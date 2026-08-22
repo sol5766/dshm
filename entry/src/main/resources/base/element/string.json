@@ -1,0 +1,28 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "DSHM"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DSHM 主入口"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DSHM"
+    },
+    {
+      "name": "background_task_reason",
+      "value": "保持内置 dsh 服务在应用退到后台时继续运行"
+    },
+    {
+      "name": "file_access_reason",
+      "value": "授权工作区目录，供内置 dsh 的文件工具读写"
+    },
+    {
+      "name": "running_lock_reason",
+      "value": "安装或启动 dsh 服务时防止系统休眠"
+    }
+  ]
+}

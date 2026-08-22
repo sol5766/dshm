@@ -1,0 +1,11 @@
+{
+  "modelVersion": "7.0.0",
+  "name": "dshm",
+  "version": "1.0.0",
+  "description": "DSHM — DeepSeek Harness HarmonyOS PC client (ArkWeb shell over the official dsh web UI)",
+  "main": "",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}

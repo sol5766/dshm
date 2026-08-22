@@ -1,0 +1,20 @@
+{
+  "color": [
+    {
+      "name": "start_window_background",
+      "value": "#F5FAF8"
+    },
+    {
+      "name": "status_connected",
+      "value": "#5CC9A8"
+    },
+    {
+      "name": "status_disconnected",
+      "value": "#E85D5D"
+    },
+    {
+      "name": "status_checking",
+      "value": "#F0AD4E"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+build/
+entry/build/
+entry/.cxx/
+.hvigor/cache/
+.hvigor/outputs/
+.hvigor/report/
+.hvigor/dependencyMap/
+.idea/
+.clangd/
+.appanalyzer/
+local.properties
+entry/src/main/resources/rawfile/busybox/
+entry/src/main/resources/rawfile/pnpm/
+*.log
+dsh-web.log
+promo-video/
+reference/

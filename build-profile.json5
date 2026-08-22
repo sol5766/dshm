@@ -1,0 +1,56 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B8C17D1BA687906BDB2DD56601038A74014C79C2719D10BA20BB50EA3E3F25E1C73FCCBD3EA4B81",
+          "profile": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.p12",
+          "storePassword": "0000001B22F799F00D33D2B1CB87D46AEA27D66BFD63D17AA7AC9F1296ED1C90A371A383C2291706700F80"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "compatibleSdkVersion": "26.0.0",
+        "targetSdkVersion": "26.0.0",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          },
+          "nativeCompiler": "BiSheng"
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}
