@@ -1,7 +1,11 @@
 /**
  * libdsh_launcher.so — 启动外部 dsh web 服务并捕获端口。
  *
- * 由 ArkTS 层通过 childProcessManager.startNativeChildProcess 启动。
+ * 两种调用方式：
+ * 1. childProcessManager.startNativeChildProcess 拉起（child 子进程模式）
+ * 2. NAPI launchDsh：应用主进程内 fork+exec dsh（继承主进程网络命名空间，
+ *    使 dsh 监听的 127.0.0.1:3080 对 ArkWeb 可见——child 子进程在独立 netns 连不上）
+ *
  * fork+exec `dsh web --port <port>` 并监控 stdout 中的 readiness line，
  * 将服务 URL 写入 <filesDir>/tmp/dsh-service-result.json。
  *
@@ -18,11 +22,12 @@
 #include <string>
 #include <vector>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <cerrno>
-#include <cerrno>
 #include <signal.h>
+#include "napi/native_api.h"
 #include "common/child_process_utils.h"
 
 static std::string gDshPidFilePath;
@@ -78,7 +83,7 @@ static std::string ParsePortFromOutput(const std::string& output) {
     return port;
 }
 
-extern "C" __attribute__((visibility("default"))) void Main() {
+static void LaunchDshInternal() {
     std::string home = GetHomeDir();
     std::string filesDir = GetFilesDir();
     std::string logDir = filesDir + "/log";
@@ -101,9 +106,9 @@ extern "C" __attribute__((visibility("default"))) void Main() {
         return;
     }
 
-    // Get requested port from environment (default 0 for auto)
+    // Get requested port from environment (default 3080, dsh 固定端口)
     const char* portEnv = std::getenv("DSH_PORT");
-    std::string port = (portEnv != nullptr && *portEnv != '\0') ? portEnv : "0";
+    std::string port = (portEnv != nullptr && *portEnv != '\0') ? portEnv : "3080";
 
     // Set up environment for dsh
     std::string pathEnv = home + "/.harmonybrew/bin:/usr/bin:/bin:/system/bin:/system/xbin:/data/service/hnp/bin";
@@ -217,3 +222,118 @@ extern "C" __attribute__((visibility("default"))) void Main() {
         fflush(stderr);
     }
 }
+
+extern "C" __attribute__((visibility("default"))) void Main() {
+    LaunchDshInternal();
+}
+
+// ---- NAPI：应用主进程内 fork+exec dsh（继承主进程网络命名空间）----
+static void* LauncherThread(void*) {
+    LaunchDshInternal();
+    return nullptr;
+}
+
+static napi_value NapiLaunchDsh(napi_env env, napi_callback_info info) {
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, LauncherThread, nullptr) == 0) {
+        pthread_detach(tid);
+    }
+    napi_value result;
+    napi_create_int32(env, 0, &result);
+    return result;
+}
+
+// ---- NAPI：安装 Harmonybrew / DeepSeek Harness（主进程 fork 执行安装命令）----
+// 输出写入 <filesDir>/log/install-<name>-<pid>.log（ArkTS 轮询显示进度），
+// 结果写入 <filesDir>/tmp/install-<name>-result.json {"success":bool,"exitCode":n,"log":"..."}
+static void RunInstall(const std::string& name, const std::string& cmd) {
+    std::string home = GetHomeDir();
+    std::string filesDir = GetFilesDir();
+    std::string logDir = filesDir + "/log";
+    EnsureDir(logDir);
+    EnsureDir(filesDir + "/tmp");
+
+    std::string logFile = logDir + "/install-" + name + "-" + std::to_string(getpid()) + ".log";
+    std::string resultPath = filesDir + "/tmp/install-" + name + "-result.json";
+    unlink(resultPath.c_str());
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        FILE* f = fopen(logFile.c_str(), "a");
+        if (f != nullptr) {
+            dup2(fileno(f), STDOUT_FILENO);
+            dup2(fileno(f), STDERR_FILENO);
+            fclose(f);
+        }
+        std::string pathEnv = home + "/.harmonybrew/bin:/usr/bin:/bin:/system/bin:/system/xbin:/data/service/hnp/bin";
+        setenv("PATH", pathEnv.c_str(), 1);
+        setenv("HOME", home.c_str(), 1);
+        std::string shell = home + "/.harmonybrew/bin/zsh";
+        if (access(shell.c_str(), X_OK) != 0) {
+            shell = "/data/service/hnp/bin/bash";
+        }
+        execl(shell.c_str(), shell.c_str(), "-lc", cmd.c_str(), (char*)nullptr);
+        fprintf(stderr, "install shell exec failed: %s\n", strerror(errno));
+        fflush(stderr);
+        _exit(127);
+    }
+    if (pid > 0) {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        bool success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        std::string json = "{\"success\":" + std::string(success ? "true" : "false") +
+                           ",\"exitCode\":" + std::to_string(exitCode) +
+                           ",\"log\":\"" + logFile + "\"}";
+        FILE* rf = fopen(resultPath.c_str(), "w");
+        if (rf != nullptr) {
+            fwrite(json.c_str(), 1, json.size(), rf);
+            fclose(rf);
+        }
+        fprintf(stderr, "=== install %s finished exit=%d ===\n", name.c_str(), exitCode);
+        fflush(stderr);
+    }
+}
+
+static void* InstallThread(void* arg) {
+    std::string* cmd = static_cast<std::string*>(arg);
+    // cmd 格式: <name>\n<shell command>
+    size_t nl = cmd->find('\n');
+    RunInstall(cmd->substr(0, nl), cmd->substr(nl + 1));
+    delete cmd;
+    return nullptr;
+}
+
+static napi_value NapiInstallBrew(napi_env env, napi_callback_info info) {
+    std::string* cmd = new std::string("brew\ncurl -fsSL https://harmonybrew.atomgit.com/install.sh | zsh");
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, InstallThread, cmd) == 0) {
+        pthread_detach(tid);
+    }
+    napi_value result;
+    napi_create_int32(env, 0, &result);
+    return result;
+}
+
+static napi_value NapiInstallDsh(napi_env env, napi_callback_info info) {
+    std::string* cmd = new std::string(
+        "dsh\nexport PATH=\"$HOME/.harmonybrew/bin:$PATH\"; if ! command -v brew >/dev/null 2>&1 && [ ! -x \"$HOME/.harmonybrew/bin/brew\" ]; then curl -fsSL https://harmonybrew.atomgit.com/install.sh | zsh; fi; export PATH=\"$HOME/.harmonybrew/bin:$PATH\"; brew install deepseek-harness");
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, InstallThread, cmd) == 0) {
+        pthread_detach(tid);
+    }
+    napi_value result;
+    napi_create_int32(env, 0, &result);
+    return result;
+}
+
+static napi_value NapiInit(napi_env env, napi_value exports) {
+    napi_property_descriptor desc[] = {
+        { "launchDsh", nullptr, NapiLaunchDsh, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "installBrew", nullptr, NapiInstallBrew, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "installDsh", nullptr, NapiInstallDsh, nullptr, nullptr, nullptr, napi_default, nullptr },
+    };
+    napi_define_properties(env, exports, 3, desc);
+    return exports;
+}
+NAPI_MODULE(NODE_GYP_MODULE_NAME, NapiInit)

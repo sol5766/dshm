@@ -5,5 +5,7 @@
   "main": "",
   "author": "",
   "license": "MIT",
-  "dependencies": {}
+  "dependencies": {
+    "libdsh_launcher.so": "file:./src/main/cpp/types/libdsh_launcher"
+  }
 }

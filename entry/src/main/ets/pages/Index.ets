@@ -8,8 +8,7 @@ import { loadServerUrl, loadAutoStartEnabled } from '../common/ServerSettings';
 import { DshBootstrap } from '../hdsh/bootstrap/DshBootstrap';
 import { WorkspaceAccess } from '../hdsh/access/WorkspaceAccess';
 import { writeOhosInfo } from '../hdsh/access/OhosInfoBridge';
-import { BrewChecker, BrewCheckResult } from '../hdsh/brew/BrewChecker';
-import { BrewInstaller, BrewInstallResult } from '../hdsh/brew/BrewInstaller';
+import { InstallManager } from '../hdsh/install/InstallManager';
 import { DshServiceManager } from '../hdsh/service/DshServiceManager';
 
 const DOMAIN: number = 0xd511;
@@ -32,9 +31,10 @@ struct Index {
   @State autoStartEnabled: boolean = true;
   @State guideError: string = '';
   @State installProgress: string = '';
-  @State dshInstalled: boolean = false;
+  @State dshInstalled: boolean = true;
   @State brewInstalled: boolean = false;
   @State serviceConnected: boolean = false;
+  @State isInstalling: boolean = false;
   private controller: webview.WebviewController = new webview.WebviewController();
   private downloadDelegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
   private configuredUrl: string = '';
@@ -57,44 +57,18 @@ struct Index {
     const gen = ++this.discoveryGeneration;
     this.pageState = 'checking';
     this.guideError = '';
-    this.statusText = '正在检查环境…';
+    this.statusText = '正在准备 dsh 服务…';
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
 
-    // Step 1: Check if dsh is installed
-    this.statusText = '正在检测 DeepSeek Harness 安装状态…';
-    const checkResult: BrewCheckResult = await BrewChecker.check(context);
-    if (gen !== this.discoveryGeneration) {
-      return;
-    }
-    this.brewInstalled = checkResult.brewInstalled;
-    this.dshInstalled = checkResult.dshInstalled;
-
-    // Step 2: If not installed, go to installing state
-    if (!checkResult.dshInstalled) {
-      this.pageState = 'installing';
-      this.statusText = 'DeepSeek Harness 未安装，准备安装…';
-      this.startProgressTimer(context);
-      const installResult: BrewInstallResult = await BrewInstaller.installDsh(context);
-      this.stopProgressTimer();
-      if (gen !== this.discoveryGeneration) {
-        return;
-      }
-      if (!installResult.success) {
-        this.guideError = '安装失败：' + installResult.message;
-        this.pageState = 'guide';
-        return;
-      }
-      this.dshInstalled = true;
-      this.brewInstalled = true;
-      this.statusText = '安装完成，正在启动服务…';
-    }
-
-    // Step 3: Check if dsh web is already running
+    // 默认已安装 deepseek-harness（不做安装检测），仅负责拉起并接入 web 服务
+    this.dshInstalled = true;
+    this.brewInstalled = true;
     const configured = loadServerUrl(context);
     this.configuredUrl = configured;
     this.autoStartEnabled = loadAutoStartEnabled(context);
     const candidates: string[] = defaultCandidates(configured);
 
+    // Step 1: 先探活（可能已手动启动）
     this.pageState = 'discovering';
     this.statusText = '正在检查本机 dsh 服务…';
     const existing = await discoverServer(candidates);
@@ -106,42 +80,38 @@ struct Index {
       return;
     }
 
-    // Step 4: If dsh is installed but not running, try to start it
-    if (this.dshInstalled) {
-      this.pageState = 'starting';
-      this.statusText = '正在启动 dsh 服务…';
-      const startedUrl: string = await DshServiceManager.startDshWeb(context, 0);
+    // Step 2: 未运行则自动拉起 dsh web
+    this.pageState = 'starting';
+    this.statusText = '正在启动 dsh 服务…';
+    const startedUrl: string = await DshServiceManager.startDshWeb(context, 0);
+    if (gen !== this.discoveryGeneration) {
+      return;
+    }
+    if (startedUrl.length > 0) {
+      // Verify with fingerprint
+      const verified: string | undefined = await discoverServer([startedUrl, DEFAULT_SERVER_URL]);
       if (gen !== this.discoveryGeneration) {
         return;
       }
-      if (startedUrl.length > 0) {
-        // Verify with fingerprint
-        const verified: string | undefined = await discoverServer([startedUrl, DEFAULT_SERVER_URL]);
-        if (gen !== this.discoveryGeneration) {
-          return;
-        }
-        if (verified !== undefined) {
-          this.connect(gen, verified, 'dsh server started and verified');
-          return;
-        }
-      }
-      // Start failed or not verified, try polling
-      const url = await this.pollLoop(candidates, gen);
-      if (gen !== this.discoveryGeneration) {
-        return;
-      }
-      if (url !== undefined) {
-        this.connect(gen, url, 'dsh server appeared after start');
+      if (verified !== undefined) {
+        this.connect(gen, verified, 'dsh server started and verified');
         return;
       }
     }
-
-    // Step 5: If auto-start embedded is enabled, boot embedded runtime
-    if (this.autoStartEnabled) {
-      await this.bootEmbedded(gen);
+    // Start failed or not verified, try polling
+    const url = await this.pollLoop(candidates, gen);
+    if (gen !== this.discoveryGeneration) {
+      return;
+    }
+    if (url !== undefined) {
+      this.connect(gen, url, 'dsh server appeared after start');
       return;
     }
 
+    // Step 3: 启动失败，展示引导（未安装可一键安装，已安装提示手动启动）
+    this.guideError = this.dshInstalled
+      ? 'dsh 服务启动超时。请确认已在终端执行过 dsh web，或点击「重新连接」重试。'
+      : '未检测到 dsh 服务，可点击下方按钮一键安装。';
     this.pageState = 'guide';
   }
 
@@ -163,6 +133,21 @@ struct Index {
         return;
       }
 
+      this.statusText = '正在启动 dsh 服务…';
+      const startedUrl: string = await DshServiceManager.startDshWeb(context, 0);
+      if (gen !== this.discoveryGeneration) {
+        return;
+      }
+      if (startedUrl.length > 0) {
+        const verified: string | undefined = await discoverServer([startedUrl, DEFAULT_SERVER_URL]);
+        if (gen !== this.discoveryGeneration) {
+          return;
+        }
+        if (verified !== undefined) {
+          this.connect(gen, verified, 'dsh server started and verified');
+          return;
+        }
+      }
       const url = await this.pollLoop(candidates, gen);
       if (gen !== this.discoveryGeneration) {
         return;
@@ -172,14 +157,14 @@ struct Index {
         return;
       }
 
-      if (this.autoStartEnabled) {
-        await this.bootEmbedded(gen);
-        return;
-      }
+      this.guideError = this.dshInstalled
+        ? 'dsh 服务启动超时。请确认已在终端执行过 dsh web，或点击「重新连接」重试。'
+        : '未检测到 dsh 服务，可点击下方按钮一键安装。';
       this.pageState = 'guide';
     } catch (error) {
       hilog.error(DOMAIN, TAG, `discovery failed: ${JSON.stringify(error)}`);
       if (gen === this.discoveryGeneration) {
+        this.guideError = error instanceof Error ? error.message : String(error);
         this.pageState = 'guide';
       }
     }
@@ -259,13 +244,6 @@ struct Index {
     });
   }
 
-  private startProgressTimer(context: common.UIAbilityContext): void {
-    this.stopProgressTimer();
-    this.progressTimer = setInterval(() => {
-      this.installProgress = BrewInstaller.readInstallProgress(context);
-    }, 1000);
-  }
-
   private stopProgressTimer(): void {
     if (this.progressTimer >= 0) {
       clearInterval(this.progressTimer);
@@ -338,11 +316,32 @@ struct Index {
   }
 
   private retryFromGuide(): void {
-    if (this.dshInstalled) {
-      this.startDiscovery();
-    } else {
-      this.startFullFlow();
+    this.startDiscovery();
+  }
+
+  // 引导页一键安装 DeepSeek Harness（NAPI 主进程执行），带进度条
+  private installFromGuide(): void {
+    if (InstallManager.isInstalling) {
+      return;
     }
+    this.isInstalling = true;
+    this.installProgress = '正在安装 DeepSeek Harness…';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    InstallManager.startInstall(context, 'dsh',
+      (tail: string) => {
+        this.installProgress = tail;
+      },
+      (success: boolean) => {
+        this.isInstalling = false;
+        if (success) {
+          this.dshInstalled = true;
+          this.getUIContext().getPromptAction().showToast({ message: 'DeepSeek Harness 安装成功，正在连接…' });
+          this.startDiscovery();
+        } else {
+          this.guideError = '安装失败，可查看日志后重试，或在终端手动安装。';
+          this.getUIContext().getPromptAction().showToast({ message: '安装失败' });
+        }
+      });
   }
 
   private reloadWeb(): void {
@@ -397,6 +396,18 @@ struct Index {
             this.startDiscovery();
           }
         })
+
+        // Web 模式设置入口（右上角，指示器下方）
+        Button('设置')
+          .height(30)
+          .fontSize(13)
+          .fontColor('#2E3A36')
+          .backgroundColor('#CCFFFFFF')
+          .borderRadius(15)
+          .position({ x: '100%', y: 52 })
+          .markAnchor({ x: '100%', y: 0 })
+          .translate({ x: -12, y: 0 })
+          .onClick(() => this.openSettings())
       } else {
         this.StatusView()
       }
@@ -521,11 +532,46 @@ struct Index {
           .fontSize(14)
           .fontColor('#7E9A8F')
 
+        if (this.guideError.length > 0) {
+          Text(this.guideError)
+            .fontSize(12)
+            .fontColor('#E85D5D')
+            .textAlign(TextAlign.Center)
+            .padding({ left: 24, right: 24 })
+        }
+
         if (!this.dshInstalled) {
-          Column({ space: 8 }) {
-            Text('DeepSeek Harness 尚未安装。请在终端执行：')
+          // 未安装：一键安装（带进度条）或手动安装
+          if (this.isInstalling) {
+            LoadingProgress()
+              .width(40)
+              .height(40)
+              .color('#5CC9A8')
+            Text('正在安装 DeepSeek Harness，请稍候…')
               .fontSize(13)
               .fontColor('#2E3A36')
+            Scroll() {
+              Text(this.installProgress)
+                .fontSize(11)
+                .fontFamily('monospace')
+                .fontColor('#5A6B62')
+                .textAlign(TextAlign.Start)
+            }
+            .width('90%')
+            .height(100)
+            .backgroundColor('#EDF5F1')
+            .borderRadius(8)
+            .padding(8)
+          } else {
+            Button('安装 DeepSeek Harness')
+              .height(36)
+              .fontSize(13)
+              .linearGradient({ angle: 135, colors: [['#5CC9A8', 0.0], ['#7FD8BC', 1.0]] })
+              .fontColor('#FFFFFF')
+              .onClick(() => this.installFromGuide())
+            Text('或在终端手动安装：')
+              .fontSize(12)
+              .fontColor('#7E9A8F')
             Row({ space: 8 }) {
               Text(INSTALL_COMMAND)
                 .fontSize(14)
@@ -539,29 +585,9 @@ struct Index {
                 .fontSize(13)
                 .onClick(() => this.copyInstallCommand())
             }
-            Text('安装完成后再启动服务：')
-              .fontSize(13)
-              .fontColor('#2E3A36')
-              .margin({ top: 4 })
-            Row({ space: 8 }) {
-              Text(START_COMMAND)
-                .fontSize(14)
-                .fontFamily('monospace')
-                .fontColor('#2E3A36')
-                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-                .backgroundColor('#E3F2EC')
-                .borderRadius(8)
-              Button('复制')
-                .height(32)
-                .fontSize(13)
-                .onClick(() => this.copyStartCommand())
-            }
           }
-          .alignItems(HorizontalAlign.Center)
         } else {
-          Text(this.autoStartEnabled
-            ? '已尝试自动启动内置后端但未成功。也可在终端手动启动后重连：'
-            : '请先在终端启动后端服务：')
+          Text('安装完成后再启动服务：')
             .fontSize(13)
             .fontColor('#2E3A36')
           Row({ space: 8 }) {
@@ -575,7 +601,7 @@ struct Index {
             Button('复制')
               .height(32)
               .fontSize(13)
-              .onClick(() => this.copyStartCommand())
+            .onClick(() => this.copyStartCommand())
           }
         }
 

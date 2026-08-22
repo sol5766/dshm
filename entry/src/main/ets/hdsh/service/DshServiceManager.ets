@@ -1,6 +1,7 @@
-import { common, childProcessManager, ChildProcessArgs } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
+import launcher from 'libdsh_launcher.so';
 import { HdshLogger } from '../utils/Logger';
 import { DEFAULT_SERVER_URL, discoverServer, defaultCandidates } from '../../common/ServerDiscovery';
 import { loadServerUrl } from '../../common/ServerSettings';
@@ -48,18 +49,14 @@ export class DshServiceManager {
     }
 
     const homeDir: string = '/storage/Users/currentUser';
-    const processArgs: ChildProcessArgs = {
-      entryParams: filesDir + ':' + String(port)
-    };
 
     try {
-      DshServiceManager.launcherPid = await childProcessManager.startNativeChildProcess(
-        'libdsh_launcher.so:Main',
-        processArgs
-      );
-      HdshLogger.info(TAG, 'dsh launcher started, pid=' + DshServiceManager.launcherPid);
+      // NAPI：应用主进程内 fork+exec dsh（继承主进程网络命名空间，
+      // dsh 监听的 127.0.0.1:3080 对 ArkWeb 可见；childProcess 子进程在独立 netns 连不上）
+      launcher.launchDsh();
+      HdshLogger.info(TAG, 'dsh launcher triggered via NAPI');
     } catch (e) {
-      HdshLogger.error(TAG, 'startNativeChildProcess failed: ' + String(e));
+      HdshLogger.error(TAG, 'launchDsh failed: ' + String(e));
       return '';
     }
 

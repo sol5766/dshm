@@ -31,9 +31,10 @@ set_target_properties(brew_installer PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
 )
 
-# libdsh_launcher.so — 外部 DSH 服务启动器
+# libdsh_launcher.so — 外部 DSH 服务启动器（NAPI：主进程 fork+exec dsh）
 add_library(dsh_launcher SHARED dsh_launcher.cpp)
 target_include_directories(dsh_launcher PRIVATE ${COMMON_DIR})
+target_link_libraries(dsh_launcher PUBLIC libace_napi.z.so)
 set_target_properties(dsh_launcher PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
   LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}

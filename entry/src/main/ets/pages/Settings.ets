@@ -4,7 +4,7 @@ import { loadServerUrl, saveServerUrl, loadAutoStartEnabled, saveAutoStartEnable
 import { WorkspaceAccess } from '../hdsh/access/WorkspaceAccess';
 import { HdshLogger } from '../hdsh/utils/Logger';
 import { BrewChecker, BrewCheckResult } from '../hdsh/brew/BrewChecker';
-import { BrewInstaller, BrewInstallResult } from '../hdsh/brew/BrewInstaller';
+import { InstallManager } from '../hdsh/install/InstallManager';
 import { DshServiceManager } from '../hdsh/service/DshServiceManager';
 
 const TAG: string = 'Settings';
@@ -74,33 +74,50 @@ struct Settings {
     this.getUIContext().getPromptAction().showToast({ message: '已清除工作区授权记录' });
   }
 
-  private async installDsh(): Promise<void> {
-    if (this.isInstalling) {
+  private installBrewAction(): void {
+    if (InstallManager.isInstalling) {
       return;
     }
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.isInstalling = true;
-    this.installProgress = '安装中…';
+    this.installProgress = '正在安装 Harmonybrew…';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    InstallManager.startInstall(context, 'brew',
+      (tail: string) => {
+        this.installProgress = tail;
+      },
+      (success: boolean) => {
+        this.isInstalling = false;
+        if (success) {
+          this.getUIContext().getPromptAction().showToast({ message: 'Harmonybrew 安装成功' });
+        } else {
+          this.getUIContext().getPromptAction().showToast({ message: '安装失败，请查看日志' });
+          this.installProgress = '安装失败（退出码非 0），日志见 files/log/install-brew-*.log';
+        }
+        this.refreshInstallStatus(context);
+      });
+  }
 
-    this.progressTimer = setInterval(() => {
-      this.installProgress = BrewInstaller.readInstallProgress(context);
-    }, 1000);
-
-    const result: BrewInstallResult = await BrewInstaller.installDsh(context);
-
-    if (this.progressTimer >= 0) {
-      clearInterval(this.progressTimer);
-      this.progressTimer = -1;
+  private installDsh(): void {
+    if (InstallManager.isInstalling) {
+      return;
     }
-
-    this.isInstalling = false;
-    if (result.success) {
-      this.getUIContext().getPromptAction().showToast({ message: 'DeepSeek Harness 安装成功' });
-      await this.refreshInstallStatus(context);
-    } else {
-      this.getUIContext().getPromptAction().showToast({ message: '安装失败：' + result.message });
-      this.installProgress = '安装失败：' + result.message;
-    }
+    this.isInstalling = true;
+    this.installProgress = '正在安装 DeepSeek Harness…';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    InstallManager.startInstall(context, 'dsh',
+      (tail: string) => {
+        this.installProgress = tail;
+      },
+      (success: boolean) => {
+        this.isInstalling = false;
+        if (success) {
+          this.getUIContext().getPromptAction().showToast({ message: 'DeepSeek Harness 安装成功' });
+        } else {
+          this.getUIContext().getPromptAction().showToast({ message: '安装失败，请查看日志' });
+          this.installProgress = '安装失败（退出码非 0），日志见 files/log/install-dsh-*.log';
+        }
+        this.refreshInstallStatus(context);
+      });
   }
 
   private async startService(): Promise<void> {
@@ -168,15 +185,27 @@ struct Settings {
             .alignItems(HorizontalAlign.Start)
             .layoutWeight(1)
 
-            if (!this.dshInstalled) {
-              Button(this.isInstalling ? '安装中…' : '安装 DSH')
-                .height(32)
-                .fontSize(13)
-                .enabled(!this.isInstalling)
-                .linearGradient({ angle: 135, colors: [['#5CC9A8', 0.0], ['#7FD8BC', 1.0]] })
-                .fontColor('#FFFFFF')
-                .onClick(() => this.installDsh())
+            Column({ space: 6 }) {
+              if (!this.brewInstalled) {
+                Button(this.isInstalling ? '安装中…' : '安装 Harmonybrew')
+                  .height(30)
+                  .fontSize(12)
+                  .enabled(!this.isInstalling)
+                  .backgroundColor('#E3F2EC')
+                  .fontColor('#2E3A36')
+                  .onClick(() => this.installBrewAction())
+              }
+              if (!this.dshInstalled) {
+                Button(this.isInstalling ? '安装中…' : '安装 DSH')
+                  .height(30)
+                  .fontSize(12)
+                  .enabled(!this.isInstalling)
+                  .linearGradient({ angle: 135, colors: [['#5CC9A8', 0.0], ['#7FD8BC', 1.0]] })
+                  .fontColor('#FFFFFF')
+                  .onClick(() => this.installDsh())
+              }
             }
+            .alignItems(HorizontalAlign.Center)
           }
           .width('100%')
           .alignItems(VerticalAlign.Center)
