@@ -8,9 +8,15 @@ entry/.cxx/
 .idea/
 .clangd/
 .appanalyzer/
+.bitfun/
 local.properties
+oh_modules/
+entry/oh_modules/
 entry/src/main/resources/rawfile/busybox/
 entry/src/main/resources/rawfile/pnpm/
+entry/src/main/resources/rawfile/dsh/
+entry/libs/
+.tmp-libnode/
 *.log
 dsh-web.log
 promo-video/

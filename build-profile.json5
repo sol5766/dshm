@@ -1,23 +1,20 @@
 {
   "app": {
-      "signingConfigs": [],
-    /*
-  "signingConfigs": [
-    {
-      "name": "default",
-      "type": "HarmonyOS",
-      "material": {
-        "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.cer",
-        "keyAlias": "debugKey",
-        "keyPassword": "0000001A52B65B372B673BEA083F0AA99AB1227D393DED38AD5C379DF881E90DA5DE310EFD573FF29F37",
-        "profile": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.p7b",
-        "signAlg": "SHA256withECDSA",
-        "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.p12",
-        "storePassword": "0000001A6D9FED3CED27A97AFFFDD359A82A4098AA4161C65CB1ED7EB0AFC1080EF5AC35B55EE49E9116"
+    "signingConfigs": [
+      {
+        "name": "default",
+        "material": {
+          "storePassword": "000000209020AB5B0A180067E0B363960EEDDCB9465BE7687D7B47172EE9B8845AFB690A927AC06A784A9FFB1EF69B5A",
+          "certpath": "/storage/Users/currentUser/Documents/ohos/config/default_dshm_desptoppq5NJ780Xx1qRTXZCQGbiMCc2MrGbf0bRIZWjza0AjE.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "000000209020AB5B0A180067E0B363960EEDDCB9465BE7687D7B47172EE9B8845AFB690A927AC06A784A9FFB1EF69B5A",
+          "profile": "/storage/Users/currentUser/Documents/ohos/config/default_dshm_desptoppq5NJ780Xx1qRTXZCQGbiMCc2MrGbf0bRIZWjza0AjE.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/storage/Users/currentUser/Documents/ohos/config/default_dshm_desptoppq5NJ780Xx1qRTXZCQGbiMCc2MrGbf0bRIZWjza0AjE.p12"
+        },
+        "type": "HarmonyOS"
       }
-    }
-  ],
-    */
+    ],
     "products": [
       {
         "name": "default",
@@ -29,8 +26,9 @@
             "caseSensitiveCheck": true,
             "useNormalizedOHMUrl": true
           },
-          "nativeCompiler": "BiSheng"
-        }
+          "nativeCompiler": "Original"
+        },
+        "signingConfig": "default"
       }
     ],
     "buildModeSet": [
@@ -39,21 +37,6 @@
       },
       {
         "name": "release"
-      }
-    ],
-    "signingConfigs": [
-      {
-        "name": "default",
-        "type": "HarmonyOS",
-        "material": {
-          "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.cer",
-          "keyAlias": "debugKey",
-          "keyPassword": "0000001A202DC71BAF4B4B0F3E1AAD47DDC5C927C0BF2D3A6D298D0362CBBDF8925AC165F7596A0B4D3B",
-          "profile": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.p7b",
-          "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_dshm_GafX-TVbS6IsxyrAd3X45r0op_9VeGb4Vbmjt0l0dag=.p12",
-          "storePassword": "0000001A359F7E5F5989D082A6FF131F0288F8BF116E00F8781C37B7CC621CF9F4BF104045735FBC3EC3"
-        }
       }
     ]
   },
