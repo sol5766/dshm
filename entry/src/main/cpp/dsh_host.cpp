@@ -30,6 +30,9 @@
 #include <cerrno>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <pty.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 
 /** node::Start(int argc, char** argv) 符号（libnode.so 导出）。 */
 typedef int (*NodeStartFn)(int argc, char** argv);
@@ -73,7 +76,7 @@ static void InjectBusyboxEnv(const std::string& dshDir) {
     }
 
     std::string busyboxBin = busyboxDir + "/busybox";
-    if (access(busyboxBin.c_str(), F_OK) != 0) {
+    if (false && access(busyboxBin.c_str(), F_OK) != 0) {
         // busybox 未解压（首次启动/解压失败）：跳过，DSH 核心功能仍可用
         return;
     }
@@ -99,7 +102,9 @@ static void InjectBusyboxEnv(const std::string& dshDir) {
     // PATH：仅使用鸿蒙沙箱允许执行的系统目录。
     // filesDir 下的 busybox ELF 可读但不可 exec，放入 PATH 会产生误导性的
     // EACCES/EPERM；dsh-bash-local 已固定使用 hnp bash，pnpm 插件走同进程 JS。
-    std::string path = "/data/service/hnp/bin:/system/bin:/system/xbin";
+    const char* userHomeEnv = std::getenv("HDSH_USER_HOME");
+    std::string userHome = (userHomeEnv != nullptr && *userHomeEnv != '\0') ? userHomeEnv : "/storage/Users/currentUser";
+    std::string path = userHome + "/.harmonybrew/bin:" + userHome + "/.local/bin:" + userHome + "/bin:/data/service/hnp/bin:/system/bin:/system/xbin";
     const char* oldPath = std::getenv("PATH");
     if (oldPath != nullptr && *oldPath != '\0') {
         path = path + ":" + oldPath;
@@ -108,19 +113,39 @@ static void InjectBusyboxEnv(const std::string& dshDir) {
     // SHELL：hnp bash 可 exec（HDSH 实测：系统 /bin/sh 在沙箱域无 MAC
     // 执行权，failed to spawn shell: Permission denied os error 13；
     // /data/service/hnp/bin/bash 在 hnp_file:s0 域可 exec 且语义完整）
-    setenv("SHELL", "/data/service/hnp/bin/bash", 1);
+    // SHELL：优先探测用户目录里的 zsh（CUSTOM_SANDBOX + 用户目录读写后，
+    // 用户安装的 zsh/bash ELF 可被 forkpty 直接执行）；找不到再回退到 hnp bash。
+    std::string shellPath = userHome + "/.harmonybrew/bin/zsh";
+    if (access(shellPath.c_str(), X_OK) != 0) {
+        shellPath = userHome + "/.local/bin/zsh";
+    }
+    if (access(shellPath.c_str(), X_OK) != 0) {
+        shellPath = "/bin/zsh";
+    }
+    if (access(shellPath.c_str(), X_OK) != 0) {
+        shellPath = "/data/service/hnp/bin/bash";
+    }
+    setenv("SHELL", shellPath.c_str(), 1);
     setenv("TERM", "xterm", 1);
 
-    // HOME：filesDir/home，可写且与 DSH 数据同区
+    // HOME：CUSTOM_SANDBOX + 用户目录全盘读写后优先使用用户目录，
+    // 这样 zsh/子进程能直接运行用户安装的 ELF（brew、dsh、node 等）。
+    // 用户目录不可写时回退到 filesDir/home，保证会话/配置仍可落盘。
     std::string filesDir = dshDir;
     std::string::size_type pos = filesDir.rfind('/');
     if (pos != std::string::npos) {
         filesDir = filesDir.substr(0, pos);
     }
-    std::string home = filesDir + "/home";
-    mkdir(home.c_str(), 0700);
+    std::string home = userHome;
+    if (access(home.c_str(), W_OK) != 0) {
+        home = filesDir + "/home";
+        mkdir(home.c_str(), 0700);
+    }
     setenv("HOME", home.c_str(), 1);
 }
+
+static void RunForkptyShellCheck();
+
 
 /**
  * 启动自检：fork+execv 验证沙箱内可执行的 shell。
@@ -151,7 +176,57 @@ static void RunSelfCheck() {
         }
     };
     runCmd("/data/service/hnp/bin/bash", {"-c", "echo HNP_BASH_SELFTEST_OK"});
+    runCmd(std::getenv("SHELL") ? std::getenv("SHELL") : "/data/service/hnp/bin/bash", {"-c", "echo USER_SHELL_SELFTEST_OK; id; pwd"});
+    RunForkptyShellCheck();
 }
+
+/**
+ * forkpty zsh/custom-sandbox 自检：CUSTOM_SANDBOX + 用户目录权限正确时，
+ * 通过 forkpty 直接拉起一个用户 shell（优先 zsh），该子进程继承当前应用
+ * 进程的 mount namespace，从而可以执行用户目录里的 ELF。结果写入 stderr，
+ * 由 ArkTS dumpNodeLogs 回读。
+ */
+static void RunForkptyShellCheck() {
+    const char* shellEnv = std::getenv("SHELL");
+    std::string shell = (shellEnv != nullptr && *shellEnv != '\0') ? shellEnv : "/data/service/hnp/bin/bash";
+    int masterFd = -1;
+    pid_t childPid = forkpty(&masterFd, nullptr, nullptr, nullptr);
+    if (childPid == 0) {
+        execl(shell.c_str(), shell.c_str(), "-lc",
+              "echo DSH_FORKPTY_SHELL_OK; echo SHELL=$0; echo HOME=$HOME; id; pwd; command -v zsh || true",
+              (char*)nullptr);
+        fprintf(stderr, "forkpty exec failed: %s (%s)\n", shell.c_str(), strerror(errno));
+        _exit(127);
+    }
+    if (childPid < 0) {
+        fprintf(stderr, "=== forkpty selfcheck failed: %s ===\n", strerror(errno));
+        fflush(stderr);
+        return;
+    }
+    char output[4096] = {};
+    int total = 0;
+    while (true) {
+        struct pollfd pfd;
+        pfd.fd = masterFd;
+        pfd.events = POLLIN;
+        int pr = poll(&pfd, 1, 1000);
+        if (pr > 0 && (pfd.revents & POLLIN) && total < (int)sizeof(output) - 1) {
+            ssize_t n = read(masterFd, output + total, sizeof(output) - 1 - total);
+            if (n > 0) total += (int)n;
+        }
+        int status = 0;
+        pid_t w = waitpid(childPid, &status, WNOHANG);
+        if (w == childPid) {
+            fprintf(stderr, "=== forkpty selfcheck exit=%d ===\n%s\n",
+                    WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                    output[0] ? output : "(empty output)");
+            fflush(stderr);
+            break;
+        }
+    }
+    close(masterFd);
+}
+
 
 /** startNativeChildProcess 的子进程入口（无参，签名与鸿蒙约定一致）。 */
 extern "C" __attribute__((visibility("default"))) void Main() {

@@ -42,26 +42,94 @@
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
         "reason": "$string:background_task_reason",
         "usedScene": {
-          "abilities": ["EntryAbility"],
-          "when": "always"
+          "when": "always",
+          "abilities": [
+            "EntryAbility"
+          ]
         }
       },
       {
         "name": "ohos.permission.FILE_ACCESS_PERSIST",
         "reason": "$string:file_access_reason",
         "usedScene": {
-          "abilities": ["EntryAbility"],
-          "when": "inuse"
+          "when": "inuse",
+          "abilities": [
+            "EntryAbility"
+          ]
         }
       },
       {
         "name": "ohos.permission.RUNNING_LOCK",
         "reason": "$string:running_lock_reason",
         "usedScene": {
-          "abilities": ["EntryAbility"],
-          "when": "always"
+          "when": "always",
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+        {
+          "name": "ohos.permission.CUSTOM_SANDBOX"
+        },
+        {
+          "name": "ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE",
+          "reason": "$string:allow_external_native_code_reason",
+          "usedScene": {
+            "when": "inuse",
+            "abilities": [
+              "EntryAbility"
+            ]
+          }
+        },
+        /*
+      {
+        "name": "ohos.permission.CUSTOM_SANDBOX"
+      },
+          */
+        /*
+      {
+        "name": "ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE",
+        "reason": "$string:allow_external_native_code_reason",
+        "usedScene": {
+          "when": "inuse",
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+        */
+      {
+        "name": "ohos.permission.READ_WRITE_USER_FILE",
+        "reason": "$string:read_write_user_file_reason",
+        "usedScene": {
+          "when": "inuse",
+          "abilities": [
+            "EntryAbility"
+          ]
+        }
+      },
+        {
+          "name": "ohos.permission.ACCESS_USER_FULL_DISK",
+          "reason": "$string:access_user_full_disk_reason",
+          "usedScene": {
+            "when": "inuse",
+            "abilities": [
+              "EntryAbility"
+            ]
+          }
+        },
+        /*
+      {
+        "name": "ohos.permission.ACCESS_USER_FULL_DISK",
+        "reason": "$string:access_user_full_disk_reason",
+        "usedScene": {
+          "when": "inuse",
+          "abilities": [
+            "EntryAbility"
+          ]
         }
       }
+          */
     ]
   }
 }

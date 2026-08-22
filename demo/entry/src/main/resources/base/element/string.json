@@ -1,0 +1,22 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "PTY Diagnostic Tool" },
+    { "name": "EntryAbility_desc", "value": "PTY permission and sleep recovery diagnostic" },
+    { "name": "EntryAbility_label", "value": "PTY Diag" },
+    { "name": "perm_custom_sandbox", "value": "Custom sandbox for PTY interface access" },
+    { "name": "perm_allow_writable_code", "value": "Allow writable+executable memory" },
+    { "name": "perm_disable_code_protection", "value": "Disable code memory protection" },
+    { "name": "perm_load_independent_lib", "value": "Allow loading independent shared libraries" },
+    { "name": "perm_allow_debug", "value": "Allow C/C++ debugging" },
+    { "name": "perm_ignore_lib_validation", "value": "Allow independent binaries to load SOs" },
+    { "name": "perm_store_persistent", "value": "Store persistent data" },
+    { "name": "perm_running_lock", "value": "Prevent sleep loss" },
+    { "name": "perm_read_write_user_file", "value": "Read/write user files" },
+    { "name": "perm_file_access_persist", "value": "Persistent file access" },
+    { "name": "perm_internet", "value": "Internet access" },
+    { "name": "perm_external_native_code", "value": "Allow external native code execution" },
+    { "name": "perm_user_disk", "value": "Access user home directory" },
+    { "name": "perm_inherit_parent", "value": "Inherit parent process permissions for child ELF" },
+    { "name": "perm_usb_ddk", "value": "USB DDK access for device enumeration" }
+  ]
+}

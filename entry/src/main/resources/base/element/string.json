@@ -23,6 +23,18 @@
     {
       "name": "running_lock_reason",
       "value": "安装或启动 dsh 服务时防止系统休眠"
+    },
+    {
+      "name": "allow_external_native_code_reason",
+      "value": "允许 DSH 在执行工具时运行用户目录中的外部原生程序"
+    },
+    {
+      "name": "read_write_user_file_reason",
+      "value": "读写用户目录中的 DSH 插件、脚本和工具链"
+    },
+    {
+      "name": "access_user_full_disk_reason",
+      "value": "访问用户公共目录，使内置 DSH 能够使用用户安装的 zsh/ELF"
     }
   ]
 }

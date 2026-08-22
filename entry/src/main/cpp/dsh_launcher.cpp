@@ -135,6 +135,18 @@ extern "C" __attribute__((visibility("default"))) void Main() {
         // Detach from parent process group so dsh survives launcher exit
         setsid();
 
+          // CUSTOM_SANDBOX + 用户目录全盘读写后，优先用用户安装的 zsh 拉起 dsh。
+          // zsh 会加载用户 shell 环境（HOME/PATH），因此 dsh 及插件中的
+          // 用户 ELF（brew/node/pnpm 等）都能直接执行。
+          std::string shell = home + "/.harmonybrew/bin/zsh";
+          if (access(shell.c_str(), X_OK) != 0) {
+            shell = "/data/service/hnp/bin/bash";
+          }
+          std::string command = "exec \"" + dshBin + "\" web --port " + port;
+          execl(shell.c_str(), shell.c_str(), "-lc", command.c_str(), (char*)nullptr);
+          fprintf(stderr, "zsh exec failed: %s (%s)\n", command.c_str(), strerror(errno));
+          // 不直接 _exit，保留原有 execv(dshBin) 作为回退路径
+
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(dshBin.c_str()));
         argv.push_back(const_cast<char*>("web"));
