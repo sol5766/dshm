@@ -32,7 +32,12 @@ if [ -f "$READY_MARKER" ] \
 fi
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# 失败时保留临时目录便于续跑（成功退出才清理）
+trap '[ $? -eq 0 ] && rm -rf "$TMP" || echo "保留临时目录: $TMP（可手动补完剩余步骤）"' EXIT
+# GitHub 直连不稳时走镜像：仅对本脚本进程树生效（git -c 等价的环境变量注入），不污染全局配置
+export GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-1}"
+export GIT_CONFIG_KEY_0="url.https://ghfast.top/https://github.com/.insteadOf"
+export GIT_CONFIG_VALUE_0="https://github.com/"
 echo "[1/4] 创建临时工程并安装 dsh@$DSH_VERSION (node_modules 较大，请耐心等待)..."
 cd "$TMP"
 npm init -y >/dev/null 2>&1

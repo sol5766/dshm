@@ -846,6 +846,10 @@ if (fs.existsSync(apiProxy)) {
 console.log('HDSH sandbox adaptation applied');
 HDSHPATCHEOF
 node "$HDSH_PATCH"
-node "$SCRIPT_DIR/create-hdsh-config-editor.mjs" "$(pwd)"
+if [ -f "$SCRIPT_DIR/create-hdsh-config-editor.mjs" ]; then
+  node "$SCRIPT_DIR/create-hdsh-config-editor.mjs" "$(pwd)"
+else
+  echo "警告: scripts/create-hdsh-config-editor.mjs 缺失（未随仓库提交），跳过 config editor 生成"
+fi
 
 echo "✅ DSH OpenHarmony 适配完成。启动: node --expose-internals <dir>/node_modules/@deepseek-ai/dsh/lib/bin.js web"
