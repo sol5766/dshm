@@ -13,6 +13,7 @@ export interface ServiceInfo {
   url: string;
   port: number;
   selfStarted: boolean;
+  message: string;
 }
 
 export class DshServiceManager {
@@ -53,6 +54,11 @@ export class DshServiceManager {
     try {
       // NAPI：应用主进程内 fork+exec dsh（继承主进程网络命名空间，
       // dsh 监听的 127.0.0.1:3080 对 ArkWeb 可见；childProcess 子进程在独立 netns 连不上）
+      try {
+        launcher.physTrace('startDshWeb: invoking launchDsh NAPI');
+      } catch (e) {
+        HdshLogger.warn(TAG, 'physTrace failed: ' + String(e));
+      }
       launcher.launchDsh();
       HdshLogger.info(TAG, 'dsh launcher triggered via NAPI');
     } catch (e) {
@@ -69,8 +75,14 @@ export class DshServiceManager {
           const info: ServiceInfo | undefined = DshServiceManager.parseServiceInfo(content);
           if (info !== undefined) {
             DshServiceManager.currentService = info;
-            HdshLogger.info(TAG, 'dsh web started: url=' + info.url + ' pid=' + info.pid);
-            return info.url;
+            if (info.url.length > 0) {
+              HdshLogger.info(TAG, 'dsh web started: url=' + info.url + ' pid=' + info.pid);
+              return info.url;
+            }
+            if (info.message.length > 0) {
+              HdshLogger.error(TAG, 'dsh launch error: ' + info.message);
+            }
+            return '';
           }
         }
       } catch (e) {
@@ -93,9 +105,15 @@ export class DshServiceManager {
       HdshLogger.info(TAG, 'Service was not self-started, not stopping');
       return;
     }
-    // The native child process (dsh) is managed by the system and will
-    // be terminated when the app process exits. We record the intent
-    // and clear the service info.
+    // dsh 经 setsid 脱离进程组，应用退出后可能残留占用 3080，必须显式 TERM
+    if (service.pid > 0) {
+      try {
+        const ret: number = launcher.stopDsh(service.pid);
+        HdshLogger.info(TAG, 'stopDsh pid=' + service.pid + ' ret=' + ret);
+      } catch (e) {
+        HdshLogger.warn(TAG, 'stopDsh failed: ' + String(e));
+      }
+    }
     DshServiceManager.clearServiceInfo(context);
     DshServiceManager.currentService = undefined;
     HdshLogger.info(TAG, 'Service stop recorded');
@@ -174,8 +192,19 @@ export class DshServiceManager {
         pid: 0,
         url: '',
         port: 0,
-        selfStarted: false
+        selfStarted: false,
+        message: ''
       };
+      // Parse message (launch error description from WriteLaunchError)
+      const msgKey: string = '"message":"';
+      const msgStart: number = content.indexOf(msgKey);
+      if (msgStart >= 0) {
+        const valueStart: number = msgStart + msgKey.length;
+        const valueEnd: number = content.indexOf('"', valueStart);
+        if (valueEnd > valueStart) {
+          info.message = content.substring(valueStart, valueEnd);
+        }
+      }
       // Parse pid
       const pidKey: string = '"pid":';
       const pidStart: number = content.indexOf(pidKey);

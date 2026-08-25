@@ -1,5 +1,4 @@
-import { http } from '@kit.NetworkKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { http, socket } from '@kit.NetworkKit';
 
 /**
  * Fingerprint injected by the dsh host into the served index.html
@@ -46,27 +45,83 @@ export function normalizeServerUrl(url: string): string {
 }
 
 /**
- * GET `url + '/'` once and report whether the body carries the dsh fingerprint.
+ * TCP 端口探测：先确认端口开放（纯 socket，异步、不占主线程、硬超时）。
+ * 冷启动早期 http 栈可能把主线程挂死（定时器都不触发），socket 不受影响。
+ * @returns true 表示端口可连接。
+ */
+async function tcpProbe(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  const tcp = socket.constructTCPSocketInstance();
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) {
+        return;
+      }
+      done = true;
+      try {
+        tcp.off('connect');
+        tcp.off('error');
+        tcp.off('close');
+        tcp.close();
+      } catch (e) {
+        // ignore
+      }
+      resolve(ok);
+    };
+    try {
+      tcp.on('connect', () => finish(true));
+      tcp.on('error', () => finish(false));
+      tcp.on('close', () => finish(false));
+      const options: socket.TCPConnectOptions = {
+        address: { address: host, port: port },
+        timeout: timeoutMs
+      };
+      tcp.connect(options).catch(() => finish(false));
+    } catch (e) {
+      finish(false);
+    }
+  });
+}
+
+/**
+ * 探测目标是否为可用的 dsh web：
+ * 1. TCP 探测端口开放（异步、不阻塞主线程，冷启动网络栈未就绪也不会死等）；
+ * 2. 开放后做 http 指纹校验；http 异常/超时则信任 TCP（回环端口被非 dsh 占用概率极低）。
  * @param url - normalized server base URL, e.g. http://127.0.0.1:3080.
- * @returns true when the server is a reachable dsh web instance.
  */
 export async function probeDshServer(url: string): Promise<boolean> {
+  let host = '127.0.0.1';
+  let port = 3080;
+  // 手写解析 host/port（不依赖 URL 全局类在 ArkTS 的可用性）
+  const m: RegExpMatchArray | null = url.match(/^https?:\/\/([^:\/]+)(?::(\d+))?/);
+  if (m !== null) {
+    host = m[1];
+    port = m[2] !== undefined ? parseInt(m[2], 10) : 3080;
+  }
+  const tcpOpen: boolean = await tcpProbe(host, port, PROBE_TIMEOUT_MS);
+  if (!tcpOpen) {
+    return false;
+  }
   const request = http.createHttp();
   try {
-    const response = await request.request(`${url}/`, {
+    const probe: Promise<boolean> = request.request(`${url}/`, {
       method: http.RequestMethod.GET,
       connectTimeout: PROBE_TIMEOUT_MS,
       readTimeout: PROBE_TIMEOUT_MS,
       header: { 'Accept': 'text/html' }
+    }).then((response) => {
+      if (response.responseCode !== 200 || typeof response.result !== 'string') {
+        return false;
+      }
+      return response.result.includes(DSH_FINGERPRINT);
     });
-    if (response.responseCode !== 200 || typeof response.result !== 'string') {
-      return false;
-    }
-    return response.result.includes(DSH_FINGERPRINT);
+    // http 异常/超时降级：端口已由 TCP 确认开放，回环上基本就是我们的 dsh
+    const timeout: Promise<boolean> = new Promise<boolean>((resolve) => {
+      setTimeout(() => resolve(true), PROBE_TIMEOUT_MS + 2000);
+    });
+    return await Promise.race([probe, timeout]);
   } catch (error) {
-    const err = error as BusinessError;
-    console.warn(`dsh-client: probe ${url} failed: ${err?.code} ${err?.message}`);
-    return false;
+    return true;
   } finally {
     request.destroy();
   }

@@ -4,21 +4,20 @@ import { pasteboard } from '@kit.BasicServicesKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { defaultCandidates, discoverServer, DEFAULT_SERVER_URL } from '../common/ServerDiscovery';
-import { loadServerUrl, loadAutoStartEnabled } from '../common/ServerSettings';
-import { DshBootstrap } from '../hdsh/bootstrap/DshBootstrap';
+import { loadServerUrl } from '../common/ServerSettings';
 import { WorkspaceAccess } from '../hdsh/access/WorkspaceAccess';
-import { writeOhosInfo } from '../hdsh/access/OhosInfoBridge';
+import { BrewChecker, BrewCheckResult } from '../hdsh/brew/BrewChecker';
 import { InstallManager } from '../hdsh/install/InstallManager';
 import { DshServiceManager } from '../hdsh/service/DshServiceManager';
+import launcher from 'libdsh_launcher.so';
 
 const DOMAIN: number = 0xd511;
 const TAG: string = 'dsh-client';
 
-type PageState = 'checking' | 'installing' | 'starting' | 'discovering' | 'booting' | 'guide' | 'web' | 'error';
+type PageState = 'checking' | 'installing' | 'starting' | 'discovering' | 'guide' | 'web' | 'error';
 
 const DISCOVER_MAX_ATTEMPTS: number = 5;
 const DISCOVER_INTERVAL_MS: number = 2000;
-const BOOT_TIMEOUT_MS: number = 120000;
 const START_COMMAND: string = 'dsh web';
 const INSTALL_COMMAND: string = 'brew install deepseek-harness';
 
@@ -28,7 +27,6 @@ struct Index {
   @State pageState: PageState = 'checking';
   @State serverUrl: string = '';
   @State statusText: string = '正在检查环境…';
-  @State autoStartEnabled: boolean = true;
   @State guideError: string = '';
   @State installProgress: string = '';
   @State dshInstalled: boolean = true;
@@ -40,13 +38,23 @@ struct Index {
   private configuredUrl: string = '';
   private discoveryGeneration: number = 0;
   private progressTimer: number = -1;
+  private flowWatchdog: number = -1;
+  private pendingStart: boolean = false;
 
   aboutToAppear(): void {
-    this.installDownloadDelegate();
-    this.startFullFlow();
+    // 冷启动时 getUIContext() 在 aboutToAppear 阶段可能尚未就绪，
+    // 直接调用会抛异常导致 startFullFlow 静默中断（表现为不自动拉起）。
+    // 统一推迟到 onPageShow（UI 上下文就绪后）执行。
+    this.pendingStart = true;
   }
 
   onPageShow(): void {
+    if (this.pendingStart) {
+      this.pendingStart = false;
+      this.installDownloadDelegate();
+      this.startFullFlow();
+      return;
+    }
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     if (this.configuredUrl !== '' && loadServerUrl(context) !== this.configuredUrl) {
       this.startFullFlow();
@@ -58,20 +66,40 @@ struct Index {
     this.pageState = 'checking';
     this.guideError = '';
     this.statusText = '正在准备 dsh 服务…';
+    this.armWatchdog(gen);
+    try {
+      await this.fullFlowBody(gen);
+    } catch (error) {
+      const msg: string = error instanceof Error ? error.message : String(error);
+      hilog.error(DOMAIN, TAG, `startFullFlow failed: ${msg}`);
+      this.physTrace('startFullFlow error: ' + msg);
+      if (gen === this.discoveryGeneration) {
+        this.guideError = '自动连接出错：' + msg;
+        this.pageState = 'guide';
+      }
+    }
+  }
+
+  private async fullFlowBody(gen: number): Promise<void> {
+    this.physTrace('startFullFlow begin');
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
 
-    // 默认已安装 deepseek-harness（不做安装检测），仅负责拉起并接入 web 服务
-    this.dshInstalled = true;
-    this.brewInstalled = true;
     const configured = loadServerUrl(context);
     this.configuredUrl = configured;
-    this.autoStartEnabled = loadAutoStartEnabled(context);
     const candidates: string[] = defaultCandidates(configured);
 
-    // Step 1: 先探活（可能已手动启动）
+    // 恢复工作区持久授权（best-effort，不阻塞启动）
+    WorkspaceAccess.activatePersisted(context);
+
+    // 探活本机服务 + 检测安装状态（ArkTS 不支持解构，顺序执行）
     this.pageState = 'discovering';
     this.statusText = '正在检查本机 dsh 服务…';
-    const existing = await discoverServer(candidates);
+    this.physTrace('discovering...');
+    const existing: string | undefined = await discoverServer(candidates);
+    const installStatus: BrewCheckResult = await BrewChecker.check(context);
+    this.dshInstalled = installStatus.dshInstalled;
+    this.brewInstalled = installStatus.brewInstalled;
+    this.physTrace('installStatus: brew=' + this.brewInstalled + ' dsh=' + this.dshInstalled);
     if (gen !== this.discoveryGeneration) {
       return;
     }
@@ -79,6 +107,14 @@ struct Index {
       this.connect(gen, existing, 'dsh server already running');
       return;
     }
+    // 未安装且无服务：直接进引导页，提供一键安装
+    if (!this.dshInstalled) {
+      this.physTrace('dsh not installed, guide to install');
+      this.guideError = '未检测到 dsh 服务，可点击下方按钮一键安装。';
+      this.pageState = 'guide';
+      return;
+    }
+    this.physTrace('no existing server, launching');
 
     // Step 2: 未运行则自动拉起 dsh web
     this.pageState = 'starting';
@@ -109,6 +145,7 @@ struct Index {
     }
 
     // Step 3: 启动失败，展示引导（未安装可一键安装，已安装提示手动启动）
+    this.physTrace('flow reached guide');
     this.guideError = this.dshInstalled
       ? 'dsh 服务启动超时。请确认已在终端执行过 dsh web，或点击「重新连接」重试。'
       : '未检测到 dsh 服务，可点击下方按钮一键安装。';
@@ -119,10 +156,10 @@ struct Index {
     const gen = ++this.discoveryGeneration;
     this.pageState = 'discovering';
     this.guideError = '';
+    this.armWatchdog(gen);
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     const configured = loadServerUrl(context);
     this.configuredUrl = configured;
-    this.autoStartEnabled = loadAutoStartEnabled(context);
     const candidates: string[] = defaultCandidates(configured);
 
     try {
@@ -170,57 +207,36 @@ struct Index {
     }
   }
 
-  private async bootEmbedded(gen: number): Promise<void> {
-    this.pageState = 'booting';
-    this.statusText = '未检测到外部服务，正在准备内置 DSH 运行环境…';
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    try {
-      await DshBootstrap.ensureDshDir(context);
-      await DshBootstrap.ensureBusybox(context);
-      await DshBootstrap.ensurePnpm(context);
-      await WorkspaceAccess.syncAuthorizedToWorkspace(context);
-      await writeOhosInfo(context);
-      DshBootstrap.clearNodeLogs(context);
-      this.statusText = '正在启动内置 dsh 服务（首次需解压运行环境，约 1~2 分钟）…';
-      await DshBootstrap.launchDsh();
-      const ready: boolean = await DshBootstrap.waitForServer(BOOT_TIMEOUT_MS);
-      if (gen !== this.discoveryGeneration) {
-        return;
-      }
-      if (!ready) {
-        hilog.error(DOMAIN, TAG, 'embedded dsh server start timed out');
-        await DshBootstrap.dumpNodeLogs(context);
-        this.guideError = DshBootstrap.readNodeLogTail(context);
-        this.pageState = 'guide';
-        return;
-      }
-      const url = await discoverServer([DEFAULT_SERVER_URL]);
-      if (gen !== this.discoveryGeneration) {
-        return;
-      }
-      if (url !== undefined) {
-        this.connect(gen, url, 'embedded dsh server ready');
-        return;
-      }
-      this.guideError = '内置服务已就绪但指纹校验未通过，可能端口被其他程序占用。';
-      this.pageState = 'guide';
-    } catch (error) {
-      hilog.error(DOMAIN, TAG, `embedded boot failed: ${JSON.stringify(error)}`);
-      if (gen === this.discoveryGeneration) {
-        this.guideError = error instanceof Error ? error.message : String(error);
-        this.pageState = 'guide';
-      }
-    }
-  }
-
   private connect(gen: number, url: string, reason: string): void {
     if (gen !== this.discoveryGeneration) {
       return;
     }
     hilog.info(DOMAIN, TAG, `${reason} at ${url}`);
+    this.disarmWatchdog();
     this.serverUrl = url;
     this.serviceConnected = true;
     this.pageState = 'web';
+  }
+
+  /** 冷启动流程看门狗：发现/拉起/验证整体 90 秒内必须出结果，否则进引导页并说明当前卡点。 */
+  private armWatchdog(gen: number): void {
+    this.disarmWatchdog();
+    this.flowWatchdog = setTimeout(() => {
+      if (gen !== this.discoveryGeneration || this.pageState === 'web' || this.pageState === 'guide') {
+        return;
+      }
+      this.flowWatchdog = -1;
+      hilog.error(DOMAIN, TAG, `cold start flow timed out at phase: ${this.statusText}`);
+      this.pageState = 'guide';
+      this.guideError = `自动连接超时（卡在：${this.statusText}）。服务可能已就绪，点「重新连接」重试，或到设置页手动启动服务。`;
+    }, 90000);
+  }
+
+  private disarmWatchdog(): void {
+    if (this.flowWatchdog >= 0) {
+      clearTimeout(this.flowWatchdog);
+      this.flowWatchdog = -1;
+    }
   }
 
   private async pollLoop(candidates: string[], gen: number): Promise<string | undefined> {
@@ -244,6 +260,15 @@ struct Index {
     });
   }
 
+  /** 镜像一行日志到物理机 ~/dshm-launcher.log（best-effort，失败忽略）。 */
+  private physTrace(msg: string): void {
+    try {
+      launcher.physTrace(msg);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, `physTrace failed: ${String(e)}`);
+    }
+  }
+
   private stopProgressTimer(): void {
     if (this.progressTimer >= 0) {
       clearInterval(this.progressTimer);
@@ -261,18 +286,22 @@ struct Index {
     } catch (error) {
       hilog.error(DOMAIN, TAG, `mkdir ${downloadDir} failed: ${JSON.stringify(error)}`);
     }
-    this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
-      const target = `${downloadDir}/${item.getSuggestedFileName()}`;
-      hilog.info(DOMAIN, TAG, `download start: ${target}`);
-      item.start(target);
-    });
-    this.downloadDelegate.onDownloadFinish((item: webview.WebDownloadItem) => {
-      this.getUIContext().getPromptAction().showToast({ message: `下载完成：应用沙箱/download/${item.getSuggestedFileName()}` });
-    });
-    this.downloadDelegate.onDownloadFailed((item: webview.WebDownloadItem) => {
-      this.getUIContext().getPromptAction().showToast({ message: `下载失败：${item.getSuggestedFileName()}` });
-    });
-    webview.WebDownloadManager.setDownloadDelegate(this.downloadDelegate);
+    try {
+      this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
+        const target = `${downloadDir}/${item.getSuggestedFileName()}`;
+        hilog.info(DOMAIN, TAG, `download start: ${target}`);
+        item.start(target);
+      });
+      this.downloadDelegate.onDownloadFinish((item: webview.WebDownloadItem) => {
+        this.getUIContext().getPromptAction().showToast({ message: `下载完成：应用沙箱/download/${item.getSuggestedFileName()}` });
+      });
+      this.downloadDelegate.onDownloadFailed((item: webview.WebDownloadItem) => {
+        this.getUIContext().getPromptAction().showToast({ message: `下载失败：${item.getSuggestedFileName()}` });
+      });
+      webview.WebDownloadManager.setDownloadDelegate(this.downloadDelegate);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, `install download delegate failed: ${JSON.stringify(error)}`);
+    }
   }
 
   private handleFileSelector(event: OnShowFileSelectorEvent): boolean {
@@ -448,7 +477,7 @@ struct Index {
         LoadingProgress()
           .width(40)
           .height(40)
-          .color('#5CC9A8')
+          .color('#000000')
         Text(this.statusText)
           .fontSize(13)
           .fontColor('#7E9A8F')
@@ -458,7 +487,7 @@ struct Index {
         LoadingProgress()
           .width(40)
           .height(40)
-          .color('#5CC9A8')
+          .color('#000000')
         Text(this.statusText)
           .fontSize(14)
           .fontColor('#2E3A36')
@@ -493,7 +522,7 @@ struct Index {
         LoadingProgress()
           .width(40)
           .height(40)
-          .color('#5CC9A8')
+          .color('#000000')
         Text(this.statusText)
           .fontSize(14)
           .fontColor('#2E3A36')
@@ -507,25 +536,16 @@ struct Index {
           .backgroundColor('#E3F2EC')
           .fontColor('#2E3A36')
           .onClick(() => this.bailToGuide())
-      } else if (this.pageState === 'discovering' || this.pageState === 'booting') {
+      } else if (this.pageState === 'discovering') {
         LoadingProgress()
           .width(40)
           .height(40)
-          .color('#5CC9A8')
+          .color('#000000')
         Text(this.statusText)
           .fontSize(13)
           .fontColor('#7E9A8F')
           .textAlign(TextAlign.Center)
           .padding({ left: 24, right: 24 })
-
-        if (this.pageState === 'booting') {
-          Button('跳过，手动启动')
-            .height(36)
-            .fontSize(13)
-            .backgroundColor('#E3F2EC')
-            .fontColor('#2E3A36')
-            .onClick(() => this.bailToGuide())
-        }
       } else {
         // guide or error state
         Text(this.pageState === 'error' ? '页面加载失败，dsh 服务可能已停止。' : '未找到运行中的 dsh 服务。')
@@ -546,7 +566,7 @@ struct Index {
             LoadingProgress()
               .width(40)
               .height(40)
-              .color('#5CC9A8')
+              .color('#000000')
             Text('正在安装 DeepSeek Harness，请稍候…')
               .fontSize(13)
               .fontColor('#2E3A36')

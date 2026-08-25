@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { DEFAULT_SERVER_URL } from '../common/ServerDiscovery';
-import { loadServerUrl, saveServerUrl, loadAutoStartEnabled, saveAutoStartEnabled } from '../common/ServerSettings';
+import { loadServerUrl, saveServerUrl } from '../common/ServerSettings';
 import { WorkspaceAccess } from '../hdsh/access/WorkspaceAccess';
 import { HdshLogger } from '../hdsh/utils/Logger';
 import { BrewChecker, BrewCheckResult } from '../hdsh/brew/BrewChecker';
@@ -13,7 +13,6 @@ const TAG: string = 'Settings';
 @Component
 struct Settings {
   @State serverUrl: string = '';
-  @State autoStart: boolean = true;
   @State dshInstalled: boolean = false;
   @State brewInstalled: boolean = false;
   @State dshPath: string = '';
@@ -26,7 +25,6 @@ struct Settings {
   aboutToAppear(): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.serverUrl = loadServerUrl(context);
-    this.autoStart = loadAutoStartEnabled(context);
     this.refreshInstallStatus(context);
     this.refreshServiceStatus();
   }
@@ -48,13 +46,6 @@ struct Settings {
     saveServerUrl(context, this.serverUrl);
     this.getUIContext().getPromptAction().showToast({ message: '已保存，返回后重新连接' });
     this.getUIContext().getRouter().back();
-  }
-
-  private toggleAutoStart(enabled: boolean): void {
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    this.autoStart = enabled;
-    saveAutoStartEnabled(context, enabled);
-    this.getUIContext().getPromptAction().showToast({ message: enabled ? '已开启内置后端自动启动' : '已关闭内置后端自动启动' });
   }
 
   private pickWorkspaceFolder(): void {
@@ -140,6 +131,7 @@ struct Settings {
 
   build() {
     Scroll() {
+      // Scroll 默认内容垂直居中；显式顶格对齐
       Column({ space: 20 }) {
         Row() {
           Button('返回')
@@ -305,27 +297,6 @@ struct Settings {
         .backgroundColor('#FFFFFF')
         .borderRadius(12)
 
-        // Auto-start toggle
-        Row({ space: 12 }) {
-          Column({ space: 4 }) {
-            Text('打开时自动启动内置后端')
-              .fontSize(14)
-              .fontColor('#2E3A36')
-            Text('未检测到外部 dsh 服务时，自动解压内置运行时并拉起服务（首次约 1~2 分钟）。')
-              .fontSize(12)
-              .fontColor('#9AB5AB')
-          }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
-          Toggle({ type: ToggleType.Switch, isOn: this.autoStart })
-            .onChange((isOn: boolean) => this.toggleAutoStart(isOn))
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-        .padding(16)
-        .backgroundColor('#FFFFFF')
-        .borderRadius(12)
-
         // Workspace section
         Row({ space: 12 }) {
           Column({ space: 4 }) {
@@ -372,6 +343,7 @@ struct Settings {
     }
     .width('100%')
     .height('100%')
+    .align(Alignment.TopStart)
     .backgroundColor('#F5FAF8')
   }
 }

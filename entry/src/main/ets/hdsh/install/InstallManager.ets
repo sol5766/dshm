@@ -33,6 +33,15 @@ export class InstallManager {
     if (InstallManager.timer >= 0) {
       return;
     }
+    // 清理上一轮的结果文件，避免读到过期结果被误判为本次已完成
+    const resultPath: string = context.filesDir + '/tmp/install-' + name + '-result.json';
+    try {
+      if (fileIo.accessSync(resultPath)) {
+        fileIo.unlinkSync(resultPath);
+      }
+    } catch (e) {
+      HdshLogger.warn(TAG, 'clean stale install result failed: ' + String(e));
+    }
     try {
       if (name === 'brew') {
         launcher.installBrew();
@@ -44,6 +53,9 @@ export class InstallManager {
       onDone(false);
       return;
     }
+    // 超时兜底：15 分钟无结果视为失败，避免永久轮询
+    let polls: number = 0;
+    const maxPolls: number = 15 * 60;
     InstallManager.timer = setInterval(() => {
       const tail: string = InstallManager.readLogTail(context, name);
       onProgress(tail);
@@ -52,6 +64,13 @@ export class InstallManager {
         InstallManager.stop();
         const ok: boolean = result.indexOf('"success":true') >= 0;
         onDone(ok);
+        return;
+      }
+      polls++;
+      if (polls >= maxPolls) {
+        InstallManager.stop();
+        HdshLogger.error(TAG, 'install timed out waiting for result file');
+        onDone(false);
       }
     }, 1000);
   }

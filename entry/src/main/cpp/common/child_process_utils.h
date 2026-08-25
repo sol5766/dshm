@@ -26,10 +26,9 @@ static std::string GetFilesDir() {
 }
 
 static std::string GetHomeDir() {
-    const char* home = std::getenv("HOME");
-    if (home != nullptr && *home != '\0') {
-        return std::string(home);
-    }
+    // 用户域 home 固定为 /storage/Users/currentUser：
+    // 不能信 getenv("HOME")——应用主进程的 HOME 可能指向应用沙箱，
+    // 会导致 brew/dsh 被安装/检测到沙箱副本（出现“安装成功但真机没有”）。
     return "/storage/Users/currentUser";
 }
 

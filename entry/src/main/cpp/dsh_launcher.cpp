@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <unistd.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -31,6 +32,19 @@
 #include "common/child_process_utils.h"
 
 static std::string gDshPidFilePath;
+
+// 把诊断行镜像到物理机用户目录日志（best-effort；主进程可能无写权限，失败静默）。
+// 子进程（自定义沙箱）可写物理 home，故子进程内的日志一定能落盘。
+static void PhysLog(const std::string& line) {
+    std::string path = GetHomeDir() + "/dshm-launcher.log";
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        return;
+    }
+    std::string msg = line + "\n";
+    (void)write(fd, msg.c_str(), msg.size());
+    close(fd);
+}
 
 static void WriteServiceInfo(const std::string& pid, const std::string& url, const std::string& port, bool selfStarted) {
     std::string json = "{";
@@ -98,13 +112,15 @@ static void LaunchDshInternal() {
 
     fprintf(stderr, "=== libdsh_launcher Main() pid=%d ===\n", getpid());
     fflush(stderr);
+    PhysLog("=== libdsh_launcher pid=" + std::to_string(getpid()) + " HOME=" + home + " dshBin=" + home + "/.harmonybrew/bin/dsh");
 
-    // Find dsh binary
+    // 注意：不能在主进程做 FileExists 预检——主进程与 fork 子进程
+    // （自定义沙箱上下文）看到的 /storage/Users 视图不同，预检会误判。
+    // dsh 缺失时由子进程 exec 失败体现（日志可见，readiness 超时兜底）。
     std::string dshBin = home + "/.harmonybrew/bin/dsh";
-    if (!FileExists(dshBin)) {
-        WriteLaunchError("dsh binary not found at " + dshBin);
-        return;
-    }
+    fprintf(stderr, "[diag] HOME=%s dshBin=%s main-view-exists=%d\n",
+            home.c_str(), dshBin.c_str(), FileExists(dshBin) ? 1 : 0);
+    fflush(stderr);
 
     // Get requested port from environment (default 3080, dsh 固定端口)
     const char* portEnv = std::getenv("DSH_PORT");
@@ -134,8 +150,15 @@ static void LaunchDshInternal() {
 
         // Redirect stdout to pipe write end
         dup2(pipefd[1], STDOUT_FILENO);
-        // Keep stderr going to the launcher log
         close(pipefd[1]);
+
+        // dsh 的 stderr 镜像到物理机用户目录（子进程在自定义沙箱，可写物理 home），
+        // 便于终端侧排查 EADDRINUSE / node 报错；写失败则保持 launcher 日志。
+        int physLogFd = open((home + "/dshm-dsh-web.log").c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (physLogFd >= 0) {
+            dup2(physLogFd, STDERR_FILENO);
+            close(physLogFd);
+        }
 
         // Detach from parent process group so dsh survives launcher exit
         setsid();
@@ -147,7 +170,7 @@ static void LaunchDshInternal() {
           if (access(shell.c_str(), X_OK) != 0) {
             shell = "/data/service/hnp/bin/bash";
           }
-          std::string command = "exec \"" + dshBin + "\" web --port " + port;
+          std::string command = "cd \"$HOME\" && exec \"" + dshBin + "\" web --port " + port;
           execl(shell.c_str(), shell.c_str(), "-lc", command.c_str(), (char*)nullptr);
           fprintf(stderr, "zsh exec failed: %s (%s)\n", command.c_str(), strerror(errno));
           // 不直接 _exit，保留原有 execv(dshBin) 作为回退路径
@@ -186,6 +209,7 @@ static void LaunchDshInternal() {
 
                 fprintf(stderr, "=== dsh web ready at %s pid=%d ===\n", url.c_str(), dshPid);
                 fflush(stderr);
+                PhysLog("=== dsh web ready at " + url + " pid=" + std::to_string(dshPid));
                 return;
             }
         } else if (n == 0) {
@@ -197,12 +221,17 @@ static void LaunchDshInternal() {
     }
     close(pipefd[0]);
 
+    // 诊断：把捕获到的 dsh 输出落日志，便于排查 readiness 未命中/假启动
+    fprintf(stderr, "[diag] dsh captured output (len=%zu): %s\n", dshOutput.size(), dshOutput.c_str());
+    fflush(stderr);
+
     // If we get here, we didn't find the readiness line
     // Check if dsh is still running (might be using a fixed port)
     int status = 0;
     pid_t wp = waitpid(dshPid, &status, WNOHANG);
     if (wp == 0) {
         // dsh is still running, might have started on a known port
+        // （无输出也可能是 stdout 全缓冲，不能据此判死）
         // Try default ports as fallback
         std::string detectedPort = ParsePortFromOutput(dshOutput);
         if (detectedPort.empty()) {
@@ -215,11 +244,13 @@ static void LaunchDshInternal() {
         fprintf(stderr, "=== dsh web started (no readiness line detected), assuming port %s pid=%d ===\n",
                 detectedPort.c_str(), dshPid);
         fflush(stderr);
+        PhysLog("=== dsh web started (no readiness line), assuming port " + detectedPort + " pid=" + std::to_string(dshPid));
     } else {
         // dsh has exited
         WriteLaunchError("dsh process exited prematurely");
         fprintf(stderr, "=== dsh process exited, status=%d ===\n", WEXITSTATUS(status));
         fflush(stderr);
+        PhysLog("=== dsh process exited, status=" + std::to_string(WEXITSTATUS(status)));
     }
 }
 
@@ -234,6 +265,7 @@ static void* LauncherThread(void*) {
 }
 
 static napi_value NapiLaunchDsh(napi_env env, napi_callback_info info) {
+    PhysLog("=== launchDsh NAPI invoked (ArkTS) ===");
     pthread_t tid;
     if (pthread_create(&tid, nullptr, LauncherThread, nullptr) == 0) {
         pthread_detach(tid);
@@ -305,7 +337,17 @@ static void* InstallThread(void* arg) {
 }
 
 static napi_value NapiInstallBrew(napi_env env, napi_callback_info info) {
-    std::string* cmd = new std::string("brew\ncurl -fsSL https://harmonybrew.atomgit.com/install.sh | zsh");
+    // 诊断信息写入日志（进度区可见），成功以 brew 可执行文件真实存在为准，
+    // 避免“退出码 0 但实际没装上”的假成功。
+    // 日志同时镜像到物理机用户目录（子进程已验证可写），便于终端侧排查。
+    // cd $HOME：子进程继承主进程 cwd（/ 或 /data），brew 会因 cwd 不可读而拒绝运行。
+    std::string* cmd = new std::string(
+        "brew\ncd \"$HOME\" && export HOMEBREW_NO_AUTO_UPDATE=1 && "
+        "exec > >(tee -a \"$HOME/dshm-install-brew.log\") 2>&1; "
+        "echo \"[diag] HOME=$HOME\"; echo \"[diag] id=$(id 2>&1)\"; "
+        "curl -fsSL https://harmonybrew.atomgit.com/install.sh | zsh && "
+        "[ -x \"$HOME/.harmonybrew/bin/brew\" ] && echo \"[diag] brew OK: $($HOME/.harmonybrew/bin/brew --version 2>&1 | head -1)\"; "
+        "echo \"[diag] CMD_EXIT=$?\"");
     pthread_t tid;
     if (pthread_create(&tid, nullptr, InstallThread, cmd) == 0) {
         pthread_detach(tid);
@@ -316,8 +358,22 @@ static napi_value NapiInstallBrew(napi_env env, napi_callback_info info) {
 }
 
 static napi_value NapiInstallDsh(napi_env env, napi_callback_info info) {
+    // install 失败时尝试 reinstall（覆盖“部分安装残留”状态）；
+    // 最终以 $HOME/.harmonybrew/bin/dsh 真实存在为成功标准。
+    // 写探针：确认子进程视图是否为物理机真实用户目录（终端侧可验证标记文件）。
+    // cd $HOME：子进程继承主进程 cwd，brew 因 cwd 不可读拒绝运行（实测复现）。
     std::string* cmd = new std::string(
-        "dsh\nexport PATH=\"$HOME/.harmonybrew/bin:$PATH\"; if ! command -v brew >/dev/null 2>&1 && [ ! -x \"$HOME/.harmonybrew/bin/brew\" ]; then curl -fsSL https://harmonybrew.atomgit.com/install.sh | zsh; fi; export PATH=\"$HOME/.harmonybrew/bin:$PATH\"; brew install deepseek-harness");
+        "dsh\ncd \"$HOME\" && export HOMEBREW_NO_AUTO_UPDATE=1 && export PATH=\"$HOME/.harmonybrew/bin:$PATH\" && "
+        "exec > >(tee -a \"$HOME/dshm-install-dsh.log\") 2>&1; "
+        "echo \"[diag] HOME=$HOME\"; echo \"[diag] id=$(id 2>&1)\"; "
+        "echo \"[diag] mount=$(cat /proc/self/mountinfo 2>/dev/null | grep ' /storage/Users/currentUser ' | head -1)\"; "
+        "if ! command -v brew >/dev/null 2>&1 && [ ! -x \"$HOME/.harmonybrew/bin/brew\" ]; then "
+        "curl -fsSL https://harmonybrew.atomgit.com/install.sh | zsh; fi; "
+        "export PATH=\"$HOME/.harmonybrew/bin:$PATH\"; "
+        "echo \"[diag] brew=$(command -v brew)\"; "
+        "(brew install deepseek-harness || brew reinstall deepseek-harness) && "
+        "[ -x \"$HOME/.harmonybrew/bin/dsh\" ] && echo \"[diag] dsh OK\"; "
+        "echo \"[diag] CMD_EXIT=$?\"");
     pthread_t tid;
     if (pthread_create(&tid, nullptr, InstallThread, cmd) == 0) {
         pthread_detach(tid);
@@ -327,13 +383,124 @@ static napi_value NapiInstallDsh(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// ---- NAPI：安装状态检测（fork 子进程上下文，与安装/拉起同一视图）----
+// 主进程与 fork 子进程（自定义沙箱）看到的 /storage/Users 视图不同：
+// 主进程 access() 真实路径会误报未安装。检测必须与安装走同一上下文——
+// fork + exec shell 判断，结果经 pipe 回传。
+// 返回 JSON 字符串：{"brewInstalled":bool,"dshInstalled":bool,"dshPath":"..."}
+static napi_value NapiCheckInstall(napi_env env, napi_callback_info info) {
+    std::string home = GetHomeDir();
+    std::string brewBin = home + "/.harmonybrew/bin/brew";
+    std::string dshBin = home + "/.harmonybrew/bin/dsh";
+    bool brewInstalled = false;
+    bool dshInstalled = false;
+
+    int pipefd[2];
+    if (pipe(pipefd) == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            close(pipefd[1]);
+            std::string pathEnv = home + "/.harmonybrew/bin:/usr/bin:/bin:/system/bin:/system/xbin:/data/service/hnp/bin";
+            setenv("PATH", pathEnv.c_str(), 1);
+            setenv("HOME", home.c_str(), 1);
+            std::string shell = home + "/.harmonybrew/bin/zsh";
+            if (access(shell.c_str(), X_OK) != 0) {
+                shell = "/data/service/hnp/bin/bash";
+            }
+            std::string cmd = "b=0; d=0; " \
+                "[ -x \"$HOME/.harmonybrew/bin/brew\" ] && b=1; " \
+                "[ -x \"$HOME/.harmonybrew/bin/dsh\" ] && d=1; " \
+                "echo \"CHECK_RESULT b=$b d=$d\"";
+            execl(shell.c_str(), shell.c_str(), "-c", cmd.c_str(), (char*)nullptr);
+            _exit(127);
+        }
+        close(pipefd[1]);
+        // 最多等 5 秒读子进程输出
+        std::string output;
+        char buf[256];
+        for (int i = 0; i < 50; i++) {
+            ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                output += buf;
+                if (output.find("CHECK_RESULT") != std::string::npos) {
+                    break;
+                }
+            } else if (n == 0) {
+                break;
+            } else {
+                usleep(100000); // 100ms
+            }
+        }
+        close(pipefd[0]);
+        int status = 0;
+        waitpid(pid, &status, 0);
+        brewInstalled = output.find("CHECK_RESULT b=1") != std::string::npos;
+        dshInstalled = output.find("d=1") != std::string::npos;
+    }
+
+    std::string json = "{";
+    json += "\"brewInstalled\":" + std::string(brewInstalled ? "true" : "false") + ",";
+    json += "\"dshInstalled\":" + std::string(dshInstalled ? "true" : "false") + ",";
+    json += "\"dshPath\":\"" + (dshInstalled ? dshBin : "") + "\"";
+    json += "}";
+
+    napi_value result;
+    napi_create_string_utf8(env, json.c_str(), json.size(), &result);
+    return result;
+}
+
+// ---- NAPI：停止自启动的 dsh 进程（主进程 kill，同 uid 可杀自定义沙箱子进程）----
+// dsh 经 setsid 脱离进程组，应用退出后可能残留占着 3080，必须显式 TERM。
+static napi_value NapiStopDsh(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int pid = -1;
+    if (argc >= 1) {
+        napi_get_value_int32(env, args[0], &pid);
+    }
+    int ret = -1;
+    if (pid > 0) {
+        ret = kill(pid, SIGTERM);
+    }
+    napi_value result;
+    napi_create_int32(env, ret, &result);
+    return result;
+}
+
+// ---- NAPI：ArkTS 侧物理日志追踪（best-effort，写到 $HOME/dshm-launcher.log）----
+// 用于冷启动流程的端到端定位：ArkTS 每步调一次，终端可直接读。
+static napi_value NapiPhysTrace(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc >= 1) {
+        size_t len = 0;
+        napi_get_value_string_utf8(env, args[0], nullptr, 0, &len);
+        std::string msg(len, '\0');
+        if (len > 0) {
+            napi_get_value_string_utf8(env, args[0], &msg[0], len + 1, &len);
+        }
+        PhysLog("ARKTS: " + msg);
+    }
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
 static napi_value NapiInit(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "launchDsh", nullptr, NapiLaunchDsh, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "installBrew", nullptr, NapiInstallBrew, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "installDsh", nullptr, NapiInstallDsh, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "checkInstall", nullptr, NapiCheckInstall, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "stopDsh", nullptr, NapiStopDsh, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "physTrace", nullptr, NapiPhysTrace, nullptr, nullptr, nullptr, napi_default, nullptr },
     };
-    napi_define_properties(env, exports, 3, desc);
+    napi_define_properties(env, exports, 6, desc);
     return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME, NapiInit)
