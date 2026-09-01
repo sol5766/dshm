@@ -1,5 +1,6 @@
 import { webview } from '@kit.ArkWeb';
-import { common } from '@kit.AbilityKit';
+import { window } from '@kit.ArkUI';
+import { common, Want } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -10,6 +11,8 @@ import { BrewChecker, BrewCheckResult } from '../hdsh/brew/BrewChecker';
 import { InstallManager } from '../hdsh/install/InstallManager';
 import { DshServiceManager } from '../hdsh/service/DshServiceManager';
 import launcher from 'libdsh_launcher.so';
+import { AppMenuBar } from '../hdsh/ui/AppMenuBar';
+import { http } from '@kit.NetworkKit';
 
 const DOMAIN: number = 0xd511;
 const TAG: string = 'dsh-client';
@@ -379,8 +382,234 @@ struct Index {
     }
   }
 
+  private goToDefaultUrl(): void {
+    if (this.pageState !== 'web') {
+      return;
+    }
+    // 即便当前 URL 已是 3080，也强制重载，保证「回到默认页」语义生效
+    this.controller.loadUrl(DEFAULT_SERVER_URL);
+    this.serverUrl = DEFAULT_SERVER_URL;
+  }
+
+
+  // ==== 菜单栏回调实现 ====
+
+  private async restartApp(): Promise<void> {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    const want: Want = {
+      bundleName: context.abilityInfo.bundleName,
+      abilityName: context.abilityInfo.name
+    };
+    this.physTrace('client restart requested');
+    try {
+      // 先停掉自启服务：令 currentService=undefined，避免旧实例 onDestroy 在短暂窗口误停刚起的服务；
+      // 也让新实例以全新状态重新拉起服务并连接。
+      if (DshServiceManager.isSelfStarted()) {
+        await DshServiceManager.stopDshWeb(context);
+      }
+      // 先新建实例（module.json5 已设 launchType=multiton，startAbility 会新建窗口/实例），
+      // 成功后再关掉旧实例；否则异常时序下会「只关没开」。
+      await context.startAbility(want);
+      context.terminateSelf();
+    } catch (e) {
+      const msg: string = e instanceof Error ? e.message : String(e);
+      hilog.error(DOMAIN, TAG, `restart failed: ${msg}`);
+      this.getUIContext().getPromptAction().showToast({ message: '重启失败: ' + msg });
+    }
+  }
+
+  private newSessionFromMenu(): void {
+    if (this.pageState !== 'web') {
+      return;
+    }
+    this.controller.runJavaScript("(function(){var keys=['new session','new chat','new conversation','new chat session','new','新会话','新对话','新建','新聊天'];var els=document.querySelectorAll('button,a,[role=button],[data-command],[data-testid],[aria-label]');for(var i=0;i<els.length;i++){var el=els[i];var t=(el.textContent||'').trim().toLowerCase();var al=(el.getAttribute('aria-label')||'').toLowerCase();var dl=(el.getAttribute('data-label')||'').toLowerCase();var dc=(el.getAttribute('data-command')||'').toLowerCase();var dt=(el.getAttribute('data-testid')||'').toLowerCase();for(var k=0;k<keys.length;k++){var key=keys[k];if(t===key||t.indexOf(key)===0||al.indexOf(key)>=0||dl.indexOf(key)>=0||dc.indexOf(key)>=0||dt.indexOf(key)>=0){el.click();return 'ok'}}}return 'not-found'})()").catch(() => {});
+  }
+
+  private openWorkspaceFromMenu(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    WorkspaceAccess.selectAndPersistFolder(context).then((uri: string) => {
+      if (uri !== '') {
+        this.getUIContext().getPromptAction().showToast({ message: '工作区目录已授权' });
+        if (this.pageState === 'web') {
+          this.controller.runJavaScript("window.dispatchEvent(new CustomEvent('dshm:workspace',{detail:'" + uri + "'}))").catch(() => {});
+        }
+      }
+    }).catch((e: Error) => {
+      hilog.warn(DOMAIN, TAG, `open workspace failed: ${e.message}`);
+    });
+  }
+
+  private startServiceFromMenu(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    DshServiceManager.startDshWeb(context, 0).then((url: string) => {
+      if (url.length > 0) {
+        this.getUIContext().getPromptAction().showToast({ message: '服务已启动：' + url });
+        this.startDiscovery();
+      }
+    }).catch((e: Error) => {
+      this.getUIContext().getPromptAction().showToast({ message: '服务启动失败：' + e.message });
+    });
+  }
+
+  private stopServiceFromMenu(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    DshServiceManager.stopDshWeb(context);
+    this.getUIContext().getPromptAction().showToast({ message: '已停止自启动服务' });
+  }
+
+  private installDshFromMenu(): void {
+    if (InstallManager.isInstalling) {
+      return;
+    }
+    this.isInstalling = true;
+    this.installProgress = '正在安装 DeepSeek Harness…';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    InstallManager.startInstall(context, 'dsh',
+      (tail: string) => { this.installProgress = tail; },
+      (success: boolean) => {
+        this.isInstalling = false;
+        if (success) {
+          this.dshInstalled = true;
+          this.getUIContext().getPromptAction().showToast({ message: 'DeepSeek Harness 安装成功' });
+          this.startDiscovery();
+        } else {
+          this.guideError = '安装失败，详情见日志。';
+          this.getUIContext().getPromptAction().showToast({ message: '安装失败' });
+        }
+      });
+  }
+
+  private installBrewFromMenu(): void {
+    if (InstallManager.isInstalling) {
+      return;
+    }
+    this.isInstalling = true;
+    this.installProgress = '正在安装 Harmonybrew…';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    InstallManager.startInstall(context, 'brew',
+      (tail: string) => { this.installProgress = tail; },
+      (success: boolean) => {
+        this.isInstalling = false;
+        if (success) {
+          this.brewInstalled = true;
+          this.getUIContext().getPromptAction().showToast({ message: 'Harmonybrew 安装成功' });
+        } else {
+          this.getUIContext().getPromptAction().showToast({ message: '安装失败，详情见日志' });
+        }
+      });
+  }
+
+  private async checkUpdateFromMenu(): Promise<void> {
+    const currentTag: string = 'v1.1.0';
+    const req = http.createHttp();
+    try {
+      const response = await req.request('https://api.github.com/repos/sol5766/dshm/releases/latest', {
+        method: http.RequestMethod.GET,
+        expectDataType: http.HttpDataType.STRING
+      });
+      const body: string = response.result as string;
+      const m: RegExpMatchArray | null = body.match(/"tag_name"\s*:\s*"([^"]+)"/);
+      const latest: string = m !== null && m.length > 1 ? m[1] : '';
+      if (latest.length > 0 && latest !== currentTag) {
+        this.getUIContext().getPromptAction().showToast({ message: '发现新版本：' + latest });
+      } else {
+        this.getUIContext().getPromptAction().showToast({ message: '已是最新版本' });
+      }
+    } catch (e) {
+      this.getUIContext().getPromptAction().showToast({ message: '检查更新失败，请检查网络' });
+    } finally {
+      req.destroy();
+    }
+  }
+
+  private closeWindowFromMenu(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    context.terminateSelf();
+  }
+
+  // ==== 窗口操作：统一在 Index 取 UIAbilityContext（菜单动作里取上下文可靠，
+  // 避免 AppMenuBar 内部 getUIContext 在菜单弹层场景失效导致「点了没反应」）====
+
+  private minimizeWindow(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    window.getLastWindow(context).then((win: window.Window) => {
+      win.minimize().catch(() => {});
+    }).catch((e: Error) => {
+      hilog.warn(DOMAIN, TAG, `minimize failed: ${e.message}`);
+      this.getUIContext().getPromptAction().showToast({ message: '最小化失败: ' + e.message });
+    });
+  }
+
+  private toggleMaximizeWindow(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    window.getLastWindow(context).then((win: window.Window) => {
+      try {
+        const st = win.getWindowStatus();
+        if (st === window.WindowStatusType.MAXIMIZE || st === window.WindowStatusType.FULL_SCREEN) {
+          win.restore().catch(() => {});
+        } else {
+          win.maximize().catch(() => {});
+        }
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, `toggle maximize getStatus failed: ${String(e)}`);
+        this.getUIContext().getPromptAction().showToast({ message: '最大化状态读取失败: ' + String(e) });
+      }
+    }).catch((e: Error) => {
+      hilog.warn(DOMAIN, TAG, `toggle maximize failed: ${e.message}`);
+      this.getUIContext().getPromptAction().showToast({ message: '最大化/还原失败: ' + e.message });
+    });
+  }
+
+  private restoreWindow(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    window.getLastWindow(context).then((win: window.Window) => {
+      win.restore().catch(() => {});
+    }).catch((e: Error) => {
+      hilog.warn(DOMAIN, TAG, `restore failed: ${e.message}`);
+      this.getUIContext().getPromptAction().showToast({ message: '还原失败: ' + e.message });
+    });
+  }
+
+  private startWindowMove(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    window.getLastWindow(context).then((win: window.Window) => {
+      try {
+        const st = win.getWindowStatus();
+        if (st === window.WindowStatusType.MAXIMIZE || st === window.WindowStatusType.FULL_SCREEN) {
+          return;
+        }
+      } catch (e) { /* 非最大化状态下允许拖动 */ }
+      win.startMoving().catch(() => {});
+    }).catch((e: Error) => {
+      hilog.warn(DOMAIN, TAG, `startMoving failed: ${e.message}`);
+      this.getUIContext().getPromptAction().showToast({ message: '拖动失败: ' + e.message });
+    });
+  }
+
   build() {
-    Stack() {
+    Column() {
+      AppMenuBar({
+        controller: this.controller,
+        serviceConnected: this.serviceConnected,
+        onOpenSettings: () => this.openSettings(),
+        onRestart: () => this.restartApp(),
+        onStartService: () => this.startServiceFromMenu(),
+        onStopService: () => this.stopServiceFromMenu(),
+        onInstallDsh: () => this.installDshFromMenu(),
+        onInstallBrew: () => this.installBrewFromMenu(),
+        onOpenWorkspace: () => this.openWorkspaceFromMenu(),
+        onReloadWeb: () => this.reloadWeb(),
+        onGoDefaultUrl: () => this.goToDefaultUrl(),
+        onNewSession: () => this.newSessionFromMenu(),
+        onCheckUpdate: () => this.checkUpdateFromMenu(),
+        onMinimize: () => this.minimizeWindow(),
+        onToggleMaximize: () => this.toggleMaximizeWindow(),
+        onRestore: () => this.restoreWindow(),
+        onStartMove: () => this.startWindowMove(),
+        onCloseWindow: () => this.closeWindowFromMenu()
+      })
+
+      Stack() {
       if (this.pageState === 'web') {
         Web({ src: this.serverUrl, controller: this.controller })
           .javaScriptAccess(true)
@@ -405,55 +634,13 @@ struct Index {
           .width('100%')
           .height('100%')
 
-        // Connection status indicator
-        Row() {
-          Circle({ width: 8, height: 8 })
-            .fill(this.serviceConnected ? '#5CC9A8' : '#E85D5D')
-          Text(this.serviceConnected ? '已连接' : '已断线')
-            .fontSize(11)
-            .fontColor('#FFFFFF')
-            .margin({ left: 4 })
-        }
-        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-        .borderRadius(12)
-        .backgroundColor(this.serviceConnected ? '#3A5A4A' : '#5A3A3A')
-        .position({ x: '100%', y: 12 })
-        .markAnchor({ x: '100%', y: 0 })
-        .translate({ x: -12, y: 0 })
-        .onClick(() => {
-          if (!this.serviceConnected) {
-            this.startDiscovery();
-          }
-        })
-
-        // Web 模式设置入口（右上角，指示器下方）
-        Button('设置')
-          .height(30)
-          .fontSize(13)
-          .fontColor('#2E3A36')
-          .backgroundColor('#CCFFFFFF')
-          .borderRadius(15)
-          .position({ x: '100%', y: 52 })
-          .markAnchor({ x: '100%', y: 0 })
-          .translate({ x: -12, y: 0 })
-          .onClick(() => this.openSettings())
       } else {
         this.StatusView()
       }
 
-      // Settings entry (not in web mode - web has its own)
-      if (this.pageState !== 'web') {
-        Button('设置')
-          .height(32)
-          .fontSize(13)
-          .fontColor('#2E3A36')
-          .backgroundColor('#CCFFFFFF')
-          .borderRadius(16)
-          .position({ x: '100%', y: 12 })
-          .markAnchor({ x: '100%', y: 0 })
-          .translate({ x: -12, y: 0 })
-          .onClick(() => this.openSettings())
       }
+      .width('100%')
+      .layoutWeight(1)
     }
     .width('100%')
     .height('100%')

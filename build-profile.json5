@@ -4,13 +4,13 @@
       {
         "name": "default",
         "material": {
-          "storePassword": "000000209020AB5B0A180067E0B363960EEDDCB9465BE7687D7B47172EE9B8845AFB690A927AC06A784A9FFB1EF69B5A",
-          "certpath": "/storage/Users/currentUser/Documents/ohos/config/default_dshm_desptoppq5NJ780Xx1qRTXZCQGbiMCc2MrGbf0bRIZWjza0AjE.cer",
-          "keyAlias": "debugKey",
-          "keyPassword": "000000209020AB5B0A180067E0B363960EEDDCB9465BE7687D7B47172EE9B8845AFB690A927AC06A784A9FFB1EF69B5A",
-          "profile": "/storage/Users/currentUser/Documents/ohos/config/default_dshm_desptoppq5NJ780Xx1qRTXZCQGbiMCc2MrGbf0bRIZWjza0AjE.p7b",
+          "storePassword": "0000001A88DC58DA8FA74A708D6E063DF5256A610227B24ED91265D8CBC824757D1D002C58731E61AAD7",
+          "certpath": "/storage/Users/currentUser/data/dshm/dshm.cer",
+          "keyAlias": "zxcvbnm",
+          "keyPassword": "0000001A88DC58DA8FA74A708D6E063DF5256A610227B24ED91265D8CBC824757D1D002C58731E61AAD7",
+          "profile": "/storage/Users/currentUser/data/dshm/dshmRelease.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "/storage/Users/currentUser/Documents/ohos/config/default_dshm_desptoppq5NJ780Xx1qRTXZCQGbiMCc2MrGbf0bRIZWjza0AjE.p12"
+          "storeFile": "/storage/Users/currentUser/data/dshm/dshm.p12"
         },
         "type": "HarmonyOS"
       }

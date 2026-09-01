@@ -21,12 +21,25 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
+    // 桌面式客户端：隐藏系统标题栏装饰条，改用页面顶部自绘标题栏，
+    // 使「HARNESS / EDIT / VIEW / WINDOWS」菜单栏能与右上角最小化/最大化/关闭同处一行。
+    try {
+      windowStage.getMainWindowSync().setWindowDecorVisible(false);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, `setWindowDecorVisible(false) failed: ${JSON.stringify(e)}`);
+    }
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, TAG, `loadContent failed: ${JSON.stringify(err)}`);
         return;
       }
       hilog.info(DOMAIN, TAG, 'loadContent succeeded');
+      // 内容加载完成后再确认一次装饰条隐藏（幂等，防止个别设备在 loadContent 时重置可见性）。
+      try {
+        windowStage.getMainWindowSync().setWindowDecorVisible(false);
+      } catch (e2) {
+        hilog.warn(DOMAIN, TAG, `re-apply setWindowDecorVisible(false) failed: ${JSON.stringify(e2)}`);
+      }
     });
   }
 
