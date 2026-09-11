@@ -64,7 +64,8 @@ git push origin <branch>
 ```
 
 > - 环境资产（`dist/env/*.zip`）在 `.gitignore` 中，不随仓库分发；发布走 **GitHub Release 附件**（tag `env-<version>`）。
-> - GitHub 上的 `main` 是**另一条实现线**（「外部 dsh 接入壳」，`bundleName=com.dshm.dshclient`，提交止于 2026-09-02 v1.1.0）；「内嵌运行时」这条线在 `embedded-runtime` 分支，两者**无共同祖先**，改动前先确认要动哪条线。
+> - 本仓库 `main` 是**「内嵌运行时」实现线**（`bundleName=com.dshm.agentic`，libnode + 完整 dsh 环境打进 HAP）。
+> - 历史上 GitHub 上曾有一条**「外部 dsh 接入壳」**线（`bundleName=com.dshm.dshclient`，ArkWeb 加载本机 `dsh web`，提交止于 2026-09-02 v1.1.0）。2026-09-11 按用户决定用内嵌线覆盖 `main`，旧线归档在分支/tag **`archive/external-shell-v1.1.0`**（需要对比或回退时从这里取，勿与当前线混用）。
 
 ### 步骤 1：取新版 dsh 产物
 
