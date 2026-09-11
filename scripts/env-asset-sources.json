@@ -1,5 +1,6 @@
 {
   "_note": [
+    "⛔ 已停用（2026-09-11）：客户端侧的「在线环境包」能力已移除，本文件当前没有任何消费者；保留供日后恢复（见 docs/dsh-version-upgrade.md §3.2）。",
     "env asset 的下载源模板，按数组顺序 failover。build-env-asset.mjs 会把 {asset} {version} {sha256} {size}",
     "替换成实际值写进 manifest.json 的 asset.urls[]；enabled=false 的条目不写入。",
     "⚠️ 本仓库 remote 已迁到 GitHub：https://github.com/sol5766/dshm",

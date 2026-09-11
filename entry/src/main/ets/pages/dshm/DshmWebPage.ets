@@ -29,12 +29,10 @@ import { StatusBarTray } from '../../dshm/system/StatusBarTray';
 const TAG: string = 'DshmWebPage';
 const HOME_URL: string = 'http://127.0.0.1:3080';
 const RESTART_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/restart';
-const UPDATE_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/update';
-const UPDATE_APPLY_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/update/apply';
 const VERSION_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/version';
-// Harness 更新是服务端后台任务（同进程 Worker 跑 pnpm），ArkTS 侧轮询进度；
-// 单次 HTTP 请求只负责“开始”与“查进度”，不承担长连接等待。
-const UPDATE_POLL_INTERVAL_MS: number = 4000;
+// 说明：`/dshm-admin/update`（Harness 在线更新）相关的端点常量、轮询参数与进度浮层
+// 已随「纯净版」一起移除（2026-09-11，用户决定暂不做在线更新）。服务端端点仍在
+// dshm-terminal 插件里（本地回环、无 UI 入口），要恢复见 docs/dsh-version-upgrade.md §3.3。
 const UI_EVENTS_GET: string = 'http://127.0.0.1:3080/dshm-admin/ui/events';
 const TERM_START_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/start';
 const TERM_WRITE_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/write';

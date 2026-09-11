@@ -1,5 +1,17 @@
 # DSHM 轻量化改造规划：容器（壳）+ 在线环境预设
 
+> ## ⛔ 本文档状态：**方案已停用（2026-09-11）**
+>
+> **客户端侧的在线环境包能力已按用户决定整体移除**，因此本文描述的路线**当前不在产品里**：
+> - 已删除：菜单「安装在线环境包（开发）」、`entry/src/main/ets/dshm/env/EnvAssetClient.ets`、
+>   `DshBootstrap` 的备份/暂存/待验收/回滚全套机制、`.dshm-asset-version` 与 `.dshm-pending-verify` 两个标记。
+> - 已停用（保留脚本但不被调用）：`scripts/build-env-asset.mjs`、`scripts/dev-env-server.mjs`、`scripts/env-asset-sources.json`。
+> - 现状：**升级方式 = 装新的 HAP**；包体问题改由「环境瘦身」解决（253.5MB → 110.7MB，HAP 385MB → 238MB，见 `dsh-version-upgrade.md` §4.1 第 6 条）。
+> - 本文**保留全文**作为日后恢复在线更新 / 纯壳路线的设计参考；被删代码可在 git 历史中找回（提交标题含「纯净版」）。
+>
+> 若日后要恢复，请先读 `docs/dsh-version-upgrade.md` §3.2 的操作要点，以及 §5.5「确认运行模式」——
+> 纯壳路线与「宿主 dsh」路线的边界必须先想清楚（两者都依赖设备上存在外部 dsh）。
+
 > 状态：规划稿 v2（2026-09-09）。用户已确认 D1=纯在线（无网不启动，用离线导入兜底）、下载源=内置 5 加速源 + 失败自动切换。已加入 busybox 实测结论与 brew/zsh 宿主通道讨论。
 > 关联：`docs/device-runtime-fixes.md`（现有沙箱运行机制）、`docs/CHANGELOG.md`、`.agent-rules/bug-log.md`。
 > 背景确认：`ACCESS_USER_FULL_DISK` 等权限经重签后已生效（用户已实测可用）。

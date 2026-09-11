@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 /**
+ * ⛔ 已停用（2026-09-11）：客户端侧的「在线环境包」能力已按用户决定移除
+ *   （菜单项 + EnvAssetClient.ets + DshBootstrap 的备份/待验收/回滚机制均已删除）。
+ * 本脚本保留作为日后恢复该路线的构建侧工具，当前没有任何代码会调用它。
+ * 现状与恢复要点见 docs/dsh-version-upgrade.md §3.2。
+ *
  * 打包「在线环境预设」（env asset）+ 生成 manifest。
  *
  * 背景与目标见 docs/plan-lite-env-online.md：把「pnpm 原地升级」换成「分发已适配好的
