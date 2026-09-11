@@ -1,0 +1,64 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "DSHM 框架入口模块"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DSHM 框架主能力"
+    },
+    {
+      "name": "BackgroundAbility_desc",
+      "value": "DSHM 系统托盘后台保活能力"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "BrewDSH"
+    },
+    {
+      "name": "activity_motion_reason",
+      "value": "框架需要感知用户活动状态和操作手信息，用于实现握持侧识别和交互优化。"
+    },
+    {
+      "name": "background_task_reason",
+      "value": "框架需要后台运行权限以保证长时任务在后台时不会被中断。"
+    },
+    {
+      "name": "detect_gesture_reason",
+      "value": "框架需要检测用户握持手势，用于实现自适应界面布局和握持感知导航。"
+    },
+    {
+      "name": "store_persistent_reason",
+      "value": "DSHM 需要在设备本地持久保存运行数据与工作区文件，用于断网后继续使用。"
+    },
+    {
+      "name": "read_write_user_file_reason",
+      "value": "DSHM 需要读写您选择的应用文件与文档，用于工作区、会话数据与配置文件。"
+    },
+    {
+      "name": "file_access_reason",
+      "value": "需要访问您选择的应用文件夹，用于 DSH 工作区文件的读写与持久授权。"
+    },
+    {
+      "name": "full_disk_access_reason",
+      "value": "DSHM 需要访问全盘文件，用于在工作空间目录中选择、读写任意位置的项目文件。"
+    },
+    {
+      "name": "download_dir_reason",
+      "value": "DSHM 需要读写您的「下载」目录，用于打开、保存与整理项目文件。"
+    },
+    {
+      "name": "documents_dir_reason",
+      "value": "DSHM 需要读写您的「文档」目录，用于打开、保存与整理项目文件。"
+    },
+    {
+      "name": "jit_fort_memory_reason",
+      "value": "V8 JIT for the embedded Node.js runtime: faster cold start and native WebAssembly/fetch support. All JavaScript ships inside the signed app package; no downloaded unsigned code is executed."
+    },
+    {
+      "name": "external_native_code_reason",
+      "value": "Execute signed native binaries bundled in this app (busybox applets and terminal pty helper) to provide the local terminal capability."
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "app": {
+    "products": [
+      {
+        "name": "default",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "26.0.0",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          },
+          "nativeCompiler": "BiSheng"
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ],
+    "signingConfigs": []
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

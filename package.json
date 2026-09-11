@@ -1,0 +1,8 @@
+{
+  "name": "dshm-tools",
+  "version": "1.0.0",
+  "description": "DSHM development tooling",
+  "scripts": {
+    "gen-icon": "node tools/gen-icon.mjs"
+  }
+}

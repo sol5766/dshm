@@ -1,0 +1,145 @@
+# Dependencies
+/node_modules/
+/oh_modules/
+**/node_modules/
+**/oh_modules/
+
+# HarmonyOS / DevEco generated files
+/local.properties
+**/build/
+**/.cxx/
+**/.preview/
+**/.test/
+/.hvigor/
+**/.hvigor/
+/.appanalyzer/
+**/.appanalyzer/
+*.hap
+*.app
+*.hsp
+
+# Native / analyzer local config
+/.clangd
+/.clang-format
+/.clang-tidy
+compile_commands.json
+
+# Logs, diagnostics, and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*~
+bugreport*.txt
+*_bugreport*.txt
+hilog*.txt
+faultlog/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / tooling cache
+.npm/
+.pnpm-store/
+.yarn/
+.parcel-cache/
+.turbo/
+.cache/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+/.idea/
+/.vscode/
+
+# Agent local state
+/.antigravitycli/
+/.agent-state/
+**/.agent-state/
+**/.agent-rules/*.local.md
+/.claude/
+/.atomcode/
+/.workbuddy/
+/.deveco/
+/.cursor/
+/.windsurf/
+/.codex/
+/.trae/
+/.kiro/
+/.opencode/
+/.continue/
+/.aider*
+/.gemini/
+/.openhands/
+
+# Local rule facts
+/.local-rules/*.local.md
+/.local-rules/snapshots/
+/.local-rules/*.log
+/.local-rules/*.tmp
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Signing and certificate files
+*.p12
+*.cer
+*.csr
+*.crt
+*.der
+*.p7b
+*.pem
+*.pfx
+*.key
+*.keystore
+*.jks
+/signing/*
+!/signing/README.md
+
+# DSHM runtime artifacts (downloaded/generated, not committed)
+/entry/libs/arm64-v8a/libnode.so
+/entry/libs/arm64-v8a/libnode.so.*
+/entry/libs/arm64-v8a/libpty_host.so*
+/entry/src/main/resources/rawfile/dsh/
+/entry/src/main/resources/rawfile/busybox/
+/entry/src/main/resources/rawfile/pnpm/
+/signing/*.key
+# AGC 签名材料缓存（ac/ce/fd 目录，勿提交）
+/signing/material/
+
+# Local debug scratch (not project content)
+/tmpplugins/
+/ui.xml
+/ui2.xml
+/dshm-shot.jpeg
+/build/ui-test-phone/
+
+# Agent tool memory (not project content)
+/.codegenie/
+
+# 本地环境资产（build-env-asset.mjs 产出，可再生，不提交）
+/dist/
+# 已知损坏的 koffi 预编译产物（见 tools/prebuilt/README.md，用 build-koffi-ohos.ps1 重建）
+/tools/prebuilt/*.node
+
+# AGC 调试 profile（含 ACL 权限，不入库）
+/dshmDebug.p7b

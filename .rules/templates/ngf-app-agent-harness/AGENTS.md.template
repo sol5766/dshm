@@ -1,0 +1,47 @@
+# <APP_NAME> Agent Rules
+
+This file governs agents working on this application. Replace every `<...>` placeholder during initialization and keep the contents specific to this App.
+
+## Rule Precedence
+
+1. The user's current explicit request.
+2. Official HarmonyOS requirements and non-overridable safety or security constraints.
+3. This App's `AGENTS.md` and applicable deeper `AGENTS.md` files.
+4. The applicable NGF framework rules and contracts.
+5. Active entries in `.agent-rules/project-rules.md`.
+6. `.agent-rules/preferences.local.md`, if present and not in conflict with higher-priority rules.
+7. Candidate rules and task notes, which never constrain implementation.
+
+**NGF integration source**: `<local source path, package version, or delivered documentation path>`
+
+## Mandatory Rule Gate
+
+Before reading or changing application source, agents must read:
+
+1. This file and any applicable parent or deeper `AGENTS.md` files.
+2. `.agent-rules/README.md` and every `active` rule in `.agent-rules/project-rules.md`.
+3. `.agent-rules/preferences.local.md` when it exists.
+4. The relevant NGF framework exports, contracts, and skills for the requested capability.
+
+Repeat this gate after a context recovery, task handoff, target change, or new error. Record the applicable rules and acceptance criteria in the active task checkpoint before implementation.
+
+## Application Boundaries
+
+- Product purpose: `<confirmed product purpose>`
+- App/module root: `<path>`
+- NGF integration mode: `<local HAR / dependency / source module / reference pattern>`
+- Framework boundary: use NGF public capabilities first; keep product-specific workflows, copy, assets, and backend protocols in the App layer unless a cross-App framework abstraction is explicitly justified.
+
+## Rule Maintenance
+
+- Apply `skill-project-rule-governance.md` when collecting project rules or durable user preferences.
+- Promote only verified, scoped, actionable rules to `active`; keep uncertain observations as `candidate`.
+- Store non-sensitive, user-specific preferences only in `.agent-rules/preferences.local.md`; do not commit it.
+- Do not put SDK paths, device facts, credentials, or temporary task notes into project rules.
+- For cross-session work, use `.agent-state/<task-id>.local.md`; it is recovery state, not a source of product truth.
+
+## Verification Policy
+
+- Default to static review for ordinary code changes.
+- Run builds, previews, device checks, or external actions only when the user requests them or when the task itself requires diagnosis of those systems.
+- Never declare completion solely because files were written or a command exited successfully; verify the App-specific acceptance criteria.

@@ -1,0 +1,155 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "phone",
+      "tablet",
+      "2in1",
+      "car",
+      "tv",
+      "wearable"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages","metadata": [
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "enable"
+      }
+    ],
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.INTERNET"
+      },
+      {
+        "name": "ohos.permission.STORE_PERSISTENT_DATA",
+        "reason": "$string:store_persistent_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.DETECT_GESTURE",
+        "reason": "$string:detect_gesture_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.ACTIVITY_MOTION",
+        "reason": "$string:activity_motion_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
+        "reason": "$string:background_task_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.PUBLISH_AGENT_REMINDER",
+        "reason": "$string:background_task_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.ACCESS_BIOMETRIC",
+        "reason": "$string:background_task_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.ACCELEROMETER",
+        "reason": "$string:detect_gesture_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.APPROXIMATELY_LOCATION",
+        "reason": "$string:background_task_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.FILE_ACCESS_PERSIST",
+        "reason": "$string:file_access_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.PREPARE_APP_TERMINATE"
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY",
+        "reason": "$string:download_dir_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_DOCUMENTS_DIRECTORY",
+        "reason": "$string:documents_dir_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      }
+
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:start_window_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "startWindow": "$profile:start_window",
+        "exported": true,
+        "backgroundModes": ["dataTransfer"],
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "ohos.want.action.home"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "BackGroundAbility",
+        "srcEntry": "./ets/backgroundability/BackGroundAbility.ets",
+        "description": "$string:BackgroundAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:start_window_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true
+      }
+    ]
+  }
+}

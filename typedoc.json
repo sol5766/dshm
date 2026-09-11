@@ -1,0 +1,12 @@
+{
+  "entryPoints": [
+    "ngf_framework/src/main/ets"
+  ],
+  "entryPointStrategy": "expand",
+  "out": "docs/api-ref",
+  "name": "Neon Genesis Framework (NGF) API Reference",
+  "exclude": [
+    "**/*+(index|.spec|.test|.e2e).ets"
+  ],
+  "includeVersion": true
+}

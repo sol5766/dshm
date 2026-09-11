@@ -1,0 +1,64 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "DSHM framework entry module"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DSHM framework main ability"
+    },
+    {
+      "name": "BackgroundAbility_desc",
+      "value": "DSHM background ability bound to the system tray"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DeepSeek Harness"
+    },
+    {
+      "name": "activity_motion_reason",
+      "value": "The framework needs to perceive user activity status and operating hand information for holding-side recognition and interaction optimization."
+    },
+    {
+      "name": "background_task_reason",
+      "value": "The framework requires background running permission to ensure long-running tasks are not interrupted in the background."
+    },
+    {
+      "name": "detect_gesture_reason",
+      "value": "The framework needs to detect user holding gestures for adaptive UI layout and holding-aware navigation."
+    },
+    {
+      "name": "store_persistent_reason",
+      "value": "DSHM persists runtime and workspace data on this device so you can keep working offline."
+    },
+    {
+      "name": "read_write_user_file_reason",
+      "value": "DSHM reads and writes files and folders you choose for workspaces, sessions, and configuration."
+    },
+    {
+      "name": "file_access_reason",
+      "value": "Access to folders you select is required for reading and writing DSH workspace files and persisting grants."
+    },
+    {
+      "name": "full_disk_access_reason",
+      "value": "DSHM needs full disk access to open, read, and write project files in any workspace directory you choose."
+    },
+    {
+      "name": "download_dir_reason",
+      "value": "DSHM needs read/write access to your Download folder so the agent can open and save project files there."
+    },
+    {
+      "name": "documents_dir_reason",
+      "value": "DSHM needs read/write access to your Documents folder so the agent can open and save project files there."
+    },
+    {
+      "name": "jit_fort_memory_reason",
+      "value": "V8 JIT for the embedded Node.js runtime: faster cold start and native WebAssembly/fetch support. All JavaScript ships inside the signed app package; no downloaded unsigned code is executed."
+    },
+    {
+      "name": "external_native_code_reason",
+      "value": "Execute signed native binaries bundled in this app (busybox applets and terminal pty helper) to provide the local terminal capability."
+    }
+  ]
+}

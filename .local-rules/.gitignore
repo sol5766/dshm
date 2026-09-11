@@ -1,0 +1,10 @@
+# Keep local machine facts private by default.
+*.local.md
+snapshots/
+*.log
+*.tmp
+
+!README.md
+!base-local-rules.md
+!AGENTS.md
+!.gitignore
