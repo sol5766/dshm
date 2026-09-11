@@ -626,3 +626,23 @@
   - 需要在 UI/文档上明确提示两套模式的会话库是分开的，切换模式前先确认自己在哪条线上。
 - **教训**：以后排查"会话/配置丢失"类问题，**第一步就查 `runtime-mode-active.txt`**，不要只看 `<filesDir>/home/.dsh`。
 - **状态**：✅ 已定位；按用户决定保留现状（不改模式），已记入文档
+
+### [2026-09-11 续六] ⚠️ 环境裁剪规则过激导致内嵌模式启动崩溃（我引入并修复）
+
+- **现象**：环境瘦身（106）后，内嵌模式启动即 abort：
+  ```
+  Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@deepseek-ai/dsh-win32-process'
+    imported from .../node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js
+  === SIGNAL 6 (Aborted) ===
+  ```
+- **根因**：`prune-dsh-env.mjs` 第一版规则是「路径里出现 win32/darwin/freebsd/android 就删」。这条规则误伤两类**名字里带 win32 但必须存在**的东西：
+  1. `@deepseek-ai/dsh-win32-process`：**dsh 自有包**，`dsh-subprocess-local@0.1.5-rc.2` 在 `lib/index.js` **顶层** import 它（属于硬依赖，鸿蒙上也要装），整包被删 → 启动即 ERR_MODULE_NOT_FOUND；
+  2. `isexe/dist/{mjs,cjs}/win32.js`：**跨平台分支模块**，被删后 pnpm 依赖树里的 isexe 入口缺失。
+- **为什么当时没发现**：裁剪后我只核对了「关键文件存在」（bin.js / shim / dshm-* 包），没有做**全树入口自检**；而且设备当时跑在 **host 模式**（auto 优先宿主 dsh），坏掉的内嵌环境根本没被触发 —— 直到模式切到 embedded 才炸出来。
+- **修复**：
+  1. 规则收紧到「平台构建产物」形状：仅 `prebuilds/`、`<os>-<arch>` 形式的**完整路径段**（`@img/sharp-win32-x64`、`@esbuild/win32-x64`）、以及 `.pdb/.dll/.exe/.lib/.exp`；`@deepseek-ai/**` 一律不做平台裁剪；
+  2. 新增 `verifyRuntimeEntries()` **包入口自检**：遍历「`node_modules/<name>` 与 `node_modules/@scope/<name>` 直下」的 package.json，解析 `main`/`module`/`exports` 的 js 目标，缺失即 `exit 1`（带 3 条已核实的上游白名单：`@xterm/headless` 的 `lib/xterm.mjs`、MCP sdk 的 `dist/{esm,cjs}/index.js` —— 这两个文件官方 tarball 里本就不存在）；
+  3. 从 npmmirror 逐个补回被误删的文件（`isexe` 2.0.0/3.1.1、`mkdirp` 3.0.1、`@xterm/headless` 6.0.0、`@modelcontextprotocol/sdk` 1.30.0、`@deepseek-ai/dsh-win32-process` 0.1.5-rc.2），再以新规则重跑裁剪。
+- **验证**：`ENV_VERSION=20260911-107` 覆盖安装后，**内嵌模式**（`runtime-mode.txt=embedded`）启动到 token URL **11.4s**，`SIGNAL=0`、`ERR_MODULE_NOT_FOUND=0`，3080 LISTEN，首页 HTTP 200（28,370B，`dshm-config-editor`×5、`hdsh`×0）；自检输出 `扫描 284 个 package.json，缺失运行时入口 0 个`。
+- **教训**：①按「路径关键字」删文件必须先自问"这名字是平台产物还是逻辑分支"；②裁剪任何运行环境后，**必须做入口级自检**，不能只看几个关键文件；③验证要在**真正会跑那条路的模式**下做（host 正常不代表 embedded 正常）。
+- **状态**：✅ 已修复（env 110.7MB / 12,485 文件；HAP 238.3MB）

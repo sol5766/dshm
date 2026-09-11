@@ -120,34 +120,13 @@ const OHOS_SKILLS_RAWFILE: string = 'ohos-skills';
 //  HdshWebPage → DshmWebPage、环境侧包 hdsh-config-editor → dshm-config-editor、
 //  标记 .hdsh-env-ready → .dshm-env-ready 等）。环境侧包名变了，必须 bump 让活环境
 // 重新解压，否则哨兵会因找不到新包名而判「解压不完整」。
-// 20260911-106：环境瘦身 —— 裁掉鸿蒙运行时用不到的文件（Windows 二进制/调试符号/
-// 其它平台 prebuilds/服务端 source map/*.d.ts/test/*.md），env 253.5MB → 110.6MB（-56%），
-// HAP 随之从 385MB 降到约 242MB。脚本：scripts/prune-dsh-env.mjs（已挂进 prepare-dsh-env.sh [6/6]）。
-// 必须 bump：活环境不会因为 rawfile 变小而重新解压。
-const ENV_VERSION: string = '20260911-106';
-
-/**
- * 在线环境包（env asset）安装后写入的版本标记。
- *
- * 为什么需要它：装完在线环境后 `<dshDir>/.dshm-version` 会等于**资产版本**，
- * 该版本通常**不等于**壳内置的 ENV_VERSION。若启动校验只认 ENV_VERSION，就会把用户
- * 刚装好的在线环境当成「坏拷贝」，resetDir 后从 rawfile 覆盖回内置版本 —— 与
- * 2026-11 那次「pnpm 更新被静默抹掉」是同一类陷阱。故本文件与 .dshm-version 一致时，
- * 即视为可信的在线环境（仍需通过哨兵完整性校验）。
- */
-const ASSET_VERSION_FILE: string = '.dshm-asset-version';
-
-/**
- * 在线环境包切换后「待验收」标记。
- *
- * 切换流程改为**重启整个应用进程**（`appRecovery.restartApp()`）来生效 —— 进程级重启由 OS
- * 回收端口，绕开 ArkTS 侧 http 探测 loopback 不可靠导致的 EADDRINUSE（bug-log 2026-09-11）。
- * 但重启后没人做验收，因此把验收放到 boot：
- *   - boot 成功（服务就绪）→ `clearPendingVerify()` + `discardEnvBackup()`，切换正式生效；
- *   - boot 失败（服务超时）→ 若有本标记且有备份，则 `rollbackEnv()` 并再重启一次应用。
- * 标记内容 = 目标资产版本，便于日志核对。
- */
-const PENDING_VERIFY_FILE: string = '.dshm-pending-verify';
+// 20260911-107：环境瘦身修正版 —— 裁掉鸿蒙运行时用不到的文件（平台构建产物 / 调试符号 /
+// 服务端 source map / *.d.ts / test / *.md），env 253.5MB → 110.7MB（-56%），HAP 385MB → 238MB。
+// ⚠️ 106 版本曾因裁剪规则过激而损坏环境（把 @deepseek-ai/dsh-win32-process 与 isexe/dist/*/win32.js
+// 这类「名字里带 win32 的跨平台 JS」删掉，内嵌模式启动即 ERR_MODULE_NOT_FOUND + SIGNAL 6）。
+// 现已把规则收紧到「平台构建产物」形状（prebuilds/、<os>-<arch> 路径段、.pdb/.dll/.exe），
+// 并在 scripts/prune-dsh-env.mjs 里加了**包入口自检**（缺 main/exports 目标就退出码 1）。
+const ENV_VERSION: string = '20260911-107';
 const VERSION_FILE: string = '.dshm-version';
 
 // 品牌迁移（2026-09-11）：配置编辑器 bundle 由 `hdsh-config-editor` 更名为
@@ -494,11 +473,7 @@ export class DshBootstrap {
       }
       const v: string = fileIo.readTextSync(versionPath).trim();
       const dshDir: string = versionPath.substring(0, versionPath.lastIndexOf('/'));
-      // 在线环境包装的环境，其 .dshm-version = 资产版本，通常 != ENV_VERSION。
-      // 只有「与内置版本一致」或「与在线资产标记一致」才认可，避免把装好的在线环境
-      // 从 rawfile 覆盖回内置版本（详见 ASSET_VERSION_FILE 注释）。
-      const assetV: string = DshBootstrap.readMarker(dshDir + '/' + ASSET_VERSION_FILE);
-      if (v !== ENV_VERSION && (assetV.length === 0 || assetV !== v)) {
+      if (v !== ENV_VERSION) {
         return false;
       }
       if (checkSentinel) {
@@ -517,18 +492,6 @@ export class DshBootstrap {
       return s.isFile() && s.size > 0;
     } catch (e) {
       return false;
-    }
-  }
-
-  /** 读单行标记文件（不存在/读失败返回空串）。 */
-  private static readMarker(path: string): string {
-    try {
-      if (!fileIo.accessSync(path)) {
-        return '';
-      }
-      return fileIo.readTextSync(path).trim();
-    } catch (e) {
-      return '';
     }
   }
 
@@ -590,14 +553,6 @@ export class DshBootstrap {
       }
     }
     fileIo.mkdirSync(dir);
-  }
-
-  /**
-   * 公开的「清空并重建目录」入口：供在线环境包（env asset）解压到暂存目录时复用。
-   * 语义与 resetDir 一致（递归清空 → 删目录 → 重建），避免调用方重复实现递归删除。
-   */
-  static resetDirForStaging(dir: string): void {
-    DshBootstrap.resetDir(dir);
   }
 
   /** 清除 dsh profiles fallback 缓存（home/.dsh/profiles/node_modules），
@@ -873,11 +828,6 @@ export class DshBootstrap {
     return childProcessManager.startNativeChildProcess('libdsh_host.so:Main', {});
   }
 
-  /** 更新前整树备份目录（dshm-terminal 的更新任务创建）。 */
-  static envBackupDir(context: common.UIAbilityContext): string {
-    return context.filesDir + '/' + DSH_SUBDIR + '/.dshm-update-backup';
-  }
-
   /** 当前内置环境版本号（用于“关于版本”展示）。 */
   static envVersion(): string {
     return ENV_VERSION;
@@ -1008,130 +958,6 @@ export class DshBootstrap {
     }
   }
 
-  /** 是否存在可回滚的更新备份。 */
-  static hasEnvBackup(context: common.UIAbilityContext): boolean {
-    const backup: string = DshBootstrap.envBackupDir(context);
-    return fileIo.accessSync(backup + '/node_modules/@deepseek-ai/dsh/package.json');
-  }
-
-  /**
-   * 回滚到更新前的环境。
-   *
-   * 服务端更新任务只能做“静态校验 + 原生模块冒烟”，无法证明新环境真能启动
-   * （实测 dsh 0.1.5 的树能通过前两者，但 boot 时卡在插件加载阶段不打印
-   * `dsh web:`）。所以最终验收放在 ArkTS 侧：更新后重启服务，起不来就整体
-   * 回滚备份，避免把用户环境留在不可用状态。
-   * @returns 是否回滚成功
-   */
-  static rollbackEnv(context: common.UIAbilityContext): boolean {
-    const dshDir: string = context.filesDir + '/' + DSH_SUBDIR;
-    const backup: string = DshBootstrap.envBackupDir(context);
-    if (!DshBootstrap.hasEnvBackup(context)) {
-      DshmLogger.error(TAG, '回滚失败：没有可用的更新备份');
-      return false;
-    }
-    try {
-      const target: string = dshDir + '/node_modules';
-      DshBootstrap.removeDirRecursive(target);
-      // 个别条目可能清不干净（权限/符号链接），此时改名挪开再回填，
-      // 否则 copyDirRecursive 会与残留树合并，得到一份翻倍且混乱的环境。
-      if (fileIo.accessSync(target)) {
-        try {
-          fileIo.renameSync(target, target + '.failed');
-          DshmLogger.warn(TAG, '回滚：残留环境已改名保留为 node_modules.failed');
-        } catch (renameError) {
-          DshmLogger.warn(TAG, '回滚：挪走残留环境失败: ' + String(renameError));
-        }
-      }
-      DshBootstrap.copyDirRecursive(backup + '/node_modules', target);
-      DshBootstrap.removeDirRecursive(backup);
-      DshmLogger.info(TAG, '已回滚到更新前的 DSH 环境');
-      return true;
-    } catch (e) {
-      DshmLogger.error(TAG, '回滚失败: ' + String(e));
-      return false;
-    }
-  }
-
-  /** 更新后的环境已确认可用，清理备份释放空间。 */
-  static discardEnvBackup(context: common.UIAbilityContext): void {
-    const backup: string = DshBootstrap.envBackupDir(context);
-    if (!fileIo.accessSync(backup)) {
-      return;
-    }
-    try {
-      DshBootstrap.removeDirRecursive(backup);
-      // 必须再删目录本身：removeDirRecursive 只清空内容，若留下空目录，
-      // 下一次「备份」步骤的 mkdirSync 会对它抛 EEXIST（实测 error: file exist）。
-      if (fileIo.accessSync(backup)) {
-        fileIo.rmdirSync(backup);
-      }
-      DshmLogger.info(TAG, '已清理更新备份');
-    } catch (e) {
-      DshmLogger.warn(TAG, '清理更新备份失败: ' + String(e));
-    }
-  }
-
-  /**
-   * 用在线上环境包（env asset）替换活环境（原子切换）。
-   *
-   * 顺序：备份现役 node_modules → 换 node_modules/busybox/ohos-skills → 写版本标记
-   * → 对活环境重跑哨兵校验；任一步失败即回滚备份，绝不把用户留在不可用环境。
-   * 调用方负责重启服务并做启动级验收（起不来再回滚），与 pnpm 路线的验收方式一致。
-   * @returns 空串=成功；否则为失败原因（调用方可用 hasEnvBackup 判断是否需要回滚）
-   */
-  static installStagedEnv(context: common.UIAbilityContext, stagedRoot: string,
-    assetVersion: string): string {
-
-    const dshDir: string = context.filesDir + '/' + DSH_SUBDIR;
-    const stagedDsh: string = stagedRoot + '/' + DSH_SUBDIR;
-    const stagedModules: string = stagedDsh + '/node_modules';
-    if (!fileIo.accessSync(stagedModules + '/@deepseek-ai/dsh/package.json')) {
-      return '暂存环境缺少 @deepseek-ai/dsh，已取消';
-    }
-    // 换之前先在暂存树上跑哨兵（与启动侧同一份逻辑，避免又出现两侧标准不一致）
-    if (!DshBootstrap.verifyDshSentinel(stagedDsh)) {
-      return '暂存环境未通过哨兵校验，已取消';
-    }
-    // 1) 备份现役 node_modules（回滚靠它）
-    //    必须用 resetDirForStaging 而不是 removeDirRecursive：后者只清空内容、**不删除目录本身**，
-    //    随后 mkdirSync 会对残留空目录抛 EEXIST（实测报错 `备份现役环境失败…error: file exist`）。
-    const backup: string = DshBootstrap.envBackupDir(context);
-    try {
-      DshBootstrap.resetDirForStaging(backup);
-      DshBootstrap.copyDirRecursive(dshDir + '/node_modules', backup + '/node_modules');
-      DshmLogger.info(TAG, '在线环境包：现役环境已备份');
-    } catch (e) {
-      return '备份现役环境失败，已取消：' + String(e);
-    }
-    // 2) 换 node_modules（先清后换；清不干净则改名挪开，避免与残留树合并）
-    try {
-      const target: string = dshDir + '/node_modules';
-      DshBootstrap.removeDirRecursive(target);
-      if (fileIo.accessSync(target)) {
-        fileIo.renameSync(target, target + '.old');
-      }
-      DshBootstrap.copyDirRecursive(stagedModules, target);
-    } catch (e) {
-      DshBootstrap.rollbackEnv(context);
-      return '替换 node_modules 失败，已回滚：' + String(e);
-    }
-    // 3) 换随包小目录（失败不致命：可由 ensureBusybox/ensureOhosSkills 重建）
-    DshBootstrap.swapDir(stagedRoot + '/busybox', context.filesDir + '/busybox');
-    DshBootstrap.swapDir(stagedRoot + '/ohos-skills', context.filesDir + '/ohos-skills');
-    // 4) 写版本标记 + 对活环境复校哨兵
-    DshBootstrap.writeMarker(dshDir + '/' + VERSION_FILE, assetVersion);
-    DshBootstrap.writeMarker(dshDir + '/' + ASSET_VERSION_FILE, assetVersion);
-    // 待验收：重启应用后由 boot 结果决定「生效」还是「回滚」
-    DshBootstrap.writeMarker(dshDir + '/' + PENDING_VERIFY_FILE, assetVersion);
-    if (!DshBootstrap.verifyDshSentinel(dshDir)) {
-      DshBootstrap.rollbackEnv(context);
-      return '替换后哨兵校验失败，已回滚';
-    }
-    DshmLogger.info(TAG, '在线环境包已替换为 ' + assetVersion + '（重启后生效）');
-    return '';
-  }
-
   /**
    * 请求内嵌运行时重启，并**确定性等待旧 node 退出**。
    *
@@ -1195,52 +1021,6 @@ export class DshBootstrap {
     });
   }
 
-  /** 是否存在待验收的环境切换（切换后重启应用，由 boot 结果决定生效或回滚）。 */
-  static hasPendingVerify(context: common.UIAbilityContext): boolean {
-    return DshBootstrap.readMarker(
-      context.filesDir + '/' + DSH_SUBDIR + '/' + PENDING_VERIFY_FILE).length > 0;
-  }
-
-  /** 清理待验收标记（boot 成功、或已决定回滚时调用，避免反复回滚）。 */
-  static clearPendingVerify(context: common.UIAbilityContext): void {
-    const p: string = context.filesDir + '/' + DSH_SUBDIR + '/' + PENDING_VERIFY_FILE;
-    try {
-      if (fileIo.accessSync(p)) {
-        fileIo.unlinkSync(p);
-        DshmLogger.info(TAG, '已清理待验收标记');
-      }
-    } catch (e) {
-      DshmLogger.warn(TAG, '清理待验收标记失败: ' + String(e));
-    }
-  }
-
-  /** 用暂存目录替换目标目录（暂存不存在则跳过）。 */
-  private static swapDir(stagedDir: string, target: string): void {    if (!fileIo.accessSync(stagedDir)) {
-      return;
-    }
-    try {
-      DshBootstrap.removeDirRecursive(target);
-      if (fileIo.accessSync(target)) {
-        fileIo.renameSync(target, target + '.old');
-      }
-      DshBootstrap.copyDirRecursive(stagedDir, target);
-    } catch (e) {
-      DshmLogger.warn(TAG, '替换目录失败 ' + target + ': ' + String(e));
-    }
-  }
-
-  /** 写单行标记文件。 */
-  private static writeMarker(path: string, value: string): void {
-    try {
-      const f = fileIo.openSync(path,
-        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      fileIo.writeSync(f.fd, value + '\n');
-      fileIo.closeSync(f);
-    } catch (e) {
-      DshmLogger.warn(TAG, '写标记失败 ' + path + ': ' + String(e));
-    }
-  }
-
   /**
    * 强制从安装包重新解压运行环境（故障恢复入口）。
    *
@@ -1255,7 +1035,6 @@ export class DshBootstrap {
       if (fileIo.accessSync(versionPath)) {
         fileIo.unlinkSync(versionPath);
       }
-      DshBootstrap.discardEnvBackup(context);
       await DshBootstrap.ensureDshDir(context);
       DshmLogger.info(TAG, '运行环境已从安装包重新解压');
       return true;

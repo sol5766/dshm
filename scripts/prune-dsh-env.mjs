@@ -26,7 +26,7 @@
  * 默认（无 --delete/--restore）：移动到 --backup（默认 %TEMP%/dshm-env-pruned）。
  */
 
-import { readdirSync, statSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { readdirSync, statSync, existsSync, mkdirSync, renameSync, rmSync, readFileSync } from 'node:fs';
 import { join, relative, dirname, extname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
@@ -63,13 +63,102 @@ function walk(dir, out) {
 
 function shouldPrune(rel, name, ext) {
   const lower = rel.toLowerCase();
-  if (/win32|darwin|freebsd|android/.test(lower)) return 'other-platform';
-  if (['.pdb', '.dll', '.exe', '.lib', '.exp'].includes(ext)) return 'debug-or-win-binary';
-  if (lower.includes('prebuilds')) return 'prebuilds';
+  const inDshScope = /node_modules[\\/]@deepseek-ai[\\/]/.test(lower);
+
+  // 这三类与平台无关，任何包里都只是类型/调试/文档，删掉不影响运行时。
   if (ext === '.map' && name !== 'client.js.map') return 'source-map';
   if (name.endsWith('.d.ts')) return 'type-decl';
   if (ext === '.md') return 'markdown';
+
+  // ⚠️ DSH 自有包（@deepseek-ai/**）**绝不能**按平台名裁剪。
+  // 2026-09-11 事故：`@deepseek-ai/dsh-subprocess-local` 在 lib/index.js **顶层** import
+  // `@deepseek-ai/dsh-win32-process`（peer 语义上必装），该包名里带 "win32"，
+  // 被平台规则整包删掉 → 内嵌模式启动即 `ERR_MODULE_NOT_FOUND` + SIGNAL 6。
+  // 包名/路径里出现 win32/darwin 不代表它是 Windows 专用二进制。
+  if (inDshScope) return null;
+
+  // 平台裁剪只认「平台构建产物」的形状，绝不按目录名里出现 win32/darwin 就删：
+  //   ✔ prebuilds/<platform>/…          （node-pty 等预编译目录）
+  //   ✔ 形如 win32-x64 / darwin-arm64 / linux-x64 的**完整路径段**（@img/sharp-win32-x64、@esbuild/win32-x64）
+  //   ✔ .pdb/.dll/.exe/.lib/.exp        （Windows 调试符号与 PE 产物）
+  //   ✘ isexe/dist/mjs/win32.js         —— 这是**跨平台分支模块**，删了会 ERR_MODULE_NOT_FOUND
+  //     （2026-09-11 实测：旧规则把它删掉后，pnpm 依赖树自检立刻报缺入口）
+  const isPlatformDir = /(^|[\\/])prebuilds([\\/]|$)/.test(lower)
+    || /(^|[\\/])(win32|darwin|linux|linuxmusl|android|freebsd|openbsd|sunos)-(x64|arm64|ia32|arm|ppc64|s390x|riscv64)([\\/]|$)/.test(lower);
+  if (isPlatformDir) return 'other-platform';
+  if (['.pdb', '.dll', '.exe', '.lib', '.exp'].includes(ext)) return 'debug-or-win-binary';
   return null;
+}
+
+/**
+ * 已知的「上游本来就没有」项（已用 npm tarball 核实，2026-09-11）：
+ *   - @xterm/headless 的 package.json 写了 "module": "lib/xterm.mjs"，但发布包里只有
+ *     lib-headless/xterm-headless.{js,mjs}，该文件从未发布；
+ *   - @modelcontextprotocol/sdk 的 exports 列出 ./dist/{esm,cjs}/index.js，但发布包里
+ *     只有 ./client、./server 等子路径，根 index 从未发布。
+ * 它们不是被裁剪掉的，白名单放行以免自检长期亮红。
+ */
+const RUNTIME_ENTRY_ALLOWLIST = [
+  '@xterm/headless -> lib/xterm.mjs',
+  '@modelcontextprotocol/sdk -> ./dist/esm/index.js',
+  '@modelcontextprotocol/sdk -> ./dist/cjs/index.js'
+];
+
+/**
+ * 裁剪后自检：每个 package.json 声明的**运行时**入口（main / exports 的 js 目标）必须还在。
+ * 上面那次事故如果早有这道检查，就不会等到设备上 SIGNAL 6 才发现。
+ */
+function verifyRuntimeEntries(envDir) {
+  const missing = [];
+  const stack = [envDir];
+  let pkgCount = 0;
+  const collect = (v, out) => {
+    if (typeof v === 'string') out.push(v);
+    else if (v && typeof v === 'object') for (const k of Object.keys(v)) collect(v[k], out);
+  };
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    // 只把「node_modules/<name>」或「node_modules/@scope/<name>」直下的 package.json 当包根。
+    // 包内还会有别的 package.json（tshy 的 dist/cjs/package.json 甚至是整份拷贝、
+    // dist/mjs/package.json 只是 {"type":"module"}），按包根解析会得到假的「入口缺失」。
+    const segs = dir.split(/[\\/]/);
+    const base = segs[segs.length - 1];
+    const parentSeg = segs[segs.length - 2];
+    const grandSeg = segs[segs.length - 3];
+    const isScopedRoot = parentSeg === 'node_modules' && base.startsWith('@');
+    const isPlainRoot = base === 'node_modules' ? false : parentSeg === 'node_modules';
+    const isScopeDir = isScopedRoot && grandSeg === 'node_modules';
+    const treatAsRoot = isPlainRoot || isScopeDir;
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) { stack.push(p); continue; }
+      if (e.name !== 'package.json') continue;
+      if (!treatAsRoot) continue;
+      // 跳过仓库内的示例/基准/测试夹具目录：它们不是被依赖的包，
+      // 其 package.json 常引用并不发布的文件（fast-uri/benchmark 就是这种）。
+      const parent = dir.split(/[\\/]/).pop().toLowerCase();
+      if (['benchmark', 'benchmarks', 'test', 'tests', 'example', 'examples', 'fixtures'].includes(parent)) continue;
+      let j;
+      try { j = JSON.parse(readFileSync(p, 'utf8')); } catch { continue; }
+      pkgCount += 1;
+      const targets = [];
+      if (typeof j.main === 'string') targets.push(j.main);
+      if (typeof j.module === 'string') targets.push(j.module);
+      if (j.exports) collect(j.exports, targets);
+      for (const t of targets) {
+        if (typeof t !== 'string' || t.includes('*')) continue;
+        if (t.startsWith('..') || t.startsWith('/')) continue; // 包外相对路径不归本包管
+        if (!/\.(js|cjs|mjs|json)$/.test(t)) continue; // 类型/裸路径交给 Node 解析规则
+        if (!existsSync(join(dir, t))) {
+          const key = (j.name || dir) + ' -> ' + t;
+          if (!RUNTIME_ENTRY_ALLOWLIST.includes(key)) missing.push(key);
+        }
+      }
+    }
+  }
+  return { pkgCount, missing };
 }
 
 const files = walk(ENV_DIR, []);
@@ -156,3 +245,14 @@ if (!DELETE && !RESTORE) {
   }
   console.log('[prune] 已还原 ' + restored + ' 个文件');
 }
+
+// 无论哪种模式都跑一次入口自检：被裁掉的包若还有人 import，设备上会以
+// ERR_MODULE_NOT_FOUND + SIGNAL 6 的形式炸在启动阶段，代价远高于这里多跑几秒。
+const { pkgCount, missing } = verifyRuntimeEntries(ENV_DIR);
+console.log('[prune] 入口自检：扫描 ' + pkgCount + " 个 package.json，缺失运行时入口 " + missing.length + ' 个');
+if (missing.length) {
+  for (const m of missing.slice(0, 20)) console.error('  缺失: ' + m);
+  console.error('[prune] ❌ 有包入口被裁掉，会导致 dsh 启动失败；请修正裁剪规则或还原该包');
+  process.exit(1);
+}
+console.log('[prune] ✅ 环境入口自检通过');

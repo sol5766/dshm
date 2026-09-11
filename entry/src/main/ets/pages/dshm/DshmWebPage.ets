@@ -15,7 +15,7 @@
  * 服务端可通过 /dshm-admin/ui/event 请求页面刷新或服务重启（插件安装后常见）。
  */
 import { webview } from '@kit.ArkWeb';
-import { common, bundleManager, appRecovery } from '@kit.AbilityKit';
+import { common, bundleManager } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
@@ -25,7 +25,6 @@ import { WorkspaceAccess } from '../../dshm/access/WorkspaceAccess';
 import { writeOhosInfo } from '../../dshm/access/OhosInfoBridge';
 import { DshmLogger } from '../../dshm/utils/Logger';
 import { StatusBarTray } from '../../dshm/system/StatusBarTray';
-import { EnvAssetClient, EnvManifest, EnvDownloadProgress } from '../../dshm/env/EnvAssetClient';
 
 const TAG: string = 'DshmWebPage';
 const HOME_URL: string = 'http://127.0.0.1:3080';
@@ -36,19 +35,11 @@ const VERSION_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/version';
 // Harness 更新是服务端后台任务（同进程 Worker 跑 pnpm），ArkTS 侧轮询进度；
 // 单次 HTTP 请求只负责“开始”与“查进度”，不承担长连接等待。
 const UPDATE_POLL_INTERVAL_MS: number = 4000;
-const UPDATE_POLL_TIMEOUT_MS: number = 15 * 60 * 1000;
-// 连续查询失败次数上限（4s 一次 → 默认 40s 无响应即判定服务端已不可用）。
-const UPDATE_POLL_MAX_FAILURES: number = 10;
 const UI_EVENTS_GET: string = 'http://127.0.0.1:3080/dshm-admin/ui/events';
 const TERM_START_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/start';
 const TERM_WRITE_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/write';
 const TERM_READ_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/read';
 const TERM_KILL_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/kill';
-// Harness 版本检查源：国内镜像优先，失败再回退官方源。
-const HARNESS_VERSION_ENDPOINTS: string[] = [
-  'https://registry.npmmirror.com/@deepseek-ai/dsh/latest',
-  'https://registry.npmjs.org/@deepseek-ai/dsh/latest'
-];
 
 /**
  * 顶栏高度。
@@ -107,44 +98,12 @@ interface KillBody {
   sid: number;
 }
 
-interface UpdateBody {
-  version: string;
-}
-
+/** 读本地 dsh package.json 取版本（服务未就绪时的退化路径，不联网）。 */
 interface DshPkgVersion {
   version?: string;
 }
 
-interface NpmLatestPkg {
-  version?: string;
-}
-
-interface UpdateResp {
-  ok?: boolean;
-  message?: string;
-  started?: boolean;
-  running?: boolean;
-  version?: string;
-}
-
-/** GET /dshm-admin/update 的进度应答（后台更新任务状态）。 */
-interface UpdateStatusResp {
-  ok?: boolean;
-  running?: boolean;
-  phase?: string;
-  message?: string;
-  resolved?: number;
-  downloaded?: number;
-  added?: number;
-  percent?: number;
-  elapsedSec?: number;
-  staged?: boolean;
-  done?: boolean;
-  success?: boolean;
-  version?: string;
-}
-
-/** GET /dshm-admin/version：运行时与环境版本信息。 */
+/** GET /dshm-admin/version：运行时与环境版本信息（本地，无网络）。 */
 interface VersionResp {
   ok?: boolean;
   message?: string;
@@ -164,12 +123,6 @@ interface AboutRow {
   value: string;
 }
 
-/** 轮询更新的最终结果（ArkTS 不允许元组返回，用具名类型）。 */
-interface UpdateOutcome {
-  success: boolean;
-  message: string;
-}
-
 @Entry
 @Component
 struct DshmWebPage {
@@ -184,30 +137,6 @@ struct DshmWebPage {
   private bootTicker: number = -1;
   /** 启动阶段说明（会与计时一起展示；由 boot() 按阶段更新）。 */
   private bootPhase: string = '';
-  // Harness 更新进度浮层：更新由服务端后台任务执行（数分钟），
-  // 主界面就绪后 statusText 不可见，用浮层常显当前阶段。
-  @State private updateRunning: boolean = false;
-  @State private updateMsg: string = '';
-  @State private updatePercent: number = 0;
-  @State private updateElapsed: number = 0;
-  @State private updateDetail: string = '';
-  /**
-   * 进度阶段（ArkTS 自己维护，不依赖服务进程）：
-   *   ''        未进行
-   *   download  正在下载/准备更新包
-   *   apply     正在应用更新（替换环境 + 重启校验）
-   *   rollback  新版本起不来，正在回滚
-   * 服务端只在上报可用时覆盖百分比；服务不可用时按本机计时继续推进，
-   * 保证用户始终看得到“还在动”。
-   */
-  @State private updateTrack: string = '';
-  private updateTicker: number = -1;
-  // 更新包已下载/安装完成，等待用户确认后重启生效（不确认就一直挂在小胶囊上）。
-  @State private updateReady: boolean = false;
-  @State private updateVersion: string = '';
-  // 应用更新（替换环境 + 重启校验）期间界面会短暂不可用，用全屏提示说明进度。
-  @State private applying: boolean = false;
-  @State private applyPhase: string = '';
   // “关于版本”面板（页内浮层，便于左对齐排版，不用系统 alert 的居中文本）
   @State private aboutOpen: boolean = false;
   @State private aboutRows: AboutRow[] = [];
@@ -411,10 +340,6 @@ struct DshmWebPage {
         this.statusText = 'DeepSeek Harness 已就绪';
         DshmLogger.info(TAG, 'DSH server 就绪，ArkWeb 加载 ' + this.webUrl);
         this.ready = true;
-        // 启动成功即认定当前环境可用：清掉可能残留的更新备份，释放空间。
-        DshBootstrap.discardEnvBackup(hostCtx);
-        // 若有「待验收的环境切换」，此刻即确认生效（清理标记，保留新环境）
-        DshBootstrap.clearPendingVerify(hostCtx);
         // 首屏白屏兜底：dsh 0.1.5 首页要等 `?token=` → 303 + Set-Cookie → `/` 走完，
         // 并拉一个 11MB 的客户端模块合并包（/plugins/??…），首次加载常赶在服务端就绪前
         // → 白屏；手动「编辑→刷新」即恢复（实测）。
@@ -445,29 +370,13 @@ struct DshmWebPage {
         }
         await DshBootstrap.dumpFallbackDiag(hostCtx);
         await DshBootstrap.dumpWebProfileManifest(hostCtx);
-        // 待验收的环境切换起不来 → 回滚到切换前并再重启一次应用。
-        // 先清标记，避免重启后被再次判定为「待验收」而形成回滚循环。
-        if (DshBootstrap.hasPendingVerify(hostCtx) && DshBootstrap.hasEnvBackup(hostCtx)) {
-          DshmLogger.error(TAG, '环境包切换后启动失败，回滚到切换前环境');
-          DshBootstrap.clearPendingVerify(hostCtx);
-          if (DshBootstrap.rollbackEnv(hostCtx)) {
-            this.statusText = '新环境启动失败，已回滚，正在重启…';
-            await this.sleep(1000);
-            appRecovery.restartApp();
-            return;
-          }
-          DshmLogger.error(TAG, '回滚失败，需用「重置运行环境（故障恢复）」');
-        }
       }
     } catch (e) {
       const msg: string = e instanceof Error ? e.message : String(e);
       this.statusText = '启动失败: ' + msg;
       DshmLogger.error(TAG, '启动失败: ' + msg);
     } finally {
-      // 无论走成功分支还是超时分支（含中途抛异常），都要处理待验收的环境切换：
-      // 否则会留下 .dshm-pending-verify + 几百 MB 备份，且下次 boot 失败会误触发回滚。
       this.stopBootTicker();
-      await this.resolvePendingEnvSwitch();
     }
   }
 
@@ -687,179 +596,9 @@ struct DshmWebPage {
     this.aboutOpen = true;
   }
 
-  /** 读取当前内置 Harness 版本（供检查更新与关于页复用）。 */
-  /**
-   * 宿主模式下的更新检查。
-   *
-   * 宿主 dsh 由 Harmonybrew 管理：应用沙箱内**无法执行 brew**（brew 需要 zsh，
-   * 而沙箱里没有任何可执行的 zsh，用 sh 跑会报 "Zsh is required to run brew"），
-   * 所以这里只做版本比对 + 给出终端升级指引，升级后重启服务即可生效。
-   */
-  private async checkHostHarnessUpdate(active: RuntimeModeInfo): Promise<void> {
-    const installed: string = active.version.length > 0 ? active.version : '未知';
-    let latest: string = '';
-    let source: string = '';
-    for (let i = 0; i < HARNESS_VERSION_ENDPOINTS.length && latest.length === 0; i++) {
-      const endpoint: string = HARNESS_VERSION_ENDPOINTS[i];
-      try {
-        const remote = await this.httpGetJson(endpoint) as NpmLatestPkg;
-        const v: string = remote.version ?? '';
-        if (v.length > 0) {
-          latest = v;
-          source = endpoint.includes('npmmirror') ? '淘宝镜像' : 'npm 官方源';
-        }
-      } catch (e) {
-        DshmLogger.warn(TAG, '版本检查源失败 ' + endpoint + ': ' + this.errOf(e));
-      }
-    }
-    if (latest.length === 0) {
-      this.showDialog('检查 Harness 更新',
-        '运行模式：宿主 dsh（Harmonybrew）\n当前版本：' + installed +
-          '\n\n远端版本检查失败（镜像与官方源均不可达）。');
-      return;
-    }
-    if (latest === installed) {
-      this.showDialog('检查 Harness 更新',
-        '运行模式：宿主 dsh（Harmonybrew）\n当前版本：' + installed +
-          '\n远端最新版：' + latest + '（' + source + '）\n\n已经是最新版，无需更新。');
-      return;
-    }
-    this.showDialog('检测到 Harness 更新（宿主模式）',
-      '当前（Harmonybrew 安装）：' + installed + '\n远端最新版：' + latest + '（' + source + '）\n\n' +
-        '宿主模式由 Homebrew 管理版本，应用沙箱内无法执行 brew（它需要 zsh）。\n' +
-        '请在系统终端执行：\n\n    brew upgrade deepseek-harness\n\n' +
-        '升级完成后，回到「Harness → 重启服务」即可加载新版本。');
-  }
 
-  private async readHarnessVersion(): Promise<string> {
-    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    const candidates: string[] = [
-      hostCtx.filesDir + '/dsh/node_modules/@deepseek-ai/dsh/package.json',
-      hostCtx.filesDir + '/home/.dsh/profiles/node_modules/@deepseek-ai/dsh/package.json'
-    ];
-    for (const p of candidates) {
-      if (fileIo.accessSync(p)) {
-        try {
-          const pkg = JSON.parse(fileIo.readTextSync(p)) as DshPkgVersion;
-          return pkg.version ?? '未知';
-        } catch (e) {
-          /* 单个文件解析失败则继续尝试下一个 */
-        }
-      }
-    }
-    return '未知';
-  }
 
-  /** Harness: 检查 Harness 更新 —— 远端 npm 检测到新版后自动执行更新并重启服务。 */
-  private async checkHarnessUpdate(): Promise<void> {
-    const hostCtxNow = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    const activeMode: RuntimeModeInfo = DshBootstrap.readActiveMode(hostCtxNow);
-    if (activeMode.mode === 'host' && DshBootstrap.readRuntimeMode(hostCtxNow) !== 'embedded') {
-      await this.checkHostHarnessUpdate(activeMode);
-      return;
-    }
-    const harnessVer: string = await this.readHarnessVersion();
-    let latest: string = '';
-    let source: string = '';
-    // 国内镜像优先（设备直连 registry.npmjs.org 常超时）；任一源成功即采用。
-    for (let i = 0; i < HARNESS_VERSION_ENDPOINTS.length && latest.length === 0; i++) {
-      const endpoint: string = HARNESS_VERSION_ENDPOINTS[i];
-      try {
-        const remote = await this.httpGetJson(endpoint) as NpmLatestPkg;
-        const v: string = remote.version ?? '';
-        if (v.length > 0) {
-          latest = v;
-          source = endpoint.includes('npmmirror') ? '淘宝镜像' : 'npm 官方源';
-        }
-      } catch (e) {
-        DshmLogger.warn(TAG, '版本检查源失败 ' + endpoint + ': ' + this.errOf(e));
-      }
-    }
-    if (latest.length === 0) {
-      this.showDialog('检查 Harness 更新', '当前内置 Harness 版本：' + harnessVer +
-        '\n\n远端版本检查失败（镜像与官方源均不可达），无法自动更新。');
-      return;
-    }
-    if (latest === harnessVer || (harnessVer !== '未知' && harnessVer.includes(latest))) {
-      this.showDialog('检查 Harness 更新', '当前内置 Harness 版本：' + harnessVer +
-        '\n远端最新版：' + latest + '（' + source + '）\n\n已经是最新版，无需更新。');
-      return;
-    }
-// 检测到新版 → 确认后自动更新
-    this.showDialogWithConfirm('检测到 Harness 更新',
-      '当前版本：' + harnessVer + '\n远端最新版：' + latest + '（' + source + '）' +
-      '\n\n更新包将从国内镜像下载（registry.npmmirror.com），失败自动回退官方源。' +
-      '\n\n是否立即自动更新并重启服务？', '立即更新', () => this.doAutoUpdate(latest));
-  }
 
-  /** 执行自动更新：调服务端 /update 端点（dsh 目录内 pnpm add），成功后重启服务。 */
-  private async doAutoUpdate(version: string): Promise<void> {
-    // 宿主模式由 Harmonybrew 管版本，应用内不跑 pnpm/替换环境。
-    const activeNow: RuntimeModeInfo = DshBootstrap.readActiveMode(
-      this.getUIContext().getHostContext() as common.UIAbilityContext);
-    if (activeNow.mode === 'host') {
-      await this.checkHostHarnessUpdate(activeNow);
-      return;
-    }
-    DshmLogger.info(TAG, '开始自动更新 Harness to ' + version);
-    // 更新是服务端后台任务：这里只做“启动 + 轮询”，界面只用顶栏一枚小胶囊
-    // 显示进度，不覆盖内容、不挡操作。
-    this.updateRunning = true;
-    this.updateReady = false;
-    this.updateVersion = version;
-    this.updateMsg = '正在连接更新服务…';
-    this.updatePercent = 0;
-    this.updateElapsed = 0;
-    this.updateDetail = '';
-    this.updateTrack = 'download';
-    this.startUpdateTicker();
-    try {
-      const body: UpdateBody = { version: version };
-      const resp = await this.postJson(UPDATE_ENDPOINT, body);
-      if (resp === null || resp.responseCode !== 200) {
-        this.updateRunning = false;
-        this.showDialog('自动更新失败', '服务端 /update 不可用或已离线。\n请手动重新安装应用安装包完成更新。');
-        return;
-      }
-      let started: boolean = false;
-      let message: string = '更新请求未被受理。';
-      try {
-        const payload = JSON.parse(resp.result as string) as UpdateResp;
-        // 已有任务在跑时不要当成失败：直接转入进度轮询。
-        started = (payload.ok === true && payload.started === true) || payload.running === true;
-        message = payload.message ?? message;
-      } catch (e) {
-        message = '服务端应答无法解析。';
-      }
-      if (!started) {
-        this.updateRunning = false;
-        this.showDialog('自动更新失败', message + '\n\n请手动重新安装应用安装包完成更新。');
-        return;
-      }
-      if (message.length > 0) {
-        this.updateMsg = message;
-      }
-      // 真实安装远超 HTTP 读超时，改由后台任务执行 + 轮询取进度。
-      const outcome: UpdateOutcome = await this.pollHarnessUpdate();
-      this.updateRunning = false;
-      this.stopUpdateTicker();
-      if (!outcome.success) {
-        this.updateTrack = '';
-        DshmLogger.warn(TAG, '自动更新失败: ' + outcome.message);
-        this.showDialog('自动更新失败', outcome.message + '\n\n请手动重新安装应用安装包完成更新。');
-        return;
-      }
-      this.updateReady = true;
-      this.updateTrack = '';
-      this.updatePercent = 100;
-      this.updateMsg = outcome.message;
-      // 下载/安装完成后才征询：用户确认后才重启生效，否则一直挂在小胶囊上。
-      this.promptApplyUpdate(outcome.message);
-    } finally {
-      this.stopUpdateTicker();
-      this.updateRunning = false;
-    }
-  }
 
   /** 更新包就绪后的确认：用户点“立即更新”才重启生效。 */
   /** 顶栏更新胶囊文案：有百分比显示百分比，否则退化为明细/已用时。 */
@@ -892,308 +631,13 @@ struct DshmWebPage {
     return DshBootstrap.readActiveMode(hostCtx).mode;
   }
 
-  private updateChipText(): string {
-    if (this.updateTrack === 'download') {
-      return '下载中 ' + this.updatePercent + '%';
-    }
-    if (this.updateTrack === 'apply') {
-      return '更新中 ' + this.updatePercent + '%';
-    }
-    if (this.updateTrack === 'rollback') {
-      return '回滚中…';
-    }
-    if (this.updatePercent > 0) {
-      return '更新中 ' + this.updatePercent + '%';
-    }
-    if (this.updateDetail.length > 0) {
-      return '更新中 ' + this.updateDetail;
-    }
-    if (this.updateElapsed > 0) {
-      return '更新中 ' + this.updateElapsed + 's';
-    }
-    return '更新中…';
-  }
 
-  /**
-   * 启动本机进度计时器（与 DSH 服务进程完全解耦）。
-   *
-   * 服务端上报的真实百分比只会把进度“往上顶”；服务未就绪/未响应时，
-   * 由本机按已用时把进度推到 90%，用户始终能看到进度在动。
-   */
-  private startUpdateTicker(): void {
-    this.stopUpdateTicker();
-    this.updateElapsed = 0;
-    this.updateTicker = setInterval((): void => {
-      this.updateElapsed += 2;
-      if (this.updateTrack === 'apply' || this.updateTrack === 'download') {
-        if (this.updatePercent < 90) {
-          // 每 2s 涨 1%，90% 封顶等待真实结果。
-          this.updatePercent = Math.min(90, this.updatePercent + 1);
-        }
-      }
-    }, 2000);
-  }
 
-  private stopUpdateTicker(): void {
-    if (this.updateTicker !== -1) {
-      clearInterval(this.updateTicker);
-      this.updateTicker = -1;
-    }
-  }
 
-  private promptApplyUpdate(message: string): void {
-    this.showDialogWithConfirm('更新包已就绪',
-      (this.updateVersion.length > 0 ? 'Harness v' + this.updateVersion + ' ' : '') +
-        '已下载并完成适配，暂存在本地（当前运行环境未改动）。\n\n' +
-        message + '\n\n现在应用更新并重启 Harness 服务吗？\n' +
-        '（若新版本在当前鸿蒙环境无法启动，会自动回滚到更新前的版本）',
-      '立即更新', (): void => {
-        this.applyUpdateWithRollback(message);
-      });
-  }
 
-  /**
-   * 更新后验收：重启服务，起不来就整体回滚备份并再重启一次。
-   *
-   * 服务端更新任务只能做静态校验（文件齐备 + 原生模块 import），无法证明新
-   * 版本真能启动 —— 实测 dsh 0.1.5 的树两项都过，但 boot 时卡在插件加载阶段。
-   * 因此最终验收放在这里：失败即回滚，保证用户始终有可用环境。
-   */
-  private async applyUpdateWithRollback(updateMessage: string): Promise<void> {
-    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    this.updateReady = false;
-    // 第一步：把暂存环境替换进活环境（此前的下载/适配全程没碰活环境）。
-    // 注意：替换后旧服务仍在内存里跑，界面暂时还能用；真正切换在下面的重启。
-    this.applying = true;
-    this.applyPhase = '正在应用更新包…';
-    // 应用/重启阶段的进度也由本机维护：服务要重启，期间根本没人在上报。
-    this.updateTrack = 'apply';
-    this.updatePercent = 0;
-    this.updateRunning = true;
-    this.startUpdateTicker();
-    let applied: boolean = false;
-    try {
-      const resp = await this.postJson(UPDATE_APPLY_ENDPOINT, {} as EmptyBody);
-      if (resp !== null && resp.responseCode === 200) {
-        const payload = JSON.parse(resp.result as string) as UpdateResp;
-        applied = payload.ok === true;
-        if (!applied) {
-          this.showDialog('更新失败', (payload.message ?? '替换运行环境失败') + '\n\n当前环境未受影响。');
-        }
-      }
-    } catch (e) {
-      DshmLogger.warn(TAG, '应用更新包失败: ' + this.errOf(e));
-    }
-    if (!applied) {
-      this.stopUpdateTicker();
-      this.updateTrack = '';
-      this.updateRunning = false;
-      this.applying = false;
-      this.applyPhase = '';
-      if (!DshBootstrap.hasEnvBackup(hostCtx)) {
-        this.showDialog('更新失败', '更新包替换失败，运行环境未改变，可继续使用当前版本。');
-      }
-      return;
-    }
-    // 第二步：切换需要重启服务；这里界面会短暂不可用，所以用全屏提示进度。
-    this.applyPhase = '正在校验新版本能否启动…';
-    if (this.updatePercent < 30) {
-      this.updatePercent = 30;
-    }
-    const booted: boolean = await this.restartAndWait();
-    if (booted) {
-      this.stopUpdateTicker();
-      DshBootstrap.discardEnvBackup(hostCtx);
-      this.applying = false;
-      this.applyPhase = '';
-      this.updatePercent = 100;
-      this.updateTrack = '';
-      this.updateRunning = false;
-      this.showDialog('更新已生效', updateMessage);
-      return;
-    }
-    if (!DshBootstrap.hasEnvBackup(hostCtx)) {
-      this.stopUpdateTicker();
-      this.applying = false;
-      this.applyPhase = '';
-      this.updateTrack = '';
-      this.updateRunning = false;
-      this.showDialog('更新后启动失败',
-        '新版本在当前设备上无法启动，且没有可用的回滚备份。\n请重新安装应用安装包恢复环境。');
-      return;
-    }
-    this.updateTrack = 'rollback';
-    this.updateMsg = '新版本无法启动，正在回滚到更新前的版本…';
-    this.applyPhase = '新版本启动失败，正在回滚…';
-    const rolled: boolean = DshBootstrap.rollbackEnv(hostCtx);
-    let backOk: boolean = false;
-    if (rolled) {
-      this.applyPhase = '正在用旧版本恢复服务…';
-      backOk = await this.restartAndWait();
-    }
-    this.updateRunning = false;
-    this.stopUpdateTicker();
-    this.updateTrack = '';
-    this.applying = false;
-    this.applyPhase = '';
-    if (rolled && backOk) {
-      this.showDialog('已回滚更新',
-        '新版本在当前鸿蒙环境无法启动，已自动回滚到更新前的版本，应用可继续使用。\n\n' +
-          '原因通常是新版本缺少构建期的鸿蒙适配（原生模块/插件补丁）。\n\n' + updateMessage);
-    } else {
-      this.showDialog('回滚失败', '自动回滚未能恢复运行，请重新安装应用安装包。');
-    }
-  }
 
-  /**
-   * 故障恢复：把运行环境从安装包重新解压一份干净的。
-   *
-   * 用于更新失败/回滚后环境损坏（表现为白屏、服务端返回资源不完整）等
-   * 普通重启治不好的情况。会话/工作区/API Key 在 filesDir/home，不受影响。
-   */
-  /**
-   * 在线环境包安装（M2/M3 第一步）。链路：拉 manifest → 多源 failover 下载 + sha256
-   * → 系统 zlib 解压到暂存目录 → 按 manifest.sentinels 校验。
-   *
-   * 本步**只做下载/解压/校验，不切换活环境**，用于在真机上验证整条链路。
-   * 原子切换与回退复用 DshBootstrap 现成的 backup/rollback 原语，随后接入。
-   */
-  private async installEnvAsset(): Promise<void> {
-    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    this.updateRunning = true;
-    this.updateTrack = 'download';
-    this.updatePercent = 0;
-    this.updateMsg = '正在获取环境清单…';
-    this.startUpdateTicker();
-    try {
-      const manifest: EnvManifest | null = await EnvAssetClient.fetchManifest(EnvAssetClient.defaultSources());
-      if (manifest === null) {
-        this.showDialog('环境包安装失败',
-          '所有清单源均不可达或内容非法。\n\n开发期请确认本机静态服务器已启动、且 hdc fport 已映射到设备 loopback。');
-        return;
-      }
-      const zipPath: string | null = await EnvAssetClient.downloadAsset(hostCtx, manifest,
-        (p: EnvDownloadProgress): void => {
-          this.updateMsg = '下载中（' + p.source + '）' + (p.received / 1048576).toFixed(1) +
-            '/' + (p.total / 1048576).toFixed(1) + ' MB' +
-            (p.attempt > 1 ? '（第 ' + p.attempt + ' 次尝试）' : '');
-          this.updatePercent = p.total > 0 ? Math.min(99, Math.floor((p.received / p.total) * 100)) : 0;
-        });
-      if (zipPath === null) {
-        this.showDialog('环境包安装失败', '所有下载源均失败，或 sha256 校验不通过（已拒绝该包）。');
-        return;
-      }
-      this.updateMsg = '正在解压（共 ' + manifest.asset.entries + ' 个条目）…';
-      this.updatePercent = 99;
-      const stage: string = hostCtx.filesDir + '/env-staging';
-      DshBootstrap.resetDirForStaging(stage);
-      await EnvAssetClient.extractZip(zipPath, stage);
-      const missing: string[] = EnvAssetClient.missingSentinels(stage, manifest.asset.sentinels);
-      if (missing.length > 0) {
-        this.showDialog('环境包校验未通过', '解压后缺少关键文件：\n' + missing.join('\n'));
-        return;
-      }
-      // 原子切换：备份 → 换树 → 写版本标记 → 活环境哨兵复校（内部失败即回滚）
-      this.updateMsg = '正在替换运行环境…';
-      const err: string = DshBootstrap.installStagedEnv(hostCtx, stage, manifest.version);
-      if (err.length > 0) {
-        this.showDialog('环境包安装失败', err + '\n\n当前运行环境未受影响。');
-        return;
-      }
-      // 按用户确认的交互：**不自动重启**，先告知「已就绪」，由用户点按钮触发重启。
-      // 重启走确定性通道（restart-request → node 退出 → node-exited → 重新拉起），
-      // 既不用 appRecovery（本设备实测为空操作），也不用 http 探测 loopback（不可靠）。
-      this.applyPhase = '';
-      this.updateMsg = '';
-      this.showDialogWithConfirm('环境包已就绪，需重启生效',
-        '已切换为在线环境包 v' + manifest.version + '（' + manifest.asset.entries + ' 个条目）。\n\n' +
-          '点击「重启并生效」后重启 DeepSeek Harness 服务；' +
-          '若新环境无法启动，会自动回滚到当前环境。',
-        '重启并生效', (): void => {
-          this.restartAfterEnvSwitch(manifest.version);
-        });
-    } catch (e) {
-      this.showDialog('环境包安装异常', this.errOf(e));
-    } finally {
-      this.stopUpdateTicker();
-      this.updateRunning = false;
-      this.updateTrack = '';
-      this.updateMsg = '';
-    }
-  }
 
-  /**
-   * 用户在「环境包已就绪」对话框点「重启并生效」后执行：
-   * 确定性重启服务 → 验收（日志 `dsh web:` 标记）→ 成功即清理备份与标记；失败即回滚再重启。
-   */
-  private async restartAfterEnvSwitch(version: string): Promise<void> {
-    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    this.updateRunning = true;
-    this.applyPhase = '正在重启服务…';
-    this.updateMsg = '正在重启服务…';
-    this.startUpdateTicker();
-    try {
-      const booted: boolean = await this.restartAndWait();
-      if (booted) {
-        DshBootstrap.discardEnvBackup(hostCtx);
-        DshBootstrap.clearPendingVerify(hostCtx);
-        this.showDialog('环境包已生效', '已切换到在线环境包 v' + version + '。');
-        return;
-      }
-      DshmLogger.error(TAG, '在线环境包启动失败，回滚');
-      DshBootstrap.clearPendingVerify(hostCtx);
-      if (DshBootstrap.hasEnvBackup(hostCtx) && DshBootstrap.rollbackEnv(hostCtx)) {
-        const back: boolean = await this.restartAndWait();
-        this.showDialog(back ? '已回滚' : '回滚失败',
-          back ? '在线环境包在当前设备无法启动，已回滚到原有环境。'
-            : '请用菜单「重置运行环境（故障恢复）」。');
-      } else {
-        this.showDialog('环境包启动失败', '无可用回滚备份，请用菜单「重置运行环境（故障恢复）」。');
-      }
-    } catch (e) {
-      this.showDialog('重启失败', this.errOf(e));
-    } finally {
-      this.stopUpdateTicker();
-      this.updateRunning = false;
-      this.applyPhase = '';
-      this.updateMsg = '';
-    }
-  }
 
-  /**
-   * 待验收的环境切换收尾。
-   *
-   * 判定「新环境是否起来了」**只用 node 日志里的 `dsh web:` 标记**（`countWebReadyMarkers`
-   * 读文件），不依赖 ArkTS 侧 http 探测 loopback —— 后者实测不可靠（服务明明在跑却判失败，
-   * 见 bug-log 2026-09-11），会导致 boot 走超时分支、成功分支里的收尾被跳过。
-   *
-   * 成功 → 丢弃备份 + 清标记（切换正式生效）；失败 → 回滚 + 清标记（避免回滚循环）。
-   */
-  private async resolvePendingEnvSwitch(): Promise<void> {
-    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    if (!DshBootstrap.hasPendingVerify(hostCtx)) {
-      return;
-    }
-    try {
-      // boot 前已 clearNodeLogs，故本环境启动成功时日志里必有新的 `dsh web:`
-      const ready: boolean = DshBootstrap.countWebReadyMarkers(hostCtx) > 0;
-      if (ready) {
-        DshmLogger.info(TAG, '在线环境包验收通过（日志已见 dsh web:）');
-        DshBootstrap.discardEnvBackup(hostCtx);
-        DshBootstrap.clearPendingVerify(hostCtx);
-        return;
-      }
-      DshmLogger.error(TAG, '在线环境包验收失败（日志无 dsh web:），回滚');
-      DshBootstrap.clearPendingVerify(hostCtx);
-      if (DshBootstrap.hasEnvBackup(hostCtx) && DshBootstrap.rollbackEnv(hostCtx)) {
-        this.statusText = '新环境启动失败，已回滚';
-        await this.sleep(800);
-        appRecovery.restartApp();
-      }
-    } catch (e) {
-      DshmLogger.warn(TAG, '待验收收尾异常: ' + this.errOf(e));
-    }
-  }
 
   private resetRuntimeEnv(): void {
     this.showDialogWithConfirm('重置运行环境',
@@ -1207,9 +651,7 @@ struct DshmWebPage {
   private async doResetRuntimeEnv(): Promise<void> {
     if (this.restarting) return;
     this.restarting = true;
-    this.updateRunning = true;
-    this.updateMsg = '正在重新解压运行环境…';
-    this.updatePercent = 0;
+    this.statusText = '正在重新解压运行环境…';
     const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
       // 先让旧服务退出，避免它继续引用即将被删除的文件。
@@ -1243,99 +685,11 @@ struct DshmWebPage {
     } catch (e) {
       this.showDialog('重置失败', this.errOf(e));
     } finally {
-      this.updateRunning = false;
       this.restarting = false;
     }
   }
 
-  /** 菜单项：查看 Harness 更新进度（后台任务可在使用过程中持续进行）。 */
-  private async showUpdateProgress(): Promise<void> {
-    if (this.updateReady) {
-      this.promptApplyUpdate(this.updateMsg);
-      return;
-    }
-    try {
-      const status = await this.httpGetJson(UPDATE_ENDPOINT) as UpdateStatusResp;
-      const msg: string = status.message ?? '';
-      if (this.updateRunning || status.running === true) {
-        this.showDialog('Harness 更新进行中',
-          '阶段：' + (status.phase ?? '') + '\n' + (msg.length > 0 ? msg : '正在进行中…') +
-            '\n\n更新在后台执行，可继续使用应用；完成后会提示是否应用。');
-        return;
-      }
-      if (status.done === true && status.success === true) {
-        this.updateVersion = status.version ?? this.updateVersion;
-        this.updateReady = true;
-        this.updateMsg = msg;
-        this.promptApplyUpdate(msg);
-        return;
-      }
-      if (status.staged === true) {
-        // 上一轮已下好但用户没确认的更新包：直接给出应用入口。
-        this.updateVersion = status.version ?? this.updateVersion;
-        this.updateReady = true;
-        this.updateMsg = msg;
-        this.promptApplyUpdate(msg);
-        return;
-      }
-      this.showDialog('Harness 更新', msg.length > 0 ? msg : '当前没有进行中的更新任务。');
-    } catch (e) {
-      this.showDialog('查看更新进度', '无法读取更新状态：' + this.errOf(e));
-    }
-  }
 
-  /**
-   * 轮询后台更新进度：每 2s 取一次 GET /dshm-admin/update。
-   * 连续查询失败达阈值视为服务端已不可用（更新可能已中断），提前结束。
-   */
-  private async pollHarnessUpdate(): Promise<UpdateOutcome> {
-    const deadline: number = Date.now() + UPDATE_POLL_TIMEOUT_MS;
-    let failures: number = 0;
-    let lastPhase: string = '';
-    while (Date.now() < deadline) {
-      await this.sleep(UPDATE_POLL_INTERVAL_MS);
-      let status: UpdateStatusResp | null = null;
-      try {
-        status = await this.httpGetJson(UPDATE_ENDPOINT) as UpdateStatusResp;
-        failures = 0;
-      } catch (e) {
-        failures++;
-        if (failures >= UPDATE_POLL_MAX_FAILURES) {
-          return { success: false, message: '更新过程中服务端持续无响应（已等待约 ' +
-            (UPDATE_POLL_INTERVAL_MS / 1000 * UPDATE_POLL_MAX_FAILURES) + 's），已中止等待。' };
-        }
-        continue;
-      }
-      const phase: string = status.phase ?? '';
-      if (phase.length > 0 && phase !== lastPhase) {
-        lastPhase = phase;
-        DshmLogger.info(TAG, '更新阶段: ' + phase);
-      }
-      const text: string = status.message ?? '';
-      // 只在内容变化时写 @State：轮询期间频繁赋值会让整页反复重建，是卡顿来源。
-      if (text.length > 0 && text !== this.updateMsg) {
-        this.updateMsg = text;
-      }
-      const percent: number = status.percent ?? 0;
-      // 服务端真实百分比只“往上顶”，本机计时器负责在服务不可用时维持推进。
-      if (percent > this.updatePercent && percent <= 100) {
-        this.updatePercent = percent;
-      }
-      const resolved: number = status.resolved ?? 0;
-      const added: number = status.added ?? 0;
-      const downloaded: number = status.downloaded ?? 0;
-      const detail: string = resolved > 0
-        ? ('已就绪 ' + added + '/' + resolved + '，已下载 ' + downloaded)
-        : '';
-      if (detail.length > 0 && detail !== this.updateDetail) {
-        this.updateDetail = detail;
-      }
-      if (status.done === true) {
-        return { success: status.success === true, message: text };
-      }
-    }
-    return { success: false, message: '等待更新完成超时；服务端可能仍在安装，可稍后重启应用确认。' };
-  }
 
   /** Harness: 重启服务 → 请求进程退出（应答后 200ms 退出），等待离线后重新拉起。 */
   private async restartService(): Promise<void> {
@@ -1591,7 +945,7 @@ struct DshmWebPage {
     }
   }
 
-  private async postJson(url: string, body: EmptyBody | UpdateBody | StartBody | WriteBody | KillBody): Promise<http.HttpResponse | null> {
+  private async postJson(url: string, body: EmptyBody | StartBody | WriteBody | KillBody): Promise<http.HttpResponse | null> {
     const client = http.createHttp();
     try {
       return await client.request(url, {
@@ -1840,9 +1194,6 @@ struct DshmWebPage {
       { value: '关于版本', action: (): void => { this.showAboutVersions(); } },
       { value: '运行模式（宿主 / 内嵌）', action: (): void => { this.openModePanel(); } },
       { value: '检查 App 更新', action: (): void => { this.checkAppUpdate(); } },
-      { value: '检查 Harness 更新（自动）', action: (): void => { this.checkHarnessUpdate(); } },
-      { value: '查看更新进度', action: (): void => { this.showUpdateProgress(); } },
-      { value: '安装在线环境包（开发）', action: (): void => { this.installEnvAsset(); } },
       { value: '重置运行环境（故障恢复）', action: (): void => { this.resetRuntimeEnv(); } },
       { value: '重启服务', action: (): void => { this.restartService(); } }
     ];
@@ -1917,39 +1268,6 @@ struct DshmWebPage {
         this.MenuTitle('Harness', this.harnessMenu())
         this.MenuTitle('编辑', this.editMenu())
         this.MenuTitle('窗口', this.windowMenu())
-        // 更新状态小胶囊：只在顶栏占一格，不覆盖内容、不拦截点击，
-        // 点它才展开详情/确认应用。
-        if (this.updateRunning) {
-          Row() {
-            Text(this.updateChipText())
-              .fontSize(11)
-              .fontColor('#78350f')
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-          .backgroundColor('#fef3c7')
-          .borderRadius(10)
-          .border({ width: 1, color: '#fcd34d' })
-          .margin({ left: 8 })
-          .onClick((): void => {
-            this.showUpdateProgress();
-          })
-        } else if (this.updateReady) {
-          Row() {
-            Text('更新已就绪')
-              .fontSize(11)
-              .fontColor('#065f46')
-          }
-          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-          .backgroundColor('#d1fae5')
-          .borderRadius(10)
-          .border({ width: 1, color: '#6ee7b7' })
-          .margin({ left: 8 })
-          .onClick((): void => {
-            this.showUpdateProgress();
-          })
-        }
         Blank()
       }
       .width('100%')
@@ -2005,31 +1323,6 @@ struct DshmWebPage {
             .onAppear(() => {
               this.startBrandAnimation();
             })
-          }
-
-          // 应用更新/回滚期间：旧 Web 还在内存里但即将被替换，内容不可用，
-          // 用一层全屏提示把真实阶段说清楚（下载阶段不会出现这层）。
-          if (this.applying) {
-            Column() {
-              LoadingProgress()
-                .width(36)
-                .height(36)
-                .color('#f59e0b')
-              Text(this.applyPhase)
-                .fontSize(14)
-                .fontColor('#334155')
-                .margin({ top: 16 })
-                .textAlign(TextAlign.Center)
-                .padding({ left: 32, right: 32 })
-              Text('请稍候，期间请不要关闭应用。')
-                .fontSize(12)
-                .fontColor('#94a3b8')
-                .margin({ top: 8 })
-            }
-            .width('100%')
-            .height('100%')
-            .justifyContent(FlexAlign.Center)
-            .backgroundColor('#F3F7FB')
           }
 
           // “关于版本”面板：页内浮层，左对齐排版。
