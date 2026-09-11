@@ -598,7 +598,7 @@
   - 脚本：`create-hdsh-config-editor.mjs` → `create-dshm-config-editor.mjs`、`test-hdsh-config-editor.mjs` → 同名 dshm 版；`ui-test-phone.sh` 里 `com.hdsh.agentic` → `com.dshm.agentic`。
   - 环境侧：包目录 `hdsh-config-editor` → `dshm-config-editor`（及其 package.json / cordis.patch.yml / client.js / lib/index.js）、`dsh-app-boot` 的 web bundles 列表、`@deepseek-ai/dsh/package.json` 的依赖名、marker `.hdsh-env-ready` → `.dshm-env-ready`。
   - 删除上游残留：`docs/20260614123648_apiChange.csv`（839KB，源仓库的 API 变更导出）、`tools/scan-hdsh.mjs`（一次性扫描器）。
-  - **刻意保留**：`dsh-OHDSH` 字面量（本地工程目录名 + gitcode 仓库地址 + 签名证书文件名）。注意它的尾部含 `HDSH`，批量替换时必须先占位保护，否则会被改成 `dsh-ODSHM`（本次脚本第一版就踩了这个，已修）。
+  - **刻意保留**：`dsh-OHDSH` 字面量（本地工程目录名 + 签名证书文件名；远端地址 2026-09-11 已从 gitcode 迁到 `github.com/sol5766/dshm`）。注意它的尾部含 `HDSH`，批量替换时必须先占位保护，否则会被改成 `dsh-ODSHM`（本次脚本第一版就踩了这个，已修）。
 - **坑 1（严重，启动即崩）**：改完环境包名后设备启动 `SIGNAL 6 (Aborted)`，日志为
   `Error: dsh: cannot resolve profile bundle "hdsh-config-editor" … from /data/…/files/home/.dsh/profiles/web`。
   **根因**：用户 profile 的 `<filesDir>/home/.dsh/profiles/<profile>/package.json` 里 `dsh.profile.bundles` 属于**用户数据**，`install -r` 不会重置，仍写着旧包名；dsh-app-boot 启动时逐项 `resolveBundleDir()`，解析不到就 throw。
