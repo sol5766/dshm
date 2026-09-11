@@ -43,10 +43,14 @@
 
 | 指标 | 宿主模式（auto 命中 Harmonybrew dsh） | 内嵌模式（HAP 内置 libnode） |
 |---|---|---|
-| 启动 → 带 token URL | **9.0s** | **11.4s** |
-| `t5.serverReady` | 7.5s | 11.4s |
+| 启动 → 带 token URL | **4.7–9.0s** | **13.6s** |
+| `t5.serverReady` | 4.2–7.5s | 12.2s |
 | 环境版本变化时的一次性解压 | 3.3s（瘦身后） | 同左 |
 | 崩溃 | `SIGNAL=0` | `SIGNAL=0`、`ERR_MODULE_NOT_FOUND=0` |
+| 首页 | HTTP 200 | HTTP 200 |
+
+> ⚠️ 上表的启动耗时**必须在对应模式下分别测**：host 正常 ≠ embedded 正常（本次踩过一次——坏掉的内嵌环境因为设备一直跑 host 而没被发现）。
+> ⚠️ `t5.serverReady` 会出现**假阳性**：`waitForServer()` 的判据是「日志出现 `dsh web: http`」**或**「3080 可连」，而上一实例的监听/TIME_WAIT 残留会让端口探测提前返回（实测一次 `t5=880ms` 但真实 URL 在 22.6s）。**以「新 pid 的 node 日志出现 `dsh web: http`」为准**。
 
 - 端到端：`1+1→2`、`3+4→7`、`7*6→42`、`9+10→19`、`6×7=42`；首屏自动渲染（不再白屏）
 - 体积：HAP **238.3MB**（`rawfile` 110.7MB + `libs` 123.7MB，HAP 不压缩存储）；安装耗时 **9.8s**（385MB 时约 60s）
@@ -352,6 +356,7 @@ aa start → EntryAbility → DshmWebPage.boot()
 | 24 | 冷启动 26–87s | `dsh-client-modules` 的 `newlineCount` 用 `for (const char of value)` 逐码点遍历 **11MB** 客户端合并包（每次迭代分配单字符字符串）→ 占 57.8%（11.4s/19.6s） | 改原生 `indexOf("\n")` 扫描 + `identitySectionMap` 等价改写；主机 19.6s→6.0s |
 | 25 | 仍有 ~1/3 启动时间花在合并包上 | 一轮启动 `buildCombo` 被调用 **469 次但只有 65 个不同产物** —— 约 400 次是同一输入的重复拼装 | 进程内记忆化（键 = `(entry.id, entry.rev)` + revision）；主机 6.0s→4.5s，真机 `t5` 16.4s→10.6s |
 | 26 | 启动期仍有大量「看不见」的开销 | 启动成本与**文件数**强相关（模块解析/realpath/stat 各走一遍）。瘦身把 env 从 26,762 砍到 12,485 个文件后：一次性解压 6.6–8.8s → **3.3s**，HAP 385MB → **238MB**，安装 60s → **9.8s** | 见 §4.1 第 6 条的裁剪规则与自检；这是当前性价比最高的一类优化 |
+| 27 | `t5.serverReady` 明显偏小（如 880ms）但带 token 的 URL 十几秒后才出现 | `waitForServer()` 是「日志出现 `dsh web: http`」**或**「3080 可连」二者取先；上一实例的监听残留 / TIME_WAIT 会让**端口探测**提前返回，于是 `t5` 记在了假就绪时刻 | 判据以**新 pid 的 node 日志出现 `dsh web: http`** 为准（本文件所有耗时都用这个口径）；复测前先 `aa force-stop` 并等 5–10s，确认 `netstat` 里 3080 无 `LISTEN` 再启动 |
 
 **性能排查方法（可复用）**：
 1. `DSHM_BOOT_PROFILE=1` 打开 shim 内置剖析器（`module.registerHooks` 统计模块加载 + 3s 心跳 + `fs.*Sync` 计数与去重率）；

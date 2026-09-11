@@ -60,7 +60,7 @@ DSHM_LIBNODE_URL=<approved-libnode-url> bash scripts/fetch-libnode.sh
 
 ## Documentation
 
-- [dsh version upgrade guide](docs/dsh-version-upgrade.md) — upgrade flow, 26 pitfalls, runtime modes
+- [dsh version upgrade guide](docs/dsh-version-upgrade.md) — upgrade flow, 27 pitfalls, runtime modes
 - [busybox runtime](docs/dsh-busybox-linux-env.md)
 - [Device runtime troubleshooting](docs/device-runtime-fixes.md)
 - [Build notes](docs/build-notes.md)
