@@ -23,6 +23,16 @@
 
 ## Bug 列表（新→旧）
 
+### [2026-09-12] `deviceInfo.apiAvailable('26.0.0')` 编译期被拒 —— 点分版本号形态当前 SDK 不支持
+- **现象**：BrewDSH 沉浸光感能力探测用 `deviceInfo.apiAvailable('26.0.0')` 做 API 级别判断，`assembleHap` 在 `CompileArkTS` 阶段直接失败：
+  `1 ERROR: 11706013 Invalid parameters for apiAvailable.`
+  `Error Message: The OpenHarmony api version must be a decimal integer between 1 and 25.`
+  改用数字 `26` 同样被拒（超出 25 上限）。即**编译期**拦截，不是运行时问题。
+- **根因**：当前 DevEco SDK 的 `@ohos.deviceInfo.d.ts` 已声明 `apiAvailable(version: string | number)` 支持点分字符串（含 `'26.0.0'`，注释明确 "For API 26+ ... Represents both OpenHarmony and Distribution OS API versions"），但**编译器内置的参数校验器比声明文件旧**，仍只接受 1–25 的十进制整数。声明与校验器版本不同步。
+- **修复**：`entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets` 改用 `deviceInfo.sdkApiVersion`（数字，无编译期限制）做阈值比较（`>= 26`），语义等价且不被拦截。已在文件头注释沉淀该坑。
+- **验证**：改用 `sdkApiVersion` 后 `CompileArkTS` 通过，`BUILD SUCCESSFUL`。
+- **附带结论（避免后续误用）**：本项目凡需 API 级别判断处，**一律用 `deviceInfo.sdkApiVersion` 数值比较**，不要用 `apiAvailable` 的点分字符串形态。
+- **状态**：✅ 已修复
 ### [2026-09-11] `appRecovery.restartApp()` 在本设备是空操作 →「环境包已替换」后应用不重启、界面停在对话框
 - **现象**：在线环境包切换成功后，代码调用 `appRecovery.restartApp()` 期望重启应用生效。实测**应用完全没重启**：应用进程 pid 不变、界面停在提示对话框「环境包已替换…应用即将重启以生效」上。用户视角就是"环境包替换了，但卡在某个环节"。磁盘状态其实已经切好（`.dshm-version`/`.dshm-asset-version` 均为目标版本、服务在跑）。
 - **根因**：`appRecovery.restartApp()`（`@ohos.app.ability.appRecovery` 声明存在）在本设备/本配置下**不产生重启**，疑似需要先 `enableAppRecovery()` 或在 `module.json5` 配置故障恢复才生效。本次未继续深挖该 API。
