@@ -126,6 +126,20 @@ bash scripts/prepare-dsh-env.sh 0.1.5-rc.1      # 版本号按需
 - 版本变化后的**首启会多花 6.6–8.8s 解压**（26,572 个文件），属正常，别当成卡死。
 - 构建产物：`entry-default-signed.hap ≈ 385MB`（其中 `libnode.so.137` 121MB + `rawfile/dsh` 253MB），安装约 1 分钟。
 
+### 步骤 5.5：确认运行模式（**排查"会话/配置丢失"必看**）
+
+`runtime-mode.txt` 缺省是 `auto`，语义是**优先宿主 dsh**：只要设备上装了 Harmonybrew 版 dsh
+（`/storage/Users/currentUser/.harmonybrew/bin/dsh`），App 就会用它，而**不是** HAP 内置的环境。
+
+两套的 `$DSH_HOME` 不同 → **会话库不是同一个**：
+
+| 模式 | dsh | node | $DSH_HOME | 会话库 |
+|---|---|---|---|---|
+| host | `/storage/Users/currentUser/.harmonybrew/bin/dsh` | 系统 node（有 JIT） | `/storage/Users/currentUser` | `/storage/Users/currentUser/.dsh/` |
+| embedded | HAP 内置 `rawfile/dsh`（`--jitless`） | 内置 `libnode.so.137` | `<filesDir>/home` | `<filesDir>/home/.dsh/` |
+
+> ⚠️ 所以在模式之间切换后界面上的会话会"消失"（其实在另一套库里）。排查会话/配置问题时，
+> **先 `cat <filesDir>/runtime-mode-active.txt`**；实测宿主模式冷启动约 4.5s，内嵌模式约 11–12s。
 ### 步骤 6：真机验收清单
 
 ```powershell

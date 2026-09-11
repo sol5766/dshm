@@ -126,11 +126,20 @@ fs.mkdirSync(path.dirname(destination), { recursive: true });
 fs.cpSync(source, destination, { recursive: true, force: true, dereference: true });
 NODE
 
-echo "[5/5] 应用 dsh 环境补丁（启动期性能）…"
+echo "[5/6] 应用 dsh 环境补丁（启动期性能）…"
 # 为什么必须在这里打：rawfile/dsh 是整包重建的（上面的 cpSync 会覆盖任何手工改动），
 # 而 @deepseek-ai/dsh-client-modules 的 newlineCount 逐码点遍历会让 11MB 客户端
 # 合并包的拼装吃掉 --jitless 冷启动一半以上时间（实测 11.4s/19.6s）。
 node "$SCRIPT_DIR/patch-dsh-env-client-modules.mjs" "$REPO_ROOT/$DEST"
+
+echo "[6/6] 环境瘦身（去掉鸿蒙运行时用不到的文件）…"
+# 为什么可以裁（2026-09-11 实测，裁剪前 253.5MB / 26,762 文件）：
+#   Windows 平台二进制 48.6MB、调试符号 48.1MB、其它平台 prebuilds 23.2MB、
+#   服务端 source map 38.8MB、*.d.ts 36.5MB、test/ 8.2MB、*.md 7.5MB
+#   → 去重并集 142.8MB（56%）。鸿蒙 arm64 永远加载不了 win32/darwin 的 dll/exe/pdb，
+#   .d.ts 只服务编译期，服务端 .map 只有调试器会读（客户端合并包要用的 client.js.map 已保留）。
+# 这一步直接影响 HAP 体积（HAP 是不压缩存储的，rawfile 有多大 HAP 就大多少）。
+node "$SCRIPT_DIR/prune-dsh-env.mjs" --env "$REPO_ROOT/$DEST" --delete
 
 printf '%s\n' "$READY_CONTENT" > "$REPO_ROOT/$READY_MARKER"
 

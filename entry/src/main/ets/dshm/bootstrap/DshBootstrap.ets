@@ -120,7 +120,11 @@ const OHOS_SKILLS_RAWFILE: string = 'ohos-skills';
 //  HdshWebPage → DshmWebPage、环境侧包 hdsh-config-editor → dshm-config-editor、
 //  标记 .hdsh-env-ready → .dshm-env-ready 等）。环境侧包名变了，必须 bump 让活环境
 // 重新解压，否则哨兵会因找不到新包名而判「解压不完整」。
-const ENV_VERSION: string = '20260911-105';
+// 20260911-106：环境瘦身 —— 裁掉鸿蒙运行时用不到的文件（Windows 二进制/调试符号/
+// 其它平台 prebuilds/服务端 source map/*.d.ts/test/*.md），env 253.5MB → 110.6MB（-56%），
+// HAP 随之从 385MB 降到约 242MB。脚本：scripts/prune-dsh-env.mjs（已挂进 prepare-dsh-env.sh [6/6]）。
+// 必须 bump：活环境不会因为 rawfile 变小而重新解压。
+const ENV_VERSION: string = '20260911-106';
 
 /**
  * 在线环境包（env asset）安装后写入的版本标记。

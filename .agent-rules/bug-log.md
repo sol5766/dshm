@@ -609,3 +609,20 @@
   **修复**：`dshm-config-editor` 是 `@deepseek-ai/dsh` **声明的依赖**，所以由 dsh 自己托管；`ensureBundleMirror()` 对该名字改为**只清理壳侧遗留的普通目录**（`removeUnmanagedMirror()`，package.json 里没有 `moduleFallback` 才删），不再镜像。另外两个（`dshm-terminal` / `dshm-ohos-settings`）不在 dsh 的依赖闭包里，继续由壳镜像。
 - **验证**：设备 `ENV_VERSION=20260911-105` 启动正常（无 SIGNAL）；`profiles/node_modules` 可见 dsh 自建的符号链接（`ws`/`yaml`/`zod`…）；服务端 3080 LISTEN + ESTABLISHED；首页 HTTP 200（28KB）；**页面里 `hdsh` 出现 0 次、`dshm-config-editor` 5 次**；UI 正常渲染（探索未至之境/设置/新建会话），输入框可输入。
 - **状态**：✅ 已修复并完成真机验证（注：本次「点击发送」的 UI 注入未成功，属 ArkWeb 注入抽风的老问题——重命名前 04:33 同样出现过；对话链路本身在重命名前已多次端到端验证）
+
+### [2026-09-11 续五] ⚠️ 「读取不到会话记录」的真因：App 静默切到了**宿主模式**的 dsh（两套 $DSH_HOME）
+
+- **现象**：用户报「App 内部进入对话报错 / 读取不到会话记录，之前遇到过」。我复现到的是：侧边栏会话列表为空、发送无响应；但服务端 3080 正常 LISTEN、node 日志零报错、`storages/workspace.json` 里明明登记着 7 个会话、`~/.dsh/sessions/--storage-Users-currentUser-harness--/` 下会话目录也在（用 App 自带终端以应用 uid 才读到，`hdc shell` 因 `drwx------` 读不到，一度误导判断）。
+- **真因**：`runtime-mode-active.txt` 显示实际运行在 **host 模式**：
+  ```
+  mode=host
+  dsh=/storage/Users/currentUser/.harmonybrew/bin/dsh   version=0.1.2-rc.1
+  node=v26.8.1                                          home=/storage/Users/currentUser
+  ```
+  即设备上装了 **Harmonybrew 版 dsh**，而 App 的 `runtime-mode.txt` 缺省是 `auto` → **优先用宿主 dsh**。宿主 dsh 的 `$DSH_HOME` 是 `/storage/Users/currentUser`，会话库在 `/storage/Users/currentUser/.dsh/`；而内嵌环境的 `$DSH_HOME` 是 `<filesDir>/home`，会话库在 `<filesDir>/home/.dsh/`。**两套库互不可见**，所以在模式之间切换（或先内嵌后宿主）时，界面上的会话就像"凭空消失"，而用户以为同一个会话记录读不到了。
+- **连带结论（重要）**：既然 `auto` 优先宿主，则 **HAP 里内置的 110MB 环境 + 121MB libnode 在宿主可用时完全没被使用**；本次修复的 0.1.5 环境（fetch shim 真流 / newlineCount / 合并包记忆化）在那条路径上也没生效——用户实测的 `1+1→2`、`6×7=42` 都是宿主 dsh 0.1.2-rc.1 + 系统 node v26.8.1（有 JIT）答的，这同时解释了"宿主模式冷启动只要 4.5s"。
+- **处置**：用户明确选择**保留 auto（两条都留）**。因此：
+  - HAP 必须保留内嵌环境与 libnode（体积维持在 238MB）；
+  - 需要在 UI/文档上明确提示两套模式的会话库是分开的，切换模式前先确认自己在哪条线上。
+- **教训**：以后排查"会话/配置丢失"类问题，**第一步就查 `runtime-mode-active.txt`**，不要只看 `<filesDir>/home/.dsh`。
+- **状态**：✅ 已定位；按用户决定保留现状（不改模式），已记入文档
