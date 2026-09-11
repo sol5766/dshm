@@ -1,0 +1,53 @@
+{
+  "_note": [
+    "env asset 的下载源模板，按数组顺序 failover。build-env-asset.mjs 会把 {asset} {version} {sha256} {size}",
+    "替换成实际值写进 manifest.json 的 asset.urls[]；enabled=false 的条目不写入。",
+    "⚠️ 本仓库 remote 已迁到 GitHub：https://github.com/sol5766/dshm",
+    "   资产发布方式：把 dist/env/dsh-env-<version>.zip 作为 Release 附件上传，tag 形如 env-<version>，",
+    "   同时把 manifest.json / SHA256SUMS 一起挂上；发布前务必用 curl -I 验证 200 且 content-length 与 manifest.size 一致。",
+    "   国内直连 GitHub Releases 常不稳，故保留 gh-proxy / ghproxy 两条镜像槽（需按需 enabled）。",
+    "   注意：dist/ 已在 .gitignore 中（本地可再生），所以 raw 通道取不到 zip，必须走 Release 附件。"
+  ],
+  "sources": [
+    {
+      "name": "dev-mock",
+      "url": "http://127.0.0.1:18080/{asset}",
+      "enabled": true,
+      "_status": "开发期联调：node scripts/dev-env-server.mjs + hdc rport tcp:18080 tcp:18080；发布前置 false"
+    },
+    {
+      "name": "github-release",
+      "url": "https://github.com/sol5766/dshm/releases/download/env-{version}/{asset}",
+      "enabled": true,
+      "_status": "主通道：需先发布一次 Release（tag env-<version>）并验证 HTTP 200"
+    },
+    {
+      "name": "gh-proxy.com",
+      "url": "https://gh-proxy.com/https://github.com/sol5766/dshm/releases/download/env-{version}/{asset}",
+      "enabled": false,
+      "_status": "国内加速槽：GitHub 直连不稳时启用"
+    },
+    {
+      "name": "ghproxy.net",
+      "url": "https://ghproxy.net/https://github.com/sol5766/dshm/releases/download/env-{version}/{asset}",
+      "enabled": false,
+      "_status": "同上，二备"
+    },
+    {
+      "name": "user-mirror",
+      "url": "",
+      "enabled": false,
+      "_status": "用户自建 OBS/内网镜像槽；填 URL 后置 enabled=true"
+    }
+  ],
+  "_devMock": {
+    "_note": [
+      "本地联调通道（plan §附 建议『先本地伪下载验证整条链，再接真网络』）：",
+      "在开发机起一个静态服务器托管 dist/env，再用 hdc rport 把它映射到设备的 127.0.0.1，",
+      "下载器即可用 loopback 地址走完整条 下载→sha256→解压→哨兵→启动 链路，无需真实外网发布。",
+      "示例：hdc rport tcp:18080 tcp:18080 （服务器监听开发机 18080）"
+    ],
+    "url": "http://127.0.0.1:18080/{asset}",
+    "enabled": false
+  }
+}

@@ -1,15 +1,8 @@
 {
-  "name": "ngf-engineering-tools",
+  "name": "dshm-tools",
   "version": "1.0.0",
-  "description": "Node.js engineering tools for NGF Framework",
+  "description": "DSHM development tooling",
   "scripts": {
-    "cli": "node tools/ngf-cli/index.js",
-    "docs": "typedoc",
-    "release": "standard-version"
-  },
-  "devDependencies": {
-    "standard-version": "^9.5.0",
-    "typedoc": "^0.28.19",
-    "typescript": "^6.0.3"
+    "gen-icon": "node tools/gen-icon.mjs"
   }
 }

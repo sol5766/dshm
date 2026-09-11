@@ -83,12 +83,13 @@
 ## 2. 项目定位
 
 - 这是一个 HarmonyOS Next 项目，主要使用 ArkTS 开发。
-- 当前仓库的主定位是 **HDSH**：在鸿蒙设备上对 dsh 进行全新实现的产品工程。
-  - `ngf_framework` 是 HDSH 依赖的鸿蒙原生基础框架（源自 NGF，独立演进），承担 UI 外壳（HDS 导航壳）、主题、国际化、存储、网络、窗口、系统任务等通用基础设施职责。
-  - `entry` 是 HDSH 的应用层，承载 dsh 的业务实现（harness 内核、插件系统、会话、工具、模型接入、交互界面）。
+- 当前仓库的主定位是 **DSHM**：在鸿蒙设备上对 dsh 进行全新实现的产品工程。
+  - ⚠️ **2026-09-11 现状校正**：上游框架模块 `ngf_framework/` **已从本仓库移除**（同时 `pages/ngf/` 演示页亦已删除）。因此本文件中所有以 `ngf_framework/src/main/ets/**`、`import { logger } from 'ngf_framework'`、`NGFHdsTitleBarOptionsFactory` 等为前提的条款，**当前均无对应代码**，只保留为历史背景；本仓库现在只有 `entry` 一层（`entry/src/main/ets/dshm/**` 为 DSHM 自有实现，日志用 `entry/src/main/ets/dshm/utils/Logger.ets` 的 `DshmLogger`）。
+  - `entry` 是 DSHM 的应用层，承载 dsh 的业务实现（harness 内核、插件系统、会话、工具、模型接入、交互界面）。
+- 品牌命名：仓库内统一 `dshm`/`DSHM`（历史名 `hdsh`/`HDSH` 已废弃；仅 `DshBootstrap.LEGACY_CONFIG_EDITOR_BUNDLE` 这类**迁移常量**保留旧名）。
 - 产品目标（待确认项见 `.agent-rules/project-rules.md` 的 Open Decisions）：将 dsh 的能力迁移到鸿蒙设备上进行全新实现，让鸿蒙用户获得原生、插件化、可持续运行的 agent 运行环境。
-- 所有对 `ngf_framework` 的修改遵循"可复用、低耦合、可扩展、可替换"的框架设计，避免写死 HDSH 专属业务；HDSH 产品逻辑留在 `entry` 层。
-- 仓库内历史遗留的 NGF 演示页面、示例与导航入口，优先视为框架验证与参考实现，不作为 HDSH 业务本身；HDSH 业务页面与 `pages/ngf/` 演示区保持边界。
+- 所有对 `ngf_framework` 的修改遵循"可复用、低耦合、可扩展、可替换"的框架设计，避免写死 DSHM 专属业务；DSHM 产品逻辑留在 `entry` 层。
+- 仓库内历史遗留的 NGF 演示页面、示例与导航入口，优先视为框架验证与参考实现，不作为 DSHM 业务本身；DSHM 业务页面与 `pages/ngf/` 演示区保持边界。
 - 优先使用官方最新 API，尽量不引入新的第三方依赖。
 
 ### 2.1 框架优先原则
@@ -115,7 +116,7 @@
   - `targetSdkVersion: 26.0.0`
   - `compatibleSdkVersion: 26.0.0`
 - 当前根目录 `oh-package.json5` 的 `modelVersion` 为 `26.0.0`。
-- 当前 `AppScope/app.json5` 的 `bundleName` 为 `com.hdsh.app`（占位，待产品确认后更新）。
+- 当前 `AppScope/app.json5` 的 `bundleName` 为 `com.dshm.agentic`（**不要随意改**：本机签名证书/p7b 是按该包名签发的，改了会导致 `SignHap` 失败；且会变成一个新应用、丢失现有数据）。
 - 当前 `entry/src/main/module.json5` 的主能力为 `EntryAbility`，页面入口通过 `$profile:main_pages` 声明。
 - 当前 `entry/src/main/resources/base/profile/main_pages.json` 中注册的入口页面为 `pages/ngf/MainMenuPage`。
 - 当前页面目录以 `entry/src/main/ets/pages/` 为主，业务页面通常放在该目录下。
@@ -418,7 +419,7 @@
 
 ### 7.4.1 鸿蒙 UI 设计方法（多形态适配规范）
 
-以下规范适用于 HDSH 手机/平板/PC 多形态 UI（含 Web UI 插件化适配），基于 2in1 真机实测沉淀：
+以下规范适用于 DSHM 手机/平板/PC 多形态 UI（含 Web UI 插件化适配），基于 2in1 真机实测沉淀：
 
 **断点规范**
 - 断点基准：手机 <700px、平板 700–1024px、PC >1024px（CSS 逻辑像素）。

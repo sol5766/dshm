@@ -1,11 +1,9 @@
 {
   "name": "entry",
   "version": "1.0.0",
-  "description": "HDSH entry module",
+  "description": "DSHM entry module",
   "main": "",
   "author": "",
   "license": "",
-  "dependencies": {
-    "ngf_framework": "file:../ngf_framework"
-  }
+  "dependencies": {}
 }

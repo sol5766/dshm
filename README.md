@@ -1,69 +1,37 @@
-# HDSH
+# DSHM
 
-HDSH 是面向 HarmonyOS Next 的 DSH 运行环境实现。项目以 `entry` 承载应用层与设备适配，以 `ngf_framework` 提供可复用的原生基础设施。
+DSHM 是面向 HarmonyOS Next 的 DSH（DeepSeek Harness）运行环境实现。应用在系统沙箱中加载 DSH 运行时、busybox 与 pnpm 环境，启动本地 DSH Web 服务后，通过 ArkWeb 加载 `http://127.0.0.1:3080`。
 
 ## 当前状态
 
-当前应用已经可以在 HarmonyOS 设备上启动 DSH 官方 WebUI：`EntryAbility` 加载 `pages/hdsh/HdshWebPage`，应用在沙箱中准备 DSH、busybox 和 pnpm 运行环境，启动本地 DSH 服务后由 ArkWeb 加载 `http://127.0.0.1:3080`。
+- `EntryAbility` 加载 `pages/dshm/DshmWebPage`，完成 DSH 环境解压 → busybox 就绪 → native 子进程（`libdsh_host` 内嵌 node `--jitless`）启动 DSH web server → ArkWeb 加载 WebUI 的端到端闭环
+- 内置 busybox 兜底 applet：ash/bash/hush、bzip2/xz、hexdump、less、nc、unzip、vi（其余由系统 toybox 补齐）
+- 内置 pnpm，插件安装通过同进程 Worker 桥接执行
+- 工作区目录授权 + 持久授权，可同步到应用沙盒 workspace
+- 支持设备形态：phone、tablet、2in1、car、tv、wearable
 
-已验证的当前交付结果：
+## 运行时约束（真机实测）
 
-- 包名：`com.hdsh.agentic`
-- 目标与兼容 SDK：HarmonyOS `6.1.0(23)`
-- 支持声明：phone、tablet、2in1、car、tv、wearable
-- 设备回归：主页可见、默认窗口比例正常、PC 断点不白屏
-- 文件搜索 fallback：在 ripgrep 不可用时使用系统 grep，并保持 ERE 正则语义
-- 内置插件市场：使用 `dshmarket@1.13.1`（`dsh-market/dsh-market`），首次 Web profile 初始化自动挂载，插件安装通过鸿蒙 Worker 桥接调用内置 pnpm
-- 公开仓库不包含签名材料、凭据或本机环境文件
-
-当前版本重点是 DSH WebUI 运行闭环与设备适配。ArkTS 原生 harness、设置、工具和 MCP 能力仍按 [迁移方案](docs/migration-plan.md) 继续演进。
-
-设备运行约束：鸿蒙应用沙箱允许读取随包分发的 busybox/pnpm 文件，但禁止直接执行应用文件目录中的 ELF。运行时因此使用系统 hnp bash 与系统工具目录，DSH 插件管理使用同进程内置 pnpm JavaScript 实现；busybox/pnpm 目录仍由准备脚本生成，作为可复现的运行时资源和后续平台适配输入。
+- **`--jitless` 必须**：沙箱 W^X 禁止创建可执行内存，embedded node 以 `--jitless --expose-internals` 启动，由 `_fetch-shim.cjs` 提供 Web 全局与 WebAssembly 垫片
+- **ArkTS http 探测 loopback 不可靠**：UI 就绪判定改为读 node 日志标记（`dsh web:`），不依赖 ArkTS http 探测 3080
+- **libnode 需 native 加固**：`DT_NEEDED` 链接固定加载顺序 + io_uring `bl syscall` 打补丁回退 epoll，由准备脚本完成后进入 `entry/libs/arm64-v8a/`
 
 ## 目录
 
 ```text
-HDSH/
-├── entry/                 # HDSH 应用层、入口 Ability、ArkWeb 页面和运行时桥接
-├── ngf_framework/         # 可复用 HarmonyOS 基础框架
-├── scripts/               # DSH 环境准备、二进制准备和真机回归脚本
-├── docs/                  # 架构、迁移、构建和变更记录
-├── .rules/                # 通用 Agent 工程规则
-├── .agent-rules/          # HDSH 项目规则与 Bug 档案
+DSHM/
+├── entry/                 # 主应用层、EntryAbility、ArkWeb 页面与运行时桥接
+├── tools/                 # 图标生成等开发工具
 └── AGENTS.md              # 工作区协作规范
 ```
 
-`entry/src/main/resources/rawfile/dsh/`、`busybox/`、`pnpm/` 和 native 运行时文件由准备脚本生成或下载，默认不提交到 Git。这样可以避免把大型二进制、签名材料和机器环境带入公开仓库。
+`entry/src/main/resources/rawfile/dsh/`、`busybox/` 与 native 运行时文件随 HAP 分发，设备端由引导流程解压。
 
 ## 开发环境
 
-1. 使用 DevEco Studio 打开仓库。
-2. 准备运行时文件：
-
-```bash
-bash scripts/prepare-dsh-env.sh 0.1.0-rc.7
-bash scripts/fetch-busybox.sh
-bash scripts/fetch-pnpm.sh
-HDSH_LIBNODE_URL=<approved-libnode-url> bash scripts/fetch-libnode.sh
-```
-
-3. 在本地 DevEco Studio 签名设置中配置开发签名，签名文件只保存在本机。
-4. 使用 Hvigor 构建 `entry` 模块并安装到设备。
-5. 执行真机回归：
-
-```bash
-bash scripts/ui-test-phone.sh 1 <hdc-target>
-```
-
-脚本要求显式传入设备 target，避免把具体设备标识写入项目。
-
-## 文档
-
-- [迁移方案](docs/migration-plan.md)
-- [busybox 运行环境](docs/dsh-busybox-linux-env.md)
-- [NGF 框架现状](docs/NGF_FRAMEWORK_STATUS.md)
-- [变更日志](docs/CHANGELOG.md)
-- [Agent 协作规范](AGENTS.md)
+1. 使用 DevEco Studio 打开仓库根。
+2. 在 DevEco Studio 签名设置中配置开发签名（调试机登录后自动签名）。
+3. 使用 Hvigor 构建 `entry` 模块并安装到设备。
 
 ## 许可证
 

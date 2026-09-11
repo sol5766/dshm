@@ -1,1 +1,0 @@
-export { IMediaPicker } from './IMediaPicker';

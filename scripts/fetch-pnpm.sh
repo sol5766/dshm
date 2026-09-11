@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# HDSH: 获取 pnpm standalone（linuxstatic arm64，musl 静态，自带 node）
+# DSHM: 获取 pnpm standalone（linuxstatic arm64，musl 静态，自带 node）
 # 用途: dsh plugin 命令是 pnpm 前向器（spawnSync("pnpm")），沙箱内无 node
 #       可执行文件，须内置 pnpm standalone 并注入 PATH。
 # 来源: npm registry @pnpm/linuxstatic-arm64（官方 SEA 单文件可执行）

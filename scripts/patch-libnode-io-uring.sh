@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# HDSH: patch libnode.so —— 禁用 libuv io_uring 初始化
+# DSHM: patch libnode.so —— 禁用 libuv io_uring 初始化
 #
 # 背景: 鸿蒙沙箱 seccomp 过滤器禁止 io_uring_setup（aarch64 syscall 425），
 #       触发即 SIGSYS 崩溃（node::V8Platform::Initialize → uv_loop_init）。

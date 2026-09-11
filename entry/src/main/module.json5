@@ -26,6 +26,33 @@
         "name": "ohos.permission.INTERNET"
       },
       {
+        "name": "ohos.permission.STORE_PERSISTENT_DATA",
+        "reason": "$string:store_persistent_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_USER_FILE",
+        "reason": "$string:read_write_user_file_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.ACCESS_USER_FULL_DISK",
+        "reason": "$string:full_disk_access_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.CUSTOM_SANDBOX"
+      },
+      {
         "name": "ohos.permission.DETECT_GESTURE",
         "reason": "$string:detect_gesture_reason",
         "usedScene": {
@@ -88,6 +115,25 @@
           "abilities": ["EntryAbility"],
           "when": "inuse"
         }
+      },
+      {
+        "name": "ohos.permission.PREPARE_APP_TERMINATE"
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY",
+        "reason": "$string:download_dir_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_DOCUMENTS_DIRECTORY",
+        "reason": "$string:documents_dir_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
       }
 
     ],
@@ -98,8 +144,9 @@
         "description": "$string:EntryAbility_desc",
         "icon": "$media:layered_image",
         "label": "$string:EntryAbility_label",
-        "startWindowIcon": "$media:startIcon",
+        "startWindowIcon": "$media:start_window_icon",
         "startWindowBackground": "$color:start_window_background",
+        "startWindow": "$profile:start_window",
         "exported": true,
         "backgroundModes": ["dataTransfer"],
         "skills": [
@@ -111,39 +158,17 @@
               "ohos.want.action.home"
             ]
           }
-        ],
-        "metadata": [
-          {
-            "name": "ohos.ability.shortcuts",
-            "resource": "$profile:shortcuts_config"
-          }
         ]
       },
       {
-        "name": "MultitonEntryAbility",
-        "srcEntry": "./ets/entryability/MultitonEntryAbility.ets",
-        "launchType": "multiton",
-        "description": "$string:MultitonEntryAbility_desc",
+        "name": "BackGroundAbility",
+        "srcEntry": "./ets/backgroundability/BackGroundAbility.ets",
+        "description": "$string:BackgroundAbility_desc",
         "icon": "$media:layered_image",
-        "label": "$string:MultitonEntryAbility_label",
-        "startWindowIcon": "$media:startIcon",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:start_window_icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true
-      }
-    ],
-    "extensionAbilities": [
-      {
-        "name": "EntryFormAbility",
-        "srcEntry": "./ets/entryformability/EntryFormAbility.ets",
-        "label": "$string:EntryFormAbility_label",
-        "description": "$string:EntryFormAbility_desc",
-        "type": "form",
-        "metadata": [
-          {
-            "name": "ohos.extension.form",
-            "resource": "$profile:form_config"
-          }
-        ]
       }
     ]
   }

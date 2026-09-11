@@ -8,14 +8,14 @@ const runtimeRoot = path.resolve('entry/src/main/resources/rawfile/dsh');
 const appBootPath = path.join(runtimeRoot, 'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js');
 const installAnchor = path.join(runtimeRoot, 'node_modules/@deepseek-ai/dsh/package.json');
 const appBoot = await import(pathToFileURL(appBootPath).href);
-const home = mkdtempSync(path.join(tmpdir(), 'hdsh-profile-managed-'));
+const home = mkdtempSync(path.join(tmpdir(), 'dshm-profile-managed-'));
 const mutablePackages = ['dshmarket', '@dsh-external/dsh-mobile-nav'];
 
 try {
   appBoot.healProfilesModuleFallback(installAnchor, home);
   const fallbackRoot = path.join(home, 'profiles', 'node_modules');
   assert.ok(existsSync(path.join(fallbackRoot, '@earendil-works', 'pi-ai', 'package.json')));
-  const fallbackMarker = path.join(home, 'profiles', '.hdsh-install-fallback-revision');
+  const fallbackMarker = path.join(home, 'profiles', '.dshm-install-fallback-revision');
   assert.equal(readFileSync(fallbackMarker, 'utf8').trim(), '20260819-50');
   rmSync(path.join(fallbackRoot, '@earendil-works', 'pi-ai'), { recursive: true, force: true });
   writeFileSync(fallbackMarker, 'stale\n', 'utf8');
@@ -27,7 +27,7 @@ try {
   const manifestPath = path.join(profileDir, 'package.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 
-  assert.equal(manifest.hdsh.profileManagedSeed.version, 2);
+  assert.equal(manifest.dshm.profileManagedSeed.version, 2);
   for (const packageName of mutablePackages) {
     assert.equal(typeof manifest.dependencies[packageName], 'string');
     assert.ok(manifest.dsh.profile.bundles.includes(packageName));
@@ -35,7 +35,7 @@ try {
     const layer = initial.layers.find((entry) => entry.packageName === packageName);
     assert.equal(layer?.packageDir, path.join(profileDir, 'node_modules', packageName));
   }
-  assert.equal(manifest.hdsh.profileManagedSeed.dependencyClosureVersion, 2);
+  assert.equal(manifest.dshm.profileManagedSeed.dependencyClosureVersion, 2);
   for (const packageName of ['@deepseek-ai/cordis-plugin-include', '@deepseek-ai/cordis-plugin-loader']) {
     assert.ok(existsSync(path.join(profileDir, 'node_modules', packageName, 'package.json')));
   }

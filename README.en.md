@@ -1,36 +1,39 @@
-# HDSH
+# DSHM
 
-HDSH is a HarmonyOS Next implementation of the DSH runtime. The `entry` module owns the application and device integration, while `ngf_framework` provides reusable native infrastructure.
+DSHM is a HarmonyOS Next implementation of the DSH (DeepSeek Harness) runtime. The `entry` module owns the application, device integration, and runtime bridge.
 
 ## Current Status
 
-The application can start the official DSH WebUI on HarmonyOS devices. `EntryAbility` loads `pages/hdsh/HdshWebPage`, prepares the DSH, busybox, and pnpm runtime inside the app sandbox, starts the local DSH service, and loads `http://127.0.0.1:3080` through ArkWeb.
+The application can start the official DSH WebUI on HarmonyOS devices. `EntryAbility` loads `pages/dshm/DshmWebPage`, prepares the DSH, busybox, and pnpm runtimes inside the app sandbox, starts the local DSH service, and loads `http://127.0.0.1:3080` through ArkWeb.
 
-Current verified delivery facts:
-
-- Bundle name: `com.hdsh.agentic`
-- Target and compatible SDK: HarmonyOS `6.1.0(23)`
+- **End-to-end loop**: embedded node (`--jitless`) inside `libdsh_host` → DSH web server on `127.0.0.1:3080` → ArkWeb renders the WebUI
+- **fetch/WebAssembly shim**: `_fetch-shim.cjs` (preloaded via `-r`) provides Web globals and a never-settling `WebAssembly` stub so undici's llhttp WASM never crashes under `--jitless`
+- **busybox fallback applets**: ash/bash/hush, bzip2/xz, hexdump, less, nc, unzip, vi — the rest is covered by the system toybox
+- Built-in pnpm; plugin installs run through an in-process worker bridge
+- Workspace directory grant with persistent permission, synced into the sandbox workspace
 - Declared device types: phone, tablet, 2in1, car, tv, wearable
-- Device regression: visible home page, normal default window ratio, no PC breakpoint blank screen
-- Filesystem search fallback: system grep is used when ripgrep is unavailable, with ERE regex semantics preserved
-- Public sources contain no signing materials, credentials, or machine-local environment files
+- Public sources contain no signing materials, credentials, or machine-local files
 
-The current release focuses on the DSH WebUI runtime loop and device adaptation. The native ArkTS harness, settings, tools, and MCP work continue according to the [migration plan](docs/migration-plan.md).
+## Runtime Constraints (verified on device)
+
+- **`--jitless` is mandatory**: the sandbox enforces W^X, so the embedded node always starts with `--jitless --expose-internals` and uses `_fetch-shim.cjs` as the WebAssembly/Web-globals shim.
+- **ArkTS http to loopback is unreliable**: server readiness is detected by polling the node log file for the `dsh web:` marker, not via HTTP probes.
+- **libnode needs native hardening**: `DT_NEEDED` linking fixes a V8 TLS bootstrap race; io_uring syscalls are patched to fall back to epoll. These are applied by scripts and shipped under `entry/libs/arm64-v8a/`, not via npm.
 
 ## Repository Layout
 
 ```text
-HDSH/
+DSHM/
 ├── entry/                 # Application layer, Ability, ArkWeb page, and runtime bridge
-├── ngf_framework/         # Reusable HarmonyOS framework
 ├── scripts/               # Runtime preparation and device regression scripts
-├── docs/                  # Architecture, migration, build, and change records
+├── docs/                  # Architecture, build, and runtime records
+├── tools/                 # Development tooling (icon generation, scans)
 ├── .rules/                # Shared Agent engineering rules
-├── .agent-rules/          # HDSH project rules and bug log
+├── .agent-rules/          # Project rules and bug log
 └── AGENTS.md              # Workspace collaboration rules
 ```
 
-`entry/src/main/resources/rawfile/dsh/`, `busybox/`, `pnpm/`, and native runtime files are generated or downloaded by preparation scripts and are ignored by Git. This keeps large binaries, signing materials, and machine-specific data out of the public repository.
+`entry/src/main/resources/rawfile/dsh/`, `busybox/`, and native runtime files are generated or downloaded by preparation scripts and ignored by Git.
 
 ## Development
 
@@ -38,28 +41,21 @@ HDSH/
 2. Prepare the runtime files:
 
 ```bash
-bash scripts/prepare-dsh-env.sh 0.1.0-rc.7
+bash scripts/prepare-dsh-env.sh 0.1.2-rc.1
 bash scripts/fetch-busybox.sh
 bash scripts/fetch-pnpm.sh
-HDSH_LIBNODE_URL=<approved-libnode-url> bash scripts/fetch-libnode.sh
+DSHM_LIBNODE_URL=<approved-libnode-url> bash scripts/fetch-libnode.sh
 ```
 
 3. Configure a local development signature in DevEco Studio. Keep signing files on the local machine.
 4. Build the `entry` module with Hvigor and install it on a device.
-5. Run the device regression script with an explicit target:
-
-```bash
-bash scripts/ui-test-phone.sh 1 <hdc-target>
-```
-
-The script intentionally requires an explicit device target so a device identifier is never embedded in the project.
+5. Run the regression script with an explicit target: `bash scripts/ui-test-phone.sh 1 <hdc-target>`.
 
 ## Documentation
 
-- [Migration plan](docs/migration-plan.md)
 - [busybox runtime](docs/dsh-busybox-linux-env.md)
-- [NGF framework status](docs/NGF_FRAMEWORK_STATUS.md)
-- [Change log](docs/CHANGELOG.md)
+- [Device runtime troubleshooting](docs/device-runtime-fixes.md)
+- [Build notes](docs/build-notes.md)
 - [Agent collaboration rules](AGENTS.md)
 
 ## License

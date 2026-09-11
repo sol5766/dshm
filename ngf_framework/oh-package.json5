@@ -1,9 +1,0 @@
-{
-  "name": "ngf_framework",
-  "version": "1.0.0",
-  "description": "Neon Genesis Framework - A reusable application framework for HarmonyOS Next.",
-  "main": "src/main/ets/index.ets",
-  "author": "HDSH Contributors",
-  "license": "MIT",
-  "dependencies": {}
-}

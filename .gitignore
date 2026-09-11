@@ -115,8 +115,10 @@ desktop.ini
 /signing/*
 !/signing/README.md
 
-# HDSH runtime artifacts (downloaded/generated, not committed)
+# DSHM runtime artifacts (downloaded/generated, not committed)
 /entry/libs/arm64-v8a/libnode.so
+/entry/libs/arm64-v8a/libnode.so.*
+/entry/libs/arm64-v8a/libpty_host.so*
 /entry/src/main/resources/rawfile/dsh/
 /entry/src/main/resources/rawfile/busybox/
 /entry/src/main/resources/rawfile/pnpm/
@@ -124,5 +126,17 @@ desktop.ini
 # AGC 签名材料缓存（ac/ce/fd 目录，勿提交）
 /signing/material/
 
+# Local debug scratch (not project content)
+/tmpplugins/
+/ui.xml
+/ui2.xml
+/dshm-shot.jpeg
+/build/ui-test-phone/
+
 # Agent tool memory (not project content)
 /.codegenie/
+
+# 本地环境资产（build-env-asset.mjs 产出，可再生，不提交）
+/dist/
+# 已知损坏的 koffi 预编译产物（见 tools/prebuilt/README.md，用 build-koffi-ohos.ps1 重建）
+/tools/prebuilt/*.node

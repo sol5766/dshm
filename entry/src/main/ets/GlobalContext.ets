@@ -1,10 +1,10 @@
-export interface NGFAbilityContextLike {
+export interface DshmAbilityContextLike {
   filesDir: string;
 }
 
 class GlobalContextHolder {
   private static instance: GlobalContextHolder | null = null;
-  private abilityContext: NGFAbilityContextLike | null = null;
+  private abilityContext: DshmAbilityContextLike | null = null;
 
   static getInstance(): GlobalContextHolder {
     if (!GlobalContextHolder.instance) {
@@ -13,7 +13,7 @@ class GlobalContextHolder {
     return GlobalContextHolder.instance;
   }
 
-  setContext(context: NGFAbilityContextLike): void {
+  setContext(context: DshmAbilityContextLike): void {
     this.abilityContext = context;
   }
 
@@ -25,7 +25,7 @@ class GlobalContextHolder {
     return this.abilityContext !== null;
   }
 
-  getNGFContext(): NGFAbilityContextLike {
+  getContextInternal(): DshmAbilityContextLike {
     if (!this.abilityContext) {
       throw new Error('Global context is not initialized');
     }
@@ -35,7 +35,7 @@ class GlobalContextHolder {
 
 const globalContextHolder: GlobalContextHolder = GlobalContextHolder.getInstance();
 
-export function setContext(context: NGFAbilityContextLike): void {
+export function setContext(context: DshmAbilityContextLike): void {
   globalContextHolder.setContext(context);
 }
 
@@ -48,18 +48,18 @@ export function isInitialized(): boolean {
 }
 
 /**
- * 获取 NGF 全局 AbilityContext
- * @returns NGFAbilityContextLike 能力上下文
+ * 获取 DSHM 全局 AbilityContext。
+ * @returns DshmAbilityContextLike 能力上下文
  * @throws Error 当全局上下文未初始化时抛出
- * @note API 23 适配：重命名以避免与系统废弃的 getContext() API 混淆
+ * @note API 23 适配：避免与系统废弃的 getContext() API 混淆
  */
-export function getNGFContext(): NGFAbilityContextLike {
-  return globalContextHolder.getNGFContext();
+export function getDshmContext(): DshmAbilityContextLike {
+  return globalContextHolder.getContextInternal();
 }
 
 /**
- * @deprecated 请使用 getNGFContext() 替代，以避免与系统废弃 API 混淆
+ * @deprecated 请使用 getDshmContext() 替代，以避免与系统废弃 API 混淆
  */
-export function getContext(): NGFAbilityContextLike {
-  return globalContextHolder.getNGFContext();
+export function getContext(): DshmAbilityContextLike {
+  return globalContextHolder.getContextInternal();
 }

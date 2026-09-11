@@ -3,14 +3,16 @@
     "products": [
       {
         "name": "default",
-        "targetSdkVersion": "6.1.0(23)",
-        "compatibleSdkVersion": "6.1.0(23)",
+        "signingConfig": "default",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "26.0.0",
         "runtimeOS": "HarmonyOS",
         "buildOption": {
           "strictMode": {
             "caseSensitiveCheck": true,
             "useNormalizedOHMUrl": true
-          }
+          },
+          "nativeCompiler": "BiSheng"
         }
       }
     ],
@@ -21,24 +23,27 @@
       {
         "name": "release"
       }
+    ],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_dsh-OHDSH_DYFdOedOk_TIQHruRAzXTxIdN2CUr9eWfCDfuI3c3yY=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001A7BA05F694FC1DEFF2549CD4FA3C6AD2714D380AC0C18AEF4DBBFB239CC8F85D7750DC535C46B",
+          "profile": "C:\\Users\\Sol\\.ohos\\config\\default_dsh-OHDSH_DYFdOedOk_TIQHruRAzXTxIdN2CUr9eWfCDfuI3c3yY=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_dsh-OHDSH_DYFdOedOk_TIQHruRAzXTxIdN2CUr9eWfCDfuI3c3yY=.p12",
+          "storePassword": "0000001A1C76416FD6FF339D238A4BFF44D7CDA6E5F8D5C9FD8B10DE259D55D221610D20DED09ED3E2DE"
+        }
+      }
     ]
   },
   "modules": [
     {
       "name": "entry",
       "srcPath": "./entry",
-      "targets": [
-        {
-          "name": "default",
-          "applyToProducts": [
-            "default"
-          ]
-        }
-      ]
-    },
-    {
-      "name": "ngf_framework",
-      "srcPath": "./ngf_framework",
       "targets": [
         {
           "name": "default",

@@ -1,1 +1,0 @@
-export { IAppLinking } from './IAppLinking';

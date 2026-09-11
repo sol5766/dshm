@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# HDSH 默认窗口 UI 自动化测试脚本（2in1 真机）
+# DSHM 默认窗口 UI 自动化测试脚本（2in1 真机）
 #
 # 用途：验证系统默认窗口尺寸下 DSH 官方 WebUI 是否正确——
 #   - 白屏检测：主列内容必须可见（探索未至之境/预览版/工作区等）
@@ -11,25 +11,25 @@
 # 用法：
 #   scripts/ui-test-phone.sh [次数] [target]
 #     次数  循环轮数（默认 1）
-#     target hdc 目标（必须显式传入，或设置 HDSH_HDC_TARGET）
+#     target hdc 目标（必须显式传入，或设置 DSHM_HDC_TARGET）
 #
 # 依赖：hdc、uitest（设备端 UI 测试框架）、python
 # ============================================================
 set -u
 ROUNDS="${1:-1}"
-TARGET="${2:-${HDSH_HDC_TARGET:-}}"
+TARGET="${2:-${DSHM_HDC_TARGET:-}}"
 if [ -z "$TARGET" ]; then
-  echo "[ui-test-phone] FAIL: 必须显式传入 hdc target 或设置 HDSH_HDC_TARGET"
+  echo "[ui-test-phone] FAIL: 必须显式传入 hdc target 或设置 DSHM_HDC_TARGET"
   exit 2
 fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# 可通过 HDSH_HDC 指定 hdc；否则从 PATH 查找，避免绑定到某台机器的 SDK 路径。
-HDC="${HDSH_HDC:-}"
+# 可通过 DSHM_HDC 指定 hdc；否则从 PATH 查找，避免绑定到某台机器的 SDK 路径。
+HDC="${DSHM_HDC:-}"
 if [ -z "$HDC" ]; then
   HDC="$(command -v hdc 2>/dev/null || true)"
 fi
 if [ -z "$HDC" ]; then
-  echo "[ui-test-phone] FAIL: 未找到 hdc，请设置 HDSH_HDC 或将 hdc 加入 PATH"
+  echo "[ui-test-phone] FAIL: 未找到 hdc，请设置 DSHM_HDC 或将 hdc 加入 PATH"
   exit 1
 fi
 if command -v cygpath >/dev/null 2>&1; then
@@ -54,7 +54,7 @@ OUT="$ROOT/build/ui-test-phone"
 # dumpLayout 并拉回，返回 JSON 路径（失败返回空）
 dump_layout() {
   local tag="$1"
-  local remote="/data/local/tmp/hdsh_${tag}.json"
+  local remote="/data/local/tmp/dshm_${tag}.json"
   local local_f="$OUT/layout_${tag}.json"
   timeout 20 "$HDC" -t "$TARGET" shell "uitest dumpLayout -p $remote" >/dev/null 2>&1
   MSYS_NO_PATHCONV=1 timeout 15 "$HDC" -t "$TARGET" file recv "$remote" "$OUT_WIN/layout_${tag}.json" >/dev/null 2>&1
@@ -230,8 +230,8 @@ PYEOF
 # --- 1) 启动应用 ---
 echo "[ui-test-phone] 启动应用..."
 timeout 15 "$HDC" -t "$TARGET" shell hilog -r >/dev/null 2>&1
-timeout 15 "$HDC" -t "$TARGET" shell aa force-stop com.hdsh.agentic 2>/dev/null
-timeout 15 "$HDC" -t "$TARGET" shell aa start -a EntryAbility -b com.hdsh.agentic -m entry 2>&1 | tail -1
+timeout 15 "$HDC" -t "$TARGET" shell aa force-stop com.dshm.agentic 2>/dev/null
+timeout 15 "$HDC" -t "$TARGET" shell aa start -a EntryAbility -b com.dshm.agentic -m entry 2>&1 | tail -1
 
 # --- 2) 等待 DSH server 就绪 ---
 echo "[ui-test-phone] 等待 DSH server 就绪..."
@@ -266,8 +266,8 @@ for round in $(seq 1 "$ROUNDS"); do
   ROUND_OK=1
 
   # 4.1 截图
-  timeout 20 "$HDC" -t "$TARGET" shell "uitest screenCap -p /data/local/tmp/hdsh_ui_${TS}.png" >/dev/null 2>&1
-  MSYS_NO_PATHCONV=1 timeout 15 "$HDC" -t "$TARGET" file recv "//data/local/tmp/hdsh_ui_${TS}.png" "$OUT_WIN/ui_${TS}.png" >/dev/null 2>&1
+  timeout 20 "$HDC" -t "$TARGET" shell "uitest screenCap -p /data/local/tmp/dshm_ui_${TS}.png" >/dev/null 2>&1
+  MSYS_NO_PATHCONV=1 timeout 15 "$HDC" -t "$TARGET" file recv "//data/local/tmp/dshm_ui_${TS}.png" "$OUT_WIN/ui_${TS}.png" >/dev/null 2>&1
   if [ -f "$OUT/ui_${TS}.png" ]; then
     echo "[ui-test-phone] 截图: $OUT/ui_${TS}.png"
   else
@@ -314,8 +314,8 @@ echo "[ui-test-phone] === 回归检查（Bug 防复发）==="
 REGRESSION_OK=1
 
 # 4.5.1 grep 工具链路：部署文件必须同时保留 Buffer 转换和 ERE argv
-GF="$(timeout 15 "$HDC" -t "$TARGET" shell "cat /data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js 2>/dev/null | grep -c 'Buffer.isBuffer(stdout)'" | tr -d '\r')" 2>/dev/null
-GE="$(timeout 15 "$HDC" -t "$TARGET" shell "cat /data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js 2>/dev/null | grep -F -c 'args.push(\"-rn\", \"-E\", \"-e\", pattern, root)'" | tr -d '\r')" 2>/dev/null
+GF="$(timeout 15 "$HDC" -t "$TARGET" shell "cat /data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js 2>/dev/null | grep -c 'Buffer.isBuffer(stdout)'" | tr -d '\r')" 2>/dev/null
+GE="$(timeout 15 "$HDC" -t "$TARGET" shell "cat /data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js 2>/dev/null | grep -F -c 'args.push(\"-rn\", \"-E\", \"-e\", pattern, root)'" | tr -d '\r')" 2>/dev/null
 if [ "${GF:-0}" -ge 1 ] && [ "${GE:-0}" -ge 1 ]; then
   echo "[ui-test-phone] PASS: grep 工具 Buffer 强转与 ERE argv 已部署（grep bug 回归）"
 else
@@ -324,7 +324,7 @@ else
 fi
 
 # 4.5.2 dsh-terminal-bash：prompt 暗号必须为 __DSH_PERSISTENT_BASH_PROMPT__
-TBF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-terminal-bash/lib/index.js"
+TBF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-terminal-bash/lib/index.js"
 if timeout 15 "$HDC" -t "$TARGET" shell "grep -q '__DSH_PERSISTENT_BASH_PROMPT__' $TBF 2>/dev/null"; then
   echo "[ui-test-phone] PASS: terminal-bash 暗号已对齐（命令提速 bug 回归）"
 else
@@ -346,8 +346,8 @@ if [ -n "$JPC" ]; then
 fi
 
 # 4.5.5 bash cwd：部署后的 dsh-bash-local 必须带工作目录恢复补丁。
-BLF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-bash-local/lib/index.js"
-if timeout 15 "$HDC" -t "$TARGET" shell "grep -F -q 'HDSH 鸿蒙适配：spawn 前显式 cd' $BLF 2>/dev/null"; then
+BLF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-bash-local/lib/index.js"
+if timeout 15 "$HDC" -t "$TARGET" shell "grep -F -q 'DSHM 鸿蒙适配：spawn 前显式 cd' $BLF 2>/dev/null"; then
   echo "[ui-test-phone] PASS: bash cwd 恢复补丁已部署"
 else
   echo "[ui-test-phone] FAIL: bash cwd 恢复补丁未部署"
@@ -357,21 +357,21 @@ fi
 # 4.5.6 三个内置插件：市场、配置编辑器、移动端 UI 与 profile 迁移实现必须同时部署。
 # profile/package.json 位于应用私有 filesDir，HDC shell 无读取权限。用已部署的
 # dsh-app-boot 迁移实现和本轮“DSH server 就绪”共同验证，避免把权限拒绝误报为迁移失败。
-MPF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/dshmarket/lib/index.js"
-MPCF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/dshmarket/cordis.patch.yml"
-MCLI="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/dshmarket/lib/dsh-cli.js"
-MWORKER="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/dshmarket/lib/hdsh-dsh-plugin-worker.cjs"
-MPLUGIN="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/lib/plugin-9h8shc4d.js"
-MBF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js"
-MLF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@dsh-market/plugin"
-CEF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/hdsh-config-editor/lib/index.js"
-CEC="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/hdsh-config-editor/client/client.js"
-MNF="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@dsh-external/dsh-mobile-nav/lib/index.js"
-MNC="/data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@dsh-external/dsh-mobile-nav/lib/client.js"
-MARKET_PACKAGE="$(timeout 15 "$HDC" -t "$TARGET" shell "test -f $MPF && test -f $MPCF && test -f $MCLI && test -f $MWORKER && test -f $MPLUGIN && grep -F -q '\"pnpm\": \"10.6.3\"' /data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && grep -F -q '\"@earendil-works/pi-ai\": \"0.82.1\"' /data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && grep -F -q 'HDSH 鸿蒙适配：pnpm Worker 临时目录' $MPLUGIN && grep -F -q 'os.tmpdir = () => tempDir' $MPLUGIN && grep -F -q 'const bundledPnpmCli = join(process.cwd(), \"dsh\", \"node_modules\", \"pnpm\", \"dist\", \"pnpm.cjs\")' $MPLUGIN && grep -F -q 'HDSH 鸿蒙适配：dshmarket Worker CLI bridge v11' $MCLI && grep -F -q 'new Worker(workerPath, { workerData: { bin: dshBin, args }, stdout: true, stderr: true })' $MCLI && printf 1" | tr -d '\r')"
-BUILTIN_EDITOR="$(timeout 15 "$HDC" -t "$TARGET" shell "test -f $CEF && test -f $CEC && grep -F -q 'withFileLock' $CEF && grep -F -q 'writeFileAtomic' $CEF && grep -F -q 'id: \"hdsh-config-editor\"' $CEC && printf 1" | tr -d '\r')"
-BUILTIN_MOBILE="$(timeout 15 "$HDC" -t "$TARGET" shell "test -f $MNF && test -f $MNC && grep -F -q 'name\": \"@dsh-external/dsh-mobile-nav\"' /data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@dsh-external/dsh-mobile-nav/package.json && grep -F -q 'data-mobile-nav=\"frame\"' $MNC && printf 1" | tr -d '\r')"
-MARKET_MIGRATION="$(timeout 15 "$HDC" -t "$TARGET" shell "grep -F -c 'HDSH profile-managed market seed v2' $MBF && grep -F -q 'function seedProfilePackageClosure' $MBF && grep -F -q 'dependencyClosureVersion !== 2' $MBF && grep -F -q 'const profileManaged = packageName === \"dshmarket\" || packageName === \"@dsh-external/dsh-mobile-nav\"' $MBF && grep -F -q '\"hdsh-config-editor\": \"1.0.0\"' /data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && grep -F -q '\"@dsh-external/dsh-mobile-nav\": \"1.0.0\"' /data/app/el2/100/base/com.hdsh.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && test ! -e $MLF" | tr -d '\r')"
+MPF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/dshmarket/lib/index.js"
+MPCF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/dshmarket/cordis.patch.yml"
+MCLI="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/dshmarket/lib/dsh-cli.js"
+MWORKER="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/dshmarket/lib/dshm-dsh-plugin-worker.cjs"
+MPLUGIN="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/lib/plugin-9h8shc4d.js"
+MBF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js"
+MLF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@dsh-market/plugin"
+CEF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/dshm-config-editor/lib/index.js"
+CEC="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/dshm-config-editor/client/client.js"
+MNF="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@dsh-external/dsh-mobile-nav/lib/index.js"
+MNC="/data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@dsh-external/dsh-mobile-nav/lib/client.js"
+MARKET_PACKAGE="$(timeout 15 "$HDC" -t "$TARGET" shell "test -f $MPF && test -f $MPCF && test -f $MCLI && test -f $MWORKER && test -f $MPLUGIN && grep -F -q '\"pnpm\": \"10.6.3\"' /data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && grep -F -q '\"@earendil-works/pi-ai\": \"0.82.1\"' /data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && grep -F -q 'DSHM 鸿蒙适配：pnpm Worker 临时目录' $MPLUGIN && grep -F -q 'os.tmpdir = () => tempDir' $MPLUGIN && grep -F -q 'const bundledPnpmCli = join(process.cwd(), \"dsh\", \"node_modules\", \"pnpm\", \"dist\", \"pnpm.cjs\")' $MPLUGIN && grep -F -q 'DSHM 鸿蒙适配：dshmarket Worker CLI bridge v11' $MCLI && grep -F -q 'new Worker(workerPath, { workerData: { bin: dshBin, args }, stdout: true, stderr: true })' $MCLI && printf 1" | tr -d '\r')"
+BUILTIN_EDITOR="$(timeout 15 "$HDC" -t "$TARGET" shell "test -f $CEF && test -f $CEC && grep -F -q 'withFileLock' $CEF && grep -F -q 'writeFileAtomic' $CEF && grep -F -q 'id: \"dshm-config-editor\"' $CEC && printf 1" | tr -d '\r')"
+BUILTIN_MOBILE="$(timeout 15 "$HDC" -t "$TARGET" shell "test -f $MNF && test -f $MNC && grep -F -q 'name\": \"@dsh-external/dsh-mobile-nav\"' /data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@dsh-external/dsh-mobile-nav/package.json && grep -F -q 'data-mobile-nav=\"frame\"' $MNC && printf 1" | tr -d '\r')"
+MARKET_MIGRATION="$(timeout 15 "$HDC" -t "$TARGET" shell "grep -F -c 'DSHM profile-managed market seed v2' $MBF && grep -F -q 'function seedProfilePackageClosure' $MBF && grep -F -q 'dependencyClosureVersion !== 2' $MBF && grep -F -q 'const profileManaged = packageName === \"dshmarket\" || packageName === \"@dsh-external/dsh-mobile-nav\"' $MBF && grep -F -q '\"dshm-config-editor\": \"1.0.0\"' /data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && grep -F -q '\"@dsh-external/dsh-mobile-nav\": \"1.0.0\"' /data/app/el2/100/base/com.dshm.agentic/haps/entry/files/dsh/node_modules/@deepseek-ai/dsh/package.json && test ! -e $MLF" | tr -d '\r')"
 if [ "${MARKET_PACKAGE:-0}" -ge 1 ] && [ "${BUILTIN_EDITOR:-0}" -ge 1 ] && [ "${BUILTIN_MOBILE:-0}" -ge 1 ] && [ "${MARKET_MIGRATION:-0}" -ge 1 ]; then
   echo "[ui-test-phone] PASS: dshmarket、配置编辑器、dsh-web-mobile 与 profile 托管预装迁移已部署"
 else
@@ -381,7 +381,7 @@ fi
 
 # 4.5.4 ArkWeb DOM Storage：Release modules.abc 会删除方法名字符串，不能用
 # strings 反查配置。这里检查随本轮成功编译、安装的 ArkTS 源码配置。
-WEB_SOURCE="$ROOT/entry/src/main/ets/pages/hdsh/HdshWebPage.ets"
+WEB_SOURCE="$ROOT/entry/src/main/ets/pages/dshm/DshmWebPage.ets"
 DOM_STORAGE="$(grep -F -c '.domStorageAccess(true)' "$WEB_SOURCE" 2>/dev/null | tr -d '\r')"
 if [ "${DOM_STORAGE:-0}" -ge 1 ]; then
   echo "[ui-test-phone] PASS: ArkWeb DOM Storage 配置参与本轮构建（localStorage 回归）"
