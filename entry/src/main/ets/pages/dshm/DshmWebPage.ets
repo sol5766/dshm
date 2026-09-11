@@ -16,7 +16,7 @@
  */
 import { webview } from '@kit.ArkWeb';
 import { common, bundleManager } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
+import { window, uiMaterial } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -25,6 +25,14 @@ import { WorkspaceAccess } from '../../dshm/access/WorkspaceAccess';
 import { writeOhosInfo } from '../../dshm/access/OhosInfoBridge';
 import { DshmLogger } from '../../dshm/utils/Logger';
 import { StatusBarTray } from '../../dshm/system/StatusBarTray';
+import { ImmersiveMaterialUtil } from '../../dshm/ui/ImmersiveMaterialUtil';
+import {
+  BrewEnvProbe,
+  BrewEnvStatus,
+  BREW_INSTALL_CMD,
+  BREW_INSTALL_DSH_CMD,
+  BREW_UPGRADE_CMD
+} from '../../dshm/ui/BrewEnvProbe';
 
 const TAG: string = 'DshmWebPage';
 const HOME_URL: string = 'http://127.0.0.1:3080';
@@ -142,6 +150,18 @@ struct DshmWebPage {
   @State private modeOpen: boolean = false;
   @State private modeCurrent: string = 'auto';
   @State private modeActive: string = '';
+  // 沉浸光感能力（空间化 Spatial UI）：设备支持时顶栏等组件使用沉浸式系统材质，
+  // 否则回退传统实色/模糊。探测结果由 ImmersiveMaterialUtil 缓存。
+  @State private immersiveEnabled: boolean = false;
+  // 「运行环境」面板：Harmonybrew / node / dsh 状态与一键安装更新入口
+  @State private envOpen: boolean = false;
+  @State private envSummary: string = '';
+  @State private envStatus: BrewEnvStatus = {
+    brewInstalled: false,
+    nodeInstalled: false,
+    dshInstalled: false,
+    storageReadable: false
+  };
   // 启动加载页品牌动效：brandOpacity 负责淡入，brandBreath 负责常驻呼吸缩放。
   // 拆成两个属性是为了让两段动画作用于不同属性，避免同一属性被并发动画抢占。
   @State private brandOpacity: number = 0;
@@ -178,6 +198,9 @@ struct DshmWebPage {
 
   aboutToAppear(): void {
     webview.WebviewController.setWebDebuggingAccess(true);
+    // 沉浸光感能力探测（同步、带缓存）：必须在首帧前完成，避免顶栏材质闪烁。
+    this.immersiveEnabled = ImmersiveMaterialUtil.isUsable();
+    DshmLogger.info(TAG, ImmersiveMaterialUtil.describe());
     this.boot();
   }
 
@@ -813,6 +836,24 @@ struct DshmWebPage {
   }
 
   /**
+   * 展开终端并等待 pty 会话建立（供「运行环境」面板的一键命令使用）。
+   *
+   * `startTerminalSession` 内部是异步建会话 + 轮询，这里按会话 id 就绪为条件
+   * 做有限次等待，避免把命令发给尚不存在的会话。
+   */
+  private async openTerminal(): Promise<void> {
+    if (!this.terminalOpen) {
+      this.terminalOpen = true;
+      this.startTerminalSession();
+    }
+    for (let i = 0; i < 40 && this.termSid <= 0; i++) {
+      await new Promise<void>((resolve: () => void) => {
+        setTimeout(() => { resolve(); }, 150);
+      });
+    }
+  }
+
+  /**
    * 窗口: 最小化（后台运行，应用常驻，点击系统托盘图标即可打开）。
    *
    * 不用 `win.minimize()`：在 2in1 上实测该调用没有可见效果（窗口不收起）。
@@ -1185,11 +1226,46 @@ struct DshmWebPage {
     this.terminalOpen = false;
   }
 
+  /**
+   * 打开「运行环境」面板：重新探测 Harmonybrew 状态，保证每次打开都反映现状
+   * （用户可能刚在终端里装完 brew，或刚授予全盘文件访问）。
+   */
+  private openEnvPanel(): void {
+    this.envStatus = BrewEnvProbe.probe();
+    this.envSummary = BrewEnvProbe.describe(this.envStatus);
+    this.envOpen = true;
+  }
+
+  /**
+   * 在终端里执行一条环境安装/更新命令。
+   *
+   * 设计取舍：不做静默后台安装——Harmonybrew 安装脚本输出量大、耗时长且需要
+   * 用户看到进度与失败原因，因此把命令**送到已存在的 pty 会话**里执行，
+   * 并自动展开终端面板让用户实时观察。这样也避免 App 侧重复实现下载/解压逻辑。
+   */
+  private async runEnvCommand(cmd: string): Promise<void> {
+    this.envOpen = false;
+    if (!this.terminalOpen) {
+      await this.openTerminal();
+    }
+    if (this.termSid <= 0) {
+      this.showDialog('终端未就绪',
+        '无法连接到 pty 终端会话，请在「编辑 → 终端」中确认终端可用后重试。');
+      return;
+    }
+    this.termLines.push(this.termPrompt() + ' ' + cmd);
+    this.scrollTermBottom();
+    const body: WriteBody = { sid: this.termSid, text: cmd + '\n' };
+    await this.postJson(TERM_WRITE_ENDPOINT, body);
+    this.focusTermInput();
+  }
+
   // ============ 三下拉菜单数据 ============
 
   private harnessMenu(): Array<MenuElement> {
     return [
       { value: '主页', action: (): void => { this.goHome(); } },
+      { value: '运行环境（Harmonybrew）', action: (): void => { this.openEnvPanel(); } },
       { value: '关于版本', action: (): void => { this.showAboutVersions(); } },
       { value: '运行模式（宿主 / 内嵌）', action: (): void => { this.openModePanel(); } },
       { value: '检查 App 更新', action: (): void => { this.checkAppUpdate(); } },
@@ -1241,40 +1317,83 @@ struct DshmWebPage {
   MenuTitle(text: string, items: Array<MenuElement>) {
     Text(text)
       .fontSize(12)
-      .fontColor('#334155')
+      .fontColor(this.immersiveEnabled ? $r('sys.color.font_primary') : '#334155')
       .padding({ left: 5, right: 5, top: 1, bottom: 1 })
       .borderRadius(3)
       .bindMenu(items)
       .onClick(() => { /* bindMenu 点击弹出 */ })
   }
 
+  /** 运行环境面板的一行状态：名称 + 就绪指示。 */
+  @Builder
+  EnvRow(name: string, ready: boolean) {
+    Row() {
+      Text(ready ? '\u2713' : '\u2715')
+        .fontSize(12)
+        .fontColor(ready ? '#1a9e6a' : '#c0392b')
+        .width(18)
+      Text(name)
+        .fontSize(12)
+        .fontColor(this.immersiveEnabled ? $r('sys.color.font_primary') : '#1c2430')
+        .layoutWeight(1)
+      Text(ready ? '已就绪' : '未安装')
+        .fontSize(11)
+        .fontColor(ready ? '#1a9e6a' : '#94a3b8')
+    }
+    .width('100%')
+    .height(26)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /**
+   * 顶栏（沉浸光感版）。
+   *
+   * 空间化（Spatial UI）落地：顶栏改为悬浮于内容之上的沉浸式材质层，
+   * 而非贴边实色条。设备支持时使用 `uiMaterial.ImmersiveMaterial`
+   * （超薄样式 + 交互形变 + 光感反馈），不支持时回退为带底部描边的实色顶栏
+   * ——与 EntryAbility 隐藏系统标题栏后的窗口按钮可读性要求兼容。
+   *
+   * 材质生效时不再设置 backgroundColor：沉浸式材质会把背景色恢复为透明色
+   * （官方 ImmersiveMaterial 说明），实色会遮挡材质滤镜效果。
+   */
+  @Builder
+  TopBar() {
+    Row() {
+      Image($r('app.media.logo_dark'))
+        .width(16)
+        .height(16)
+        .borderRadius(3)
+      Text('DeepSeek')
+        .fontSize(12)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(this.immersiveEnabled ? $r('sys.color.font_primary') : '#1c2430')
+        .margin({ left: 6, right: 12 })
+      this.MenuTitle('Harness', this.harnessMenu())
+      this.MenuTitle('编辑', this.editMenu())
+      this.MenuTitle('窗口', this.windowMenu())
+      Blank()
+    }
+    .width('100%')
+    .height(TOP_BAR_HEIGHT)
+    .padding({ left: 10, right: 4 })
+    .alignItems(VerticalAlign.Center)
+    .backgroundColor(this.immersiveEnabled ? undefined : '#ffffff')
+    .border(this.immersiveEnabled
+      ? { width: { bottom: 0 }, color: Color.Transparent }
+      : { width: { bottom: 1 }, color: '#e4e7ec' })
+    .systemMaterial(this.immersiveEnabled
+      ? new uiMaterial.ImmersiveMaterial({
+        style: uiMaterial.ImmersiveStyle.ULTRA_THIN,
+        interactive: true,
+        lightEffect: { color: undefined }
+      })
+      : undefined)
+  }
+
   build() {
     Column() {
-      // 顶栏：品牌 + 三菜单 —— 全部同一条水平线。
-      // 底色取白：EntryAbility 隐藏了系统标题栏，系统窗口按钮（最小化/最大化/
-      // 关闭）会浮在顶栏右端，系统按浅色模式绘制深色图标，深色底会让它们完全看不见。
-      // 因此顶栏用浅色主题：白底 + 深色 logo + 深色文字。
-      Row() {
-        Image($r('app.media.logo_dark'))
-          .width(16)
-          .height(16)
-          .borderRadius(3)
-        Text('DeepSeek')
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#1c2430')
-          .margin({ left: 6, right: 12 })
-        this.MenuTitle('Harness', this.harnessMenu())
-        this.MenuTitle('编辑', this.editMenu())
-        this.MenuTitle('窗口', this.windowMenu())
-        Blank()
-      }
-      .width('100%')
-      .height(TOP_BAR_HEIGHT)
-      .padding({ left: 10, right: 4 })
-      .backgroundColor('#ffffff')
-      .alignItems(VerticalAlign.Center)
-      .border({ width: { bottom: 1 }, color: '#e4e7ec' })
+      // 顶栏：沉浸光感材质，见 TopBar() 实现。
+      this.TopBar()
 
       // 内容区：Web + 右侧终端边栏
       Row() {
@@ -1419,8 +1538,13 @@ struct DshmWebPage {
                   Button('关闭')
                     .fontSize(12)
                     .height(30)
-                    .backgroundColor('#1c2430')
-                    .fontColor('#ffffff')
+                    .backgroundColor(this.immersiveEnabled ? undefined : '#1c2430')
+                    .buttonStyle(this.immersiveEnabled
+                      ? ButtonStyleMode.EMPHASIZED
+                      : ButtonStyleMode.NORMAL)
+                    .fontColor(this.immersiveEnabled
+                      ? $r('sys.color.font_on_primary')
+                      : '#ffffff')
                     .onClick((): void => {
                       this.modeOpen = false;
                     })
@@ -1432,9 +1556,140 @@ struct DshmWebPage {
               .width(520)
               .padding(20)
               .alignItems(HorizontalAlign.Start)
-              .backgroundColor('#ffffff')
-              .borderRadius(12)
-              .border({ width: 1, color: '#e4e7ec' })
+              .backgroundColor(this.immersiveEnabled ? undefined : '#ffffff')
+              .borderRadius(20)
+              .border(this.immersiveEnabled
+                ? { width: 0, color: Color.Transparent }
+                : { width: 1, color: '#e4e7ec' })
+              // 空间化：面板卡片使用沉浸式材质（厚样式，保证正文可读性），
+              // 不可用时回退为传统不透明白卡。
+              .systemMaterial(this.immersiveEnabled
+                ? new uiMaterial.ImmersiveMaterial({
+                  style: uiMaterial.ImmersiveStyle.THICK,
+                  interactive: false,
+                  lightEffect: null
+                })
+                : undefined)
+            }
+            .width('100%')
+            .height('100%')
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .backgroundColor('#66000000')
+          }
+
+          // 运行环境面板：Harmonybrew 状态 + 一键安装/更新（命令送入 pty 终端执行）
+          if (this.envOpen) {
+            Column() {
+              Column() {
+                Text('运行环境')
+                  .fontSize(16)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.immersiveEnabled ? $r('sys.color.font_primary') : '#1c2430')
+                  .width('100%')
+                  .textAlign(TextAlign.Start)
+                Text(this.envSummary)
+                  .fontSize(11)
+                  .fontColor('#64748b')
+                  .width('100%')
+                  .textAlign(TextAlign.Start)
+                  .margin({ top: 4, bottom: 12 })
+
+                this.EnvRow('Harmonybrew', this.envStatus.brewInstalled)
+                this.EnvRow('原生 node（插件安装依赖）', this.envStatus.nodeInstalled)
+                this.EnvRow('deepseek-harness（宿主模式）', this.envStatus.dshInstalled)
+                this.EnvRow('全盘文件访问', this.envStatus.storageReadable)
+
+                Text('沉浸光感：' + (this.immersiveEnabled ? '已启用（系统自适应材质）' : '当前设备不支持'))
+                  .fontSize(11)
+                  .fontColor('#94a3b8')
+                  .width('100%')
+                  .textAlign(TextAlign.Start)
+                  .margin({ top: 10 })
+
+                // 一键操作：命令送入终端执行，用户可实时看到安装进度与报错
+                Row() {
+                  if (!this.envStatus.brewInstalled) {
+                    Button('一键安装 Harmonybrew')
+                      .fontSize(12)
+                      .height(32)
+                      .backgroundColor('#1c2430')
+                      .fontColor('#ffffff')
+                      .onClick((): void => {
+                        this.showDialogWithConfirm('安装 Harmonybrew',
+                          '将在终端中执行官方安装脚本：\n\n' + BREW_INSTALL_CMD +
+                            '\n\n安装过程中请在终端面板查看进度。确定继续吗？',
+                          '开始安装', (): void => {
+                            this.runEnvCommand(BREW_INSTALL_CMD);
+                          });
+                      })
+                  } else {
+                    if (!this.envStatus.dshInstalled) {
+                      Button('安装 deepseek-harness')
+                        .fontSize(12)
+                        .height(32)
+                        .backgroundColor('#1c2430')
+                        .fontColor('#ffffff')
+                        .margin({ right: 8 })
+                        .onClick((): void => {
+                          this.runEnvCommand(BREW_INSTALL_DSH_CMD);
+                        })
+                    }
+                    Button('更新运行时')
+                      .fontSize(12)
+                      .height(32)
+                      .backgroundColor('#eef2f7')
+                      .fontColor('#1c2430')
+                      .onClick((): void => {
+                        this.runEnvCommand(BREW_UPGRADE_CMD);
+                      })
+                  }
+                  Blank()
+                  Button('重新检测')
+                    .fontSize(12)
+                    .height(32)
+                    .backgroundColor('#eef2f7')
+                    .fontColor('#1c2430')
+                    .onClick((): void => {
+                      this.envStatus = BrewEnvProbe.probe();
+                      this.envSummary = BrewEnvProbe.describe(this.envStatus);
+                    })
+                  Button('关闭')
+                    .fontSize(12)
+                    .height(32)
+                    .backgroundColor('#1c2430')
+                    .fontColor('#ffffff')
+                    .margin({ left: 8 })
+                    .onClick((): void => {
+                      this.envOpen = false;
+                    })
+                }
+                .width('100%')
+                .margin({ top: 16 })
+
+                Text('宿主模式（Harmonybrew）提供原生 node、JIT 与完整插件能力；' +
+                  '内嵌运行时为无 brew 时的兜底方案（jitless，部分插件不可用）。')
+                  .fontSize(11)
+                  .fontColor('#94a3b8')
+                  .width('100%')
+                  .textAlign(TextAlign.Start)
+                  .margin({ top: 12 })
+              }
+              .width(560)
+              .padding(20)
+              .alignItems(HorizontalAlign.Start)
+              .backgroundColor(this.immersiveEnabled ? undefined : '#ffffff')
+              .borderRadius(20)
+              .border(this.immersiveEnabled
+                ? { width: 0, color: Color.Transparent }
+                : { width: 1, color: '#e4e7ec' })
+              .systemMaterial(this.immersiveEnabled
+                ? new uiMaterial.ImmersiveMaterial({
+                  style: uiMaterial.ImmersiveStyle.THICK,
+                  interactive: false,
+                  lightEffect: null
+                })
+                : undefined)
             }
             .width('100%')
             .height('100%')

@@ -3,6 +3,7 @@
     "products": [
       {
         "name": "default",
+        "signingConfig": "default",
         "targetSdkVersion": "26.0.0",
         "compatibleSdkVersion": "26.0.0",
         "runtimeOS": "HarmonyOS",
@@ -23,7 +24,21 @@
         "name": "release"
       }
     ],
-    "signingConfigs": []
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BBE73F8ED364BD4C4BAED4414B8BD97971FF7DD16944CF39B9A8080083D5ACE0D91FCD16C31C6F9",
+          "profile": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.p12",
+          "storePassword": "0000001B0F5498A3F3F1775BC913071B9DA6CAF66142E3AF6206BFCE58B26E577DCAE30F8EC5950DE411F2"
+        }
+      }
+    ]
   },
   "modules": [
     {
