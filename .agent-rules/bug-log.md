@@ -646,3 +646,17 @@
 - **验证**：`ENV_VERSION=20260911-107` 覆盖安装后，**内嵌模式**（`runtime-mode.txt=embedded`）启动到 token URL **11.4s**，`SIGNAL=0`、`ERR_MODULE_NOT_FOUND=0`，3080 LISTEN，首页 HTTP 200（28,370B，`dshm-config-editor`×5、`hdsh`×0）；自检输出 `扫描 284 个 package.json，缺失运行时入口 0 个`。
 - **教训**：①按「路径关键字」删文件必须先自问"这名字是平台产物还是逻辑分支"；②裁剪任何运行环境后，**必须做入口级自检**，不能只看几个关键文件；③验证要在**真正会跑那条路的模式**下做（host 正常不代表 embedded 正常）。
 - **状态**：✅ 已修复（env 110.7MB / 12,485 文件；HAP 238.3MB）
+
+### [2026-09-11 续七] ⚠️ 修正核心假设：「沙箱 W^X → 必须 jitless」实为「无 JIT 类 ACL 权限才必须」
+
+- **触发**：用户指出 WorkBuddy 在同一台鸿蒙 PC 上跑 Electron 37.2（Chromium 138 / Node 22.17，**带 V8 JIT**），质疑我们"沙箱禁 JIT"的结论。
+- **实测**（2in1 86E0226429000417）：
+  - WorkBuddy 进程树含 4 个 `electron` 进程（daemon / sidecar headless / edge-sync 扩展），argv[0] = `/data/storage/el1/bundle/libs/arm64/electron`（独立 ELF 打进 HAP，Electron 还是独立 feature HAP：`hapPath=…/electron.hap`、`entryModuleName=electron`）；**命令行无 `--jitless`**；
+  - `bm dump` 权限对比：WorkBuddy 有 **`ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE`**（我们没有），分发属性 `app_gallery` + release 签名；
+  - 我们 2026-09-08 的 jitless 结论是在**无该权限的本机签名**下得出的；当时 V8 Fatal 混杂了加载期 TLS/链接问题（已由 libnode DT_NEEDED 修复）与 JIT 内存拦截，从未在持权限签名下验证过裸 JIT。
+- **结论**：禁不禁 JIT 取决于**签名 profile 里的受限 ACL 权限**（AGC 审批），不是沙箱一刀切。jitless 仍是"未持有权限时"的正确回退。
+- **落地**：`docs/workbuddy-runtime-analysis.md`（完整证据 + 三条路线）：
+  - 路线 A（中期）：AGC 申请 JIT 类 ACL 权限 + dsh_host.cpp 做「JIT 探测成功即开 JIT、失败回退 jitless」的运行时开关（预期内嵌启动 13.6s → 6–8s，WASM/undici 原生 fetch 回归）；
+  - 路线 B（现状，已验证）：auto 优先宿主 dsh（Harmonybrew node 26.8.1 带 JIT，4.7s），内嵌 jitless 兜底；
+  - 路线 C（长期可选）：参考 WorkBuddy 把 libnode+env 拆独立 feature HAP（配合恢复在线更新；注意拆模块本身不给 JIT 权限）。
+- **状态**：✅ 已定位并文档化；路线 A 涉及 AGC 审批流程，待用户决策

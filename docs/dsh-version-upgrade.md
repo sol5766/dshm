@@ -167,6 +167,7 @@ bash scripts/prepare-dsh-env.sh 0.1.5-rc.1      # 版本号按需
 | host | `/storage/Users/currentUser/.harmonybrew/bin/dsh` | 系统 node（有 JIT） | `/storage/Users/currentUser` | `/storage/Users/currentUser/.dsh/` |
 | embedded | HAP 内置 `rawfile/dsh`（`--jitless`） | 内置 `libnode.so.137` | `<filesDir>/home` | `<filesDir>/home/.dsh/` |
 
+> 💡 为什么 embedded 必须 --jitless、而 WorkBuddy 的 Electron 能跑 JIT？——差别在签名 profile 里的受限权限 ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE（AGC 审批）。取证与三条路线（含 JIT 探测自动回退方案）见 docs/workbuddy-runtime-analysis.md。
 > ⚠️ 所以在模式之间切换后界面上的会话会"消失"（其实在另一套库里）。排查会话/配置问题时，
 > **先 `cat <filesDir>/runtime-mode-active.txt`**；实测宿主模式冷启动约 4.5s，内嵌模式约 11–12s。
 ### 步骤 6：真机验收清单
