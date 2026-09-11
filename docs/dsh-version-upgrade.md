@@ -54,6 +54,18 @@ $env:PATH='C:\Program Files\Huawei\DevEco Studio\jbr\bin;'+$env:PATH
 $env:JAVA_TOOL_OPTIONS='-Xms16m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:ReservedCodeCacheSize=64m'  # 防 SignHap OOM
 ```
 
+### 步骤 0.5：确认远端仓库地址
+
+本仓库 remote 已迁到 **GitHub `sol5766/dshm`**（2026-09-11）。本机 `github.com:443` **直连不通**，需走本机代理：
+
+```powershell
+$env:HTTPS_PROXY='http://127.0.0.1:7897'; $env:HTTP_PROXY='http://127.0.0.1:7897'
+git push origin <branch>
+```
+
+> - 环境资产（`dist/env/*.zip`）在 `.gitignore` 中，不随仓库分发；发布走 **GitHub Release 附件**（tag `env-<version>`）。
+> - GitHub 上的 `main` 是**另一条实现线**（「外部 dsh 接入壳」，`bundleName=com.dshm.dshclient`，提交止于 2026-09-02 v1.1.0）；「内嵌运行时」这条线在 `embedded-runtime` 分支，两者**无共同祖先**，改动前先确认要动哪条线。
+
 ### 步骤 1：取新版 dsh 产物
 
 - **源**：`npmmirror`（`https://registry.npmmirror.com`）与 **GitCode**（国内可达）。GitHub 直连/gh-proxy 在本机实测不可靠，已从 `scripts/env-asset-sources.json` 里禁用。
