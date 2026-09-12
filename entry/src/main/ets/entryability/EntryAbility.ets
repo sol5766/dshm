@@ -12,7 +12,7 @@
  *   - 应用内「窗口 → 关闭窗口」或托盘右键"退出" → 真正退出（摘托盘 + 结束
  *     主 Ability，node 服务随进程回收）。
  */
-import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, ConfigurationConstant, UIAbility, Want, abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
 import { setContext, clearContext, DshmAbilityContextLike } from '../GlobalContext';
@@ -21,7 +21,34 @@ import { StatusBarTray, MENU_CODE_EXIT } from '../dshm/system/StatusBarTray';
 
 const TAG: string = 'EntryAbility';
 
+/**
+ * 需要在启动时向用户申请/引导开启的权限。
+ *
+ * - `ACCESS_USER_FULL_DISK`：BrewDSH 的**核心依赖**。Harmonybrew 装在
+ *   `~/.harmonybrew`、工作区默认也是个人文件夹，没有它 App 读不到
+ *   `/storage/Users/currentUser`（运行环境面板全显示未安装、工作区选不到
+ *   个人文件夹、hostDsh 永远 missing）。属 `manual_settings` 类型：
+ *   profile 只给「资格」，**必须由用户在系统设置里手动开启**。
+ * - `READ_WRITE_USER_FILE` / `FILE_ACCESS_PERSIST`：个人文件读写与持久授权。
+ * - `ALLOW_EXTERNAL_NATIVE_CODE`：执行包内签名的原生二进制（busybox、pty helper）。
+ * - `CUSTOM_SANDBOX`：沙箱放宽，pty 终端 fork/exec 依赖它。
+ *
+ * 这些权限无法用 `requestPermissionsFromUser` 弹窗申请（非 user_grant 类型），
+ * 只能用 `openPermissionOnSetting` 引导用户到系统设置页开启。
+ */
+const RUNTIME_PERMISSIONS: Array<Permissions> = [
+  'ohos.permission.ACCESS_USER_FULL_DISK',
+  'ohos.permission.CUSTOM_SANDBOX',
+  'ohos.permission.READ_WRITE_USER_FILE',
+  'ohos.permission.FILE_ACCESS_PERSIST',
+  'ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE'
+];
+
 export default class EntryAbility extends UIAbility {
+  /**
+   * 是否已发起过权限引导（每次进程生命周期只引导一轮，避免反复弹设置页）。
+   */
+  private hasRequestedRuntimePermissions: boolean = false;
   /**
    * 是否处于"用户主动退出"流程。为 true 时 onPrepareToTerminate 放行，
    * 否则系统关闭动作一律按"隐藏到托盘常驻"处理。
@@ -86,6 +113,58 @@ export default class EntryAbility extends UIAbility {
     // 兜底：无论从 Dock、任务栏还是托盘唤回，都确保主窗口真的显示出来
     //（窗口被 hideAbility 隐藏后，仅回前台不会自动取消隐藏）。
     this.ensureWindowShown();
+    // 运行时权限引导：缺 ACCESS_USER_FULL_DISK 会让整个 Harmonybrew 集成失效，
+    // 因此在每次进入前台时检查并引导（每进程只引导一轮）。
+    this.ensureRuntimePermissions();
+  }
+
+  /**
+   * 检查运行时权限并引导用户开启。
+   *
+   * `ACCESS_USER_FULL_DISK` / `CUSTOM_SANDBOX` 等属受限权限，**不是**
+   * `user_grant` 类型，无法用 `requestPermissionsFromUser` 弹窗申请；
+   * 只能通过 `openPermissionOnSetting` 拉起系统级的权限设置页让用户手动开启。
+   *
+   * 检查用 `checkAccessTokenSync`（同步、无弹窗），已授予的权限不重复引导；
+   * 只对**未授予**的权限调用一次设置页跳转（多个未授予权限时系统会在同一
+   * 设置页内呈现，无需逐个跳转）。
+   */
+  private ensureRuntimePermissions(): void {
+    if (this.hasRequestedRuntimePermissions) {
+      return;
+    }
+    this.hasRequestedRuntimePermissions = true;
+    try {
+      const atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
+      const tokenId: number = this.context.applicationInfo.accessTokenId;
+      let firstMissing: Permissions | null = null;
+      for (let i = 0; i < RUNTIME_PERMISSIONS.length; i++) {
+        const permission: Permissions = RUNTIME_PERMISSIONS[i];
+        try {
+          const status: abilityAccessCtrl.GrantStatus =
+            atManager.checkAccessTokenSync(tokenId, permission);
+          const granted: boolean = (status === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED);
+          DshmLogger.info(TAG, '权限 ' + permission + (granted ? ' 已授予' : ' 未授予'));
+          if (!granted && firstMissing === null) {
+            firstMissing = permission;
+          }
+        } catch (e) {
+          DshmLogger.warn(TAG, '检查权限 ' + permission + ' 失败: ' + String(e));
+        }
+      }
+      if (firstMissing !== null) {
+        DshmLogger.info(TAG, '引导用户开启权限: ' + firstMissing);
+        atManager.openPermissionOnSetting(this.context, firstMissing)
+          .then((): void => {
+            DshmLogger.info(TAG, '权限设置页已关闭');
+          })
+          .catch((err: BusinessError): void => {
+            DshmLogger.warn(TAG, '打开权限设置页失败: ' + String(err.code) + ' ' + err.message);
+          });
+      }
+    } catch (e) {
+      DshmLogger.warn(TAG, '运行时权限检查失败（跳过）: ' + String(e));
+    }
   }
 
   /** 确保主窗口处于显示状态（已显示时忽略报错）。 */
