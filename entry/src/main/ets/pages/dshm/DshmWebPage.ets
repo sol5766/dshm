@@ -1054,13 +1054,19 @@ struct DshmWebPage {
           this.termSid = payload.sid;
           this.termPty = payload.pty === true;
           this.termConnected = true;
-          this.termShell = payload.shell ?? '';
+          // 只取可执行文件名（如 "zsh"），完整路径又长又没有交互价值
+          // （实测会显示 "/storage/Users/currentUser/.harmonybrew/bin/zsh"）。
+          const shellRaw: string = payload.shell ?? '';
+          const slashAt: number = shellRaw.lastIndexOf('/');
+          this.termShell = slashAt >= 0 ? shellRaw.substring(slashAt + 1) : shellRaw;
           this.termUser = payload.user ?? '';
           this.termHost = payload.host ?? '';
           this.termCwd = payload.cwd ?? '';
-          const shellName: string = payload.shell ?? 'zsh';
-          this.termLines = ['DeepSeek Harness 终端 · ' + shellName +
-            (this.termPty ? '（pty）' : '（管道回退）') + '。输入命令，回车执行。'];
+          // 横幅极简：模式已由标题栏徽标表达（pty/pipe），shell 名只取文件名。
+          const shellRaw2: string = payload.shell ?? 'zsh';
+          const slashAt2: number = shellRaw2.lastIndexOf('/');
+          const shellName: string = slashAt2 >= 0 ? shellRaw2.substring(slashAt2 + 1) : shellRaw2;
+          this.termLines = ['终端已连接 · ' + shellName + '。输入命令，回车执行。'];
           this.startPoll();
           this.focusTermInput();
           return;
@@ -1107,11 +1113,36 @@ struct DshmWebPage {
     }
   }
 
-  /** 移除终端输出中的 ANSI 转义序列（仅显示文本，保色码丢弃）。 */
+  /**
+   * 清理终端输出为纯文本（仅显示用，丢弃所有控制序列）。
+   *
+   * 管道回退模式下 shell 不经过 pty 的行规程，大量非 CSI 控制序列会泄漏进
+   * 输出流（2026-09-12 实测）：
+   *   - OSC 9278 序列：`\u001b]9278;f;{"event": "SetupComplete"}\u0007`
+   *     （ArkWeb 桥接的 viewport 标记，终端里纯属噪音）；
+   *   - zsh 的粗体/反显提示符：`\u001b[1m\u001b[7m%\u001b[27m\u001b[0m`；
+   *   - 其它 CSI（色码/光标）与 OSC 标题设置等。
+   *
+   * 原 stripAnsi 只匹配 `\u001b[...` 形式的 CSI，对 OSC（`\u001b]...` 终止于
+   * BEL 或 ST）与独立 BEL 字符不生效，导致用户看到 `"SetupComplete"}` 这类
+   * 半截 JSON。这里统一处理四类：CSI、OSC(BEL/ST 终止)、独立 BEL、其余 C0
+   * 控制符（保留 \n \r \t）。
+   */
   private stripAnsi(s: string): string {
+    let out: string = s;
+    // 1) OSC 序列：ESC ] ... 终止于 BEL(\x07) 或 ST(ESC \)
     // eslint-disable-next-line no-control-regex
-    const re = /\u001b\[[0-9;?]*[A-Za-z]/g;
-    return s.replace(re, '');
+    out = out.replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '');
+    // 2) CSI 序列：ESC [ ... 参数字节 + 终止字母
+    // eslint-disable-next-line no-control-regex
+    out = out.replace(/\u001b\[[0-9;?<>=! ]*[A-Za-z@`]/g, '');
+    // 3) 独立 BEL（OSC 被截断时残留）
+    // eslint-disable-next-line no-control-regex
+    out = out.replace(/\u0007/g, '');
+    // 4) 其余 C0 控制符（保留 \n \r \t）
+    // eslint-disable-next-line no-control-regex
+    out = out.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    return out;
   }
 
   /**
