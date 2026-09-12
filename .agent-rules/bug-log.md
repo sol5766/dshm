@@ -23,6 +23,33 @@
 
 ## Bug 列表（新→旧）
 
+### [2026-09-12] 宿主模式「运行环境探测」与「工作区选择」异常（调查中）
+- **现象 A**：`/dshm-admin/version` 返回 `{"ok":false,"message":"未找到 DSH 环境根"}`。
+- **根因 A（已修）**：`dshm-terminal` 的 `resolveDshRoot()` 四个候选路径全部假设「HOME 在 `<filesDir>/home`」；宿主模式 HOME 改指个人文件夹（`/storage/Users/currentUser`）后全部 miss。修复：`dsh_host.cpp` 导出 `DSHM_FILES_DIR` 环境变量，`resolveDshRoot` 增加最高优先级候选 `DSHM_FILES_DIR/dsh`；插件版本 1.0.11→1.0.12 触发镜像更新。已验证：`~/.dsh` 副本为 1.0.12、`DSHM_FILES_DIR` 已传到宿主进程、判据文件齐全。
+- **现象 B**：主页点「添加工作区」无法选择工作区。
+- **机制 B（已查明）**：dsh 前端是 client-modules 架构，「添加工作区」由 `@deepseek-ai/dsh-client-ui-directory-picker-browse` 实现（浏览文件树选目录，API 驱动，非系统 picker）；数据源为 `dsh-api-workspace-files` / `dsh-api-workspace-controller`，服务端读 workspace root 目录树。宿主模式 workspace root = `libdsh_host chdir` 的个人文件夹。
+- **待办 B**：从 client.js 找到真实 browse API 路径；设备上复现点击行为并抓请求；按根因修复。
+- **状态**：🟡 A 已修复待回归；B 调查中
+
+### [2026-09-12] 终端输出乱码（OSC 泄漏 + zshrc 报错）与「会话启动失败」（405）
+- **现象 1**：打开终端最前面一堆乱码——`"SetupComplete"}` 半截 JSON、`[1m[7m%` 等；横幅显示完整 shell 路径非常啰嗦。
+- **根因 1**：旧 `stripAnsi` 只匹配 CSI（`ESC[...字母`）；管道回退模式下 zsh 输出中的 OSC 序列（`ESC]9278;f;{...}BEL`，ArkWeb 桥接 viewport 标记）与独立 BEL 不被过滤。
+- **修复 1**：`stripAnsi` 重写为四类过滤（OSC-BEL/ST、CSI、独立 BEL、其余 C0 控制符，保留换行回车制表）；`termShell` 只取文件名；启动横幅极简。
+- **现象 2**：`.zshrc:225 brew: bad interpreter: /usr/bin/zsh`。
+- **根因 2**：Harmonybrew 的 brew 脚本 shebang 为 `#!/usr/bin/zsh`，沙箱内不存在；`eval "brew shellenv"` 必触发。**App 侧不可修，需上游调整 shebang**。
+- **修复 2（设备侧一次性）**：恢复 `.zshrc.bak-dshm` → 删除 225 行裸 eval → 末尾追加直接 `export PATH`（等价 shellenv 的 PATH 部分）→ `zsh -n` 校验 RC:0。修复过程踩坑：sed 中间插入曾把 guard 行插进函数定义内部导致 165 行 parse error（用 `head -N | zsh -n` 二分 + md5 对比定位），最终改为「恢复备份 + 末尾追加」。
+- **验证**：新会话启动输出仅剩一行提示符；node v26.8.1 正常执行。
+- **状态**：✅ 已修复（brew shebang 遗留归上游）
+
+### [2026-09-12] 宿主模式终端「会话启动失败」（/dshm-terminal/start 405）
+- **现象**：宿主模式（Harmonybrew dsh）下终端面板报「会话启动失败」，`POST /dshm-terminal/start` 返回 **405 Method Not Allowed**；内嵌模式同端点正常。
+- **根因**：`dsh-app-boot` 的 profile bundle 机制要求**两步缺一不可**：
+  1. 模块可达：插件目录位于 `$DSH_HOME/profiles/node_modules/`；
+  2. **显式声明**：插件名列在 `$DSH_HOME/profiles/web/package.json` 的 `dsh.profile.bundles` 数组里。
+  只放 node_modules 不写 bundles 列表**不会被加载**。内嵌环境靠适配脚本改 `dsh-app-boot` 源码的 `PROFILE_TEMPLATES.web.bundles` 实现；宿主模式改不了 brew 源码。
+- **修复**：新增 `DshBootstrap.ensureHostModeTerminal()`：镜像 `dshm-terminal`/`dshm-ohos-settings`/`dshm-config-editor` 到 `~/.dsh/profiles/node_modules`，并生成/合并 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`（保留官方 bundle 顺序与 `patchReload`，去重追加，见 `mergeWebProfileBundles`）；同时创建 profile patch 层 `cordis.patch.yml`。另加 `host-plugin-diag.txt` 诊断文件（hilog 抓不到时用 hdc 回读）。
+- **验证**：pty start 405 → **200**，sid 分配正常，zsh 提示符出现（`localhost ~ %`）。
+- **状态**：✅ 已修复
 ### [2026-09-12] 顶栏改用沉浸光感后菜单文字与系统窗口按钮全部不可见
 - **现象**：顶栏加 `systemMaterial(ImmersiveMaterial)` 后，用户反馈「状态栏上菜单的字儿和右上角的三个按钮整的啥都看不到了」。dumpLayout 确认文字节点**存在且 bounds 正常**（`DeepSeek/Harness/编辑/窗口` 在 y≈322-386），属"看得见节点、看不见内容"。
 - **根因**：`EntryAbility.onWindowStageCreate` 调用了 `setWindowDecorVisible(false)` 隐藏系统标题栏，系统的 最小化/最大化/关闭 三个按钮**浮在应用顶栏之上**，由系统按浅色模式画**深色图标**。顶栏改用沉浸式材质后 `backgroundColor: undefined` —— 官方 `ImmersiveMaterial` 说明明确「systemMaterial 属性生效后已设置的背景色会被恢复为透明色」，于是顶栏变半透明，深色文字与深色系统按钮图标同时落在"透明底 + Web 内容"上，对比度崩溃。

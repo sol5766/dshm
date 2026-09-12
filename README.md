@@ -1,21 +1,25 @@
-# DSHM
+# BrewDSH
 
-DSHM 是面向 HarmonyOS Next 的 DSH（DeepSeek Harness）运行环境实现。应用在系统沙箱中加载 DSH 运行时、busybox 与 pnpm 环境，启动本地 DSH Web 服务后，通过 ArkWeb 加载 `http://127.0.0.1:3080`。
+BrewDSH 是面向 HarmonyOS Next 的 DeepSeek Harness 客户端（**Harmonybrew 桥接路线**）：
+运行时由 [Harmonybrew](https://harmonybrew.atomgit.com/) 提供（`brew install deepseek-harness`，
+原生 node + JIT），App 提供图形壳、会话管理与内嵌 jitless 兜底环境。
+
+姊妹项目 `dsh-OHDSH` 为内置运行时路线（整环境打包进 HAP），见其仓库 tag `embedded-runtime-complete`。
 
 ## 当前状态
 
-- `EntryAbility` 加载 `pages/dshm/DshmWebPage`，完成 DSH 环境解压 → busybox 就绪 → native 子进程启动 DSH web server → ArkWeb 加载 WebUI 的端到端闭环
-- **两种运行模式**（Harness → 运行模式，写在 `<filesDir>/runtime-mode.txt`）：
-  - `auto`（默认）：设备上存在 Harmonybrew 版 dsh 时**优先用宿主 dsh**（系统 node，启动约 **9s**）
-  - `host`：强制宿主 dsh（`~/.harmonybrew/bin/dsh`）
-  - `embedded`：用 HAP 内置 `libnode` + `rawfile/dsh` 环境，`--jitless`（启动约 **11.4s**）
-  - ⚠️ 两种模式的 `$DSH_HOME` 不同（host = `/storage/Users/currentUser`、embedded = `<filesDir>/home`），**会话库互不可见** —— 排查"会话没了"先看 `runtime-mode-active.txt`
-- 内置 busybox 兜底 applet：ash/bash/hush、bzip2/xz、hexdump、less、nc、unzip、vi（其余由系统 toybox 补齐）
-- 内置 pnpm，插件安装通过同进程 Worker 桥接执行
-- 工作区目录授权 + 持久授权，可同步到应用沙盒 workspace
-- **App 内无在线升级**：菜单只有本地功能（主页 / 关于版本 / 运行模式 / 检查 App 更新 / 重置运行环境 / 重启服务，编辑菜单含刷新与 zsh 终端）；升级 dsh 版本 = 重建环境 + 装新 HAP，见 [docs/dsh-version-upgrade.md](docs/dsh-version-upgrade.md)
-- **环境已瘦身**：`rawfile/dsh` 由 253.5MB / 26,762 文件降到 **110.7MB / 12,485 文件**，HAP 由 385MB 降到 **238MB**、安装耗时 60s → **9.8s**；由 `scripts/prune-dsh-env.mjs` 完成并带**包入口自检**
-- 支持设备形态：phone、tablet、2in1、car、tv、wearable
+- **宿主模式（默认推荐）**：自动检测 `~/.harmonybrew/bin/dsh`，检测到即以 brew 安装的
+  dsh（0.1.5-rc.2_2）+ 原生 node（v26.8.1，JIT 可用）运行；未检测到时回退内嵌 jitless 环境
+- **运行环境面板**（Harness 菜单）：逐项展示 Harmonybrew / node / deepseek-harness / 全盘访问
+  状态，一键安装 Harmonybrew（官方 install.sh）、一键更新运行时——命令送入 pty 终端执行，
+  进度实时可见
+- **终端**：内嵌侧边栏终端（zsh），宿主模式下由壳侧 `dshm-terminal` bundle 提供
+  （经 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 声明接入 brew dsh）
+- **沉浸光感**：面板卡片使用 `uiMaterial.ImmersiveMaterial`（API 26 空间化材质），
+  带三层能力探测与降级；顶栏因系统窗口按钮浮层问题保持实色
+- **权限引导**：`ACCESS_USER_FULL_DISK` / `CUSTOM_SANDBOX` 等受限权限通过
+  `openPermissionOnSetting` 引导用户到系统设置开启
+- 包名 `com.brewdsh.app`；权限仅保留必需项（ACL 3 条 + 普通权限）
 
 ## 运行时约束（真机实测）
 
@@ -23,6 +27,9 @@ DSHM 是面向 HarmonyOS Next 的 DSH（DeepSeek Harness）运行环境实现。
 - **ArkTS http 探测 loopback 不可靠**：UI 就绪判定改为读 node 日志标记（`dsh web:`），不依赖 ArkTS http 探测 3080
 - **libnode 需 native 加固**：`DT_NEEDED` 链接固定加载顺序 + io_uring `bl syscall` 打补丁回退 epoll，由准备脚本完成后进入 `entry/libs/arm64-v8a/`
 - **HAP 不压缩存储**：`rawfile` 每减 1MB，HAP 就少 1MB —— 体积优化主要靠裁剪环境文件（判据必须是"平台构建产物"形状，不能按路径里出现 `win32` 就删，详见升级手册 §4.1）
+- **两种模式 $DSH_HOME 不同**：host = `~/.dsh`（个人文件夹）、embedded = `<filesDir>/home/.dsh`，**会话库互不可见** —— 排查"会话没了"先看 `runtime-mode-active.txt`
+- **宿主插件接入两步缺一不可**：模块放 `~/.dsh/profiles/node_modules/` 且插件名列入 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`，后者由 `DshBootstrap.ensureHostModeTerminal` 自动维护
+- **跨仓库复制 rawfile 禁用 /XD node_modules**：robocopy 的目录名排除是全树生效的，会整树漏拷内嵌环境
 
 ## 目录
 

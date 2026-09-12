@@ -126,7 +126,7 @@ const OHOS_SKILLS_RAWFILE: string = 'ohos-skills';
 // 这类「名字里带 win32 的跨平台 JS」删掉，内嵌模式启动即 ERR_MODULE_NOT_FOUND + SIGNAL 6）。
 // 现已把规则收紧到「平台构建产物」形状（prebuilds/、<os>-<arch> 路径段、.pdb/.dll/.exe），
 // 并在 scripts/prune-dsh-env.mjs 里加了**包入口自检**（缺 main/exports 目标就退出码 1）。
-const ENV_VERSION: string = '20260911-109';
+const ENV_VERSION: string = '20260911-110';
 const VERSION_FILE: string = '.dshm-version';
 
 // 品牌迁移（2026-09-11）：配置编辑器 bundle 由 `hdsh-config-editor` 更名为

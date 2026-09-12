@@ -465,6 +465,10 @@ static void InjectBusyboxEnv(const std::string& dshDir) {
     std::string home = filesDir + "/home";
     mkdir(home.c_str(), 0700);
     setenv("HOME", home.c_str(), 1);
+    // BrewDSH：把 filesDir 显式传给壳侧插件（dshm-terminal 等）。宿主模式下
+    // HOME 会被改指个人文件夹（RunHostDsh），插件无法再从 HOME 推导出内嵌
+    // 环境根 <filesDir>/dsh，因此这里单独导出。
+    setenv("DSHM_FILES_DIR", filesDir.c_str(), 1);
 }
 
 /**
