@@ -657,7 +657,60 @@ export class DshBootstrap {
     }
   }
 
+  /**
+   * 清理 dsh 自身 heal 出来的「非托管副本」，避免下次启动直接 abort。
+   *
+   * 背景（2026-09-12 实测）：`dsh-app-boot` 的 `healProfilesModuleFallbackLocked`
+   * 会用 `ensureSymlink` 在 `<DSH_HOME>/profiles/node_modules` 下建立指向 dsh 安装
+   * 目录的**符号链接**。本沙箱**禁止 symlink**，dsh 的降级路径退化为**整目录复制**，
+   * 于是留下一个**真实目录** `profiles/node_modules/@deepseek-ai/dsh`。
+   * 下次启动时 heal 检测到
+   * `exists and is not a symlink or dsh-managed module proxy` 直接 throw，
+   * 进程 abort（`SIGNAL 6`），表现为「重启后应用起不来 / 会话无法对话」。
+   *
+   * 修复策略：启动前扫描该目录，凡属 `@deepseek-ai/*` 且**不是** dsh 托管代理包
+   * （package.json 无 `dsh.moduleFallback` 标记）的普通目录一律删除，交还 dsh 重新
+   * 生成。幂等：dsh 托管产物与符号链接都会被保留。
+   *
+   * 只清理 `@deepseek-ai/` 命名空间下的条目 —— 那是 dsh 自己的依赖域，
+   * 壳侧镜像的 `dshm-*` bundle 不在此列，不会被误删。
+   */
+  private static cleanUnmanagedHealFallback(context: common.UIAbilityContext): void {
+    const profilesNM: string = context.filesDir + '/home/.dsh/profiles/node_modules';
+    const scopeDir: string = profilesNM + '/@deepseek-ai';
+    try {
+      if (!fileIo.accessSync(scopeDir)) {
+        return;
+      }
+      const entries: string[] = fileIo.listFileSync(scopeDir);
+      for (let i = 0; i < entries.length; i++) {
+        const name: string = entries[i];
+        const target: string = scopeDir + '/' + name;
+        try {
+          const manifest: string = target + '/package.json';
+          if (!fileIo.accessSync(manifest)) {
+            // 无 package.json：dsh 卸载后的残渣，直接清。
+            DshBootstrap.removeDirRecursive(target);
+            DshmLogger.info(TAG, '已清理 heal 残渣（无 manifest）: @deepseek-ai/' + name);
+            continue;
+          }
+          const text: string = fileIo.readTextSync(manifest);
+          if (text.indexOf('moduleFallback') < 0) {
+            DshBootstrap.removeDirRecursive(target);
+            DshmLogger.info(TAG, '已清理非托管 heal 副本: @deepseek-ai/' + name);
+          }
+        } catch (e) {
+          DshmLogger.warn(TAG, '清理 heal 副本失败（' + name + '）: ' + String(e));
+        }
+      }
+    } catch (e) {
+      // 目录不存在（首次启动）或不可读：静默跳过，不影响启动。
+    }
+  }
+
   static ensureBundleMirror(context: common.UIAbilityContext): void {
+    // 启动前先清掉 dsh 自己 heal 出来的非托管副本（见下方 healProfilesFallback 说明）。
+    DshBootstrap.cleanUnmanagedHealFallback(context);
     const dshNM: string = context.filesDir + '/' + DSH_SUBDIR + '/node_modules';
     const profilesNM: string = context.filesDir + '/home/.dsh/profiles/node_modules';
     const names: Array<string> = ['dshm-config-editor', 'dshm-ohos-settings', 'dshm-terminal'];

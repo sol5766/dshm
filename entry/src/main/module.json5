@@ -114,6 +114,39 @@
           "abilities": ["EntryAbility"],
           "when": "inuse"
         }
+      },
+      // ===== BrewDSH 运行时必需的三条权限 =====
+      // 参考标准：D:\desktop\demo\entry\src\main\module.json5（同样走 debug 侧载）。
+      //
+      // ACCESS_USER_FULL_DISK：读 /storage/Users/currentUser 下的个人文件夹。
+      //   **BrewDSH 的核心依赖**——Harmonybrew 装在 ~/.harmonybrew，工作区默认也是
+      //   个人文件夹。缺此权限时：BrewEnvProbe 全部探测失败（面板显示"未检测到
+      //   Harmonybrew"）、工作区选不到个人文件夹、hostDsh 永远 missing。
+      //   属 manual_settings 类型：profile 给资格后还需用户在系统设置手动开启开关。
+      // CUSTOM_SANDBOX：沙箱放宽，pty 终端 fork/exec 依赖它。缺此权限时
+      //   dshm-terminal start 报 "Permission denied"（终端面板打不开）。
+      // READ_WRITE_USER_FILE：个人文件读写（与 FULL_DISK 配套）。
+      //
+      // 注：这三条均需 ACL，走 debug 侧载时由调试 profile 关联；上架版本需按
+      // 上架要求重新评估（届时再裁剪）。
+      {
+        "name": "ohos.permission.ACCESS_USER_FULL_DISK",
+        "reason": "$string:full_disk_access_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
+      },
+      {
+        "name": "ohos.permission.CUSTOM_SANDBOX"
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_USER_FILE",
+        "reason": "$string:full_disk_access_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
       }
 
     ],

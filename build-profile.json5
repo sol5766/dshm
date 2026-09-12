@@ -31,11 +31,11 @@
         "material": {
           "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001BBE73F8ED364BD4C4BAED4414B8BD97971FF7DD16944CF39B9A8080083D5ACE0D91FCD16C31C6F9",
+          "keyPassword": "0000001BD97B1E98F41A9A877ABF4F3820B49A048A582E00EDBA0BFFFD04C9CC9FC329C98B5F74D5750F1B",
           "profile": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.p12",
-          "storePassword": "0000001B0F5498A3F3F1775BC913071B9DA6CAF66142E3AF6206BFCE58B26E577DCAE30F8EC5950DE411F2"
+          "storePassword": "0000001B76CA9F8D6C55AA6D4646F678F270D7383039CC42AC7F00BD44D3618555C25A432E76C78533F70E"
         }
       }
     ]

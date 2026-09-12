@@ -1317,7 +1317,7 @@ struct DshmWebPage {
   MenuTitle(text: string, items: Array<MenuElement>) {
     Text(text)
       .fontSize(12)
-      .fontColor(this.immersiveEnabled ? $r('sys.color.font_primary') : '#334155')
+      .fontColor('#334155')
       .padding({ left: 5, right: 5, top: 1, bottom: 1 })
       .borderRadius(3)
       .bindMenu(items)
@@ -1346,15 +1346,21 @@ struct DshmWebPage {
   }
 
   /**
-   * 顶栏（沉浸光感版）。
+   * 顶栏（**必须为不透明实色**）。
    *
-   * 空间化（Spatial UI）落地：顶栏改为悬浮于内容之上的沉浸式材质层，
-   * 而非贴边实色条。设备支持时使用 `uiMaterial.ImmersiveMaterial`
-   * （超薄样式 + 交互形变 + 光感反馈），不支持时回退为带底部描边的实色顶栏
-   * ——与 EntryAbility 隐藏系统标题栏后的窗口按钮可读性要求兼容。
+   * ⚠️ 回归教训（2026-09-12，实测踩坑）：本顶栏**不能**使用沉浸式系统材质。
    *
-   * 材质生效时不再设置 backgroundColor：沉浸式材质会把背景色恢复为透明色
-   * （官方 ImmersiveMaterial 说明），实色会遮挡材质滤镜效果。
+   * `EntryAbility.onWindowStageCreate` 调用了 `setWindowDecorVisible(false)`
+   * 隐藏系统标题栏，于是系统的最小化/最大化/关闭三个窗口按钮**浮在应用顶栏之上**
+   * 并由系统按浅色模式绘制**深色图标**。一旦顶栏改为半透明材质
+   * （`systemMaterial` 会把 `backgroundColor` 恢复为透明色），会出现两个后果：
+   *   1. 顶栏文字与系统按钮图标同时落在"半透明底 + Web 内容"之上，对比度崩溃，
+   *      实测表现就是**菜单文字和右上角三个按钮全都看不清**（用户直接反馈）；
+   *   2. Web 内容透出后与顶栏文字混叠，可读性进一步恶化。
+   *
+   * 结论：沉浸光感适用于「下方有内容可透出」的卡片/浮层，**不适用于背后压着系统
+   * 按钮层的固定工具条**。顶栏保持白底 + 底部描边；沉浸光感只用在下方的面板卡片上
+   * （那些场景背景有半透明遮罩，材质效果安全且观感更好）。
    */
   @Builder
   TopBar() {
@@ -1366,7 +1372,7 @@ struct DshmWebPage {
       Text('DeepSeek')
         .fontSize(12)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.immersiveEnabled ? $r('sys.color.font_primary') : '#1c2430')
+        .fontColor('#1c2430')
         .margin({ left: 6, right: 12 })
       this.MenuTitle('Harness', this.harnessMenu())
       this.MenuTitle('编辑', this.editMenu())
@@ -1376,18 +1382,9 @@ struct DshmWebPage {
     .width('100%')
     .height(TOP_BAR_HEIGHT)
     .padding({ left: 10, right: 4 })
+    .backgroundColor('#ffffff')
     .alignItems(VerticalAlign.Center)
-    .backgroundColor(this.immersiveEnabled ? undefined : '#ffffff')
-    .border(this.immersiveEnabled
-      ? { width: { bottom: 0 }, color: Color.Transparent }
-      : { width: { bottom: 1 }, color: '#e4e7ec' })
-    .systemMaterial(this.immersiveEnabled
-      ? new uiMaterial.ImmersiveMaterial({
-        style: uiMaterial.ImmersiveStyle.ULTRA_THIN,
-        interactive: true,
-        lightEffect: { color: undefined }
-      })
-      : undefined)
+    .border({ width: { bottom: 1 }, color: '#e4e7ec' })
   }
 
   build() {
@@ -1502,7 +1499,7 @@ struct DshmWebPage {
             .height('100%')
             .justifyContent(FlexAlign.Center)
             .alignItems(HorizontalAlign.Center)
-            .backgroundColor('#66000000')
+            .backgroundColor('#33000000')
           }
 
           // 运行模式面板：宿主 dsh（Harmonybrew）/ 内嵌运行时 / 自动
@@ -1565,7 +1562,7 @@ struct DshmWebPage {
               // 不可用时回退为传统不透明白卡。
               .systemMaterial(this.immersiveEnabled
                 ? new uiMaterial.ImmersiveMaterial({
-                  style: uiMaterial.ImmersiveStyle.THICK,
+                  style: uiMaterial.ImmersiveStyle.ULTRA_THICK,
                   interactive: false,
                   lightEffect: null
                 })
@@ -1575,7 +1572,7 @@ struct DshmWebPage {
             .height('100%')
             .justifyContent(FlexAlign.Center)
             .alignItems(HorizontalAlign.Center)
-            .backgroundColor('#66000000')
+            .backgroundColor('#33000000')
           }
 
           // 运行环境面板：Harmonybrew 状态 + 一键安装/更新（命令送入 pty 终端执行）
@@ -1685,7 +1682,7 @@ struct DshmWebPage {
                 : { width: 1, color: '#e4e7ec' })
               .systemMaterial(this.immersiveEnabled
                 ? new uiMaterial.ImmersiveMaterial({
-                  style: uiMaterial.ImmersiveStyle.THICK,
+                  style: uiMaterial.ImmersiveStyle.ULTRA_THICK,
                   interactive: false,
                   lightEffect: null
                 })
@@ -1695,7 +1692,7 @@ struct DshmWebPage {
             .height('100%')
             .justifyContent(FlexAlign.Center)
             .alignItems(HorizontalAlign.Center)
-            .backgroundColor('#66000000')
+            .backgroundColor('#33000000')
           }
         }
         .width('100%')

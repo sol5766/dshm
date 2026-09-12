@@ -23,6 +23,39 @@
 
 ## Bug 列表（新→旧）
 
+### [2026-09-12] 顶栏改用沉浸光感后菜单文字与系统窗口按钮全部不可见
+- **现象**：顶栏加 `systemMaterial(ImmersiveMaterial)` 后，用户反馈「状态栏上菜单的字儿和右上角的三个按钮整的啥都看不到了」。dumpLayout 确认文字节点**存在且 bounds 正常**（`DeepSeek/Harness/编辑/窗口` 在 y≈322-386），属"看得见节点、看不见内容"。
+- **根因**：`EntryAbility.onWindowStageCreate` 调用了 `setWindowDecorVisible(false)` 隐藏系统标题栏，系统的 最小化/最大化/关闭 三个按钮**浮在应用顶栏之上**，由系统按浅色模式画**深色图标**。顶栏改用沉浸式材质后 `backgroundColor: undefined` —— 官方 `ImmersiveMaterial` 说明明确「systemMaterial 属性生效后已设置的背景色会被恢复为透明色」，于是顶栏变半透明，深色文字与深色系统按钮图标同时落在"透明底 + Web 内容"上，对比度崩溃。
+- **修复**：`DshmWebPage.TopBar()` 回退为 `#ffffff` 不透明实色 + 底部 `#e4e7ec` 描边，并在该 Builder 的注释中写明**顶栏禁止使用沉浸材质**的原因。沉浸光感仅保留在面板卡片（底下有半透明遮罩、不压系统按钮层），且样式由 `THICK` 提升为 `ULTRA_THICK`、遮罩由 `#66000000` 调浅为 `#33000000` 以保证正文可读性。
+- **验证**：修复后截图做像素量化 —— 顶栏文字带底色 `RGB(255,255,255)`，亮度对比差 237（最暗 18 / 最亮 255）；右上角按钮区底色 `RGB(243,232,214)`（系统绘制浅暖白）。二者均达到清晰可读的对比度。
+- **回归测试**：`scripts/ui-test-phone.sh` 新增顶栏不透明度断言（见下）。
+- **状态**：✅ 已修复
+
+### [2026-09-12] hostDsh 路径被工作区回退污染 → Harmonybrew 宿主模式永远不可用
+- **现象**：node 日志持续输出 `runtime mode=auto hostDsh=/data/storage/el2/base/haps/entry/files/.harmonybrew/bin/dsh (missing)`，即使设备上确实装了 Harmonybrew，宿主模式也永远回退到内嵌 jitless。
+- **根因**：`dsh_host.cpp` 中 `const std::string hostDsh = wsDir + "/.harmonybrew/bin/dsh";`。而 `wsDir` 的取值逻辑是「`/storage/Users/currentUser` 不可访问时**回退为 filesDir**」（个人文件夹未授权时的设计降级）。Harmonybrew 是**用户级绝对安装根**，与工作区无关，跟着 `wsDir` 一起回退后被拼成 `<filesDir>/.harmonybrew/bin/dsh`，必然 missing。
+- **修复**：改为按「用户级根优先、filesDir 兜底」顺序独立探测**绝对路径**：
+  `/storage/Users/currentUser/.harmonybrew/bin/dsh` → 失败再看 `<filesDir>/.harmonybrew/bin/dsh`，不再复用 `wsDir`。
+- **验证**：修复后日志变为 `hostDsh=/storage/Users/currentUser/.harmonybrew/bin/dsh (missing)` —— 路径正确，此时 missing 是真实的「未安装」而非「路径拼错」。
+- **状态**：✅ 已修复
+
+### [2026-09-12] `profiles/node_modules` heal 残留导致每次启动 SIGNAL 6
+- **现象**：应用启动后 3080 无监听，node 日志以 `SIGNAL 6 (Aborted)` 结束，用户表现为「重启后应用起不来 / 会话不能对话」。
+- **根因**：`dsh-app-boot` 的 `healProfilesModuleFallbackLocked` 在沙箱内执行 `ensureSymlink`，而**沙箱禁止 symlink**，dsh 自身的 heal 逻辑退化为**整目录复制**（此前已在 bug-log 记录过同一根因）。复制产物 `<DSH_HOME>/profiles/node_modules/@deepseek-ai/dsh` 是**真实目录而非符号链接**，下次启动时 heal 检测到 `exists and is not a symlink or dsh-managed module proxy` 直接 `throw` → 进程 abort。
+  错误原文：`dsh: .../profiles/node_modules/@deepseek-ai/dsh exists and is not a symlink or dsh-managed module proxy; remove it so dsh can manage the installation fallback`
+- **修复（当前为运维手段）**：启动前 `rm -rf <DSH_HOME>/profiles/node_modules` 让其重新 heal。**根治方案待实施**：应改为在启动流程中检测该目录是否为「非符号链接的普通目录」并自动清理（幂等），避免用户手动干预。
+- **验证**：清理后重启，`dsh web:` 正常出现、3080 LISTEN 且有大量 ESTABLISHED 连接、无 SIGNAL。
+- **状态**：🟡 已定位；手动清理可恢复；自动清理待实施
+
+### [2026-09-12] BrewDSH 移除 ACL 后运行环境探测全失败（权限与 profile 联动问题）
+- **现象**：「运行环境」面板始终显示 Harmonybrew / node / dsh / 全盘访问**全部未安装/未就绪**，但用户从系统终端能正常启动 dsh；同时 pty 终端报 `Permission denied` 打不开。
+- **根因（两层）**：
+  1. 拆分 BrewDSH 时按其「权限只加不用申请的」要求，`module.json5` 删除了 `ACCESS_USER_FULL_DISK` / `CUSTOM_SANDBOX` / `READ_WRITE_USER_FILE` 三条 ACL。缺 `ACCESS_USER_FULL_DISK` → 读不到 `/storage/Users/currentUser` → `BrewEnvProbe` 全部 false；缺 `CUSTOM_SANDBOX` → pty fork/exec 被拒。
+  2. **DevEco 自动签名生成的调试 profile，其 ACL 是按 manifest 中声明的权限去申请的**。manifest 删掉权限后，新 profile 只剩 3 条（DOCUMENTS/DOWNLOAD/FILE_ACCESS_PERSIST），因此即使把 manifest 权限加回来，**旧 profile 仍不支持**，安装直接报 `9568289 grant request permissions failed. PermissionName: ohos.permission.ACCESS_USER_FULL_DISK`。
+- **关键认知**：`ACCESS_USER_FULL_DISK` 属 `manual_settings` 类型 —— profile 只给「资格」，**还需要用户在系统设置手动打开开关**（设置 → 应用和元服务 → <应用名> → 权限 → 全盘文件访问）。
+- **修复**：① manifest 按 `D:\desktop\demo` 参考标准加回三条权限；② 在 DevEco 中重新触发自动签名，让 profile 带上新 ACL；③ 用户在系统设置手动开启全盘文件访问。
+- **验证**：待 profile 重新生成后验证。
+- **状态**：🟡 代码已改，等待重新签名验证
 ### [2026-09-12] `deviceInfo.apiAvailable('26.0.0')` 编译期被拒 —— 点分版本号形态当前 SDK 不支持
 - **现象**：BrewDSH 沉浸光感能力探测用 `deviceInfo.apiAvailable('26.0.0')` 做 API 级别判断，`assembleHap` 在 `CompileArkTS` 阶段直接失败：
   `1 ERROR: 11706013 Invalid parameters for apiAvailable.`

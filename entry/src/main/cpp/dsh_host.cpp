@@ -666,7 +666,21 @@ extern "C" __attribute__((visibility("default"))) void Main() {
             fclose(fm);
         }
     }
-    const std::string hostDsh = wsDir + "/.harmonybrew/bin/dsh";
+    // 宿主 dsh 候选路径：Harmonybrew 是**用户级绝对安装根**，与工作区（wsDir）无关。
+    //
+    // 修 Bug（2026-09-12）：此前写成 `wsDir + "/.harmonybrew/bin/dsh"`，当个人文件夹
+    // 未授权时 wsDir 会回退到 filesDir，宿主路径被错误拼成
+    // `<filesDir>/.harmonybrew/bin/dsh`（必然 missing），日志表现为
+    // `hostDsh=.../files/.harmonybrew/bin/dsh (missing)` —— 宿主模式在此设备永远不可用。
+    // 现改为按「用户级根优先、filesDir 兜底」的顺序逐个探测绝对路径。
+    const std::string kUserBrewDsh = "/storage/Users/currentUser/.harmonybrew/bin/dsh";
+    const std::string kFilesBrewDsh = filesDirTmp + "/.harmonybrew/bin/dsh";
+    std::string hostDsh = kUserBrewDsh;
+    if (access(kUserBrewDsh.c_str(), X_OK) == 0) {
+        hostDsh = kUserBrewDsh;
+    } else if (access(kFilesBrewDsh.c_str(), X_OK) == 0) {
+        hostDsh = kFilesBrewDsh;
+    }
     const bool hostAvailable = (access(hostDsh.c_str(), X_OK) == 0);
     fprintf(stderr, "=== runtime mode=%s hostDsh=%s (%s) ===\n",
             mode.c_str(), hostDsh.c_str(), hostAvailable ? "executable" : "missing");
