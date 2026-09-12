@@ -464,6 +464,187 @@ export class DshBootstrap {
     }
   }
 
+  /**
+   * 把壳侧自研插件（`dshm-terminal` / `dshm-ohos-settings` / `dshm-config-editor`）
+   * 接入**宿主模式**（Harmonybrew dsh）的 web profile。
+   *
+   * 背景（2026-09-12 实测）：宿主模式的 dsh 是 brew 安装的独立发行版，只带官方
+   * 插件，**不含**壳侧的 `dshm-terminal`。而 App 的终端面板依赖它暴露的
+   * `/dshm-terminal/start|write|read` 端点，缺失时 `POST /dshm-terminal/start`
+   * 返回 **405 Method Not Allowed**，UI 显示「会话启动失败」。
+   *
+   * 接入需要**两步**（缺一不可，均由 `dsh-app-boot` 的 profile 机制决定）：
+   *   1. **模块可达**：把插件目录放到 `$DSH_HOME/profiles/node_modules/` 下
+   *      —— 满足 Node 的 parent-walk 解析（`$DSH_HOME` = `~/.dsh`，
+   *      因宿主模式 `HOME=/storage/Users/currentUser`）。
+   *   2. **显式声明**：在 `$DSH_HOME/profiles/web/package.json` 的
+   *      `dsh.profile.bundles` 数组里列出插件名。dsh-app-boot 的文档原文：
+   *      「Bundles are npm packages whose manifest declares
+   *      `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`; the tree is
+   *      composed by applying each bundle's patch list in `dsh.profile.bundles`
+   *      order」—— **只放 node_modules 不写 bundles 列表不会被加载**。
+   *
+   * 内嵌环境是靠适配脚本直接改 `dsh-app-boot` 的 `PROFILE_TEMPLATES.web.bundles`
+   * 源码实现的；宿主模式改不了 brew 的源码，因此改为**写 profile 的
+   * package.json**（这正是该字段的设计用途）。
+   *
+   * 全部失败都静默降级并写诊断文件，不影响 dsh 核心启动。
+   */
+  static ensureHostModeTerminal(context: common.UIAbilityContext): void {
+    const diag: Array<string> = [];
+    try {
+      const brewDsh: string = '/storage/Users/currentUser/.harmonybrew/bin/dsh';
+      if (!fileIo.accessSync(brewDsh)) {
+        diag.push('brew dsh 不存在，跳过');
+        DshBootstrap.writeHostDiag(context, diag);
+        return;
+      }
+      diag.push('brew dsh 存在');
+      const srcRoot: string = context.filesDir + '/dsh/node_modules';
+      const hostHome: string = '/storage/Users/currentUser/.dsh';
+      const hostNM: string = hostHome + '/profiles/node_modules';
+      const webProfileDir: string = hostHome + '/profiles/web';
+      const webPkg: string = webProfileDir + '/package.json';
+      diag.push('hostNM=' + hostNM);
+
+      // ---- 第 1 步：模块可达 ----
+      try {
+        DshBootstrap.mkdirRecursive(hostNM);
+        diag.push('mkdir hostNM OK');
+      } catch (e) {
+        diag.push('mkdir hostNM 失败: ' + String(e));
+      }
+      const bundles: Array<string> = ['dshm-config-editor', 'dshm-terminal', 'dshm-ohos-settings'];
+      for (let i = 0; i < bundles.length; i++) {
+        const name: string = bundles[i];
+        const src: string = srcRoot + '/' + name;
+        if (!fileIo.accessSync(src + '/package.json')) {
+          diag.push(name + ': 源不存在');
+          continue;
+        }
+        const dst: string = hostNM + '/' + name;
+        try {
+          if (!DshBootstrap.bundleMirrorCurrent(src, dst)) {
+            DshBootstrap.removeDirRecursive(dst);
+            DshBootstrap.copyDirRecursive(src, dst);
+            diag.push(name + ': 已复制');
+          } else {
+            diag.push(name + ': 已是最新');
+          }
+        } catch (e) {
+          diag.push(name + ': 复制失败 ' + String(e));
+        }
+      }
+
+      // ---- 第 2 步：写 web profile 的 bundles 声明 ----
+      try {
+        DshBootstrap.mkdirRecursive(webProfileDir);
+        const merged: string = DshBootstrap.mergeWebProfileBundles(webPkg, bundles);
+        const file = fileIo.openSync(webPkg,
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        fileIo.writeSync(file.fd, merged);
+        fileIo.closeSync(file);
+        diag.push('web/package.json 已写入 bundles');
+      } catch (e) {
+        diag.push('写 web/package.json 失败: ' + String(e));
+      }
+
+      // ---- 第 3 步：profile 自带 patch 层（dsh-app-boot 会读 cordis.patch.yml）----
+      try {
+        const patchPath: string = webProfileDir + '/cordis.patch.yml';
+        if (!fileIo.accessSync(patchPath)) {
+          const f2 = fileIo.openSync(patchPath,
+            fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+          fileIo.writeSync(f2.fd, '# DSHM 壳侧 profile patch 层（由 App 生成，保持为空即可）。\n');
+          fileIo.closeSync(f2);
+          diag.push('web/cordis.patch.yml 已创建');
+        }
+      } catch (e) {
+        diag.push('创建 profile patch 失败: ' + String(e));
+      }
+
+      diag.push('完成');
+      DshmLogger.info(TAG, '宿主插件接入完成');
+    } catch (e) {
+      diag.push('整体异常: ' + String(e));
+      DshmLogger.warn(TAG, '宿主插件接入失败（跳过）: ' + String(e));
+    }
+    DshBootstrap.writeHostDiag(context, diag);
+  }
+
+  /**
+   * 生成/合并 web profile 的 `package.json`，把壳侧 bundle 并入
+   * `dsh.profile.bundles`（保留官方 bundle 与其顺序，追加缺失项，去重）。
+   *
+   * 已存在时读取原文件并只改 bundles 数组，避免覆盖 dsh 自己写入的字段
+   * （如 `dependencies`、`dsh.profile.patchReload`）。
+   */
+  private static mergeWebProfileBundles(webPkg: string, extra: Array<string>): string {
+    // dsh 官方 web profile 的默认 bundle（见 dsh-app-boot 的 PROFILE_TEMPLATES）。
+    let existing: Array<string> = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'];
+    let patchReload: string = 'live';
+    if (fileIo.accessSync(webPkg)) {
+      try {
+        const meta: Record<string, Object> =
+          JSON.parse(fileIo.readTextSync(webPkg)) as Record<string, Object>;
+        const dshNode: Object | undefined = meta['dsh'] as Object | undefined;
+        if (dshNode !== undefined) {
+          const profile: Object | undefined = (dshNode as Record<string, Object>)['profile'] as Object | undefined;
+          if (profile !== undefined) {
+            const prof: Record<string, Object> = profile as Record<string, Object>;
+            const list: Object | undefined = prof['bundles'] as Object | undefined;
+            if (list !== undefined) {
+              existing = list as Array<string>;
+            }
+            const pr: Object | undefined = prof['patchReload'] as Object | undefined;
+            if (pr !== undefined) {
+              patchReload = pr as string;
+            }
+          }
+        }
+      } catch (e) {
+        // 解析失败时用默认模板重建，保证可用性。
+      }
+    }
+    const merged: Array<string> = [];
+    for (let i = 0; i < existing.length; i++) {
+      merged.push(existing[i]);
+    }
+    for (let i = 0; i < extra.length; i++) {
+      if (merged.indexOf(extra[i]) < 0) {
+        merged.push(extra[i]);
+      }
+    }
+    // bundles 列表整体序列化为单行，避免 JSON.stringify 的多行缩进影响可读性。
+    const lines: Array<string> = [];
+    for (let i = 0; i < merged.length; i++) {
+      lines.push('    "' + merged[i] + '"');
+    }
+    return '{\n'
+      + '  "name": "dsh-profile-web",\n'
+      + '  "private": true,\n'
+      + '  "dsh": {\n'
+      + '    "profile": {\n'
+      + '      "bundles": [\n' + lines.join(',\n') + '\n      ],\n'
+      + '      "patchReload": "' + patchReload + '"\n'
+      + '    }\n'
+      + '  }\n'
+      + '}\n';
+  }
+
+  /** 把宿主插件安装诊断写到 filesDir/host-plugin-diag.txt（供 hdc 回读排查）。 */
+  private static writeHostDiag(context: common.UIAbilityContext, lines: Array<string>): void {
+    try {
+      const path: string = context.filesDir + '/host-plugin-diag.txt';
+      const file = fileIo.openSync(path,
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      fileIo.writeSync(file.fd, lines.join('\n') + '\n');
+      fileIo.closeSync(file);
+    } catch (e) {
+      /* 诊断写入失败不影响主流程 */
+    }
+  }
+
   /** 逐级创建目录（fileIo.mkdirSync 不递归父目录）。 */
   private static mkdirRecursive(dir: string): void {
     const parent: string = dir.substring(0, dir.lastIndexOf('/'));

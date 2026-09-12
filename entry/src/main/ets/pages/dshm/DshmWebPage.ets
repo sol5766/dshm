@@ -317,6 +317,8 @@ struct DshmWebPage {
       await WorkspaceAccess.syncAuthorizedToWorkspace(hostCtx);
       await DshBootstrap.ensureOhosSkills(hostCtx);
       DshBootstrap.ensurePnpmWrapper(hostCtx);
+      // 宿主模式（Harmonybrew dsh）需要壳侧插件才能提供终端端点，见方法注释。
+      DshBootstrap.ensureHostModeTerminal(hostCtx);
       await writeOhosInfo(hostCtx);
       DshBootstrap.clearNodeLogs(hostCtx);
       DshBootstrap.ensureBundleMirror(hostCtx);
@@ -1699,34 +1701,57 @@ struct DshmWebPage {
         .height('100%')
         .layoutWeight(1)
 
-        // 终端侧边栏（终端样式）
+        // 终端侧边栏：与 dsh 本体 UI 视觉语言对齐
+        //（浅色底、圆角、系统字体、语义状态色；顶栏同色系，避免黑白割裂）
         if (this.terminalOpen) {
           Column() {
+            // 标题栏：状态点 + 标题 + 环境标记 + 操作
             Row() {
-              Circle({ width: 8, height: 8 })
-                .fill(this.termConnected ? '#4ade80' : '#9ca3af')
-                .margin({ right: 6 })
-              Text('终端')
-                .fontSize(12)
-                .fontColor('#e5e7eb')
-                .layoutWeight(1)
-              Text(this.termPty ? 'pty · ' + (this.termShell ?? 'zsh') : 'pipe')
-                .fontSize(11)
-                .fontColor('#6b7280')
+              Circle({ width: 7, height: 7 })
+                .fill(this.termConnected ? '#1a9e6a' : '#c0c6d0')
                 .margin({ right: 8 })
+              Text('终端')
+                .fontSize(13)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#1c2430')
+              Text(this.termPty ? 'pty' : 'pipe')
+                .fontSize(10)
+                .fontColor('#64748b')
+                .backgroundColor('#eef2f7')
+                .borderRadius(4)
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+                .margin({ left: 8 })
+              Blank()
               Text('清屏')
                 .fontSize(12)
-                .fontColor('#9ca3af')
+                .fontColor('#64748b')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
                 .onClick(() => { this.termLines = []; })
-              Text('断开')
+              Text('关闭')
                 .fontSize(12)
-                .fontColor('#9ca3af')
-                .margin({ left: 12 })
+                .fontColor('#64748b')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .margin({ left: 4 })
                 .onClick(() => this.closeTerminal())
             }
-            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+            .padding({ left: 12, right: 8, top: 8, bottom: 8 })
             .width('100%')
-            .backgroundColor('#0d1117')
+            .backgroundColor('#f7f9fc')
+            .border({ width: { bottom: 1 }, color: '#e4e7ec' })
+
+            // 会话信息条：user@host + cwd（对齐 dsh 的语义化信息展示）
+            if (this.termConnected == false) {
+              Row() {
+                Text('正在连接终端…')
+                  .fontSize(11)
+                  .fontColor('#94a3b8')
+              }
+              .width('100%')
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .backgroundColor('#fbfcfe')
+            }
 
             List({ space: 0, scroller: this.listScroller }) {
               ForEach(this.termLines, (line: string) => {
@@ -1735,8 +1760,8 @@ struct DshmWebPage {
                     .width('100%')
                     .fontSize(12)
                     .fontFamily('monospace')
-                    .fontColor('#e6edf3')
-                    .padding({ left: 10, right: 6, top: 1, bottom: 1 })
+                    .fontColor('#24292f')
+                    .padding({ left: 12, right: 8, top: 1.5, bottom: 1.5 })
                     .textAlign(TextAlign.Start)
                 }
               }, (line: string, index: number) => index.toString())
@@ -1748,15 +1773,15 @@ struct DshmWebPage {
                   Text(this.termPrompt())
                     .fontSize(12)
                     .fontFamily('monospace')
-                    .fontColor('#00ff9c')
+                    .fontColor('#1a9e6a')
                     .maxLines(1)
                   TextInput({ text: this.termInput })
                     .id(TERM_INPUT_ID)
                     .layoutWeight(1)
                     .fontSize(12)
                     .fontFamily('monospace')
-                    .fontColor('#e6edf3')
-                    .caretColor('#00ff9c')
+                    .fontColor('#24292f')
+                    .caretColor('#1a9e6a')
                     .backgroundColor(Color.Transparent)
                     .borderRadius(0)
                     .padding({ left: 6, right: 0, top: 0, bottom: 0 })
@@ -1765,17 +1790,17 @@ struct DshmWebPage {
                 }
                 .width('100%')
                 .alignItems(VerticalAlign.Center)
-                .padding({ left: 10, right: 6, top: 1, bottom: 1 })
+                .padding({ left: 12, right: 8, top: 1.5, bottom: 1.5 })
               }
             }
             .layoutWeight(1)
-            .backgroundColor('#010409')
+            .backgroundColor('#ffffff')
             .scrollBar(BarState.Auto)
           }
-          .width(420)
+          .width(440)
           .height('100%')
-          .backgroundColor('#0d1117')
-          .border({ width: { left: 1 }, color: '#21262d' })
+          .backgroundColor('#ffffff')
+          .border({ width: { left: 1 }, color: '#e4e7ec' })
         }
       }
       .width('100%')
