@@ -38,8 +38,8 @@ export default class BackGroundAbility extends UIAbility {
   }
 
   /**
-   * 系统结束本 Ability（用户从 Dock / 托盘右键退出，或系统回收）时触发。
-   * 这里只广播事件，由 EntryAbility 负责摘掉托盘图标并结束自己 —— 否则会出现
+   * 系统结束本 Ability（用户从系统右键菜单退出，或系统回收）时触发。
+   * 这里只广播事件，由 EntryAbility 负责停 DSH、摘掉托盘图标并结束自己 —— 否则会出现
    * "后台进程已销毁、主 Ability 却还活着"的半死状态（官方文档第 8 步明确提示）。
    */
   onPrepareToTerminate(): boolean {

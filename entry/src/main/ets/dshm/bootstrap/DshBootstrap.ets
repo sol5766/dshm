@@ -1689,19 +1689,44 @@ export class DshBootstrap {
    */
   static async stopDsh(context: common.UIAbilityContext, mode: string,
     timeoutMs: number): Promise<boolean> {
+    let stopped: boolean = false;
     if (mode === 'host') {
-      const stopped: string = context.filesDir + '/host-stopped';
+      const marker: string = context.filesDir + '/host-stopped';
       try {
-        if (fileIo.accessSync(stopped)) {
-          fileIo.unlinkSync(stopped);
+        if (fileIo.accessSync(marker)) {
+          fileIo.unlinkSync(marker);
         }
       } catch (e) {
         DshmLogger.warn(TAG, '清理 host-stopped 失败: ' + String(e));
       }
       DshBootstrap.requestHostRestart(context);
-      return await DshBootstrap.waitForStopMarker(context, 'host-stopped', timeoutMs);
+      stopped = await DshBootstrap.waitForStopMarker(context, 'host-stopped', timeoutMs);
+    } else {
+      stopped = await DshBootstrap.requestEmbeddedRestart(context, timeoutMs);
     }
-    return await DshBootstrap.requestEmbeddedRestart(context, timeoutMs);
+    if (!stopped) {
+      // 超时说明没有活着的 native 守候进程在消费信号。**必须回收信号文件**：
+      // 留着它，等会儿 launchDsh() 起的新进程会在第一轮轮询里命中它，把刚起来的
+      // dsh 立刻杀掉（现象：重启后服务一直起不来）。
+      DshBootstrap.clearStopSignals(context);
+    }
+    return stopped;
+  }
+
+  /** 清掉停机信号文件（重启/停止请求）。 */
+  private static clearStopSignals(context: common.UIAbilityContext): void {
+    const names: string[] = ['restart-request', 'stop-request', 'kill-request'];
+    for (let i = 0; i < names.length; i++) {
+      const p: string = context.filesDir + '/' + names[i];
+      try {
+        if (fileIo.accessSync(p)) {
+          fileIo.unlinkSync(p);
+          DshmLogger.warn(TAG, '停机超时：已回收残留信号 ' + names[i]);
+        }
+      } catch (e) {
+        DshmLogger.warn(TAG, '回收信号 ' + names[i] + ' 失败: ' + String(e));
+      }
+    }
   }
 
   /** 请求退出整个应用前，先停掉 dsh（之后由调用方 terminateSelf）。 */
@@ -1912,18 +1937,6 @@ export class DshBootstrap {
       DshmLogger.info(TAG, '已清除上一轮 node 诊断日志');
     } catch (e) {
       DshmLogger.warn(TAG, '创建 node 日志目录失败: ' + String(e));
-    }
-  }
-
-  /** 确保 filesDir/log 目录存在（幂等，供 boot 打点落盘）。 */
-  static ensureLogDir(context: common.UIAbilityContext): void {
-    const logDir: string = context.filesDir + '/log';
-    try {
-      if (!fileIo.accessSync(logDir)) {
-        fileIo.mkdirSync(logDir);
-      }
-    } catch (e) {
-      DshmLogger.warn(TAG, '创建 log 目录失败: ' + String(e));
     }
   }
 

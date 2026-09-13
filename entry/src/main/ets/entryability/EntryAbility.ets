@@ -7,10 +7,10 @@
  *
  * 同时负责 PC 系统托盘常驻（见 dshm/system/StatusBarTray）：
  *   - 启动时挂载托盘图标，并拉起绑定的 BackGroundAbility 维持后台保活；
- *   - 左键点托盘图标 / 右键菜单"打开" → showAbility() 把窗口唤回前台；
- *   - 系统关闭按钮（窗口右上角 X、Dock/托盘右键退出）→ 隐藏到托盘常驻；
- *   - 应用内「窗口 → 关闭窗口」或托盘右键"退出" → 真正退出（摘托盘 + 结束
- *     主 Ability，node 服务随进程回收）。
+ *   - 左键点托盘图标 → showAbility() 把窗口唤回前台（右键交给系统默认菜单）；
+ *   - 关闭窗口（右上角 X / 系统菜单里的关闭）→ 隐藏到托盘常驻；
+ *   - 应用内「窗口 → 关闭窗口」→ 真正退出：先停 DSH → 摘托盘 → 结束主 Ability。
+ *   - 另：启动时清理旧版本注册进任务栏（Dock/快捷栏）右键菜单的残留项。
  */
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want, abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';

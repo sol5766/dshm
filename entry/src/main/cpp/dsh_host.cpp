@@ -176,6 +176,11 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
     const std::string restartFlag = filesDir + "/restart-request";
     const std::string stopFlag = filesDir + "/stop-request";
     const std::string stoppedFlag = filesDir + "/host-stopped";
+    // 丢掉**陈旧**信号：它可能是"上一次壳侧请求停机、但当时没有守候进程在跑"时留下的。
+    // 不清掉的话，本进程 fork 出 dsh 后第一轮轮询就会看到它，立刻把刚起来的 dsh 杀掉
+    // （现象：点重启后服务起不来）。只认本次 fork 之后新写入的信号。
+    unlink(restartFlag.c_str());
+    unlink(stopFlag.c_str());
     int lastStatus = 0;
     for (;;) {
         pid_t pid = fork();
@@ -238,16 +243,18 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
             }
             usleep(400 * 1000);
         }
-        if (stopForRelaunch) {
-            // 落「守候进程已停」标记：壳侧据此**确定性**等待旧实例退出（含监听套接字关闭），
-            // 而不是靠 http 探测 loopback（该探测不可靠，见 bug-log 2026-09-11）。
+        // 无论"收到信号停机"还是"子进程自己退出（崩溃/被杀）"，都在返回前落
+        // host-stopped 并结束守候进程。壳侧一律以该标记判定"旧实例已退出"——
+        // 若只在收到信号时写，那么"dsh 已经崩了、用户又点重启"的场景会让壳侧白等
+        // 超时（30s）后才放弃。
+        {
             FILE* fs = fopen(stoppedFlag.c_str(), "w");
             if (fs != nullptr) {
-                fprintf(fs, "%s\n", stopIsExit ? "stop" : "restart");
+                fprintf(fs, "%s\n", stopForRelaunch ? (stopIsExit ? "stop" : "restart") : "child-exited");
                 fclose(fs);
             }
             fprintf(stderr, "=== host dsh supervisor exiting (%s); shell will relaunch by mode ===\n",
-                    stopIsExit ? "stop" : "restart");
+                    stopForRelaunch ? (stopIsExit ? "stop" : "restart") : "child-exited");
             fflush(stderr);
         }
         // 守候进程不再原地重启：无论是收到信号还是子进程自行退出，都结束本进程，
@@ -971,6 +978,10 @@ std::string bin = dshDir + "/node_modules/@deepseek-ai/dsh/lib/bin.js";
         // native 父进程独立于 node，用文件信号杀子进程是确定性的。
         const std::string killFlag = filesDir + "/kill-request";
         const std::string jsRestartFlag = filesDir + "/restart-request";
+        // 丢弃陈旧信号：可能是"壳侧请求停机的当时没有 native 父进程在轮询"留下的。
+        // 不清掉会被本轮第一轮轮询命中，把刚 fork 出来的 node 立刻杀掉。
+        unlink(killFlag.c_str());
+        unlink(jsRestartFlag.c_str());
         int status = 0;
         fprintf(stderr, "=== embedded mode: forked dsh web server pid=%d ===\n", static_cast<int>(pid));
         fflush(stderr);

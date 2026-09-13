@@ -13,9 +13,12 @@
  * 退出链路（两条，均收敛到 EntryAbility.exitApp()）：
  *   1) 应用内「窗口 → 关闭窗口」→ publishExitRequest() → EntryAbility 与
  *      BackGroundAbility 各自 terminateSelf，node 服务随主进程回收。
- *   2) 系统托盘/Dock 右键退出 → 系统先结束 BackGroundAbility → 其
- *      onPrepareToTerminate 发 EVENT_BG_TERMINATING → EntryAbility 移除托盘
- *      图标并 terminateSelf。
+ *   2) 系统结束后台 Ability（系统右键菜单退出 / 系统回收）→ 其
+ *      onPrepareToTerminate 发 EVENT_BG_TERMINATING → EntryAbility 停 DSH、移除
+ *      托盘图标并 terminateSelf。
+ *
+ * 另：**不注册自定义右键菜单**（statusBarGroupMenu）—— 「打开」靠左键、「退出」系统
+ * 自带、「重启」在应用内 Harness 菜单；理由见 install() 里的注释。
  */
 import { statusBarManager } from '@kit.DeskTopExtensionKit';
 import { common, Want, StartOptions, contextConstant } from '@kit.AbilityKit';
@@ -40,7 +43,7 @@ const REMOVE_DELAY_MS: number = 120;
 
 /** 应用内请求整体退出。 */
 export const EVENT_EXIT_REQUEST: string = 'dshm.tray.exit.request';
-/** 后台 Ability 即将被系统结束（托盘/Dock 右键退出）。 */
+/** 后台 Ability 即将被系统结束（系统右键退出 / 系统回收）。 */
 export const EVENT_BG_TERMINATING: string = 'dshm.tray.bg.terminating';
 
 /** 托盘图标点击事件载荷（statusBarManager 'statusBarIconClick'）。 */

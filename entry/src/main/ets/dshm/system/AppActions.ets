@@ -1,10 +1,10 @@
 /**
  * 应用级动作：重启 / 停止 DSH 服务。
  *
- * 为什么单独抽一层：同一个动作有三个入口 —— 应用内菜单（DshmWebPage）、
- * 系统托盘右键（StatusBarTray → EntryAbility）、Dock 图标右键（quickBarManager →
- * BackGroundAbility）。如果每个入口各写一套「先停后起」的流程，迟早会漂移成
- * 其中一条忘了等旧进程退出，于是新旧实例抢 3080。这里收敛成唯一实现。
+ * 为什么单独抽一层：`restartDsh` 里那套「先停旧、等它真退出、再按当前模式拉起」的顺序
+ * 是踩过坑才收敛出来的（不等旧实例退出就拉起 → 新旧抢 3080），必须只有一份实现。
+ * 目前调用方是应用内 Harness 菜单（DshmWebPage）；早期它还同时服务托盘/Dock 的系统级
+ * 菜单入口，那些入口已移除（原因见 QuickBarMenuCleanup.ets）。
  */
 import { common } from '@kit.AbilityKit';
 import { commonEventManager } from '@kit.BasicServicesKit';
@@ -102,8 +102,9 @@ export class DshmAppActions {
    * 退出应用前先停掉 DSH。
    *
    * 官方文档没有任何一句保证 `terminateSelf()` 会清理应用自己 spawn 的 native
-   * 子进程，必须显式停：宿主模式下发 stop-request，守候进程 kill 掉 brew dsh 后
-   * 自身退出；内嵌模式下发 restart-request，node 退出后 libdsh_host 返回。
+   * 子进程，必须显式停：宿主模式下发 `stop-request`，native 守候进程 kill 掉 brew dsh
+   * 后自身退出并写 `host-stopped`；内嵌模式下发 `kill-request`，native 父进程 kill 掉
+   * node 后写 `node-exited`。
    * 超时（默认 8s）后仍然返回，由调用方继续走 terminateSelf，避免"退不掉"。
    */
   static async stopForExit(context: common.UIAbilityContext): Promise<boolean> {
