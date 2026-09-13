@@ -38,19 +38,6 @@ const QUICK_HEIGHT: number = 30;
 /** 移除托盘到结束 Ability 之间的缓冲，避免图标残留。 */
 const REMOVE_DELAY_MS: number = 120;
 
-/** 托盘右键菜单项 ID。 */
-/**
- * 托盘菜单码。
- *
- * 只保留「重启」：PC 的系统托盘/快捷栏右键**自带退出项**（走 EntryAbility
- * onPrepareToTerminate 拦截），自己再加一个就是重复；「打开」也不需要，左键点
- * 图标即唤回主窗口（见 onIconClick）。
- * `MENU_CODE_SHOW` / `MENU_CODE_EXIT` 保留为兼容分支：菜单项已不再注册，
- * 但 onMenuClick 仍认这两个码（历史菜单缓存/系统行为变化时不至于无响应）。
- */
-export const MENU_CODE_SHOW: string = 'show';
-export const MENU_CODE_EXIT: string = 'exit';
-export const MENU_CODE_RESTART: string = 'restart';
 /** 应用内请求整体退出。 */
 export const EVENT_EXIT_REQUEST: string = 'dshm.tray.exit.request';
 /** 后台 Ability 即将被系统结束（托盘/Dock 右键退出）。 */
@@ -59,11 +46,6 @@ export const EVENT_BG_TERMINATING: string = 'dshm.tray.bg.terminating';
 /** 托盘图标点击事件载荷（statusBarManager 'statusBarIconClick'）。 */
 interface IconClickPayload {
   iconClickType?: string;
-}
-
-/** 托盘右键菜单事件载荷（statusBarManager 'rightMenuClick'）。 */
-interface MenuClickPayload {
-  menuCode?: string;
 }
 
 function errOf(e: Object): string {
@@ -77,8 +59,6 @@ export class StatusBarTray {
   private static bgHeld: boolean = false;
   /** 托盘图标点击回调。 */
   private static iconClickCb: ((clickType: string) => void) | null = null;
-  /** 托盘右键菜单回调。 */
-  private static menuClickCb: ((menuCode: string) => void) | null = null;
   /** 已创建的公共事件订阅者（避免重复订阅）。 */
   private static subscribers: Array<commonEventManager.CommonEventSubscriber> = [];
 
@@ -106,31 +86,21 @@ export class StatusBarTray {
       moduleName: MODULE_NAME,
       loadingStatus: false
     };
-    const restartAction: statusBarManager.StatusBarMenuAction = {
-      abilityName: BG_ABILITY_NAME,
-      moduleName: MODULE_NAME,
-      notifyOnly: true,
-      menuCode: MENU_CODE_RESTART
-    };
-    // 菜单只保留「重启」一项，其余交给系统与既有交互：
-    //   - 不放「打开」—— 左键点托盘图标本来就把主窗口唤回前台（onIconClick → showWindow）；
-    //   - 不放「退出」—— PC 的系统托盘/快捷栏右键自带退出项（走 onPrepareToTerminate 拦截），
-    //     自己再放一个就是重复噪音。应用内的退出入口仍然保留（窗口菜单 → publishExitRequest）。
-    const restartItem: statusBarManager.StatusBarMenuItem = {
-      title: '重启',
-      menuAction: restartAction
-    };
-    const group: statusBarManager.StatusBarMenuItem[] = [restartItem];
-    const groups: statusBarManager.StatusBarGroupMenu[] = [group];
+    // 不注册自定义右键菜单（statusBarGroupMenu）：
+    //   - 「打开」不需要 —— 左键点托盘图标本来就把主窗口唤回前台（onIconClick → showWindow）；
+    //   - 「退出」不需要 —— PC 的系统托盘右键**自带退出项**（走 onPrepareToTerminate 拦截），
+    //     自己再放一个就是重复；
+    //   - 「重启」也不需要 —— 应用内 Harness 菜单已有「重启服务」，且本项目评估后决定
+    //     不再往系统级菜单里塞自定义项（Dock 那条入口同样已移除，见 QuickBarMenuCleanup）。
+    // 因此右键完全交给系统默认菜单，应用只提供"左键唤回"。
     const item: statusBarManager.StatusBarItem = {
       icons: icons,
       quickOperation: quick,
-      statusBarGroupMenu: groups,
       hoverTips: 'DeepSeek Harness 正在运行'
     };
     statusBarManager.addToStatusBar(context, item);
     StatusBarTray.installed = true;
-    DshmLogger.info(TAG, '系统托盘图标已挂载');
+    DshmLogger.info(TAG, '系统托盘图标已挂载（无自定义右键菜单，左键唤回）');
   }
 
   /**
@@ -185,21 +155,6 @@ export class StatusBarTray {
       const fn: ((clickType: string) => void) | null = StatusBarTray.iconClickCb;
       if (fn !== null) {
         fn(clickType);
-      }
-    });
-  }
-
-  /** 注册托盘右键菜单点击回调（可重复注册，后者覆盖前者）。 */
-  static onMenuClick(cb: (menuCode: string) => void): void {
-    StatusBarTray.menuClickCb = cb;
-    statusBarManager.off('rightMenuClick');
-    statusBarManager.on('rightMenuClick', (data: emitter.EventData): void => {
-      const payload: MenuClickPayload | undefined = data.data as MenuClickPayload | undefined;
-      const code: string = payload !== undefined && payload.menuCode !== undefined ? payload.menuCode : '';
-      DshmLogger.info(TAG, '托盘右键菜单: ' + code);
-      const fn: ((menuCode: string) => void) | null = StatusBarTray.menuClickCb;
-      if (fn !== null) {
-        fn(code);
       }
     });
   }

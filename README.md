@@ -26,8 +26,11 @@
   触摸场景另有 `Tab`/`↑`/`^C` 按钮。
 - **运行环境面板**：逐项展示 Harmonybrew / node / deepseek-harness / 全盘访问权限状态，
   一键安装/升级运行时（命令送入 pty 实时可见）。
-- **系统集成（PC / 2in1）**：任务栏 **Dock 图标右键「重启」**（`quickBarManager`）、
-  系统托盘图标左键唤回 + 右键「重启」（`statusBarManager`）、关闭窗口时隐藏到托盘常驻。
+- **系统集成（PC / 2in1）**：系统托盘图标**左键唤回**主窗口、关闭窗口时**隐藏到托盘常驻**
+  （DSH 服务不断）；重启服务在应用内 Harness 菜单。
+  > 系统级右键菜单里**不放自定义项**：Dock（快捷栏）那条入口试过 `quickBarManager`，但系统
+  > 只能用 `startAbility` 拉起目标 Ability、且实测**不转发**我们登记的参数，最终评估后废弃并清理；
+  > 托盘右键交回系统默认菜单（自带退出）。原因与 API 细节见踩坑点总表 §7。
 - **沉浸光感 UI**：面板卡片使用 `uiMaterial.ImmersiveMaterial`（API 26 空间化材质），带能力探测与降级。
 - **权限引导**：`ACCESS_USER_FULL_DISK` / `CUSTOM_SANDBOX` 等受限权限通过 `openPermissionOnSetting` 引导开启。
 - **品牌**：白底黑鲸鱼启动页 + 分层应用图标。

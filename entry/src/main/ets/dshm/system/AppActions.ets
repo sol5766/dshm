@@ -22,12 +22,6 @@ const TAG: string = 'DshmAppActions';
 const DIAG_FILE: string = 'restart-diag.txt';
 
 /**
- * 「请求重启」事件：Dock 菜单由 BackGroundAbility（**独立进程**）接收，
- * 而 dsh 的 native 子进程归属主进程（EntryAbility），因此不能在那里直接重启，
- * 而是广播本事件，由主进程执行（见 EntryAbility.onCreate 的订阅）。
- */
-export const EVENT_RESTART_REQUEST: string = 'dshm.dsh.restart.request';
-/**
  * 「重启完成」事件：dsh 每次启动都会换一个鉴权 token，页面必须重新用新 URL 加载，
  * 否则停在 401/旧连接上。重启方（主进程）广播本事件，页面收到即重新 loadUrl。
  */
@@ -117,17 +111,7 @@ export class DshmAppActions {
     return await DshBootstrap.stopDshForExit(context, mode, 8000);
   }
 
-  // ============ 跨进程事件（Dock 菜单在独立进程接收）============
-
-  /** 请求主进程重启 DSH（Dock 菜单用）。 */
-  static requestRestart(): void {
-    DshmAppActions.publish(EVENT_RESTART_REQUEST, '请求重启');
-  }
-
-  /** 主进程订阅重启请求，由它执行真正的重启（dsh native 子进程归属主进程）。 */
-  static subscribeRestartRequest(handler: () => void): void {
-    DshmAppActions.subscribe(EVENT_RESTART_REQUEST, handler);
-  }
+  // ============ 重启完成通知（页面换新 token 重载）============
 
   /** 页面订阅重启完成，重新用新 token 的 URL 加载 Web UI。 */
   static subscribeRestartDone(handler: () => void): void {

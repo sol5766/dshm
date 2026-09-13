@@ -1,5 +1,22 @@
 # HarmonyOS NEXT (API 26 / HarmonyOS 6, PC 2in1) Dock 交互与退出方案
 
+> ## ⚠️ 采用情况（2026-09-13 结论，先读这段）
+>
+> 本文是**调研资料**，其中「问题 1：Dock 右键菜单」的方案**最终没有采用**：
+>
+> - 已实测落地过一版（`quickBarManager` + 菜单项指向后台 Ability），但发现两个硬伤：
+>   1. 系统对菜单项只支持指定 `abilityName`，一律用**普通 `startAbility`** 拉起，不带
+>      `startupVisibility: STARTUP_HIDE` —— 目标若是无 UI 的后台 Ability，屏幕上会多出一个
+>      只显示启动图、永远进不去的窗口；
+>   2. 真实点击时系统**没有转发**我们在 `parameters` 里登记的 `dshmAction`（want 里只有系统参数），
+>      即这个入口无法携带动作标识。
+> - 结论：**该入口已整体移除**（代码里只剩 `QuickBarMenuCleanup.ets` 负责清理系统侧残留注册项），
+>   托盘右键交回系统默认菜单，重启服务保留在应用内 Harness 菜单。
+> - 「问题 3：优雅退出」的结论**已采用**（先停 dsh 再 `terminateSelf`），见 `AppActions.stopForExit` /
+>   `EntryAbility.exitApp`。
+>
+> 下面的 API 事实与官方链接仍然有效，留作后续需要系统级菜单时的参考。
+
 调研范围：官方文档快照（DevEco CLI docs, API 26.0.0）+ 本机 DevEco SDK 26.0 声明文件实证。
 目标机型：MNTXM-24B（PC/2in1）。目标工程：`com.brewdsh.app` / module `entry` / `EntryAbility`。
 

@@ -13,34 +13,11 @@
  */
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { fileIo } from '@kit.CoreFileKit';
+import { window } from '@kit.ArkUI';
 import { DshmLogger } from '../dshm/utils/Logger';
 import { StatusBarTray } from '../dshm/system/StatusBarTray';
-import { DshmAppActions } from '../dshm/system/AppActions';
-import {
-  QUICKBAR_PARAM_KEY,
-  QUICKBAR_ACTION_EXIT,
-  QUICKBAR_ACTION_RESTART
-} from '../dshm/system/QuickBarMenu';
 
 const TAG: string = 'BackGroundAbility';
-
-/**
- * Dock 菜单动作诊断文件。
- *
- * 为什么需要：hilog 在本机 2in1 上读不到应用日志（`hilog -x` 无本应用 tag），
- * 而"Dock 菜单点击到底有没有进来、WantParams 有没有带过来"只能靠文件留证。
- */
-function writeActionDiag(context: Context, line: string): void {
-  try {
-    const f = fileIo.openSync(context.filesDir + '/quickbar-action.txt',
-      fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-    fileIo.writeSync(f.fd, new Date().toISOString() + ' ' + line + '\n');
-    fileIo.closeSync(f);
-  } catch (e) {
-    DshmLogger.warn(TAG, '写 Dock 动作诊断失败: ' + String(e));
-  }
-}
 
 export default class BackGroundAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -50,53 +27,6 @@ export default class BackGroundAbility extends UIAbility {
       DshmLogger.info(TAG, '收到整体退出事件，结束后台进程');
       this.terminateSelfQuietly();
     });
-    // Dock 右键菜单冷启动路径：系统以 startAbility 拉起本 Ability 并带回 WantParams。
-    this.dispatchQuickBarAction(want);
-  }
-
-  /**
-   * Dock 右键菜单热启动路径：目标 Ability 已存在时系统只回调 onNewWant。
-   *
-   * 这里必须实现，否则"应用已在后台时点 Dock 菜单"会完全没反应（冷热两条路径
-   * 是系统行为，不走哪个取决于 Ability 是否存活）。
-   */
-  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    DshmLogger.info(TAG, 'onNewWant');
-    this.dispatchQuickBarAction(want);
-  }
-
-  /**
-   * 分发 Dock 菜单动作。
-   *
-   * quickBarManager 的菜单项只能指定 abilityName，参数经 WantParams 回传，
-   * 所以动作识别放在这里。两个动作都**不把主窗口拉到前台**：
-   *   - 重启：直接调 DshmAppActions.restartDsh（停旧 → 按当前模式拉起 → 等就绪），
-   *     页面若存活会由 UI 轮询自然感知；窗口保持原状；
-   *   - 退出：广播整体退出请求，由 EntryAbility 统一走「停 DSH → 摘托盘 → 结束」
-   *     链路（与托盘右键退出、应用内退出完全同一条路），本 Ability 随后自行结束。
-   */
-  private dispatchQuickBarAction(want: Want): void {
-    const params: Record<string, Object> | undefined = want.parameters;
-    const raw: Object | undefined = params === undefined ? undefined : params[QUICKBAR_PARAM_KEY];
-    // 诊断：Dock 菜单点击是否真的到达本 Ability、参数是否原样带回。
-    writeActionDiag(this.context,
-      'want.parameters=' + (params === undefined ? 'undefined' : JSON.stringify(params))
-        + ' action=' + (raw === undefined ? '(none)' : String(raw)));
-    if (params === undefined || raw === undefined) {
-      return;
-    }
-    const action: string = String(raw);
-    DshmLogger.info(TAG, '收到 Dock 菜单动作: ' + action);
-    if (action === QUICKBAR_ACTION_EXIT) {
-      StatusBarTray.publishExitRequest();
-      this.terminateSelfQuietly();
-      return;
-    }
-    if (action === QUICKBAR_ACTION_RESTART) {
-      // dsh 的 native 子进程归属主进程（EntryAbility），本 Ability 在独立进程里，
-      // 不能直接重启 —— 广播请求，由主进程执行并广播完成事件让页面换新 token 重载。
-      DshmAppActions.requestRestart();
-    }
   }
 
   private terminateSelfQuietly(): void {
@@ -116,6 +46,25 @@ export default class BackGroundAbility extends UIAbility {
     DshmLogger.info(TAG, 'onPrepareToTerminate：通知主 Ability 一并退出');
     StatusBarTray.notifyBgTerminating();
     return false;
+  }
+
+  /**
+   * 窗口阶段兜底：本 Ability 是"无窗口保活"设计，正常情况下由 EntryAbility 以
+   * `startupVisibility: STARTUP_HIDE` + 托盘绑定 processMode 拉起，不显示窗口。
+   *
+   * 但**任何以普通 startAbility 拉起它的路径都会得到一个正常窗口**（系统只看
+   * abilityName，不带那些参数），而它没有任何 UI 内容 → 屏幕上会多出一个只显示
+   * 启动图、永远进不去的窗口（实测 2026-09-13）。这里立刻隐藏窗口作为兜底。
+   */
+  onWindowStageCreate(windowStage: window.WindowStage): void {
+    DshmLogger.info(TAG, 'onWindowStageCreate：隐藏窗口（本 Ability 无 UI 内容）');
+    // 用 UIAbilityContext.hideAbility() 而不是 Window.hide()：后者在 API 26 已不存在
+    //（本项目其它地方也是用 hideAbility，见 EntryAbility.onPrepareToTerminate）。
+    this.context.hideAbility().then((): void => {
+      DshmLogger.info(TAG, '窗口已隐藏');
+    }).catch((e: BusinessError): void => {
+      DshmLogger.warn(TAG, '隐藏窗口失败: ' + JSON.stringify(e));
+    });
   }
 
   onDestroy(): void {

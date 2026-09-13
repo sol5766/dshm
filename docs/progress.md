@@ -27,8 +27,7 @@
 | **模式切换干净可靠** | 统一「停旧（等标记）→ 清日志 → 重做镜像 → 按新模式拉起 → 等就绪」；宿主守候进程收到信号后**自身退出**、内嵌停机改由 native 父进程 `kill-request` 接管。停机 **0.8s**、就绪 ~12s；两个方向均验证 |
 | **环境树不再被误删** | `removeDirRecursive` 入口补 `lstatSync`（原先顺符号链接把 242 个包的真实内容删光，两种模式都起不来） |
 | **宿主 profile 启动修复** | 壳侧写的 `cordis.patch.yml` 必须是顶层 YAML 数组（原来只写注释 → 解析成 null → dsh abort `status=256`） |
-| **Dock 右键「重启」** | `quickBarManager`（仅 2in1）+ 后台 Ability 收 WantParams + 公共事件转主进程执行 + 完成后页面换新 token 重载；菜单只保留「重启」（退出用系统自带）；幂等清理 + 诊断文件 |
-| **托盘菜单简化** | 只留「重启」（打开靠左键唤回、退出用系统自带）；左键唤回补 `Window.restore()` 优先 |
+| **系统菜单入口（已废弃）** | 试过用 `quickBarManager` 在任务栏（Dock）右键加「重启」，并在托盘右键加「重启」；实测系统只用 `startAbility` 拉起目标 Ability、且**不转发**登记的 WantParams，还会给无 UI 的后台 Ability 建出空窗口 → **最终全部移除**，托盘右键交回系统默认菜单（自带退出），仅保留托盘左键唤回；新增 `QuickBarMenuCleanup.ets` 清理系统侧残留注册项 |
 | **退出更干净** | `exitApp` 先停 dsh 再 `terminateSelf`：实测退出后应用与 dsh 进程数 9 → 0 |
 | **启动画面 = 白底黑鲸鱼** | 重做启动图图标（透明底黑鲸鱼）、应用图标（白底 + 黑鲸鱼）、深色字标；生成脚本 `scripts/gen-brand-assets.ps1` 可复现 |
 | **环境版本** | `ENV_VERSION` 116 → **120**（rawfile 内容多次变更，必须同步提升） |

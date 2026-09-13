@@ -209,26 +209,43 @@
 
 ## 7. 鸿蒙 PC 系统集成
 
+> **本项目的采用情况（2026-09-13 最终决定）**：系统级右键菜单里**不再放任何自定义项** ——
+> Dock（快捷栏）那条入口已废弃并清理（原因见 §7.2、§7.3），托盘右键交回系统默认菜单。
+> 保留的只有：**托盘图标左键唤回主窗口**、**关闭窗口隐藏到托盘常驻**、**应用内 Harness 菜单的「重启服务」**。
+> 下面这些 API 结论仍然有效，供后续需要时参考。
+
 ### 7.1 Dock（快捷栏）右键 ≠ 状态栏（托盘）右键
 - **Dock / 快捷栏**（屏幕底部任务栏图标右键）= **`quickBarManager`**（`@kit.DeskTopExtensionKit`，仅 2in1）。
   官方 `shortcuts` 只覆盖"**长按**桌面图标"，`abilities[].skills` 只声明"能被谁拉起"，`fileContextMenu` 是文件管理器里
   右键**文件**的菜单 —— 三者都不适用于 Dock。
-- **状态栏 / 系统托盘**（右下角托盘图标右键）= **`statusBarManager`**（本工程 `StatusBarTray` 已在用）。
+- **状态栏 / 系统托盘**（托盘图标右键）= **`statusBarManager`**（本工程 `StatusBarTray` 在用）。
+  两者是**两套独立 API**：清理其中一个不会影响另一个（实测：删掉 Dock 分组后托盘菜单项依旧存在）。
 
-### 7.2 `quickBarManager` 的"空查询"会抛错
-- **现象**：`capabilitySupported=true` 之后立刻失败：`1020210003 Category not found`；创建分组后再遇到 `1020210004 Quick task not found`。
-- **根因**：没有任何分组 / 分组内没有任何任务时，`getCustomCategories` / `getTasksFromCategory` **抛错而不是返回空数组**。
-- **对策**：两处都 try/catch 并按空集合处理，否则首次安装永远建不出菜单。
+### 7.2 `quickBarManager` 的坑（每条都实测过）
+1. **"空查询"会抛错**：没有任何分组时 `getCustomCategories` 抛 `1020210003 Category not found`；
+   分组内没有任务时 `getTasksFromCategory` 抛 `1020210004 Quick task not found`。必须 try/catch 当空集合处理，
+   否则首次安装永远建不出菜单。
+2. **菜单项只能指定 `abilityName`**，系统一律以**普通 `startAbility`** 拉起目标 —— 不带
+   `startupVisibility: STARTUP_HIDE`。若目标是无 UI 的后台 Ability，系统会给它建一个**正常窗口**：
+   屏幕上多出一个只显示启动图、永远进不去的窗口（实测踩到）。指向带 UI 的 EntryAbility 才行。
+3. **`parameters`（登记成 WantParams）实测没有送达**：真实点击（caller `com.ohos.sceneboard.MainAbility`）
+   到达的 `want.parameters` 里只有系统参数，我们登记的 `dshmAction=restart` **不存在** —— 也就是说
+   这个入口**无法携带动作标识**，只能靠"点了哪个 abilityName"来区分动作。
+4. 修改版本后必须提升 `ENV_VERSION` 无关（纯 ArkTS 改动），但**系统侧残留需要主动清理**：
+   改目标/去掉菜单项后，旧注册项仍在系统里，必须 `deleteCustomCategory`/`deleteQuickTask` 删掉，
+   否则用户右键里会出现点了没反应的死项（`QuickBarMenuCleanup.ets` 就是干这个的）。
 
-### 7.3 Dock 菜单项只能指定 Ability，参数以 WantParams 回传
-- 系统必定 `startAbility`，`parameters` 变成 `want.parameters`。因此：
-  - 目标选**无窗口的后台 Ability**，避免点"退出/重启"把主窗口闪到前台；
-  - 冷启动走 `onCreate`、热启动走 `onNewWant`，两条都要实现；
-  - 跨进程动作用公共事件转回主进程执行（dsh 的 native 子进程归属主进程）。
-
-### 7.4 Dock 左键点击不是 startAbility
+### 7.3 Dock 左键点击不是 startAbility
 - 左键由系统"切任务到前台"，只保证触发 `onForeground`。窗口若被**最小化**，`showWindow()` 不一定恢复 →
   用 `Window.restore()` 优先、失败回退 `showWindow()`。`launchType` 保持 `singleton`（也是缺省值）。
+
+### 7.4 托盘自定义菜单 vs 系统默认菜单
+- `StatusBarItem.statusBarGroupMenu` 里的项通过 `statusBarManager.on('rightMenuClick')` 回传 `menuCode`；
+  `menuAction.notifyOnly = true` 表示"只通知、不拉起 Ability"。
+- 系统托盘右键**自带退出项**（只能拦截、不能改文案，见 §7.5），所以自己再加「退出」是重复；
+  「打开」也不需要，左键点图标即唤回。本项目因此**不注册自定义托盘菜单**。
+- 若确实要注册，注意 `notifyOnly` 项的系统行为在不同版本上可能仍会拉起 `abilityName` —— 那就又回到
+  §7.2 第 2 条的"空窗口"问题：**给后台 Ability 加 `onWindowStageCreate → hideAbility()` 兜底**。
 
 ### 7.5 退出：`terminateSelf()` 只销毁当前 Ability，也**不保证**清理 native 子进程
 - 进程内还有后台 Ability 时，只调一次 `terminateSelf()` 进程不退 → 要广播事件让另一个 Ability 也结束；
@@ -236,7 +253,8 @@
   （宿主发 `stop-request`、内嵌发 `kill-request`，等标记，超时也继续退，避免"退不掉"）；
 - 官方对"Dock 栏退出"是否触发 `onDestroy` 的说法自相矛盾 → 关键落盘/清理不要只放 `onDestroy`。
 - 系统自带的 Dock/托盘退出项**只能拦截**（`onPrepareToTerminate`，需要 `ohos.permission.PREPARE_APP_TERMINATE`），
-  **不能自定义文案**；要自定义项就得用 `quickBarManager`。
+  **不能自定义文案**。
+- ⚠️ `Window.hide()` 在 API 26 已**不存在**；隐藏窗口用 `UIAbilityContext.hideAbility()`。
 
 ---
 

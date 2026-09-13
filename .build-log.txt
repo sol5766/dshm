@@ -1,0 +1,1655 @@
+﻿> hvigor [32mUP-TO-DATE :entry:default@PreBuild...  [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 1 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@GenerateMetadata...  [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 16 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@MergeProfile...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@CreateBuildProfile...  [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 17 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@MakePackInfo...  [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 10 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@GeneratePkgContextInfo...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessProfile...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessRouterMap...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessShareConfig...  [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 3 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessResource...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@GenerateLoaderJson...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@CompileResource...  [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 73 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessLibs...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@DoNativeStrip...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@CacheNativeLibs...  [39m
+node.exe : > hvigor [33mWARN: [33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/sy
+stem/StatusBarTray.ets:67:55
+At line:4 char:1
++ & 'C:\Program Files\Huawei\DevEco Studio\tools\node\node.exe' 'C:\Pro ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (> hvigor [33mW...rTray.ets:67:55:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:101:5
+ The system capacity of this api 'statusBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:101:22
+ The system capacity of this api 'addToStatusBar' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:101:22
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:119:36
+ This API is unavailable to phone, tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:120:42
+ This API is unavailable to phone, tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:138:7
+ The system capacity of this api 'statusBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:138:24
+ The system capacity of this api 'removeFromStatusBar' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:149:5
+ The system capacity of this api 'statusBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:149:22
+ The system capacity of this api 'off' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:150:5
+ The system capacity of this api 'statusBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/StatusBarTray.ets:150:22
+ The system capacity of this api 'on' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:447:37
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:448:25
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:450:12
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:451:12
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:766:16
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:845:17
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:856:19
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:997:16
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1000:1
+7
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1047:5
+6
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1050:1
+7
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1051:1
+4
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1063:1
+8
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1207:1
+6
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1214:1
+2
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1238:1
+8
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1373:1
+9
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1424:1
+7
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1440:1
+7
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1443:4
+3
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1516:4
+3
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1532:2
+1
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1533:1
+8
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1569:3
+2
+ This API is unavailable to phone, tv, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1569:3
+2
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1739:1
+8
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1828:1
+8
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/bootstrap/DshBootstrap.ets:1902:1
+6
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:41
+:38
+ The system capacity of this api 'quickBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:41
+:54
+ The system capacity of this api 'isQuickBarCapabilitySupported' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:49
+:26
+ The system capacity of this api 'quickBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:49
+:42
+ The system capacity of this api 'getCustomCategories' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:59
+:25
+ The system capacity of this api 'categoryName' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:62
+:40
+ The system capacity of this api 'categoryId' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:64
+:15
+ The system capacity of this api 'quickBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:64
+:31
+ The system capacity of this api 'deleteCustomCategory' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:77
+:15
+ The system capacity of this api 'quickBarManager' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:77
+:31
+ The system capacity of this api 'getCustomCategories' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/system/QuickBarMenuCleanup.ets:80
+:29
+ The system capacity of this api 'categoryName' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/entryability/EntryAbility.ets:103:13
+ This API is unavailable to tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/entryability/EntryAbility.ets:104:13
+ This API is unavailable to tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/entryability/EntryAbility.ets:204:12
+ This API is unavailable to phone, tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/entryability/EntryAbility.ets:245:18
+ This API is unavailable to phone, tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/entryability/EntryAbility.ets:291:18
+ This API is unavailable to phone, tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/backgroundability/BackGroundAbility.et
+s:63:18
+ This API is unavailable to phone, tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:181:32
+ The system capacity of this api 'picker' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:181:39
+ The system capacity of this api 'DocumentViewPicker' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:182:25
+ The system capacity of this api 'picker' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:182:32
+ The system capacity of this api 'DocumentSelectOptions' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:183:13
+ The system capacity of this api 'selectMode' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:183:26
+ The system capacity of this api 'picker' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:183:33
+ The system capacity of this api 'DocumentSelectMode' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:183:52
+ The system capacity of this api 'FOLDER' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:184:13
+ The system capacity of this api 'maxSelectNumber' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:188:15
+ The system capacity of this api 'defaultFilePathUri' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:194:35
+ The system capacity of this api 'select' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:218:32
+ The system capacity of this api 'OperationMode' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:218:46
+ The system capacity of this api 'READ_MODE' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:218:68
+ The system capacity of this api 'OperationMode' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:218:82
+ The system capacity of this api 'WRITE_MODE' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:221:23
+ The system capacity of this api 'persistPermission' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:238:32
+> hvigor [32mFinished :entry:default@CompileArkTS... after 6 s 624 ms [39m
+ The system capacity of this api 'OperationMode' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:238:46
+ The system capacity of this api 'READ_MODE' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:238:68
+ The system capacity of this api 'OperationMode' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:238:82
+ The system capacity of this api 'WRITE_MODE' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/access/WorkspaceAccess.ets:241:23
+ The system capacity of this api 'activatePermission' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:77:5
+4
+ The system capacity of this api 'hdsMaterial' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:77:6
+6
+ The system capacity of this api 'getSystemMaterialTypes' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:81:3
+2
+ The system capacity of this api 'hdsMaterial' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:81:4
+4
+ The system capacity of this api 'MaterialType' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:81:5
+7
+ The system capacity of this api 'IMMERSIVE' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:110:
+21
+ The system capacity of this api 'hdsMaterial' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:110:
+33
+ The system capacity of this api 'MaterialType' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:110:
+46
+ The system capacity of this api 'ADAPTIVE' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:111:
+22
+ The system capacity of this api 'hdsMaterial' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:111:
+34
+ The system capacity of this api 'MaterialLevel' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/dshm/ui/ImmersiveMaterialUtil.ets:111:
+48
+ The system capacity of this api 'ADAPTIVE' is not supported on all devices
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/pages/dshm/DshmWebPage.ets:242:5
+ 'animateTo' has been deprecated.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/pages/dshm/DshmWebPage.ets:245:5
+ 'animateTo' has been deprecated.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/pages/dshm/DshmWebPage.ets:563:23
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/pages/dshm/DshmWebPage.ets:635:20
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/pages/dshm/DshmWebPage.ets:925:23
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/pages/dshm/DshmWebPage.ets:970:21
+ This API is unavailable to phone, tv, car, wearable.
+[39m[39m
+[33mWARN: [33m[33mArkTS:WARN File: D:/desktop/temp/BrewDSH/entry/src/main/ets/pages/dshm/DshmWebPage.ets:1060:33
+ Function may throw exceptions. Special handling is required.
+[39m[39m
+[39m
+> hvigor [32mUP-TO-DATE :entry:default@GeneratePkgModuleJson...  [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [33mWARN: Picked up JAVA_TOOL_OPTIONS: -Xms16m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:ReservedCodeCacheSize=6
+4m
+[39m
+> hvigor [32mFinished :entry:default@PackageHap... after 5 s 358 ms [39m
+> hvigor [33mWARN: Unexpected source code files packaged in 'entry'. Please remove them if not needed. Reference: http
+s://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-hvigor-build-profile-app#section03812484215
+If the checking is not needed, you can set buildOption/packOptions/enableSourceCodeCheck to false at file: D:\desktop\t
+emp\BrewDSH\build-profile.json5
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod-to-json-schema\postesm.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod-to-json-schema\postcjs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod-to-json-schema\createIndex.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\compile.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4-mini\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\schemas.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\parse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\iso.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\in-out.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\external.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\deep-partial.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\coerce.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\mini\checks.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\zh-TW.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\zh-CN.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\yo.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\vi.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\uz.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ur.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\uk.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ua.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\tr.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\tk.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\th.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\tg.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ta.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\sv.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\sl.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\sk.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ru.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ro.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\pt.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\pt-BR.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ps.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\pl.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ota.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\no.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\nn.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\nl.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ne.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ms.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\mk.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\lt.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ko.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\kn.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\km.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\kh.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ka.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ja.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\it.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\is.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\id.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\hy.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\hu.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\hr.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\hi.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\he.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\gu.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\fr.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\fr-CA.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\fi.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\fa.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\es.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\eo.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\en.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\el.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\de.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\da.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\cs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ckb.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ca.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\bn.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\bg.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\be.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\az.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\locales\ar.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\zsf.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\visit.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\versions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\util.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\to-json-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\standard-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\schemas.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\registries.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\regexes.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\parse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\memoizer.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\json-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\json-schema-processors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\json-schema-generator.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\doc.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\core.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\compile.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\checks.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\core\api.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\schemas.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\parse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\iso.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\in-out.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\from-json-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\external.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\deep-partial.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\compat.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\coerce.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v4\classic\checks.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\ZodError.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\standard-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\external.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\locales\en.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\helpers\util.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\helpers\typeAliases.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\helpers\partialUtil.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\helpers\parseUtil.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\helpers\errorUtil.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\helpers\enumUtil.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\union.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\string.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\realworld.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\primitives.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\object.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\ipv4.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\discriminatedUnion.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\v3\benchmarks\datetime.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\mini\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\zod\src\locales\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\sharp\src\utilities.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\sharp\src\stats.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\sharp\src\pipeline.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\sharp\src\operations.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\sharp\src\metadata.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\sharp\src\common.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\lib\Find-Visu
+alStudio.cs
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\test_gyp.
+py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\gyp_main.
+py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\__init__.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\_tokenizer.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\_structures.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\_parser.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\_musllinux.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\_manylinux.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\_elffile.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\version.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\utils.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\tags.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\specifiers.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\requirements.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\metadata.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\pac
+kaging\markers.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\__init__.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\xml_fix.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\xcode_ninja.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\xcode_emulation_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\xcode_emulation.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\xcodeproj_file.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\win_tool.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\simple_copy.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\ninja_syntax.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\msvs_emulation.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSVersion.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSUtil.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSUserFile.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSToolFile.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSSettings_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSSettings.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSProject.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\MSVSNew.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\mac_tool.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\input_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\input.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\flock_tool.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\easy_xml_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\easy_xml.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\common_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\common.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\__init__.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\xcode_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\xcode.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\ninja_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\ninja.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\msvs_test.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\msvs.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\make.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\gypsh.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\gypd.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\eclipse.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\dump_dependency_json.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\compile_commands_json.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\cmake.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\pnpm\dist\node_modules\node-gyp\gyp\pylib\gyp
+\generator\analyzer.py
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\version.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\streaming.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resource.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\pagination.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\client.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\azure.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\api-promise.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\zodToJs
+onSchema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\util.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\Refs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parseDe
+f.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\Options
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\index.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\errorMe
+ssages.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\unknown.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\union.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\undefined.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\tuple.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\string.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\set.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\record.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\readonly.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\promise.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\pipeline.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\optional.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\object.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\number.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\nullable.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\null.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\never.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\nativeEnum.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\map.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\literal.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\intersection.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\enum.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\effects.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\default.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\date.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\catch.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\branded.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\boolean.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\bigint.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\array.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\zod-to-json-schema\parsers
+\any.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\_vendor\partial-json-parser\parser
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\webhooks.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\videos.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\vector-stores.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\shared.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\realtime.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\moderations.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\models.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\images.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\graders.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\files.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\evals.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\embeddings.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\conversations.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\containers.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\completions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\chat.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\batches.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\audio.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\webhooks\webhooks.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\webhooks\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\vector-stores\vector-sto
+res.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\vector-stores\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\vector-stores\files.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\vector-stores\file-batch
+es.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\uploads\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\uploads\parts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\uploads\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills\versions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills\skills.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills\content.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills\versions\versions
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills\versions\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\skills\versions\content.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses\ws.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses\ws-base.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses\responses.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses\internal-base.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses\input-tokens.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses\input-items.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\responses\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\realtime\realtime.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\realtime\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\realtime\client-secrets.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\realtime\calls.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\graders\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\graders\graders.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\graders\grader-models.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\methods.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\jobs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\fine-tuning.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\checkpoints.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\alpha.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\jobs\jobs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\jobs\index.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\jobs\checkpo
+ints.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\checkpoints\
+permissions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\checkpoints\
+index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\checkpoints\
+checkpoints.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\alpha\index.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\alpha\grader
+s.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\fine-tuning\alpha\alpha.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\evals\runs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\evals\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\evals\evals.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\evals\runs\runs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\evals\runs\output-items.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\evals\runs\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\conversations\items.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\conversations\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\conversations\conversati
+ons.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\containers\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\containers\files.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\containers\containers.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\containers\files\index.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\containers\files\files.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\containers\files\content
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\chat\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\chat\completions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\chat\chat.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\chat\completions\message
+s.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\chat\completions\index.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\chat\completions\complet
+ions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\realtime.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\chatkit.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\beta.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\assistants.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads\threads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads\runs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads\messages.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads\runs\steps.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads\runs\runs.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\threads\runs\index.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\realtime\transcript
+ion-sessions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\realtime\sessions.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\realtime\realtime.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\realtime\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\chatkit\threads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\chatkit\sessions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\chatkit\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\beta\chatkit\chatkit.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\audio\translations.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\audio\transcriptions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\audio\speech.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\audio\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\audio\audio.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\admin.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\users
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\usage
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\spend
+-alerts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\roles
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\organ
+ization.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\invit
+es.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\index
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\group
+s.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\data-
+retention.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\certi
+ficates.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\audit
+-logs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\admin
+-api-keys.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\users
+\users.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\users
+\roles.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\users
+\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\users.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\spend-alerts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\service-accounts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\roles.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\rate-limits.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\projects.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\model-permissions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\hosted-tool-permissions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\groups.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\data-retention.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\certificates.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\api-keys.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\users\users.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\users\roles.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\users\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\groups\roles.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\groups\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\proje
+cts\groups\groups.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\group
+s\users.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\group
+s\roles.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\group
+s\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\resources\admin\organization\group
+s\groups.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\realtime\ws.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\realtime\websocket.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\realtime\internal-base.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\realtime\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\Util.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\transform.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\RunnableFunction.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\ResponsesParser.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\parser.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\jsonschema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\EventStream.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\EventEmitter.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\chatCompletionUtils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\ChatCompletionStreamingRunner.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\ChatCompletionStream.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\ChatCompletionRunner.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\AssistantStream.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\AbstractChatCompletionRunner.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\responses\ResponseStream.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\lib\responses\EventTypes.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\ws.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\ws-adapter.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\ws-adapter-node.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\ws-adapter-browser.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\to-file.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\stream-utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\shims.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\shim-types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\request-options.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\parse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\headers.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\detect-platform.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\builtin-types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\values.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\uuid.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\sleep.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\query.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\path.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\log.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\env.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\bytes.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\utils\base64.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\qs\utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\qs\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\qs\stringify.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\qs\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\qs\formats.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\internal\decoders\line.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\helpers\zod.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\helpers\audio.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\core\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\core\streaming.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\core\resource.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\core\pagination.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\core\EventEmitter.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\core\error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\core\api-promise.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\beta\realtime\ws.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\beta\realtime\websocket.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\beta\realtime\internal-base.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\beta\realtime\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\auth\workload-identity-auth.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\auth\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\auth\subject-token-providers.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\openai\src\auth\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\node-pty\src\win\path_util.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\node-pty\src\win\conpty.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\node-addon-api\nothing.c
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\node-addon-api\napi.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\node-addon-api\napi-inl.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\node-addon-api\napi-inl.deprecated.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\koffi\vendor\node-api-headers\include\node_ap
+i_types.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\koffi\vendor\node-api-headers\include\node_ap
+i.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\koffi\vendor\node-api-headers\include\js_nati
+ve_api_types.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\koffi\vendor\node-api-headers\include\js_nati
+ve_api.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\koffi\vendor\node-addon-api\napi.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\koffi\vendor\node-addon-api\napi-inl.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\koffi\vendor\node-addon-api\napi-inl.deprecat
+ed.h
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\fast-uri\types\index.test-d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource-parser\src\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource-parser\src\stream.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource-parser\src\parse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource-parser\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource-parser\src\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource\src\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource\src\EventSource.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\eventsource\src\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\verify.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\updates.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\update-api-v1.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\trial.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\themes.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\store.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\sources.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\source-migration.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\snapshot.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\settings.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\routes.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\restart.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\registry.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\regions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\region-probe.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\profile.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\presets.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\pnpm-compat.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\patch.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\order.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\net.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\ndjson.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\log.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\install.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\http.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\hot.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\home-paths.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\groups.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\gist.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\dsh-install.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\dsh-cli.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\discovery-compatibility.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\diagnostics.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\compatibility.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\check.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\channels.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\changelog.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\catalog-npm.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\catalog-local-match.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\backup.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\agents.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\accelerate.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\self-check.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\primitives.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\operations.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\market-data.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\locales.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\globals.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\src\client\comments.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\verify.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\updates.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\update-api-v1.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\trial.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\themes.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\store.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\sources.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\source-migration.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\snapshot.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\settings.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\routes.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\restart.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\registry.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\regions.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\region-probe.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\profile.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\presets.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\pnpm-compat.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\patch.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\order.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\net.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\ndjson.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\log.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\install.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\index.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\http.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\hot.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\home-paths.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\groups.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\gist.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\dsh-install.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\dsh-cli.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\discovery-compatibility.d
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\diagnostics.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\compatibility.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\check.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\channels.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\changelog.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\catalog-npm.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\catalog-local-match.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\backup.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\agents.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\dshmarket\lib\types\accelerate.d.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\data-uri-to-buffer\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv-formats\src\limit.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv-formats\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv-formats\src\formats.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\jtd.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\core.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\ajv.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\2020.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\2019.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\next.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\metadata.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\draft7.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\draft2020.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\code.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\uniqueItems.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\required.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\pattern.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\multipleOf.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\limitProperti
+es.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\limitNumber.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\limitLength.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\limitItems.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\limitContains
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\enum.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\dependentRequ
+ired.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\validation\const.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\unevaluated\unevaluatedP
+roperties.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\unevaluated\unevaluatedI
+tems.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\unevaluated\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\values.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\union.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\type.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\ref.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\properties.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\optionalProperties.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\nullable.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\metadata.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\enum.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\elements.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\jtd\discriminator.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\format\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\format\format.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\dynamic\recursiveRef.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\dynamic\recursiveAnchor.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\dynamic\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\dynamic\dynamicRef.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\dynamic\dynamicAnchor.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\discriminator\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\discriminator\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\core\ref.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\core\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\core\id.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\thenElse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\propertyNames
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\properties.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\prefixItems.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\patternProper
+ties.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\oneOf.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\not.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\items2020.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\items.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\if.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\dependentSche
+mas.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\dependencies.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\contains.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\anyOf.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\allOf.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\additionalPro
+perties.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\vocabularies\applicator\additionalIte
+ms.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\types\jtd-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\types\json-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\types\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\standalone\instance.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\standalone\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\validation_error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\uri.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\ucs2length.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\timestamp.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\re2.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\quote.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\parseJson.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\runtime\equal.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\refs\jtd-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\refs\json-schema-2020-12\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\refs\json-schema-2019-09\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\util.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\rules.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\resolve.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\ref_error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\names.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\validate\subschema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\validate\keyword.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\validate\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\validate\defaults.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\validate\dataType.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\validate\boolSchema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\validate\applicability.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\jtd\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\jtd\serialize.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\jtd\parse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\codegen\scope.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\codegen\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\ajv\lib\compile\codegen\code.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@stablelib\base64\base64.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@stablelib\base64\base64.test.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@stablelib\base64\base64.bench.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\schemastery\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\node-addon-system\src\main.c
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\node-addon-system\src\flock.c
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cosmokit\src\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cosmokit\src\time.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cosmokit\src\string.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cosmokit\src\misc.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cosmokit\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cosmokit\src\array.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-timer\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-loader\src\interna
+l.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-loader\src\index.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-loader\src\config\
+utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-loader\src\config\
+tree.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-loader\src\config\
+isolate.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-loader\src\config\
+group.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-loader\src\config\
+entry.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-include\src\index.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-hmr\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-hmr\src\error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis-plugin-group\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\service.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\registry.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\reflect.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\logger.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\fiber.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\events.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@deepseek-ai\cordis\src\context.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\util\src\uint32ArrayFrom.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\util\src\numToUint8.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\util\src\isEmptyData.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\util\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\util\src\convertToBuffer.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\supports-web-crypto\src\supportsW
+ebCrypto.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\supports-web-crypto\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-js\src\RawSha256.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-js\src\knownHashes.fixture
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-js\src\jsSha256.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-js\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-js\src\constants.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-browser\src\webCryptoSha25
+6.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-browser\src\isEmptyData.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-browser\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-browser\src\crossPlatformS
+ha256.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@aws-crypto\sha256-browser\src\constants.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\version.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\streaming.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resource.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\pagination.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\client.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\api-promise.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\_vendor\partial-json-pa
+rser\parser.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\memory\node.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\memory\node.brows
+er.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\agent-toolset\syn
+c-interval.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\agent-toolset\ski
+lls.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\agent-toolset\nod
+e.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\agent-toolset\nod
+e.browser.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\agent-toolset\mem
+ories.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\tools\agent-toolset\fs-
+util.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\top-level.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\skills.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\shared.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\models.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\messages.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\files.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\completions.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\skills\versio
+ns.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\skills\skills
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\skills\index.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\messages\mess
+ages.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\messages\inde
+x.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\messages\batc
+hes.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\webhooks
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\vaults.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\user-pro
+files.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\tunnels.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\skills.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\models.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\messages
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\memory-s
+tores.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\files.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\environm
+ents.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\dreams.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\deployme
+nts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\deployme
+nt-runs.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\beta.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\agents.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\vaults\v
+aults.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\vaults\i
+ndex.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\vaults\c
+redentials.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\tunnels\
+tunnels.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\tunnels\
+index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\tunnels\
+certificates.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\skills\v
+ersions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\skills\s
+kills.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\skills\i
+ndex.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\threads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\sessions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\resources.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\events.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\threads\threads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\threads\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\sessions
+\threads\events.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\workspaces.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\users.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\service-accounts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\rate-limits.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\organization.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\invites.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\external-keys.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\compliance-settings.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\api-keys.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\workspaces\workspaces.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\workspaces\service-accounts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\workspaces\rate-limits.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\workspaces\members.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\workspaces\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\service-accounts\workspaces.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\service-accounts\service-accounts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\service-accounts\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation\rules.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation\issuers.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation\federation.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation\rules\workspaces.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation\rules\rules.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\organiza
+tion\federation\rules\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\messages
+\messages.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\messages
+\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\messages
+\batches.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\memory-s
+tores\memory-versions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\memory-s
+tores\memory-stores.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\memory-s
+tores\memories.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\memory-s
+tores\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\environm
+ents\work.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\environm
+ents\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\environm
+ents\environments.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\agents\v
+ersions.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\agents\i
+ndex.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\resources\beta\agents\a
+gents.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\transform-json-sche
+ma.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\standard-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\parser.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\middleware.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\MessageStream.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\helper-client.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\credentials.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\BetaMessageStream.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\beta-parser.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\tools\ToolError.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\tools\SessionToolRu
+nner.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\tools\CompactionCon
+trol.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\tools\BetaToolRunne
+r.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\tools\BetaRunnableT
+ool.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\sessions\accumulate
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\environments\worker
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\environments\poller
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\environments\index.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\credentials\user-oa
+uth.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\credentials\types.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\credentials\token-c
+ache.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\credentials\oidc-fe
+deration.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\credentials\identit
+y-token.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\lib\credentials\credent
+ial-chain.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\to-file.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\stream-utils.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\stainless-help
+er-header.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\shims.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\shim-types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\request-signal
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\request-option
+s.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\parse.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\node.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\node.browser.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\message-stream
+-utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\headers.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\file-store.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\errors.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\detect-platfor
+m.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\constants.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\builtin-types.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\values.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\uuid.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\time.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\sleep.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\query.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\promise.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\path.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\log.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\env.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\bytes.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\base64.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\backoff.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\async-qu
+eue.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\utils\abort.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\qs\utils.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\qs\types.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\qs\stringify.t
+s
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\qs\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\qs\formats.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\decoders\line.
+ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\internal\decoders\jsonl
+.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\zod.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\json-schema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\index.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\beta\zod.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\beta\standard-s
+chema.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\beta\memory.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\beta\mcp.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\beta\json-schem
+a.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\helpers\beta\environmen
+ts.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\uploads.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\streaming.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\resource.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\pagination.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\middleware.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\error.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\credentials.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\api.ts
+D:\desktop\temp\BrewDSH\entry\src\main\resources\rawfile\dsh\node_modules\@anthropic-ai\sdk\src\core\api-promise.ts[39
+m
+> hvigor [32mFinished :entry:default@PackingCheck... after 745 ms [39m
+> hvigor [33mWARN: Picked up JAVA_TOOL_OPTIONS: -Xms16m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:ReservedCodeCacheSize=6
+4m
+[39m
+> hvigor [33mWARN: Picked up JAVA_TOOL_OPTIONS: -Xms16m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:ReservedCodeCacheSize=6
+4m
+[39m
+> hvigor [32mFinished :entry:default@SignHap... after 8 s 103 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 1 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 25 s 904 ms [39m

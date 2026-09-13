@@ -17,9 +17,9 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
 import { setContext, clearContext, DshmAbilityContextLike } from '../GlobalContext';
 import { DshmLogger } from '../dshm/utils/Logger';
-import { StatusBarTray, MENU_CODE_EXIT, MENU_CODE_RESTART } from '../dshm/system/StatusBarTray';
+import { StatusBarTray } from '../dshm/system/StatusBarTray';
 import { DshmAppActions } from '../dshm/system/AppActions';
-import { installQuickBarMenu } from '../dshm/system/QuickBarMenu';
+import { removeQuickBarMenu } from '../dshm/system/QuickBarMenuCleanup';
 
 const TAG: string = 'EntryAbility';
 
@@ -80,21 +80,6 @@ export default class EntryAbility extends UIAbility {
       DshmLogger.warn(TAG, '固定浅色模式失败（可忽略）: ' + String(e));
     }
     this.setupStatusBar();
-    // Dock（快捷栏）菜单的「重启」在后台进程被触发，那里不能直接重启 dsh
-    // （native 子进程归属本进程），因此由本 Ability 订阅请求并执行。
-    DshmAppActions.subscribeRestartRequest((): void => {
-      this.restartDshFromMenu();
-    });
-  }
-
-  /** 响应外部（Dock 菜单 / 托盘菜单）重启请求：重启成功后广播事件让页面换新 URL。 */
-  private restartDshFromMenu(): void {
-    DshmLogger.info(TAG, '收到外部重启请求，开始重启 DSH');
-    DshmAppActions.restartDsh(this.context).then((ok: boolean): void => {
-      DshmLogger.info(TAG, '外部重启完成，就绪=' + String(ok));
-    }).catch((e: Object): void => {
-      DshmLogger.warn(TAG, '外部重启失败: ' + String(e));
-    });
   }
 
   onDestroy(): void {
@@ -123,10 +108,11 @@ export default class EntryAbility extends UIAbility {
       }
       // 使用系统为当前设备形态提供的默认主窗口尺寸，避免将 2in1 强制缩成手机长条比例。
     });
-    // Dock（快捷栏）右键菜单：在窗口阶段创建后注册，用户即使从不打开页面也能重启/退出。
-    // 幂等且失败静默（非 2in1 设备不支持该能力）。
-    installQuickBarMenu(this.context).catch((e: Object): void => {
-      DshmLogger.warn(TAG, 'Dock 菜单注册异常（可忽略）: ' + String(e));
+    // 清理旧版本在任务栏（Dock/快捷栏）右键菜单里注册的分组。
+    // 该入口已废弃（原因见 QuickBarMenuCleanup.ets 头部注释），但历史注册项会留在系统里，
+    // 必须主动删掉，否则用户的任务栏右键会一直挂着一个点了没反应的「重启」。
+    removeQuickBarMenu(this.context).catch((e: Object): void => {
+      DshmLogger.warn(TAG, 'Dock 菜单清理异常（可忽略）: ' + String(e));
     });
   }
 
@@ -284,16 +270,8 @@ export default class EntryAbility extends UIAbility {
           this.showMainWindow();
         }
       });
-      // 右键菜单。
-      StatusBarTray.onMenuClick((menuCode: string): void => {
-        if (menuCode === MENU_CODE_EXIT) {
-          this.exitApp('托盘右键退出');
-        } else if (menuCode === MENU_CODE_RESTART) {
-          this.restartDshFromMenu();
-        } else {
-          this.showMainWindow();
-        }
-      });
+      // 托盘右键不注册自定义菜单（见 StatusBarTray.install 注释）：
+      // 「打开」靠左键、「退出」由系统右键菜单自带、「重启」在应用内 Harness 菜单里。
       StatusBarTray.install(ctx).then((): void => {
         this.trayReady = true;
         // 绑定托盘进程的前置条件是"应用已有托盘图标"，故挂图标后再拉起，留一点缓冲。
