@@ -150,3 +150,7 @@ desktop.ini
 /.local-rules/*.png
 *.bak-*
 
+
+# 本机构建日志（Agent 调试产物）
+/.build-log.txt
+
