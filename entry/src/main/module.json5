@@ -162,6 +162,10 @@
         "startWindow": "$profile:start_window",
         "exported": true,
         "backgroundModes": ["dataTransfer"],
+        // 显式声明单实例：Dock 左键点击由系统切任务到前台（走 onForeground），
+        // 只有 singleton 才能保证"唤回已有窗口"而不是再起一个实例。
+        // 缺省值本就是 singleton，这里写出来是防止后续被误改。
+        "launchType": "singleton",
         "skills": [
           {
             "entities": [
@@ -181,7 +185,10 @@
         "label": "$string:EntryAbility_label",
         "startWindowIcon": "$media:start_window_icon",
         "startWindowBackground": "$color:start_window_background",
-        "exported": true
+        "exported": true,
+        // Dock（快捷栏）右键菜单项只能指定 abilityName，系统以 startAbility 拉起它；
+        // singleton 保证连点多次不会堆出多个后台 Ability 实例。
+        "launchType": "singleton"
       }
     ]
   }

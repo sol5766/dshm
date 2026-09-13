@@ -23,6 +23,71 @@
 
 ## Bug 列表（新→旧）
 
+### [2026-09-13] 内嵌模式「停旧实例」不可靠：停机能力放在了被停的进程里（切换模式卡住）
+
+- **现象**：内嵌模式下切模式/重启时 `DshBootstrap.stopDsh` 超时 30s 返回 false，`DshmAppActions.restartDsh` 直接放弃 → 界面停在旧模式，模式切换看起来"没反应"（`restart-diag.txt`：`stopDsh stopped=false` / `放弃：旧实例未退出`）。宿主模式同一步只要 0.8s，正常。
+- **根因**：内嵌停机通道是「ArkTS 写 `restart-request` → **dsh 进程内的 dshm-terminal 插件**轮询到就 `process.exit(0)` → native 写 `node-exited`」。这等于把停机能力放在**要被停掉的那个进程**里：插件没加载、事件循环被占住或轮询被拖慢时，旧 node 就永远停不下来。宿主模式没这个问题——它的守候进程独立于 dsh，收信号直接 kill 子进程。
+- **修复**：
+  1. `dsh_host.cpp` 内嵌分支由 `waitpid(pid, &status, 0)` 阻塞等待改为**轮询**并响应 `<filesDir>/kill-request`：native 父进程直接 SIGTERM→(必要时)SIGKILL 掉 node 子进程，且**由父进程兜底写 `node-exited`**（子进程被 SIGKILL 时写不出任何东西，而壳侧就靠这个标记判断端口已释放）。杀掉后顺带清理残留的 `restart-request`，否则下一个 node 一启动就会被 JS 插件自杀（启动循环）。
+  2. `DshBootstrap.requestEmbeddedRestart()` 改为写 `kill-request` 并等 `node-exited`（投票间隔 200ms）。
+  3. JS 侧插件通道保留为冗余路径，但不再是唯一依赖。
+- **验证（设备实测）**：内嵌 → 宿主切换 `stopDsh stopped=true` 用时 **0.8s**（修复前 30s 超时失败），随后 `waitForWebMarker ready=true`、`runtime-mode-active.txt` 变为 host；反方向（宿主 → 内嵌）同样 0.8s 停机、新实例写 `boot-state.json`（mode=embedded）。
+- **状态**：✅ 已修复并设备验证（2026-09-13）
+
+### [2026-09-13] Dock（快捷栏）右键菜单：分组/任务查询在"空"时会抛错，首次安装永远建不出来
+
+- **现象**：`quickBarManager` 注册流程在 `capabilitySupported=true` 之后立刻失败：`code=1020210003 Category not found`；即使绕过，也会遇到 `1020210004 Quick task not found`。
+- **根因**：鸿蒙在"一个分组都没有 / 分组内一个任务都没有"时，`getCustomCategories` / `getTasksFromCategory` **抛错而不是返回空数组**。把查询当"必须成功"的写法会让首次注册直接终止，且永远建不出分组。
+- **修复**：`QuickBarMenu.ets` 把这两处查询各自 try/catch，失败按"空集合"处理；注册后**复核**任务列表并写 `quickbar-diag.txt`（hilog 在本机 2in1 上读不到应用日志）。同时把分组内容按白名单收敛为**只有「重启」**：删掉历史项（旧版本的「重启 DSH」「退出 DSH」），并**不再注册「退出」**——PC 的系统快捷栏/托盘右键自带退出项。
+- **验证（设备实测）**：`capabilitySupported=true` → `existingCategories=0` → `categoryId=1` → `已删除历史菜单项: 退出 DSH / 重启 DSH` → `tasksAfter=重启->BackGroundAbility`；点击动作经 want 参数回到 `BackGroundAbility`（`quickbar-action.txt` 里能看到 `dshmAction=restart`），再由公共事件交主进程执行重启（`restart-diag.txt` 全链路 ready=true）。
+- **状态**：✅ 已修复并设备验证（2026-09-13）
+
+### [2026-09-13] 宿主模式终端退化为管道会话、Tab 补全完全无效
+
+- **现象**：宿主模式终端标题显示 `pipe` 而不是 `pty`；按 Tab 无任何反应，没有补全、也没有行编辑/历史/^C。内嵌模式正常。
+- **根因（两个独立问题叠加）**：
+  1. **pty addon 加载不了**：`pty_host` 把 `libnode.so.137` 写进了 DT_NEEDED（工具链默认 `-Wl,--no-undefined`，15 个 N-API 未定义符号必须先满足）。内嵌模式进程里本就 dlopen 了同一份 libnode，没问题；宿主模式跑的是 brew 的原生 node（v26.8.1），进程里没有 libnode → `Error loading shared library libnode.so.137`，回退 `vendor/pty_host.node`（el2）→ `Permission denied`（沙箱只允许 dlopen el1 库目录）→ 全部候选失败。往 brew node 进程里塞内嵌 libnode 更不可取（两份 V8）。
+  2. **Tab 在 UI 层就被吃掉**：终端输入行是 ArkUI `TextInput`，ArkUI 默认把 Tab 当**焦点切换键**在框架层消费，`onChange/onSubmit` 永远收不到 `\t`；且输入框本身无法产生 Tab 字符。即便 pty 正常，Tab 也到不了 shell。
+  3. **`/dshm-terminal/write` 总会补 `\n`**：控制序列被追加回车，表现为「补全后立刻执行」（实测 `ec`+Tab 直接跑了 `echo`）。
+- **修复**：
+  - `CMakeLists.txt` 新增 `pty_host_napi` 目标：同一份 `pty_terminal.cpp`，**不链接 libnode**（N-API 是跨版本 ABI 稳定的，`napi_*` 留给加载它的 node 解析），并把工具链注入的 `-Wl,--no-undefined` 从本目录链接参数里摘掉（lld 只有 `--no-undefined`，没有放行开关）。产物 `libpty_host_napi.so` 随 HAP 进 el1 库目录。
+  - `dsh_host.cpp` 新增 `NativeLibDirFromMaps()`，在**父进程**（`InjectBusyboxEnv`）导出 `DSHM_LIB_DIR`＝el1 库目录；`scripts/patch-terminal-pty-host.mjs` 把它作为最高优先级候选插进 `ptyCandidates`（顺序：`libpty_host.so` → `libpty_host_napi.so` → vendor，加载循环对失败候选自动继续，无需判断模式）。
+  - ArkTS 侧新增 `sendTermRaw()`（raw 模式、不 trim 不补换行）与 `onTermKeyEvent()`：Tab→`\t`、↑/↓→`\x1b[A/B`、Esc→`\x1b`、Ctrl-C→`\x03`，全部 `stopPropagation()`；终端标题栏加 `Tab`/`↑`/`^C` 触摸按钮兜底。
+  - 插件侧 `write` 支持 `raw: true` 时不补换行。
+- **验证（设备实测，宿主模式 brew node v26.8.1）**：日志 `pty addon 加载成功: .../libs/arm64/libpty_host_napi.so`；`/dshm-terminal/start` 返回 `pty:true`；发送 `ec`+`\t`(raw) 后 zsh 补全为 `echo` 且**未执行**（事件里 `Completion.input=echo`），追加 ` TAB_OK\n` 后正确输出 `TAB_OK`（exit 0）。内嵌模式仍走链接版 `libpty_host.so`，Tab 补全同样验证通过。
+- **状态**：✅ 已修复并设备验证（2026-09-13）
+
+### [2026-09-13] 插件市场 `pnpm:false`、装不了任何插件（三重根因）
+
+- **现象**：`/dsh-market/status` 的 `pnpm` 恒为 `false`，市场能打开但点安装必失败（`provisionPnpm` 走 corepack/npm 子进程同样不可用）。
+- **根因（三层，缺一不可）**：
+  1. **安装链路全是子进程**：`probePnpm()`＝`spawn('pnpm','--version')`、`provisionPnpm()`＝corepack/npm、`runDshPlugin()`＝`spawn(node, dsh bin.js plugin …)`。鸿蒙沙箱里 PATH 上没有 pnpm/npm/corepack，且 filesDir 内可执行文件 spawn/execv 一律 EACCES → 必然失败。
+  2. **pnpm 装出的 dshmarket 遮蔽了壳侧镜像**：profile 的 `dependencies` 声明了 dshmarket，pnpm 会把它从 npm 装成 `profiles/web/node_modules/dshmarket`（指向 `web/node_modules/.pnpm/dshmarket@…` 的符号链接，**未打补丁**）。Node 解析优先近层，dsh 实际加载的是它，桥接补丁永不生效。
+  3. **`/dshm-terminal/write` 补换行**（与终端那条同源）：即使桥接生效，Tab 类控制序列也会被追加回车。
+- **修复**：
+  - `scripts/patch-market-pnpm-bridge.mjs`（新增，接入 `prepare-dsh-env.sh` 5.3 步）：把 dshmarket 的 `probePnpm`/`provisionPnpm`/`runDshPlugin` 改走 dsh 自带的**同进程**实现 —— `@deepseek-ai/dsh/lib/plugin-*.js` 的 `runPlugin()`（worker_threads 里 require 内置 `pnpm/dist/pnpm.cjs`，成功后 reconcile `dsh.profile.bundles`），并临时 `chdir(DSHM_FILES_DIR)` 让它命中 `<filesDir>/dsh/...` 的内置 pnpm。`DSHM_FILES_DIR` 不存在时补丁完全惰性。
+  - ArkTS `ensureMarketBundle()` 新增 `dropShadowMarketCopy()`：生效副本不含桥接标记时，符号链接只删链接、真实目录**连目录一起删**（只清内容会留空目录，Node 仍会把它当 dshmarket 解析 → bundle 加载 `ERR_MODULE_NOT_FOUND`，实测内嵌模式因此启动失败），删不掉则用打补丁副本覆盖。
+- **验证（设备实测，两种模式）**：内嵌与宿主 `/dsh-market/status` 均为 `pnpm:true`；真实安装 `dsh-status-rotator@0.17.2` 成功（node 日志 `Progress: resolved/reused/downloaded/added` + `Done in 2.4s using pnpm v10.6.3`，返回 `exitCode:0`、`state=live`、bundle 已注入），随后卸载还原成功（`Done in 326ms`）。宿主模式早前也验证过 `dsh-context` 安装链路。
+- **残留说明（非缺陷）**：pnpm 每次安装都会重新生成 `web/node_modules/dshmarket` 遮蔽项，但**当次运行**加载的是已在内存里的打补丁副本，不受影响；下次启动由 `dropShadowMarketCopy()` 清掉。
+- **状态**：✅ 已修复并设备验证（2026-09-13）
+
+### [2026-09-13] 壳侧清理顺着符号链接删掉了 DSH 环境树（两种模式都无法启动）
+
+- **现象**：嵌入式模式启动后 node 直接 `MODULE_NOT_FOUND`：`Cannot find module '.../dsh/node_modules/@deepseek-ai/dsh/lib/_fetch-shim.cjs'`（requireStack=internal/preload）。设备上 `dsh/node_modules/@deepseek-ai/` 下 **242 个包全部被清空、只剩空目录**（mtime 恰为启动时刻），`<DSH_HOME>/profiles/node_modules/@deepseek-ai/*` 全部变成**悬空符号链接**；环境树文件数从 12,462 掉到 10,905。
+- **根因**：`DshBootstrap.removeDirRecursive()` 只对**子项**用了 `lstatSync`，**入口自身没有**判链接；而 `accessSync/listFileSync/statSync` 都会**跟随**符号链接。`cleanUnmanagedHealFallback()` 调 `removeDirRecursive('<home>/profiles/node_modules/@deepseek-ai/<pkg>')` 删除 dsh heal 出来的**符号链接**时，遍历到的是链接目标（环境树里的真实包），于是逐个删掉真实文件与子目录；函数返回时既不 rmdir 入口，就留下「空目录 + 悬空链接」。次要因素：该清理函数还硬编码了内嵌会话库 `home/.dsh`，宿主模式下清的是另一份库。
+- **更正历史结论**：2026-09-11 条目里「沙箱禁 symlink，dsh 的 heal 只能整目录复制到 profiles/node_modules」的判断**不成立**。实测 dsh-app-boot 走的是 `ensureSymlink()`（`dsh-app-boot/lib/index.js:413/679`），且鸿蒙沙箱**允许** symlink（设备上确实是 `l` 类型链接）。此前观察到的「真实目录副本」很可能是壳侧镜像留下的，而非 dsh 的降级路径。
+- **修复**：① `removeDirRecursive()` 入口先 `lstatSync`，符号链接/非目录一律 `unlinkSync` 后返回，绝不递归（`DshBootstrap.ets:1050+`）；② `cleanUnmanagedHealFallback()` 先 lstat **跳过符号链接**（dsh 托管入口），只清真实目录副本，并改为遍历两种模式的 DSH_HOME（新增 `allDshHomes()`）；③ `clearProfilesFallback()` 同样覆盖两种模式；④ 启动流程按模式分流（`DshmWebPage.ets:330+`：embedded 不跑宿主种子，host 不做内嵌镜像，auto 两者都做）。
+- **验证**：重装启动触发自愈重解压（12,462 文件 / 2,640 目录），启动完成后环境树仍为 **12,461 文件、未再被清空**；`boot-state.json` `mode=embedded`、`t5.serverReady 11.9s`；`/dsh-market/status` 返回 `dshmarket 1.45.1`、`/dshm-terminal/start` 从 405 变 200。
+- **状态**：✅ 已修复并设备验证（2026-09-13）
+
+### [2026-09-13] 宿主模式壳侧写的 cordis.patch.yml 只有注释，宿主 dsh 启动即 abort
+
+- **现象**：宿主模式 `boot-timing.txt` 永远停在 `t4.wsInfo`，`t5.serverReady` 不出现；node 日志 `Error: dsh: overlay .../home-host/.dsh/profiles/web/cordis.patch.yml must be a top-level YAML array of loader patch entries` → `host dsh exited: status=256`，界面停在「正在启动」。
+- **根因**：`DshBootstrap.ensureHostModeTerminal()` 第 3 步在文件缺失时只写入一行注释；YAML 把纯注释文档解析成 `null`，`dsh-app-boot` 的 `parsePatchList()` 直接抛错。dsh 官方 web 模板写的是「注释 + `[]`」，内嵌环境因此一直正常，只有宿主模式受影响。
+- **修复**：新增常量 `EMPTY_PROFILE_PATCH`（注释 + `[]`，与官方模板等价）；写入条件由「缺失才写」改为 `profilePatchLooksValid()`（跳过注释行/空行后首个有效字符必须是 `[`）不合格即覆盖重写，可**自愈**设备上已存在的坏文件。
+- **验证**：重装后宿主模式诊断显示 `web/cordis.patch.yml 已写入/修复`，`t5.serverReady 9.7s`，日志出现 `dsh web: http://127.0.0.1:3080/?token=...`；宿主 profile 的 bundles 含 `dshmarket`（`dependencies.dshmarket=1.45.1`），独立会话库 `home-host/.dsh` 已生成自己的 `settings.yaml` / `.credentials.yaml` / `storages/`。
+- **状态**：✅ 已修复并设备验证（2026-09-13）
+
 ### [2026-09-12] 宿主模式「运行环境探测」与「工作区选择」异常（调查中）
 - **现象 A**：`/dshm-admin/version` 返回 `{"ok":false,"message":"未找到 DSH 环境根"}`。
 - **根因 A（已修）**：`dshm-terminal` 的 `resolveDshRoot()` 四个候选路径全部假设「HOME 在 `<filesDir>/home`」；宿主模式 HOME 改指个人文件夹（`/storage/Users/currentUser`）后全部 miss。修复：`dsh_host.cpp` 导出 `DSHM_FILES_DIR` 环境变量，`resolveDshRoot` 增加最高优先级候选 `DSHM_FILES_DIR/dsh`；插件版本 1.0.11→1.0.12 触发镜像更新。已验证：`~/.dsh` 副本为 1.0.12、`DSHM_FILES_DIR` 已传到宿主进程、判据文件齐全。

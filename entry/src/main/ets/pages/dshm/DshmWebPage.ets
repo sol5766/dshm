@@ -15,20 +15,23 @@
  * 服务端可通过 /dshm-admin/ui/event 请求页面刷新或服务重启（插件安装后常见）。
  */
 import { webview } from '@kit.ArkWeb';
+import { KeyCode } from '@kit.InputKit';
 import { common, bundleManager } from '@kit.AbilityKit';
 import { window, uiMaterial } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { DshBootstrap, RuntimeModeInfo } from '../../dshm/bootstrap/DshBootstrap';
+import { DshBootstrap, RuntimeModeInfo, DshBootState } from '../../dshm/bootstrap/DshBootstrap';
 import { WorkspaceAccess } from '../../dshm/access/WorkspaceAccess';
 import { writeOhosInfo } from '../../dshm/access/OhosInfoBridge';
 import { DshmLogger } from '../../dshm/utils/Logger';
 import { StatusBarTray } from '../../dshm/system/StatusBarTray';
+import { DshmAppActions } from '../../dshm/system/AppActions';
 import { ImmersiveMaterialUtil } from '../../dshm/ui/ImmersiveMaterialUtil';
 import {
   BrewEnvProbe,
   BrewEnvStatus,
+  HARMONYBREW_ROOT,
   BREW_INSTALL_CMD,
   BREW_INSTALL_DSH_CMD,
   BREW_UPGRADE_CMD
@@ -36,7 +39,6 @@ import {
 
 const TAG: string = 'DshmWebPage';
 const HOME_URL: string = 'http://127.0.0.1:3080';
-const RESTART_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/restart';
 const VERSION_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/version';
 // 说明：`/dshm-admin/update`（Harness 在线更新）相关的端点常量、轮询参数与进度浮层
 // 已随「纯净版」一起移除（2026-09-11，用户决定暂不做在线更新）。服务端端点仍在
@@ -98,6 +100,13 @@ interface StartBody {
 interface WriteBody {
   sid: number;
   text: string;
+  /**
+   * 原始模式：服务端**不补换行**。
+   *
+   * 终端默认（缺省 false）收到的是一行命令，服务端会补 `\n` 执行；而 Tab 补全、
+   * 方向键、Ctrl-C 这类控制序列必须原样送进 pty，补了 `\n` 会变成「补全后立刻执行」。
+   */
+  raw?: boolean;
 }
 
 interface KillBody {
@@ -150,6 +159,8 @@ struct DshmWebPage {
   @State private modeOpen: boolean = false;
   @State private modeCurrent: string = 'auto';
   @State private modeActive: string = '';
+  /** 当前模式实际生效的运行环境明细（dsh 路径/版本、node、会话库、环境目录）。 */
+  @State private modeEnvDetail: string = '';
   // 沉浸光感能力（空间化 Spatial UI）：设备支持时顶栏等组件使用沉浸式系统材质，
   // 否则回退传统实色/模糊。探测结果由 ImmersiveMaterialUtil 缓存。
   @State private immersiveEnabled: boolean = false;
@@ -201,6 +212,17 @@ struct DshmWebPage {
     // 沉浸光感能力探测（同步、带缓存）：必须在首帧前完成，避免顶栏材质闪烁。
     this.immersiveEnabled = ImmersiveMaterialUtil.isUsable();
     DshmLogger.info(TAG, ImmersiveMaterialUtil.describe());
+    // 外部（Dock/托盘菜单）重启完成后 dsh 会换新 token，必须用新 URL 重新加载，
+    // 否则页面停在旧 token 上（401/白屏）。事件由 DshmAppActions 在主进程发布。
+    DshmAppActions.subscribeRestartDone((): void => {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const url: string = DshBootstrap.readWebUrl(ctx);
+      DshmLogger.info(TAG, '收到外部重启完成事件，重新加载 ' + url);
+      this.webUrl = url;
+      this.ready = true;
+      this.controller.loadUrl(url);
+      this.startUiEventPoll();
+    });
     this.boot();
   }
 
@@ -316,12 +338,29 @@ struct DshmWebPage {
       await WorkspaceAccess.ensureInitialSelection(hostCtx);
       await WorkspaceAccess.syncAuthorizedToWorkspace(hostCtx);
       await DshBootstrap.ensureOhosSkills(hostCtx);
-      DshBootstrap.ensurePnpmWrapper(hostCtx);
+      // 嵌入式模式：用 node_shim（CMake PIE ELF，dlopen libnode.so.137）提供 pnpm
+      // spawn 能力。宿主模式（Harmonybrew dsh）：桥接到 brew node（原生 V8 JIT）。
+      const bootMode: string = DshBootstrap.readRuntimeMode(hostCtx);
+      if (bootMode === 'embedded') {
+        DshBootstrap.prepareNodeShim(hostCtx);
+      } else {
+        DshBootstrap.ensurePnpmWrapper(hostCtx);
+      }
       // 宿主模式（Harmonybrew dsh）需要壳侧插件才能提供终端端点，见方法注释。
-      DshBootstrap.ensureHostModeTerminal(hostCtx);
+      // 按运行模式分流：auto 模式在 native 侧才决定归属，故两份都准备（现行行为）。
+      if (bootMode !== 'embedded') {
+        DshBootstrap.ensureHostModeTerminal(hostCtx);
+      }
       await writeOhosInfo(hostCtx);
       DshBootstrap.clearNodeLogs(hostCtx);
-      DshBootstrap.ensureBundleMirror(hostCtx);
+      // profiles 卫生清理（跳过 dsh 托管符号链接，只清真实目录副本）两种模式都要做。
+      DshBootstrap.cleanHealFallbackProfiles(hostCtx);
+      if (bootMode !== 'host') {
+        DshBootstrap.ensureBundleMirror(hostCtx);
+      }
+      // 内置插件市场：把 dshmarket 补进两种模式各自 web profile 的 bundles/dependencies
+      // （全新 profile 由 dsh-app-boot 模板带出，存量 profile 在这里补写一次）。
+      DshBootstrap.ensureMarketBundle(hostCtx);
       // 品牌迁移：用户 profile 里遗留的旧 bundle 名必须在 dsh 启动前改掉，
       // 否则 dsh-app-boot 解析不到 bundle 会直接 abort（实测 SIGNAL 6）。
       DshBootstrap.migrateLegacyProfileBundleNames(hostCtx);
@@ -331,6 +370,28 @@ struct DshmWebPage {
       const serverUp: boolean = await DshBootstrap.waitForServer(hostCtx, 120000);
       mark('t5.serverReady');
       if (serverUp) {
+        // ── A1 快路径（阶段0）：读 _fetch-shim 写的结构化 boot-state.json ──
+        // dsh 打印带 token 的 URL 时文件即就绪（原子写），不必刮日志。
+        // 读不到（旧环境 / 剖析模式 / 嗅探失败）时，回退下方原有轮询刮削路径。
+        const bootState: DshBootState | null = DshBootstrap.readBootState(hostCtx);
+        if (bootState !== null) {
+          this.webUrl = bootState.url;
+          this.statusText = 'DeepSeek Harness 已就绪';
+          DshmLogger.info(TAG, 'boot-state 就绪（A1 快路径），ArkWeb 加载 ' + this.webUrl);
+          this.ready = true;
+          this.ensureFirstPaintVisible();
+          await DshBootstrap.echoNodeLogMarks(hostCtx);
+          this.registerWindowSizeListener();
+          this.startUiEventPoll();
+          if (await WorkspaceAccess.shouldNotifyFullDisk(hostCtx)) {
+            this.showDialog('开启「全盘文件访问」权限',
+              '系统不提供该权限的授权弹窗 —— 它属于受限权限，只能在系统设置中手动开启。\n\n' +
+                '路径：设置 → 应用和元服务 → DeepSeek Harness → 权限 → 全盘文件访问 → 允许。\n\n' +
+                '开启后 DSH 才能读写工作区（默认：个人文件夹）下的任意文件；' +
+                '未开启时仅可访问「下载」「文档」目录。');
+          }
+          return;
+        }
         // 关键：Web 组件以创建时的 webUrl 为准（src 后续改动不会重载）。
         // 必须先把带鉴权 token 的完整 URL 解析好（日志里的
         // "dsh web: http://127.0.0.1:3080/?token=..."），再一次性给 webUrl
@@ -600,10 +661,20 @@ struct DshmWebPage {
     const rows: AboutRow[] = [
       { label: '应用版本', value: appVer + '（versionCode ' + appCode + '）' },
       { label: 'DSH 版本', value: dshVer },
-      { label: '运行时', value: 'node ' + nodeVer + (platform.length > 0 ? '　' + platform : '') },
-      { label: '内置环境', value: DshBootstrap.envVersion() }
+      { label: '运行时', value: 'node ' + nodeVer + (platform.length > 0 ? '　' + platform : '') }
     ];
+    // 内置环境版本只对内嵌模式有意义：宿主模式跑的是 brew 的 dsh，与内置环境无关。
+    if (modeInfo.mode !== 'host') {
+      rows.push({ label: '内置环境', value: DshBootstrap.envVersion() });
+    }
     rows.unshift({ label: '运行模式', value: modeLabel });
+    // 会话库：两种模式各自独立（切换模式即切换会话库），这是用户最常困惑的差异点。
+    rows.push({
+      label: '会话库（DSH_HOME）',
+      value: modeInfo.dshHome.length > 0
+        ? modeInfo.dshHome
+        : DshBootstrap.dshHomeForMode(hostCtxForMode, modeInfo.mode === 'host')
+    });
     if (modeInfo.dshPath.length > 0) {
       rows.push({ label: '宿主 dsh', value: modeInfo.dshPath });
     }
@@ -631,21 +702,61 @@ struct DshmWebPage {
     const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.modeCurrent = DshBootstrap.readRuntimeMode(hostCtx);
     const info: RuntimeModeInfo = DshBootstrap.readActiveMode(hostCtx);
-    this.modeActive = info.mode === 'host'
+    const hostMode: boolean = info.mode === 'host';
+    this.modeActive = hostMode
       ? '当前生效：宿主 dsh（Harmonybrew' + (info.version.length > 0 ? ' ' + info.version : '') + '）'
       : '当前生效：内嵌运行时（libnode / --jitless）';
+    // 运行环境随模式切换而显示：两种模式的 dsh 来源、node、会话库、环境目录都不同，
+    // 这里把**当前生效**的那一套列出来，避免用户拿内嵌环境的路径去理解宿主模式。
+    const lines: Array<string> = [];
+    if (hostMode) {
+      if (info.dshPath.length > 0) {
+        lines.push('dsh：' + info.dshPath);
+      }
+      if (info.nodeVersion.length > 0) {
+        lines.push('node：' + info.nodeVersion + '（Harmonybrew，原生 JIT）');
+      }
+    } else {
+      lines.push('dsh：应用内置环境（' + DshBootstrap.envVersion() + '）');
+      lines.push('node：libnode（--jitless，无需 Harmonybrew）');
+    }
+    // 会话库路径是两种模式的核心差异：各自独立、切换模式即切换会话库。
+    const activeDshHome: string = info.dshHome.length > 0
+      ? info.dshHome
+      : DshBootstrap.dshHomeForMode(hostCtx, hostMode);
+    lines.push('会话库：' + activeDshHome);
+    if (info.home.length > 0) {
+      lines.push('HOME：' + info.home);
+    }
+    this.modeEnvDetail = lines.join('\n');
     this.modeOpen = true;
   }
 
-  /** 切换运行模式并重启服务。 */
+  /**
+   * 切换运行模式并重启服务。
+   *
+   * 顺序很关键：**先写模式文件，再走统一重启流程**。统一重启会按旧模式的通道停掉
+   * 旧实例（并等 host-stopped / node-exited 标记），然后 launchDsh() 起一个读新
+   * runtime-mode.txt 的 native 进程 —— 旧进程被彻底杀死，不会与新模式抢 3080。
+   * 切到宿主模式前先探一次 Harmonybrew：没装 dsh 时明确告知，避免用户以为切换失败。
+   */
   private applyRuntimeMode(mode: string): void {
     const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    DshBootstrap.writeRuntimeMode(hostCtx, mode);
-    this.modeOpen = false;
     const label: string = mode === 'host' ? '宿主 dsh（Harmonybrew）'
       : (mode === 'embedded' ? '内嵌运行时' : '自动（有宿主就用宿主）');
+    if (mode === 'host' && !BrewEnvProbe.probe().dshInstalled) {
+      this.modeOpen = false;
+      this.showDialog('宿主 dsh 不可用',
+        '未检测到 ' + HARMONYBREW_ROOT + '/bin/dsh。\n\n'
+          + '宿主模式需要先在「' + '运行环境（Harmonybrew）' + '」面板或终端里执行：\n'
+          + BREW_INSTALL_CMD + '\n' + BREW_INSTALL_DSH_CMD + '\n\n'
+          + '仍要切换的话，启动会回退到内嵌运行时。');
+      return;
+    }
+    DshBootstrap.writeRuntimeMode(hostCtx, mode);
+    this.modeOpen = false;
     this.showDialog('运行模式已切换',
-      '已设置为：' + label + '\n\n正在重启 Harness 服务以生效…');
+      '已设置为：' + label + '\n\n正在停止当前实例并按新模式重新启动（先杀旧进程，避免抢端口）…');
     this.restartService();
   }
 
@@ -664,6 +775,15 @@ struct DshmWebPage {
 
 
   private resetRuntimeEnv(): void {
+    // 防御：宿主模式下拒绝执行。该动作只重解压内嵌环境树，修不了宿主 dsh；
+    // 且宿主 dsh 没有 /dshm-admin/restart 端点、旧实例不会被停，
+    // 重解压后再次 launchDsh 会拉起第二个实例抢 3080。
+    if (this.currentMode() === 'host') {
+      this.showDialog('当前是宿主模式',
+        '「重置运行环境」只重建内嵌运行时。宿主 dsh 由 Harmonybrew 管理，\n' +
+          '请使用「修复宿主插件（重建镜像）」，或在内置终端执行 brew upgrade deepseek-harness。');
+      return;
+    }
     this.showDialogWithConfirm('重置运行环境',
       '将从安装包重新解压一份干净的 DSH 运行环境（约 10–60 秒），用于修复更新失败或环境损坏。\n\n' +
         '会话、工作区与 API Key 保存在应用数据目录的 home 下，不会被清除。\n\n确定继续吗？',
@@ -678,13 +798,13 @@ struct DshmWebPage {
     this.statusText = '正在重新解压运行环境…';
     const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
-      // 先让旧服务退出，避免它继续引用即将被删除的文件。
-      try {
-        await this.postJson(RESTART_ENDPOINT, {} as EmptyBody);
-      } catch (e) {
-        DshmLogger.warn(TAG, '重置前停止服务失败（可能已退出）: ' + this.errOf(e));
+      // 先按内嵌模式的通道停掉旧实例并**等它真正退出**，再重解压，避免旧 node
+      // 继续引用即将被删除的文件（等价于旧实现的 /dshm-admin/restart + 端口探测，
+      // 但用 node-exited 标记判定，确定且不依赖 http 探测）。
+      const stopped: boolean = await DshBootstrap.stopDsh(hostCtx, 'embedded', 30000);
+      if (!stopped) {
+        DshmLogger.warn(TAG, '重置前旧 node 未确认退出，仍继续重解压（旧进程可能已死）');
       }
-      await this.waitPortDown(10000);
       this.stopUiEventPoll();
       this.closeTerminal();
       const rebuilt: boolean = await DshBootstrap.forceReinstallEnv(hostCtx);
@@ -722,7 +842,18 @@ struct DshmWebPage {
 
   /**
    * 重启服务并等待就绪，返回是否成功。
-   * 更新后的环境仅靠服务端静态校验无法证明可启动，这里在重启后做最终验收。
+   *
+   * 统一流程（2026-09-13 重写，同时服务「重启服务」与「切换运行模式」）：
+   *   1. 按**当前生效模式**停掉旧实例，并确定性等待它真正退出（host 等 host-stopped、
+   *      embedded 等 node-exited）——旧实例的监听套接字必须先释放，否则新模式实例
+   *      绑不上 3080 或两个实例交替抢端口；
+   *   2. 清掉上一轮日志与陈旧 boot-state（就绪判据要读新日志）；
+   *   3. 重新 launchDsh()：起一个**读当前 runtime-mode.txt** 的 native 进程，
+   *      因此切换模式后不需要任何额外分支，新模式自然生效；
+   *   4. 等 `dsh web:` 标记出现（文件读取，可靠）。
+   *
+   * 关键点：切换模式时这里读的是**旧模式**（要用旧模式的通道去停它），
+   * 而第 3 步起的是新模式，两者不能混。
    */
   private async restartAndWait(): Promise<boolean> {
     if (this.restarting) return false;
@@ -732,33 +863,15 @@ struct DshmWebPage {
     this.stopUiEventPoll();
     this.closeTerminal();
     const hostCtx0 = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    const hostMode: boolean = DshBootstrap.readActiveMode(hostCtx0).mode === 'host'
-      && DshBootstrap.readRuntimeMode(hostCtx0) !== 'embedded';
+    const oldMode: string = DshBootstrap.readActiveMode(hostCtx0).mode;
+    const newMode: string = DshBootstrap.readRuntimeMode(hostCtx0);
+    if (oldMode !== newMode && newMode !== 'auto') {
+      DshmLogger.info(TAG, '运行模式切换：' + oldMode + ' -> ' + newMode + '（先停旧实例再按新模式拉起）');
+    }
     try {
-      if (hostMode) {
-        // 宿主模式：native 守候进程负责结束并重新拉起 dsh（无 /dshm-admin 端点）
-        const markersBefore: number = DshBootstrap.countWebReadyMarkers(hostCtx0);
-        DshBootstrap.requestHostRestart(hostCtx0);
-        this.ready = await this.waitForNewWebMarker(hostCtx0, markersBefore, 90000);
-      } else {
-        // 内嵌模式：文件信号让旧 node 退出 → 等 node-exited（确定性）→ 拉起新实例。
-        // 全程不依赖 http 探测 loopback（不可靠，会造成新旧 node 抢 3080）。
-        const exited: boolean = await DshBootstrap.requestEmbeddedRestart(hostCtx0, 25000);
-        if (!exited) {
-          this.statusText = '旧服务未退出，重启已取消';
-          DshmLogger.error(TAG, '旧 node 未在超时内退出，放弃重启（避免抢端口）');
-          return false;
-        }
-        DshmLogger.info(TAG, '旧进程已退出，拉起新实例');
-        DshBootstrap.clearNodeLogs(hostCtx0);
-        // 重启也必须重做 bundle 镜像：profile 的 web bundles 里挂着 dshm-*，
-        // 而 ensureDshDir 在版本变化时会清掉 profiles/node_modules；不重镜像
-        // 就会 ERR_MODULE_NOT_FOUND: Cannot find package 'dshm-terminal' 直接崩。
-        DshBootstrap.ensureBundleMirror(hostCtx0);
-        await DshBootstrap.launchDsh();
-        // 就绪判定用日志里的 `dsh web:`（文件读取，可靠）
-        this.ready = await DshBootstrap.waitForWebMarker(hostCtx0, 120000);
-      }
+      // 停旧 → 清日志 → 重做镜像 → 按当前 mode 拉起 → 等 `dsh web:` 标记。
+      // 与 Dock 菜单、托盘菜单共用 DshmAppActions.restartDsh（唯一实现，避免漂移）。
+      this.ready = await DshmAppActions.restartDsh(hostCtx0);
       if (this.ready) {
         this.webUrl = DshBootstrap.readWebUrl(hostCtx0);
         this.statusText = 'Harness 服务已重启';
@@ -775,18 +888,6 @@ struct DshmWebPage {
     } finally {
       this.restarting = false;
     }
-  }
-
-  /** 等待日志里出现新的 `dsh web:` 标记（宿主模式重启用）。 */
-  private async waitForNewWebMarker(hostCtx: common.UIAbilityContext, before: number, timeoutMs: number): Promise<boolean> {
-    const deadline: number = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await this.sleep(1000);
-      if (DshBootstrap.countWebReadyMarkers(hostCtx) > before) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /** 编辑: 撤销（Ctrl+Z）。 */
@@ -973,20 +1074,6 @@ struct DshmWebPage {
     }
   }
 
-  private async httpProbe(timeoutMs: number): Promise<http.HttpResponse> {
-    const client = http.createHttp();
-    try {
-      return await client.request(HOME_URL, {
-        method: http.RequestMethod.GET,
-        connectTimeout: timeoutMs,
-        readTimeout: timeoutMs,
-        usingProxy: false
-      });
-    } finally {
-      client.destroy();
-    }
-  }
-
   private async postJson(url: string, body: EmptyBody | StartBody | WriteBody | KillBody): Promise<http.HttpResponse | null> {
     const client = http.createHttp();
     try {
@@ -1004,20 +1091,6 @@ struct DshmWebPage {
     } finally {
       client.destroy();
     }
-  }
-
-  /** 探测端口直到不再响应（驱动旧进程退出），最多 maxWaitMs，间隔 200ms。 */
-  private async waitPortDown(maxWaitMs: number): Promise<boolean> {
-    const deadline: number = Date.now() + maxWaitMs;
-    while (Date.now() < deadline) {
-      try {
-        await this.httpProbe(300);
-      } catch (e) {
-        return true;
-      }
-      await this.sleep(200);
-    }
-    return false;
   }
 
   private async sleep(ms: number): Promise<void> {
@@ -1042,11 +1115,14 @@ struct DshmWebPage {
     } as AlertDialogParamWithButtons);
   }
 
-  /** 打开 pty 终端会话并启动轮询（zsh，服务端自动回退 /bin/sh）。 */
+  /** 打开 pty 终端会话并启动轮询（shell 按运行模式选择，服务端自动回退 /bin/sh）。 */
   private async startTerminalSession(): Promise<void> {
     if (this.termSid > 0) return;
     try {
-      const body: StartBody = { shell: 'zsh' };
+      // shell 随模式变化：宿主模式用 brew 的 zsh（交互体验完整）；
+      // 内嵌模式沙箱内没有 brew，改用 hnp bash（dshm-terminal 找不到时回退 /bin/sh）。
+      const shellName: string = this.currentMode() === 'host' ? 'zsh' : 'bash';
+      const body: StartBody = { shell: shellName };
       const resp = await this.postJson(TERM_START_ENDPOINT, body);
       if (resp !== null && resp.responseCode === 200) {
         const payload = JSON.parse(resp.result as string) as TermStartResp;
@@ -1225,6 +1301,68 @@ struct DshmWebPage {
     }
   }
 
+  /**
+   * 向终端会话发送**原始控制序列**（不 trim、不补换行）。
+   *
+   * 为什么必须与 `sendTermCommand()` 分开：
+   *   - `sendTermCommand()` 会 `trim()` 并补 `\n`，而 `'\t'.trim() === ''`，
+   *     Tab 会在发出前就被丢掉；
+   *   - Tab / 方向键 / Ctrl-C / Esc 都是控制序列（`\t`、`\x1b[A`、`\x03`、`\x1b`），
+   *     语义上也不是「一行命令」，不能附加回车。
+   *
+   * 仅在 pty 会话（`termPty === true`）下有意义：管道回退模式下 shell 的 stdin
+   * 不是 tty，本就没有行编辑与补全，发了也不会有反应。
+   */
+  private async sendTermRaw(text: string): Promise<void> {
+    if (this.termSid <= 0 || text.length === 0) return;
+    const body: WriteBody = { sid: this.termSid, text: text, raw: true };
+    await this.postJson(TERM_WRITE_ENDPOINT, body);
+    this.focusTermInput();
+  }
+
+  /**
+   * 终端按键直通：把键盘事件翻译成 shell 需要的控制序列。
+   *
+   * 背景（2026-09-13 实测）：终端输入行是 ArkUI `TextInput`，而 ArkUI 默认把
+   * **Tab 当作焦点切换键**在框架层消费掉，`onChange/onSubmit` 永远收不到 `\t`，
+   * 于是「Tab 补全没反应」。这里在 `onKeyEvent` 里拦下并 `stopPropagation()`，
+   * 把按键交给 pty，行为与真实终端一致；返回 true 表示事件已消费。
+   *
+   * 触摸/无实体键盘场景由标题栏的 Tab / ^C / ↑ 按钮兜底（见终端标题栏）。
+   */
+  private onTermKeyEvent(event: KeyEvent): boolean {
+    if (event.type !== KeyType.Down) return false;
+    if (event.keyCode === KeyCode.KEYCODE_TAB) {
+      this.sendTermRaw('\t');
+      event.stopPropagation();
+      return true;
+    }
+    if (event.keyCode === KeyCode.KEYCODE_DPAD_UP) {
+      this.sendTermRaw('\u001b[A');
+      event.stopPropagation();
+      return true;
+    }
+    if (event.keyCode === KeyCode.KEYCODE_DPAD_DOWN) {
+      this.sendTermRaw('\u001b[B');
+      event.stopPropagation();
+      return true;
+    }
+    if (event.keyCode === KeyCode.KEYCODE_ESCAPE) {
+      this.sendTermRaw('\u001b');
+      event.stopPropagation();
+      return true;
+    }
+    // Ctrl-C 中断当前前台命令。
+    if (event.keyCode === KeyCode.KEYCODE_C
+      && event.getModifierKeyState !== undefined
+      && event.getModifierKeyState(['ctrl'])) {
+      this.sendTermRaw('\u0003');
+      event.stopPropagation();
+      return true;
+    }
+    return false;
+  }
+
   /** 发送一行命令到终端。 */
   private async sendTermCommand(): Promise<void> {
     const text = this.termInput.trim();
@@ -1295,16 +1433,57 @@ struct DshmWebPage {
 
   // ============ 三下拉菜单数据 ============
 
+  /**
+   * Harness 菜单（**随当前生效模式变化**）。
+   *
+   * 为什么必须按模式变化：
+   *   - 「运行环境（Harmonybrew）」只对宿主模式有意义：内嵌模式跑的是应用自带
+   *     libnode，brew 装没装都与当前运行时无关，展示它只会误导。
+   *   - 「重置运行环境」只重解压**内嵌**环境树（<filesDir>/dsh）。宿主模式跑的是
+   *     brew 的 dsh，该操作既修不了宿主问题，又会在宿主 dsh 未停的情况下
+   *     重新拉起一个实例去抢 3080（实测流程：/dshm-admin/restart 在宿主模式不存在
+   *     → 旧实例不会被停 → 新实例 EADDRINUSE）。宿主模式的等价恢复动作是
+   *     「修复宿主插件」（重建 <filesDir>/home-host/.dsh 下的壳侧镜像与 profile）。
+   */
   private harnessMenu(): Array<MenuElement> {
-    return [
-      { value: '主页', action: (): void => { this.goHome(); } },
-      { value: '运行环境（Harmonybrew）', action: (): void => { this.openEnvPanel(); } },
-      { value: '关于版本', action: (): void => { this.showAboutVersions(); } },
-      { value: '运行模式（宿主 / 内嵌）', action: (): void => { this.openModePanel(); } },
-      { value: '检查 App 更新', action: (): void => { this.checkAppUpdate(); } },
-      { value: '重置运行环境（故障恢复）', action: (): void => { this.resetRuntimeEnv(); } },
-      { value: '重启服务', action: (): void => { this.restartService(); } }
+    const hostMode: boolean = this.currentMode() === 'host';
+    const items: Array<MenuElement> = [
+      { value: '主页', action: (): void => { this.goHome(); } }
     ];
+    if (hostMode) {
+      items.push({ value: '运行环境（Harmonybrew）', action: (): void => { this.openEnvPanel(); } });
+    }
+    items.push({ value: '关于版本', action: (): void => { this.showAboutVersions(); } });
+    items.push({ value: '运行模式（宿主 / 内嵌）', action: (): void => { this.openModePanel(); } });
+    items.push({ value: '检查 App 更新', action: (): void => { this.checkAppUpdate(); } });
+    if (hostMode) {
+      items.push({ value: '修复宿主插件（重建镜像）', action: (): void => { this.repairHostProfile(); } });
+    } else {
+      items.push({ value: '重置内嵌运行环境（故障恢复）', action: (): void => { this.resetRuntimeEnv(); } });
+    }
+    items.push({ value: '重启服务', action: (): void => { this.restartService(); } });
+    return items;
+  }
+
+  /**
+   * 宿主模式故障恢复：重建宿主会话库下的壳侧插件镜像与 web profile 声明。
+   *
+   * 宿主 dsh 的可执行包由 Harmonybrew 管理（升级/修复用 `brew upgrade deepseek-harness`），
+   * 应用不该也无法重装它；应用负责的只是注入到 <filesDir>/home-host/.dsh 的这部分
+   * （dshm-* 镜像、dshmarket、web profile 的 bundles/dependencies）。宿主模式下
+   * 终端/设置等壳侧端点缺失或市场不出现时，重做这些镜像即可修复。
+   */
+  private repairHostProfile(): void {
+    this.showDialogWithConfirm('修复宿主插件',
+      '将重建宿主会话库下的壳侧插件镜像（终端 / 设置 / 插件市场），随后重启服务。\n\n' +
+        '宿主 dsh 本体属于 Harmonybrew，如需升级请在终端执行 brew upgrade deepseek-harness。\n\n确定继续吗？',
+      '修复', (): void => {
+        const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        DshBootstrap.ensureHostModeTerminal(hostCtx);
+        DshBootstrap.ensureMarketBundle(hostCtx);
+        this.showDialog('已重建宿主插件镜像', '正在重启 Harness 服务以生效…');
+        this.restartService();
+      });
   }
 
   private editMenu(): Array<MenuElement> {
@@ -1550,14 +1729,23 @@ struct DshmWebPage {
                   .fontColor('#64748b')
                   .width('100%')
                   .textAlign(TextAlign.Start)
-                  .margin({ top: 4, bottom: 12 })
+                  .margin({ top: 4, bottom: 8 })
+                // 当前模式实际生效的运行环境（dsh 来源 / node / 会话库 / HOME）
+                Text(this.modeEnvDetail)
+                  .fontSize(11)
+                  .fontColor('#475569')
+                  .width('100%')
+                  .textAlign(TextAlign.Start)
+                  .margin({ bottom: 12 })
 
                 this.ModeRow('auto', '自动（检测到 Harmonybrew 的 dsh 就用宿主模式）')
                 this.ModeRow('host', '宿主 dsh —— Harmonybrew 安装，原生 node/JIT，插件能力完整')
                 this.ModeRow('embedded', '内嵌运行时 —— 应用自带 libnode（--jitless），不依赖 brew')
 
                 Text('宿主模式需要已安装 Harmonybrew 且执行过 brew install deepseek-harness；' +
-                  '切换后会重启 Harness 服务。宿主模式下的版本升级请在终端执行 brew upgrade deepseek-harness。')
+                  '切换后会重启 Harness 服务。宿主模式下的版本升级请在终端执行 brew upgrade deepseek-harness。\n\n' +
+                  '两种模式各自维护**独立的会话库**（宿主 home-host/.dsh、内嵌 home/.dsh）：' +
+                  '切换模式后看到的是该模式自己的会话、设置与凭据，互不影响、也互不覆盖。')
                   .fontSize(11)
                   .fontColor('#94a3b8')
                   .width('100%')
@@ -1753,6 +1941,28 @@ struct DshmWebPage {
                 .padding({ left: 5, right: 5, top: 1, bottom: 1 })
                 .margin({ left: 8 })
               Blank()
+              // 触摸兜底：实体键盘的 Tab/↑/Ctrl-C 由 onTermKeyEvent 直通，
+              // 触屏（平板/手机）上没有这些键，用按钮发送同样的控制序列。
+              Text('Tab')
+                .fontSize(12)
+                .fontColor(this.termPty ? '#64748b' : '#c0c6d0')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .onClick(() => { this.sendTermRaw('\t'); })
+              Text('↑')
+                .fontSize(12)
+                .fontColor(this.termPty ? '#64748b' : '#c0c6d0')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .margin({ left: 2 })
+                .onClick(() => { this.sendTermRaw('\u001b[A'); })
+              Text('^C')
+                .fontSize(12)
+                .fontColor(this.termPty ? '#64748b' : '#c0c6d0')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .margin({ left: 2 })
+                .onClick(() => { this.sendTermRaw('\u0003'); })
               Text('清屏')
                 .fontSize(12)
                 .fontColor('#64748b')
@@ -1818,6 +2028,8 @@ struct DshmWebPage {
                     .padding({ left: 6, right: 0, top: 0, bottom: 0 })
                     .onChange((v: string) => { this.termInput = v; })
                     .onSubmit(() => { this.sendTermCommand(); })
+                    // Tab 补全 / 历史 / Esc / Ctrl-C 直通到 pty（见 onTermKeyEvent 注释）。
+                    .onKeyEvent((event: KeyEvent): boolean => this.onTermKeyEvent(event))
                 }
                 .width('100%')
                 .alignItems(VerticalAlign.Center)

@@ -12,7 +12,7 @@
 # ============================================================
 set -e
 DSH_VERSION="${1:-0.1.2-rc.1}"
-DSH_MARKET_VERSION="${DSH_MARKET_VERSION:-1.13.1}"
+DSH_MARKET_VERSION="${DSH_MARKET_VERSION:-latest}"
 DSH_MOBILE_NAV_REVISION="${DSH_MOBILE_NAV_REVISION:-a96035f1b18162adefa5d322b24123159fb85855}"
 DSHM_ADAPT_REVISION="20260910-56"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -48,15 +48,31 @@ npm install --no-audit --no-fund --ignore-scripts "@deepseek-ai/dsh@$DSH_VERSION
 # 在 npm 下无法共存（装它需 --legacy-peer-deps，只会在同一棵树剪掉其余 peer）。
 # lean-web：不额外安装，web profile 仅用 dsh-base + dsh-web-app + 内置 dshm-config-editor。
 
-# dshmarket：与完整 peer 树在 npm 下无法共存（其 peer @deepseek-ai/dsh-settings@^0.1.0-rc.7
-# 与 rc.1.2 的 dsh-settings 冲突，装它必须 --legacy-peer-deps，而那只会在同一棵树里
-# 剪掉其余 peer）。它不是启动必需（仅插件市场 UI），此处只告警不阻断。
-echo "[1.5/4] 检查内置 dshmarket（非启动必需，缺失仅告警）..."
-if [ -f node_modules/dshmarket/lib/index.js ] && [ -f node_modules/dshmarket/lib/dsh-cli.js ]; then
-  echo "  dshmarket 已内置于 DSH 运行时"
-else
-  echo "  WARN: dshmarket 未内置于 DSH 运行时（插件市场需单独安装，不影响核心工具运行）"
+# dshmarket：内置插件市场（2026-09-13 起改为真装，不再只告警）。
+#
+# 为什么用 `npm pack` + 手工落包，而不是 `npm install dshmarket`：
+#   它的 peer 声明（@deepseek-ai/dsh-settings@^0.1.0-rc.7 等）与当前 dsh 0.1.5-rc.1
+#   的 peer 树不匹配，`npm install` 会被 peer 冲突挡住；加 --legacy-peer-deps 又会在
+#   同一棵树里剪掉其余 peer（会导致 dsh 启动 ERR_MODULE_NOT_FOUND）。
+#   `npm pack` 只取 tarball，完全不参与依赖解析，因此不会破坏已装好的 peer 树；
+#   其运行时依赖（js-yaml / undici / cordis / schemastery / dsh-settings）在 dsh
+#   依赖树里已存在，无需再装。
+# 与 dsh-OHDSH（gitcode.com/MakeBlackSheepGreat/dsh-OHDSH）的做法一致：内置市场 +
+# 进 dsh 依赖闭包 + 首启 seed 进 web profile bundles，市场随后才能自我管理/更新。
+echo "[1.5/4] 内置 dshmarket@$DSH_MARKET_VERSION（npm pack 手工落包，绕开 peer 解析）..."
+if [ ! -f node_modules/dshmarket/lib/index.js ]; then
+  mkdir -p node_modules/dshmarket
+  npm pack "dshmarket@$DSH_MARKET_VERSION" --pack-destination node_modules/dshmarket >/dev/null 2>&1 || true
+  MARKET_TGZ="$(ls node_modules/dshmarket/dshmarket-*.tgz 2>/dev/null | head -1)"
+  if [ -n "$MARKET_TGZ" ]; then
+    tar -xzf "$MARKET_TGZ" -C node_modules/dshmarket --strip-components=1
+    rm -f "$MARKET_TGZ"
+  fi
 fi
+[ -f node_modules/dshmarket/lib/index.js ] || { echo "错误: dshmarket 插件入口不存在"; exit 1; }
+[ -f node_modules/dshmarket/lib/dsh-cli.js ] || { echo "错误: dshmarket CLI 入口不存在"; exit 1; }
+[ -f node_modules/dshmarket/cordis.patch.yml ] || { echo "错误: dshmarket Cordis patch 不存在"; exit 1; }
+echo "  dshmarket 已内置: $(node -p "require('./node_modules/dshmarket/package.json').version" 2>/dev/null || echo unknown)"
 
 echo "[1.6/4] 检查内置 dsh-web-mobile（lean-web：非启动必需，缺失仅告警）..."
 if [ -f node_modules/@dsh-external/dsh-mobile-nav/lib/client.js ]; then
@@ -132,6 +148,28 @@ echo "[5/6] 应用 dsh 环境补丁（启动期性能）…"
 # 合并包的拼装吃掉 --jitless 冷启动一半以上时间（实测 11.4s/19.6s）。
 node "$SCRIPT_DIR/patch-dsh-env-client-modules.mjs" "$REPO_ROOT/$DEST"
 
+echo "[5.1/6] 修补 flock 为鸿蒙健壮实现（会话写锁，防残留锁卡死旧会话）…"
+# 为什么必须在这里打：上游只为 linux/darwin 提供 system.node，鸿蒙要纯 JS 等价实现；
+# 而朴素的「O_EXCL 锁文件 + 进程内轮询」在进程被强杀后会留下永久残留锁，
+# 导致旧会话拿不到写所有权（症状：装完 HAP 后旧会话无法继续对话，两种模式皆然）。
+# 该补丁必须由脚本生成，否则重建环境即丢失。
+node "$SCRIPT_DIR/patch-flock-ohos.mjs" "$REPO_ROOT/$DEST"
+
+echo "[5.2/6] 内置 dshmarket（落包 + 依赖闭包 + web 模板）…"
+# 与前一步同理：这些改动都落在 rawfile/dsh（gitignore，整包重建），必须由脚本可复现。
+# 具体做法与理由见 scripts/patch-market-bundle.mjs 头部注释。
+node "$SCRIPT_DIR/patch-market-bundle.mjs" "$REPO_ROOT/$DEST" "$DSH_MARKET_VERSION"
+
+echo "[5.3/6] 市场安装链路改走「同进程 pnpm」（鸿蒙沙箱无法 spawn 可执行文件）…"
+# 与 5.1/5.2 同理：改动落在 rawfile/dsh（gitignore，整包重建），必须由脚本可复现。
+# 不打这一步时 /dsh-market/status 的 pnpm 恒为 false，市场能打开但装不了任何插件。
+node "$SCRIPT_DIR/patch-market-pnpm-bridge.mjs"
+
+echo "[5.4/6] 让宿主模式也能加载 pty addon（DSHM_LIB_DIR 候选）…"
+# 宿主模式没有 libnode 映射，dshm-terminal 无法从 /proc/self/maps 推导 el1 库目录，
+# 不打这一步则宿主模式终端永远退化成管道会话（无 Tab 补全/行编辑）。
+node "$SCRIPT_DIR/patch-terminal-pty-host.mjs"
+
 echo "[6/6] 环境瘦身（去掉鸿蒙运行时用不到的文件）…"
 # 为什么可以裁（2026-09-11 实测，裁剪前 253.5MB / 26,762 文件）：
 #   Windows 平台二进制 48.6MB、调试符号 48.1MB、其它平台 prebuilds 23.2MB、
@@ -140,6 +178,41 @@ echo "[6/6] 环境瘦身（去掉鸿蒙运行时用不到的文件）…"
 #   .d.ts 只服务编译期，服务端 .map 只有调试器会读（客户端合并包要用的 client.js.map 已保留）。
 # 这一步直接影响 HAP 体积（HAP 是不压缩存储的，rawfile 有多大 HAP 就大多少）。
 node "$SCRIPT_DIR/prune-dsh-env.mjs" --env "$REPO_ROOT/$DEST" --delete
+
+echo "[7/7] 创建 node 可执行 shim 与 pnpm 包装脚本…"
+# CMake node_shim 编译产物通过 CMakeLists.txt POST_BUILD 直接复制到
+# $DEST/node/bin/node。此处确保目录存在、并创建 pnpm 包装脚本让 node 子进程
+# 可以 spawn pnpm（安装外部插件用）。
+NODE_BIN="$REPO_ROOT/$DEST/node/bin"
+mkdir -p "$NODE_BIN"
+
+# pnpm wrapper：指向内嵌 node_shim + pnpm.cjs
+if [ -f "$REPO_ROOT/$DEST/node_modules/pnpm/dist/pnpm.cjs" ]; then
+  # pnpm（包管理器命令）
+  cat > "$NODE_BIN/pnpm" << 'PNPMWRAP'
+#!/system/bin/sh
+exec /system/bin/nativespawn "$(dirname "$0")/node" "$(dirname "$0")/../node_modules/pnpm/dist/pnpm.cjs" "$@"
+PNPMWRAP
+  chmod +x "$NODE_BIN/pnpm"
+
+  # pnpx（执行器命令）
+  cat > "$NODE_BIN/pnpx" << 'PNPXWRAP'
+#!/system/bin/sh
+exec /system/bin/nativespawn "$(dirname "$0")/node" "$(dirname "$0")/../node_modules/pnpm/dist/pnpm.cjs" dlx "$@"
+PNPXWRAP
+  chmod +x "$NODE_BIN/pnpx"
+  echo "  pnpm/pnpx wrapper 已创建"
+else
+  echo "  WARN: pnpm dist 不存在，跳过 wrapper"
+fi
+
+# 若有 CMake 产物 node_shim 则确保可执行
+if [ -f "$NODE_BIN/node" ]; then
+  chmod +x "$NODE_BIN/node"
+  echo "  node_shim 就绪: $NODE_BIN/node"
+else
+  echo "  WARN: node_shim 未找到（构建时由 CMake POST_BUILD 复制，忽略则跳过）"
+fi
 
 printf '%s\n' "$READY_CONTENT" > "$REPO_ROOT/$READY_MARKER"
 

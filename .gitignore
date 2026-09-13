@@ -143,3 +143,10 @@ desktop.ini
 
 # AGC 调试 profile（含 ACL 权限，不入库）
 /dshmDebug.p7b
+
+# 本地品牌资源备份与本地截图（不入库）
+/.asset-backup/
+/.local-rules/*.jpeg
+/.local-rules/*.png
+*.bak-*
+

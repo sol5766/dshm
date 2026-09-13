@@ -87,6 +87,12 @@ static void InstallCrashDiagnostics() {
 }
 
 /**
+ * 前置声明：会话库（DSH_HOME）按运行模式分离。
+ * 定义见 InjectBusyboxEnv 之前；宿主模式（RunHostDsh）在上方用到它，故需前置声明。
+ */
+static std::string DshHomeForMode(const std::string& filesDir, bool hostMode);
+
+/**
  * 宿主模式（Plan A）：直接执行 Harmonybrew 安装的 dsh。
  *
  * brew 的 `bin/dsh` 是 `#!/bin/sh` 包装脚本，内部 exec 的是 brew 自带的
@@ -151,6 +157,9 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
             fprintf(f, "version=%s\n", dshVersion.c_str());
             fprintf(f, "node=%s\n", nodeVersion.c_str());
             fprintf(f, "home=%s\n", home.c_str());
+            // 当前模式的会话库路径（ArkTS「运行模式」面板据此显示，便于确认分离生效）。
+            const std::string hostDshHomeForReport = DshHomeForMode(filesDir, true);
+            fprintf(f, "dshHome=%s\n", hostDshHomeForReport.c_str());
             fclose(f);
         }
     }
@@ -159,8 +168,14 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
         fflush(stderr);
     }
     // 宿主 dsh 没有 /dshm-admin/* 端点可用来请求退出，重启改为文件信号：
-    // ArkTS 侧创建 <filesDir>/restart-request，本进程守候到它即结束子进程并重启。
+    // ArkTS 侧创建 <filesDir>/restart-request（重启）或 stop-request（退出），
+    // 本进程守候到它即结束子进程。**随后守候进程自身退出**，不再原地重新 fork：
+    // 原地重启会无条件再起一个宿主 dsh，即使 runtime-mode.txt 已改成 embedded ——
+    // 切换模式时表现为「旧模式的进程还在跑、新模式又起一个，两个抢 3080」。
+    // 退出后由壳侧统一 launchDsh() 起一个读新模式的 native 进程。
     const std::string restartFlag = filesDir + "/restart-request";
+    const std::string stopFlag = filesDir + "/stop-request";
+    const std::string stoppedFlag = filesDir + "/host-stopped";
     int lastStatus = 0;
     for (;;) {
         pid_t pid = fork();
@@ -171,6 +186,13 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
         }
         if (pid == 0) {
             setenv("HOME", home.c_str(), 1);
+            // 宿主模式的会话库：独立于内嵌模式，落在 App 自己的可写区
+            // <filesDir>/home-host/.dsh（而不是个人目录，避免与 CLI dsh 共用同一库）。
+            // 两种模式因此各自延续自己的会话，切换模式不再表现为「会话丢失」。
+            const std::string hostDshHome = DshHomeForMode(filesDir, true);
+            setenv("DSH_HOME", hostDshHome.c_str(), 1);
+            fprintf(stderr, "=== host DSH_HOME=%s ===\n", hostDshHome.c_str());
+            fflush(stderr);
             // brew formula 在包装脚本里设置的 OpenSSL 移植开关，这里保持一致。
             setenv("OPENSSL_armcap", "0", 1);
             const std::string cmd = dshPath + " web --no-open";
@@ -181,7 +203,8 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
         }
         fprintf(stderr, "=== host dsh started pid=%d ===\n", pid);
         fflush(stderr);
-        bool restartRequested = false;
+        bool stopForRelaunch = false;
+        bool stopIsExit = false;
         for (;;) {
             int status = 0;
             const pid_t done = waitpid(pid, &status, WNOHANG);
@@ -197,9 +220,12 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
                 lastStatus = -1;
                 break;
             }
-            if (access(restartFlag.c_str(), F_OK) == 0) {
+            if (access(restartFlag.c_str(), F_OK) == 0 || access(stopFlag.c_str(), F_OK) == 0) {
+                stopIsExit = access(stopFlag.c_str(), F_OK) == 0;
                 unlink(restartFlag.c_str());
-                fprintf(stderr, "=== restart requested: stopping host dsh pid=%d ===\n", pid);
+                unlink(stopFlag.c_str());
+                fprintf(stderr, "=== %s requested: stopping host dsh pid=%d ===\n",
+                        stopIsExit ? "stop" : "restart", pid);
                 fflush(stderr);
                 kill(pid, SIGTERM);
                 usleep(400 * 1000);
@@ -207,16 +233,26 @@ static int RunHostDsh(const std::string& dshPath, const std::string& home, const
                     kill(pid, SIGKILL);
                     waitpid(pid, &status, 0);
                 }
-                restartRequested = true;
+                stopForRelaunch = true;
                 break;
             }
             usleep(400 * 1000);
         }
-        if (!restartRequested) {
-            break;
+        if (stopForRelaunch) {
+            // 落「守候进程已停」标记：壳侧据此**确定性**等待旧实例退出（含监听套接字关闭），
+            // 而不是靠 http 探测 loopback（该探测不可靠，见 bug-log 2026-09-11）。
+            FILE* fs = fopen(stoppedFlag.c_str(), "w");
+            if (fs != nullptr) {
+                fprintf(fs, "%s\n", stopIsExit ? "stop" : "restart");
+                fclose(fs);
+            }
+            fprintf(stderr, "=== host dsh supervisor exiting (%s); shell will relaunch by mode ===\n",
+                    stopIsExit ? "stop" : "restart");
+            fflush(stderr);
         }
-        fprintf(stderr, "=== host dsh restarting ===\n");
-        fflush(stderr);
+        // 守候进程不再原地重启：无论是收到信号还是子进程自行退出，都结束本进程，
+        // 由壳侧按当前 runtime-mode.txt 重新 launchDsh()。
+        break;
     }
     return lastStatus;
 }
@@ -369,10 +405,83 @@ static int RunEmbeddedNodeForked(const std::string& filesDir, const char* probeS
 }
 
 /**
+ * 会话库（DSH_HOME）按运行模式分离。
+ *
+ * 为什么必须分离（2026-09-13）：
+ *   dsh 用 DSH_HOME 决定 sessions / settings / credentials / skills 的落点；
+ *   不显式设置时它由 HOME 推导（`~/.dsh`），而两种模式的 HOME 不同
+ *   （宿主 = 个人目录 /storage/Users/currentUser，内嵌 = <filesDir>/home）。
+ *   于是「切换运行模式」等于换了一个数据目录，用户看到的现象就是**会话消失、
+ *   旧会话无法继续**；宿主库还落在个人目录里，可写性与权限都不受 App 控制。
+ *
+ * 因此两种模式各自显式声明一个由 App 拥有、彼此独立的 DSH_HOME：
+ *   内嵌 -> <filesDir>/home/.dsh
+ *   宿主 -> <filesDir>/home-host/.dsh
+ * 两个库互不干扰；切到哪个模式，就自动用它自己的会话库。
+ */
+static std::string DshHomeForMode(const std::string& filesDir, bool hostMode) {
+    const std::string base = filesDir + (hostMode ? "/home-host" : "/home");
+    const std::string dshHome = base + "/.dsh";
+    // 逐级创建：mkdir 不递归，且任一已存在时 errno=EEXIST 属正常。
+    mkdir(base.c_str(), 0700);
+    mkdir(dshHome.c_str(), 0700);
+    return dshHome;
+}
+
+/**
+ * 本进程原生库（libdsh_host.so / libnode.so / libpty_host.so）所在的 el1 目录。
+ *
+ * 为什么需要它：鸿蒙沙箱只允许 dlopen **el1 bundle 库目录**里的原生库，el2 用户
+ * 数据区（filesDir 解压产物）一律 ERR_DLOPEN_FAILED。内嵌模式下 dshm-terminal 可以
+ * 靠 /proc/self/maps 里的 libnode 映射推导出该目录；宿主模式跑的是 brew node，
+ * 进程里没有 libnode，推不出来 → pty addon 只能退到 vendor/*.node → 加载失败 →
+ * 终端永远退化成管道会话（无 Tab 补全、无行编辑）。
+ *
+ * 必须在**父进程**（Main() 注入环境时）计算：宿主 dsh 是 exec 出来的新进程，
+ * 它自己的 maps 里没有 libdsh_host，只能靠继承这个环境变量。
+ */
+static std::string NativeLibDirFromMaps() {
+    FILE* maps = fopen("/proc/self/maps", "r");
+    if (maps == nullptr) {
+        return std::string();
+    }
+    char line[2048];
+    std::string dir;
+    while (fgets(line, sizeof(line), maps) != nullptr) {
+        std::string text(line);
+        const std::string::size_type slash = text.find('/');
+        if (slash == std::string::npos) {
+            continue;
+        }
+        std::string path = text.substr(slash);
+        while (!path.empty()) {
+            const char tail = path[path.size() - 1];
+            if (tail == '\n' || tail == '\r' || tail == ' ' || tail == '\t') {
+                path.erase(path.size() - 1);
+            } else {
+                break;
+            }
+        }
+        if (path.find("/libdsh_host.so") != std::string::npos
+            || path.find("/libnode.so") != std::string::npos
+            || path.find("/libpty_host.so") != std::string::npos) {
+            const std::string::size_type lastSlash = path.rfind('/');
+            if (lastSlash != std::string::npos) {
+                dir = path.substr(0, lastSlash);
+                break;
+            }
+        }
+    }
+    fclose(maps);
+    return dir;
+}
+
+/**
  * 注入 busybox/Linux 环境变量，供 dsh 的 bash 工具（tool-bash）使用：
  *   PATH   = <busyboxDir>:$PATH    —— 软链 sh/bash 直接可调
  *   SHELL  = <busyboxDir>/sh       —— 默认 shell（dsh 据此定位 shell）
  *   HOME   = <filesDir>/home       —— 可写家目录（dsh 会话与配置）
+ *   DSH_HOME = <filesDir>/home/.dsh —— 内嵌模式会话库（显式固定，见 DshHomeForMode）
  *   TERM   = xterm                 —— 多数 CLI 工具需要 TERM 才不报错
  * busybox 目录不存在时静默跳过（不阻塞 DSH 启动，仅 bash 工具不可用）。
  */
@@ -465,10 +574,24 @@ static void InjectBusyboxEnv(const std::string& dshDir) {
     std::string home = filesDir + "/home";
     mkdir(home.c_str(), 0700);
     setenv("HOME", home.c_str(), 1);
+    // 内嵌模式的会话库：显式固定为 <filesDir>/home/.dsh。
+    // 不显式设置时它会由 HOME 推导，看似等价；但一旦宿主模式（HOME=个人目录）
+    // 参与进来，两个模式的库就会随模式漂移，表现为「切换模式后会话消失」。
+    const std::string dshHome = DshHomeForMode(filesDir, false);
+    setenv("DSH_HOME", dshHome.c_str(), 1);
+    fprintf(stderr, "=== embedded DSH_HOME=%s ===\n", dshHome.c_str());
+    fflush(stderr);
     // BrewDSH：把 filesDir 显式传给壳侧插件（dshm-terminal 等）。宿主模式下
     // HOME 会被改指个人文件夹（RunHostDsh），插件无法再从 HOME 推导出内嵌
     // 环境根 <filesDir>/dsh，因此这里单独导出。
     setenv("DSHM_FILES_DIR", filesDir.c_str(), 1);
+    // BrewDSH：原生库目录。宿主模式没有 libnode 映射，dshm-terminal 只能靠它
+    // 找到 el1 库目录里的 libpty_host.so，否则 pty 永远加载失败（见函数注释）。
+    const std::string nativeLibDir = NativeLibDirFromMaps();
+    if (!nativeLibDir.empty()) {
+        setenv("DSHM_LIB_DIR", nativeLibDir.c_str(), 1);
+        fprintf(stderr, "=== DSHM_LIB_DIR=%s ===\n", nativeLibDir.c_str());
+    }
 }
 
 /**
@@ -701,6 +824,9 @@ extern "C" __attribute__((visibility("default"))) void Main() {
         FILE* f = fopen((filesDir + "/runtime-mode-active.txt").c_str(), "w");
         if (f != nullptr) {
             fprintf(f, "embedded\n");
+            // 内嵌模式的会话库路径（与宿主模式完全分离，见 DshHomeForMode）。
+            const std::string embeddedDshHome = DshHomeForMode(filesDir, false);
+            fprintf(f, "dshHome=%s\n", embeddedDshHome.c_str());
             fclose(f);
         }
     }
@@ -812,7 +938,80 @@ std::string bin = dshDir + "/node_modules/@deepseek-ai/dsh/lib/bin.js";
     argv.push_back(const_cast<char*>(bin.c_str()));
     argv.push_back(const_cast<char*>("web"));
 #endif
-    const int nodeExitCode = RunEmbeddedNode(argv);
-    fprintf(stderr, "=== libdsh_host node exit=%d ===\n", nodeExitCode);
-    fflush(stderr);
+
+    // 嵌入式模式最终启动：fork 子进程，在其中调用 RunEmbeddedNode(argv)。
+    //
+    // jit probe（RunEmbeddedNodeForked）已 fork 子进程完成一次 dlopen(libnode) +
+    // node::Start。主进程若在此处再次直接调 RunEmbeddedNode → V8 第二次初始化
+    // 会触发 SIGTRAP（TLS errno 竞态）。fork 后子进程是 fresh 进程空间，V8 首次
+    // 初始化 TLS 正确，不存在竞态。
+    //
+    // 不依赖可执行文件（沙箱禁止从 el2 用户文件区 execv PIE ELF，之前尝试的
+    // node_shim + nativespawn 均 Permission denied）。
+    {
+        const pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "=== embedded mode final fork failed: %s ===\n", strerror(errno));
+            fflush(stderr);
+            return;
+        }
+        if (pid == 0) {
+            // 子进程：RunEmbeddedNode 正常工作，exit 后 _exit
+            const int rc = RunEmbeddedNode(argv);
+            fprintf(stderr, "=== embedded mode child RunEmbeddedNode exit=%d ===\n", rc);
+            fflush(stderr);
+            _exit(rc >= 0 ? rc : 1);
+        }
+        // 父进程：轮询等待子进程退出，并响应壳侧的 kill-request。
+        //
+        // 为什么必须由 native 接管停机：早先的停机通道是「ArkTS 写 restart-request →
+        // dsh 进程内的 dshm-terminal 插件轮询到就 process.exit(0)」。这条通道把停机
+        // 能力放在**要被停掉的那个进程**里 —— 插件没加载、被拖慢或事件循环被占住时，
+        // 旧 node 就永远停不下来（实测内嵌模式出现 30s 超时、restartDsh 直接放弃）。
+        // native 父进程独立于 node，用文件信号杀子进程是确定性的。
+        const std::string killFlag = filesDir + "/kill-request";
+        const std::string jsRestartFlag = filesDir + "/restart-request";
+        int status = 0;
+        fprintf(stderr, "=== embedded mode: forked dsh web server pid=%d ===\n", static_cast<int>(pid));
+        fflush(stderr);
+        for (;;) {
+            const pid_t done = waitpid(pid, &status, WNOHANG);
+            if (done == pid) {
+                break;
+            }
+            if (done < 0) {
+                fprintf(stderr, "=== embedded mode waitpid failed: %s ===\n", strerror(errno));
+                fflush(stderr);
+                break;
+            }
+            if (access(killFlag.c_str(), F_OK) == 0) {
+                unlink(killFlag.c_str());
+                // 顺带清掉可能残留的 JS 侧重启信号：旧 node 已被 native 杀掉，插件没机会
+                // 消费它；留着会让**下一个** node 一启动就自杀（启动循环）。
+                unlink(jsRestartFlag.c_str());
+                fprintf(stderr, "=== kill-request: stopping embedded node pid=%d ===\n",
+                        static_cast<int>(pid));
+                fflush(stderr);
+                kill(pid, SIGTERM);
+                usleep(400 * 1000);
+                if (waitpid(pid, &status, WNOHANG) == 0) {
+                    kill(pid, SIGKILL);
+                    waitpid(pid, &status, 0);
+                }
+                break;
+            }
+            usleep(400 * 1000);
+        }
+        const int nodeExitCode = WIFEXITED(status) ? WEXITSTATUS(status)
+            : (WIFSIGNALED(status) ? -(WTERMSIG(status)) : -1);
+        fprintf(stderr, "=== libdsh_host node exit=%d ===\n", nodeExitCode);
+        fflush(stderr);
+        // node-exited 必须由**父进程**兜底写：子进程被 SIGKILL 时写不出任何东西，
+        // 而壳侧就是靠这个标记判定「端口已释放、可以拉起新实例」。
+        FILE* fe = fopen((filesDir + "/node-exited").c_str(), "w");
+        if (fe != nullptr) {
+            fprintf(fe, "%d\n", nodeExitCode);
+            fclose(fe);
+        }
+    }
 }

@@ -14,6 +14,40 @@
 | 路线 | **Harmonybrew 深度集成**：brew 提供原生 node/dsh（JIT 可用），App 做壳 + 内嵌 jitless 兜底 |
 | 姊妹项目 | `dsh-OHDSH`（内置运行时），待 AGC 权限正式审批后继续开发 |
 
+## 2026-09-13 进度（阶段：双模式收敛 + 系统集成 + 市场可用）
+
+### ✅ 本轮完成（均为真机验证）
+
+| 项 | 结果 |
+|---|---|
+| **插件市场真正可用** | 市场安装链路改走 dsh 自带「同进程 pnpm」（worker_threads + 内置 `pnpm/dist/pnpm.cjs`）：`/dsh-market/status` 的 `pnpm` 由恒 `false` 变 `true`；真实安装 `dsh-status-rotator@0.17.2` 成功（`Done in 2.4s using pnpm v10.6.3`）、卸载也正常；两种模式均通过 |
+| **遮蔽副本治理** | pnpm 会把 dshmarket 装成 `profiles/web/node_modules/dshmarket`（未打补丁）遮蔽壳侧镜像 → 启动时检测并解除（符号链接只删链接、真实目录连目录一起删） |
+| **宿主模式终端 = 真 PTY** | 新增不链接 libnode 的 `libpty_host_napi.so`（N-API 符号交宿主 node 解析）+ native 导出 `DSHM_LIB_DIR`；宿主终端从 `pipe` 变 `pty` |
+| **Tab 补全** | ArkUI `TextInput` 吞 Tab → `onKeyEvent` 拦截直通 pty（Tab/↑/↓/Esc/Ctrl-C）+ 触摸按钮；`/dshm-terminal/write` 支持 `raw`（不补换行）。实测 `ec`+Tab 补全成 `echo` 且不误执行 |
+| **模式切换干净可靠** | 统一「停旧（等标记）→ 清日志 → 重做镜像 → 按新模式拉起 → 等就绪」；宿主守候进程收到信号后**自身退出**、内嵌停机改由 native 父进程 `kill-request` 接管。停机 **0.8s**、就绪 ~12s；两个方向均验证 |
+| **环境树不再被误删** | `removeDirRecursive` 入口补 `lstatSync`（原先顺符号链接把 242 个包的真实内容删光，两种模式都起不来） |
+| **宿主 profile 启动修复** | 壳侧写的 `cordis.patch.yml` 必须是顶层 YAML 数组（原来只写注释 → 解析成 null → dsh abort `status=256`） |
+| **Dock 右键「重启」** | `quickBarManager`（仅 2in1）+ 后台 Ability 收 WantParams + 公共事件转主进程执行 + 完成后页面换新 token 重载；菜单只保留「重启」（退出用系统自带）；幂等清理 + 诊断文件 |
+| **托盘菜单简化** | 只留「重启」（打开靠左键唤回、退出用系统自带）；左键唤回补 `Window.restore()` 优先 |
+| **退出更干净** | `exitApp` 先停 dsh 再 `terminateSelf`：实测退出后应用与 dsh 进程数 9 → 0 |
+| **启动画面 = 白底黑鲸鱼** | 重做启动图图标（透明底黑鲸鱼）、应用图标（白底 + 黑鲸鱼）、深色字标；生成脚本 `scripts/gen-brand-assets.ps1` 可复现 |
+| **环境版本** | `ENV_VERSION` 116 → **120**（rawfile 内容多次变更，必须同步提升） |
+| **文档** | 新增 `docs/pitfalls-and-gotchas.md`（踩坑点总表）与 `docs/harmonyos-pc-dock-menu-research.md`；README 重写；bug-log 追加 4 条 |
+
+### 交付物
+
+- `entry/build/default/outputs/default/entry-default-signed.hap`（约 243 MB，全新完整构建）
+- 侧载：`hdc install -r <上面那个 hap>`
+
+### 待办
+
+- **在线更新环境包**（`plan-lite-env-online.md`）：目前环境只随 HAP 分发。
+- **HNP 路线**（可选）：把内置 node 打成 HNP 内嵌进 HAP，可获得**执行位**（`execv` 而非只能 `dlopen`）。前置：手工 repack + 签名（需签名口令）、设备 HNP 开关状态未知。
+- **JIT**：需 release/上架签名才能过 XPM 代码页签名校验。
+- **手机/平板形态**：当前 UI 与交互按 2in1 打磨。
+
+---
+
 ## 当前进度总览（2026-09-12）
 
 ### ✅ 已打通的完整链路

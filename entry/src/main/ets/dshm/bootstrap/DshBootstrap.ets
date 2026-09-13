@@ -13,6 +13,8 @@ import { common } from '@kit.AbilityKit';
 import { childProcessManager } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
+import process from '@ohos.process';
 import resourceManager from '@ohos.resourceManager';
 import { DshmLogger } from '../utils/Logger';
 
@@ -126,7 +128,10 @@ const OHOS_SKILLS_RAWFILE: string = 'ohos-skills';
 // 这类「名字里带 win32 的跨平台 JS」删掉，内嵌模式启动即 ERR_MODULE_NOT_FOUND + SIGNAL 6）。
 // 现已把规则收紧到「平台构建产物」形状（prebuilds/、<os>-<arch> 路径段、.pdb/.dll/.exe），
 // 并在 scripts/prune-dsh-env.mjs 里加了**包入口自检**（缺 main/exports 目标就退出码 1）。
-const ENV_VERSION: string = '20260911-110';
+// 20260913-116：把 boot-state.json 写入器正式落进 _fetch-shim.cjs（A1 结构化启动
+//   状态）。此前的 A1 是直接手改进环境树的，重建/回退即丢失（本次实测确认丢失），
+//   现在由脚本生成、随环境重建可复现。
+const ENV_VERSION: string = '20260913-120';
 const VERSION_FILE: string = '.dshm-version';
 
 // 品牌迁移（2026-09-11）：配置编辑器 bundle 由 `hdsh-config-editor` 更名为
@@ -136,6 +141,18 @@ const VERSION_FILE: string = '.dshm-version';
 // 解析不到就 throw → node 直接 abort（实测 SIGNAL 6）。故必须做一次性幂等迁移。
 const CONFIG_EDITOR_BUNDLE: string = 'dshm-config-editor';
 const LEGACY_CONFIG_EDITOR_BUNDLE: string = 'hdsh-config-editor';
+
+// 壳侧给 dshmarket 打的「同进程 pnpm 桥接」标记（scripts/patch-market-pnpm-bridge.mjs）。
+// 用来判断某份 dshmarket 副本是否已带桥接：pnpm 从 npm 装出来的副本不含它。
+const PNPM_BRIDGE_MARKER: string = '同进程 pnpm 桥接';
+
+// profile patch 层（<DSH_HOME>/profiles/<name>/cordis.patch.yml）的规范空内容。
+// dsh-app-boot 的 parsePatchList 要求该文件是**顶层 YAML 数组**；只有注释会被解析成
+// null 并直接 throw（宿主 dsh abort，2026-09-13 实测）。内容与 dsh 官方 web 模板等价。
+const EMPTY_PROFILE_PATCH: string =
+  '# DSHM 壳侧 profile patch 层（由 App 生成）：必须是顶层 YAML 数组。\n' +
+  '# 默认留空；需要覆盖/禁用/插入 loader 条目时在此按数组项追加。\n' +
+  '[]\n';
 
 // busybox：随 HAP 分发（rawfile/busybox/busybox），解压到 filesDir/busybox
 // 注意：可执行权限（0755）由 libdsh_host（C++）在 node 启动前 chmod，
@@ -173,6 +190,21 @@ export interface RuntimeModeInfo {
   version: string;   // 宿主模式下 brew Cellar 里的 dsh 版本
   nodeVersion: string; // 宿主模式下 brew node 的版本
   home: string;      // 宿主模式下的 HOME
+  dshHome: string;   // 当前模式生效的会话库（DSH_HOME，两模式分离）
+}
+
+/**
+ * 结构化启动状态（阶段0 A1）：由 _fetch-shim.cjs 在 dsh 打印就绪 URL 时
+ * 原子写入 <filesDir>/boot-state.json。ArkTS 优先读它，读不到再回退日志刮削。
+ */
+export interface DshBootState {
+  mode: string;      // 'embedded'
+  pid: number;       // 写入该文件的 node 进程（活性校验用）
+  url: string;       // 带 token 的完整 web URL
+  dshVersion: string;
+  nodeVersion: string;
+  arch: string;
+  readyAt: string;   // ISO 时间
 }
 
 export class DshBootstrap {
@@ -217,10 +249,26 @@ export class DshBootstrap {
   private static extracting: Promise<string> | null = null;
 
   private static readonly EXTRACT_LOCK_FILE: string = '.dshm-extract.lock';
-  private static readonly EXTRACT_LOCK_STALE_SEC: number = 600;
   private static readonly EXTRACT_WAIT_MS: number = 5 * 60 * 1000;
 
-  /** 落一条“正在解压”锁文件，供同机其他进程判断，避免并发 reset 互删。 */
+  /** 进程存活判定：/proc/<pid> 存在即活（写锁者与判定者同在沙箱内，相互可见）。 */
+  private static pidAlive(pid: number): boolean {
+    if (pid <= 0) {
+      return false;
+    }
+    try {
+      return fileIo.accessSync('/proc/' + pid);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * 落一条「正在解压」锁文件，供同机其他进程判断，避免并发 reset 互删。
+   * 内容 = "<pid> <unix秒>"：残留锁用「写锁进程是否还活着」秒级判定
+   * （借鉴上游 Desktop project-manager.withLock 的 PID 探活），取代旧的
+   * 时间戳 600s 过期 + 最长 5 分钟等待。
+   */
   private static markExtractInProgress(dshDir: string): void {
     try {
       if (!fileIo.accessSync(dshDir)) {
@@ -228,7 +276,7 @@ export class DshBootstrap {
       }
       const f = fileIo.openSync(dshDir + '/' + DshBootstrap.EXTRACT_LOCK_FILE,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      fileIo.writeSync(f.fd, String(Date.now()));
+      fileIo.writeSync(f.fd, String(process.pid) + ' ' + String(Math.floor(Date.now() / 1000)) + '\n');
       fileIo.closeSync(f);
     } catch (e) {
       DshmLogger.warn(TAG, '写解压锁失败: ' + String(e));
@@ -246,16 +294,26 @@ export class DshBootstrap {
     }
   }
 
-  /** 是否存在未过期的“正在解压”标记（过期视为残留锁）。 */
+  /**
+   * 是否存在「正在解压」的活锁：
+   * 新格式（"<pid> <unix秒>"）→ 写锁进程仍存活即视为持锁（秒级判定，
+   * 不再有 600s 过期猜测）；解析失败或 PID 已死 → 视为残留锁。
+   * 旧格式（纯时间戳，升级前的存量安装可能留下）→ 按 600s 过期兜底判定。
+   */
   private static isExtractInProgress(dshDir: string): boolean {
     const p: string = dshDir + '/' + DshBootstrap.EXTRACT_LOCK_FILE;
     try {
       if (!fileIo.accessSync(p)) {
         return false;
       }
-      const st = fileIo.statSync(p);
-      const ageSec: number = Date.now() / 1000 - st.mtime;
-      return ageSec < DshBootstrap.EXTRACT_LOCK_STALE_SEC;
+      const content: string = fileIo.readTextSync(p).trim();
+      const spaceAt: number = content.indexOf(' ');
+      if (spaceAt > 0) {
+        const pid: number = Number(content.substring(0, spaceAt));
+        return DshBootstrap.pidAlive(pid);
+      }
+      const ageSec: number = Date.now() / 1000 - Number(content);
+      return ageSec < 600;
     } catch (e) {
       return false;
     }
@@ -430,12 +488,77 @@ export class DshBootstrap {
   }
 
   /**
-   * 生成 pnpm wrapper 到 <filesDir>/bin/pnpm（embedded 模式的插件安装依赖）。
+   * 准备内嵌 node_shim 可执行环境（embedded 模式）。
+   *
+   * 1. 确保 <envRoot>/node/bin/node 可执行（CMake 编译的 node_shim，通过
+   *    POST_BUILD 复制到 rawfile，解压后为 0644，需要 chmod +x）。
+   * 2. 写入 <envRoot>/node_flags.txt（C++ shim 读此文件追加 argv），
+   *    反映当前的 JIT 策略（probe 结果或默认 --jitless --expose-internals）。
+   * 3. 生成 pnpm wrapper 到 <filesDir>/bin/pnpm，指向 node_shim，
+   *    供 dsh plugin install、pnpm add 等子进程 spawn 使用。
+   *
+   * 本方法只在 embedded 模式下调用（由 DshmWebPage.boot 在 ensurePnpmWrapper
+   * 前根据 active mode 决定）。
+   */
+  static prepareNodeShim(context: common.UIAbilityContext): void {
+    const dshDir: string = context.filesDir + '/dsh';
+    const nodeBin: string = dshDir + '/node/bin/node';
+    try {
+      // 1. 确保 node_shim 可执行（rawfile 解压默认为 0644，prepare-dsh-env.sh
+      //    会做 chmod +x；此处若失败则 pnpm 将不可用，但不应阻止启动）
+      if (!fileIo.accessSync(nodeBin)) {
+        DshmLogger.warn(TAG, 'node_shim 不存在: ' + nodeBin + '（pnpm 子进程不可用）');
+      }
+
+      // 2. 写 node_flags.txt（C++ shim 读此文件追加 argv）
+      //    内嵌模式必定需要 --jitless --expose-internals
+      const flagsPath: string = dshDir + '/node_flags.txt';
+      const flags: string = '--jitless\n--expose-internals\n';
+      try {
+        const f = fileIo.openSync(flagsPath,
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        fileIo.writeSync(f.fd, flags);
+        fileIo.closeSync(f);
+        DshmLogger.info(TAG, 'node_flags.txt 已写入');
+      } catch (e) {
+        DshmLogger.warn(TAG, '写 node_flags.txt 失败: ' + String(e));
+      }
+
+      // 3. 生成 pnpm wrapper 指向 node_shim
+      const pnpmCjs: string = dshDir + '/node_modules/pnpm/bin/pnpm.cjs';
+      if (!fileIo.accessSync(pnpmCjs)) {
+        DshmLogger.warn(TAG, 'pnpm.cjs 不存在，跳过 pnpm wrapper');
+        return;
+      }
+      const binDir: string = context.filesDir + '/bin';
+      DshBootstrap.mkdirRecursive(binDir);
+      const wrapper: string = binDir + '/pnpm';
+      // node_shim 由 nativespawn 启动（CMake PIE ELF，系统可 exec）
+      const content: string = '#!/system/bin/sh\nexec /system/bin/nativespawn '
+        + nodeBin + ' ' + pnpmCjs + ' "$@"\n';
+      try {
+        const file = fileIo.openSync(wrapper,
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        fileIo.writeSync(file.fd, content);
+        fileIo.closeSync(file);
+        DshmLogger.info(TAG, 'pnpm wrapper 已生成（embedded node_shim）: ' + wrapper);
+      } catch (e) {
+        DshmLogger.warn(TAG, '写 pnpm wrapper 失败: ' + String(e));
+      }
+    } catch (e) {
+      DshmLogger.warn(TAG, 'prepareNodeShim 异常: ' + String(e));
+    }
+  }
+
+  /**
+   * 生成 pnpm wrapper 到 <filesDir>/bin/pnpm（宿主模式用）。
    *
    * embedded 沙箱内没有独立 node 可执行文件，但 Harmonybrew 的 node
    * （/storage/Users/currentUser/.harmonybrew/bin/node，v26.8.1）在沙箱内
    * 可 exec（2026-09-11 实测）。生成 wrapper 把 pnpm.cjs 桥接到该 node。
    * Harmonybrew 不存在时跳过（pty/bash 仍可用系统命令）。
+   *
+   * 注意：嵌入式模式不再走此函数（用 prepareNodeShim 替代）。
    */
   static ensurePnpmWrapper(context: common.UIAbilityContext): void {
     try {
@@ -501,7 +624,10 @@ export class DshBootstrap {
       }
       diag.push('brew dsh 存在');
       const srcRoot: string = context.filesDir + '/dsh/node_modules';
-      const hostHome: string = '/storage/Users/currentUser/.dsh';
+      // 宿主模式的 DSH_HOME 由 native 侧固定为 <filesDir>/home-host/.dsh（与内嵌模式分离）。
+      // 壳侧插件镜像必须落在同一个库里，否则 dsh 从 $DSH_HOME/profiles 解析不到它们，
+      // 宿主模式会失去终端/设置等壳侧端点。规则与 dsh_host.cpp 的 DshHomeForMode 一致。
+      const hostHome: string = DshBootstrap.dshHomeForMode(context, true);
       const hostNM: string = hostHome + '/profiles/node_modules';
       const webProfileDir: string = hostHome + '/profiles/web';
       const webPkg: string = webProfileDir + '/package.json';
@@ -514,7 +640,10 @@ export class DshBootstrap {
       } catch (e) {
         diag.push('mkdir hostNM 失败: ' + String(e));
       }
-      const bundles: Array<string> = ['dshm-config-editor', 'dshm-terminal', 'dshm-ohos-settings'];
+      // 宿主模式同样启用内置插件市场：dshmarket 会随下面的循环被镜像进
+      // <hostDshHome>/profiles/node_modules，dsh 才能从 profile 里解析到它
+      // （brew 侧 dsh 树里没有 dshmarket，只写 bundles 不镜像会解析失败而 abort）。
+      const bundles: Array<string> = ['dshm-config-editor', 'dshm-terminal', 'dshm-ohos-settings', 'dshmarket'];
       for (let i = 0; i < bundles.length; i++) {
         const name: string = bundles[i];
         const src: string = srcRoot + '/' + name;
@@ -536,28 +665,42 @@ export class DshBootstrap {
         }
       }
 
-      // ---- 第 2 步：写 web profile 的 bundles 声明 ----
+      // ---- 第 2 步：写 web profile 的 bundles 声明（B1 事务式写入）----
       try {
         DshBootstrap.mkdirRecursive(webProfileDir);
+        if (DshBootstrap.isWebProfileBroken(webProfileDir)) {
+          // 残留标记 / 半截 JSON：先按模板重建（含默认官方 bundle + dshm-*）。
+          DshBootstrap.rebuildWebProfile(webProfileDir);
+        }
+        DshBootstrap.markProfilePending(webProfileDir);
         const merged: string = DshBootstrap.mergeWebProfileBundles(webPkg, bundles);
-        const file = fileIo.openSync(webPkg,
+        const file = fileIo.openSync(webPkg + '.tmp',
           fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
         fileIo.writeSync(file.fd, merged);
         fileIo.closeSync(file);
-        diag.push('web/package.json 已写入 bundles');
+        fileIo.renameSync(webPkg + '.tmp', webPkg);
+        DshBootstrap.clearProfilePending(webProfileDir);
+        diag.push('web/package.json 已写入 bundles（事务式）');
       } catch (e) {
         diag.push('写 web/package.json 失败: ' + String(e));
       }
 
       // ---- 第 3 步：profile 自带 patch 层（dsh-app-boot 会读 cordis.patch.yml）----
+      // 内容必须与 dsh 官方模板一致：**顶层 YAML 数组**。只写注释会让 YAML 解析成
+      // null，dsh-app-boot 的 parsePatchList 直接抛
+      // 「must be a top-level YAML array of loader patch entries」→ 宿主 dsh 启动即退出
+      // （2026-09-13 实测：宿主模式 t5.serverReady 永不出现，日志 status=256）。
       try {
         const patchPath: string = webProfileDir + '/cordis.patch.yml';
-        if (!fileIo.accessSync(patchPath)) {
+        // 自愈：不仅缺失时创建，**已存在但不是顶层数组**时也要改写。
+        // 旧版本壳侧只写了注释行，设备上存量 profile 里就有这种坏文件，
+        // 光靠「缺失才写」永远修不好（宿主模式会一直 abort）。
+        if (!DshBootstrap.profilePatchLooksValid(patchPath)) {
           const f2 = fileIo.openSync(patchPath,
             fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-          fileIo.writeSync(f2.fd, '# DSHM 壳侧 profile patch 层（由 App 生成，保持为空即可）。\n');
+          fileIo.writeSync(f2.fd, EMPTY_PROFILE_PATCH);
           fileIo.closeSync(f2);
-          diag.push('web/cordis.patch.yml 已创建');
+          diag.push('web/cordis.patch.yml 已写入/修复');
         }
       } catch (e) {
         diag.push('创建 profile patch 失败: ' + String(e));
@@ -573,20 +716,58 @@ export class DshBootstrap {
   }
 
   /**
+   * 判断 profile 的 `cordis.patch.yml` 是否为「顶层 YAML 数组」形态。
+   *
+   * 只做壳侧能可靠判定的最小检查：跳过注释行与空行后，首个有效字符必须是 `[`。
+   * 不引入 YAML 依赖，也不把其它合法写法误判成坏文件 —— 凡以 `[` 开头者一律放行，
+   * 交给 dsh 自己解析。
+   */
+  private static profilePatchLooksValid(path: string): boolean {
+    try {
+      if (!fileIo.accessSync(path)) {
+        return false;
+      }
+      const lines: string[] = fileIo.readTextSync(path).split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line: string = lines[i].trim();
+        if (line.length === 0 || line.startsWith('#')) {
+          continue;
+        }
+        return line.startsWith('[');
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
    * 生成/合并 web profile 的 `package.json`，把壳侧 bundle 并入
    * `dsh.profile.bundles`（保留官方 bundle 与其顺序，追加缺失项，去重）。
    *
    * 已存在时读取原文件并只改 bundles 数组，避免覆盖 dsh 自己写入的字段
    * （如 `dependencies`、`dsh.profile.patchReload`）。
+   *
+   * 阶段0 B1（借鉴上游 DesktopProjectManager 的 fail-forward 事务标记）：
+   * 写入前落 `.dshm-profile-pending` 标记，写成功后清除。若写入中途崩溃
+   * （半截 JSON → dsh-app-boot 解析失败直接 SIGNAL 6，2026-09-11 实测过的
+   * 崩溃类），下次启动 detectBrokenWebProfile 会看到残留标记，按模板重建。
+   * 原子性兜底：先写 .tmp 再 rename（沙箱 rename 同目录原子）。
    */
   private static mergeWebProfileBundles(webPkg: string, extra: Array<string>): string {
     // dsh 官方 web profile 的默认 bundle（见 dsh-app-boot 的 PROFILE_TEMPLATES）。
     let existing: Array<string> = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'];
     let patchReload: string = 'live';
+    // 解析成功时保留原始对象：只改 dsh.profile.bundles，其余字段（尤其
+    // dependencies —— dshmarket 等 profile 托管插件的依赖声明就写在这里）
+    // 必须原样保留。早期实现会重建整个 JSON，一旦覆写就会把 dependencies 抹掉，
+    // 导致已启用插件解析失败、dsh 启动即 abort（2026-09-13 修正）。
+    let original: Record<string, Object> | null = null;
     if (fileIo.accessSync(webPkg)) {
       try {
         const meta: Record<string, Object> =
           JSON.parse(fileIo.readTextSync(webPkg)) as Record<string, Object>;
+        original = meta;
         const dshNode: Object | undefined = meta['dsh'] as Object | undefined;
         if (dshNode !== undefined) {
           const profile: Object | undefined = (dshNode as Record<string, Object>)['profile'] as Object | undefined;
@@ -604,6 +785,7 @@ export class DshBootstrap {
         }
       } catch (e) {
         // 解析失败时用默认模板重建，保证可用性。
+        original = null;
       }
     }
     const merged: Array<string> = [];
@@ -615,7 +797,24 @@ export class DshBootstrap {
         merged.push(extra[i]);
       }
     }
-    // bundles 列表整体序列化为单行，避免 JSON.stringify 的多行缩进影响可读性。
+    if (original !== null) {
+      // 保留原对象其余字段，只替换 bundles。
+      // 注：ArkTS 禁止无类型对象字面量，空对象一律用 JSON.parse('{}') 构造。
+      const dshValue: Object | undefined = original['dsh'] as Object | undefined;
+      const dshNode: Object = dshValue !== undefined ? dshValue : (JSON.parse('{}') as Object);
+      const profValue: Object | undefined = (dshNode as Record<string, Object>)['profile'] as Object | undefined;
+      const prof: Record<string, Object> = profValue !== undefined
+        ? (profValue as Record<string, Object>)
+        : (JSON.parse('{}') as Record<string, Object>);
+      prof['bundles'] = merged;
+      if (prof['patchReload'] === undefined) {
+        prof['patchReload'] = patchReload;
+      }
+      (dshNode as Record<string, Object>)['profile'] = prof;
+      original['dsh'] = dshNode;
+      return JSON.stringify(original, null, 2) + '\n';
+    }
+    // 无原文件/解析失败：按官方模板重建（bundles 列表单行化，保持可读）。
     const lines: Array<string> = [];
     for (let i = 0; i < merged.length; i++) {
       lines.push('    "' + merged[i] + '"');
@@ -630,6 +829,203 @@ export class DshBootstrap {
       + '    }\n'
       + '  }\n'
       + '}\n';
+  }
+
+  /**
+   * 确保内置 dshmarket 出现在两种模式**各自**的 web profile bundles 列表里。
+   *
+   * 新 profile 由 dsh-app-boot 模板创建（模板已含 dshmarket，见 patch-market-bundle.mjs）；
+   * 存量 profile 需要这里补写一次，否则已有用户看不到插件市场。
+   * 两种模式的库互不影响（内嵌 <filesDir>/home/.dsh，宿主 <filesDir>/home-host/.dsh）。
+   * 幂等：内容未变化不写盘；写入走 pending 标记 + tmp/rename 事务。
+   */
+  static ensureMarketBundle(context: common.UIAbilityContext): void {
+    const marketDir: string = context.filesDir + '/' + DSH_SUBDIR + '/node_modules/dshmarket';
+    const marketManifest: string = marketDir + '/package.json';
+    if (!fileIo.accessSync(marketManifest)) {
+      DshmLogger.info(TAG, '未内置 dshmarket，跳过 web bundle 注入');
+      return;
+    }
+    const profileDirs: Array<string> = [
+      DshBootstrap.dshHomeForMode(context, false) + '/profiles/web',
+      DshBootstrap.dshHomeForMode(context, true) + '/profiles/web'
+    ];
+    for (let i = 0; i < profileDirs.length; i++) {
+      const dir: string = profileDirs[i];
+      const pkg: string = dir + '/package.json';
+      if (!fileIo.accessSync(pkg)) {
+        // 该模式尚未初始化 profile：交给 dsh-app-boot 用模板创建（已含 dshmarket）。
+        continue;
+      }
+      try {
+        // 先清除 pnpm 装出来的「遮蔽副本」（2026-09-13 实测的 pnpm:false 根因）。
+        // profile 的 dependencies 里声明了 dshmarket，pnpm 会把它从 npm 装成
+        // profiles/web/node_modules/dshmarket —— 那是**未打补丁**的上游包，而 Node
+        // 解析优先近层，dsh 实际加载的就是它，壳侧的「同进程 pnpm 桥接」永远不生效
+        // （/dsh-market/status 恒为 pnpm:false，市场能打开但装不了插件）。
+        // 删掉它，解析回落到壳侧镜像的 profiles/node_modules/dshmarket（已打补丁）；
+        // pnpm 下次安装会重建，本步骤每次启动重清一次，幂等。
+        DshBootstrap.dropShadowMarketCopy(dir + '/node_modules/dshmarket', marketDir);
+        let merged: string = DshBootstrap.mergeWebProfileBundles(pkg, ['dshmarket']);
+        // 除 bundles 外还要声明依赖：dsh 依据 profile 的 dependencies 托管第三方
+        // bundle（dsh-app-boot 的 profile-managed seed 也是这么写的）。缺依赖声明
+        // 时市场包可能不被物化到 profiles/node_modules，bundle 会解析失败。
+        // 注：ArkTS 禁止无类型对象字面量，空对象用 JSON.parse('{}') 构造。
+        try {
+          const marketMeta: Record<string, Object> =
+            JSON.parse(fileIo.readTextSync(marketManifest)) as Record<string, Object>;
+          const marketVersion: Object = marketMeta['version'] as Object;
+          const meta: Record<string, Object> = JSON.parse(merged) as Record<string, Object>;
+          const depsValue: Object | undefined = meta['dependencies'] as Object | undefined;
+          const deps: Record<string, Object> = depsValue !== undefined
+            ? (depsValue as Record<string, Object>)
+            : (JSON.parse('{}') as Record<string, Object>);
+          if (deps['dshmarket'] !== marketVersion) {
+            deps['dshmarket'] = marketVersion;
+            meta['dependencies'] = deps;
+            merged = JSON.stringify(meta, null, 2) + '\n';
+          }
+        } catch (e) {
+          DshmLogger.warn(TAG, '写 dshmarket 依赖声明失败（' + dir + '）: ' + String(e));
+        }
+        const current: string = fileIo.readTextSync(pkg);
+        if (current === merged) {
+          continue;
+        }
+        DshBootstrap.markProfilePending(dir);
+        const file = fileIo.openSync(pkg + '.tmp',
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        fileIo.writeSync(file.fd, merged);
+        fileIo.closeSync(file);
+        fileIo.renameSync(pkg + '.tmp', pkg);
+        DshBootstrap.clearProfilePending(dir);
+        DshmLogger.info(TAG, 'web profile 已补入 dshmarket bundle: ' + dir);
+      } catch (e) {
+        DshBootstrap.clearProfilePending(dir);
+        DshmLogger.warn(TAG, '补写 dshmarket bundle 失败（' + dir + '）: ' + String(e));
+      }
+    }
+  }
+
+  /**
+   * 解除 pnpm 装出来的 dshmarket「遮蔽」（生效副本不含桥接补丁时才处理）。
+   *
+   * 实测形态（2026-09-13）：
+   *   profiles/web/node_modules/dshmarket ->
+   *     .pnpm/dshmarket@1.45.1_.../node_modules/dshmarket          （未打补丁的 npm 副本）
+   * 或者 pnpm 直接在 web/node_modules 下放的真实目录。Node 解析优先近层，于是 dsh 加载的
+   * 是它，壳侧的「同进程 pnpm 桥接」永不生效（/dsh-market/status 恒为 pnpm:false）。
+   *
+   * 处理顺序：
+   *   1. 符号链接 → 只删链接（`.pnpm` 里的真实副本留着），解析回落到已打补丁的
+   *      profiles/node_modules/dshmarket；
+   *   2. 真实目录 → **连目录一起删**（只清内容会留下空目录，Node 仍会把它当 dshmarket
+   *      解析，bundle 加载直接 ERR_MODULE_NOT_FOUND —— 实测内嵌模式启动失败）；
+   *   3. 删不掉（权限/占用）→ 退化为用已打补丁的副本覆盖，至少保证是完整包。
+   */
+  private static dropShadowMarketCopy(path: string, srcPkgDir: string): void {
+    try {
+      if (!fileIo.accessSync(path)) {
+        return;
+      }
+      // 先看**生效内容**（readTextSync 会跟随符号链接）：已带桥接就什么都不做。
+      const cli: string = path + '/lib/dsh-cli.js';
+      if (fileIo.accessSync(cli)) {
+        if (fileIo.readTextSync(cli).indexOf(PNPM_BRIDGE_MARKER) >= 0) {
+          return;
+        }
+      }
+      if (fileIo.lstatSync(path).isSymbolicLink()) {
+        fileIo.unlinkSync(path);
+        DshmLogger.info(TAG, '已解除 pnpm 遮蔽链接（未打补丁的 dshmarket）: ' + path);
+        return;
+      }
+      DshBootstrap.removeDirRecursive(path);
+      if (fileIo.accessSync(path)) {
+        try {
+          fileIo.rmdirSync(path);
+        } catch (e) {
+          DshmLogger.warn(TAG, '删除遮蔽目录失败（' + path + '）: ' + String(e));
+        }
+      }
+      if (!fileIo.accessSync(path)) {
+        DshmLogger.info(TAG, '已清除 pnpm 遮蔽副本（未打补丁的 dshmarket）: ' + path);
+        return;
+      }
+      DshBootstrap.copyDirRecursive(srcPkgDir, path);
+      DshmLogger.info(TAG, '遮蔽副本删不掉，已用打补丁副本覆盖: ' + path);
+    } catch (e) {
+      DshmLogger.warn(TAG, '解除 dshmarket 遮蔽失败（' + path + '）: ' + String(e));
+    }
+  }
+
+  /** B1：web profile 写入事务标记（写入前落，成功后清；残留=上次写入中断）。 */
+  private static markProfilePending(webProfileDir: string): void {
+    try {
+      if (!fileIo.accessSync(webProfileDir)) {
+        DshBootstrap.mkdirRecursive(webProfileDir);
+      }
+      const f = fileIo.openSync(webProfileDir + '/.dshm-profile-pending',
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      fileIo.writeSync(f.fd, String(process.pid) + '\n');
+      fileIo.closeSync(f);
+    } catch (e) {
+      DshmLogger.warn(TAG, '写 profile pending 标记失败: ' + String(e));
+    }
+  }
+
+  private static clearProfilePending(webProfileDir: string): void {
+    try {
+      const p: string = webProfileDir + '/.dshm-profile-pending';
+      if (fileIo.accessSync(p)) {
+        fileIo.unlinkSync(p);
+      }
+    } catch (e) {
+      /* 清理失败不影响主流程 */
+    }
+  }
+
+  /**
+   * B1 自愈入口：web profile 是否处于「写入中断」状态。
+   * 判据 = 残留 pending 标记，或 package.json 存在但 JSON 解析失败。
+   * 两者任一成立，调用方按默认模板重建 profile（重解压/重置本来也会重建，
+   * 这里只是把「半写状态导致 node 启动即 SIGNAL 6」提前拦截成确定性自愈）。
+   */
+  static isWebProfileBroken(webProfileDir: string): boolean {
+    const pending: string = webProfileDir + '/.dshm-profile-pending';
+    const webPkg: string = webProfileDir + '/package.json';
+    if (fileIo.accessSync(pending)) {
+      return true;
+    }
+    if (!fileIo.accessSync(webPkg)) {
+      return false; // 不存在 = 首启，不算坏
+    }
+    try {
+      JSON.parse(fileIo.readTextSync(webPkg));
+      return false;
+    } catch (e) {
+      DshmLogger.warn(TAG, 'web profile package.json 解析失败（疑似半写），判定为损坏');
+      return true;
+    }
+  }
+
+  /** B1：按默认模板重建 web profile（保留目录内其余 dsh 自管文件）。 */
+  static rebuildWebProfile(webProfileDir: string): void {
+    try {
+      DshBootstrap.markProfilePending(webProfileDir);
+      const merged: string = DshBootstrap.mergeWebProfileBundles(
+        webProfileDir + '/package.json',
+        ['dshm-config-editor', 'dshm-terminal', 'dshm-ohos-settings']);
+      const file = fileIo.openSync(webProfileDir + '/package.json.tmp',
+        fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      fileIo.writeSync(file.fd, merged);
+      fileIo.closeSync(file);
+      fileIo.renameSync(webProfileDir + '/package.json.tmp', webProfileDir + '/package.json');
+      DshBootstrap.clearProfilePending(webProfileDir);
+      DshmLogger.info(TAG, 'web profile 已按模板重建');
+    } catch (e) {
+      DshmLogger.warn(TAG, 'web profile 重建失败: ' + String(e));
+    }
   }
 
   /** 把宿主插件安装诊断写到 filesDir/host-plugin-diag.txt（供 hdc 回读排查）。 */
@@ -676,22 +1072,36 @@ export class DshBootstrap {
     }
   }
 
-  /** 判断环境版本文件是否与当前 ENV_VERSION 匹配（容忍尾部换行）。
-   * 版本号匹配且 checkSentinel 为 true 时还需抽查 DSH 哨兵文件：覆盖安装/
-   * 并发启动可能留下“版本已写但环境不完整”的坏拷贝（实测 M0 复制提前结束、
-   * 空目录），此时视为未就绪，下次启动强制重新解压自愈。
-   * busybox 等小目录无哨兵，传 false 仅比较版本号。
+  /**
+   * 判断环境版本文件是否与当前 ENV_VERSION 匹配（容忍尾部换行）。
+   * 版本号匹配 + arch 绑定匹配（阶段0 B3）+ checkSentinel 为 true 时哨兵抽查
+   * 全部通过，才视为就绪。arch 行缺失（旧版本文件）视为匹配——升级首启仍走
+   * ENV_VERSION 变更触发重解压，不额外强刷。
    */
   private static isEnvVersionOk(versionPath: string, checkSentinel: boolean): boolean {
     try {
       if (!fileIo.accessSync(versionPath)) {
         return false;
       }
-      const v: string = fileIo.readTextSync(versionPath).trim();
-      const dshDir: string = versionPath.substring(0, versionPath.lastIndexOf('/'));
+      const content: string = fileIo.readTextSync(versionPath);
+      const firstLineEnd: number = content.indexOf('\n');
+      const v: string = (firstLineEnd < 0 ? content : content.substring(0, firstLineEnd)).trim();
       if (v !== ENV_VERSION) {
         return false;
       }
+      if (firstLineEnd >= 0) {
+        const rest: string = content.substring(firstLineEnd + 1);
+        const archAt: number = rest.indexOf('arch=');
+        if (archAt >= 0) {
+          const boundArch: string = rest.substring(archAt + 5).split('\n')[0].trim();
+          if (boundArch.length > 0 && boundArch !== DshBootstrap.deviceArch()) {
+            DshmLogger.warn(TAG, '环境 arch 不匹配（绑定 ' + boundArch
+              + '，当前 ' + DshBootstrap.deviceArch() + '），将重解压');
+            return false;
+          }
+        }
+      }
+      const dshDir: string = versionPath.substring(0, versionPath.lastIndexOf('/'));
       if (checkSentinel) {
         return DshBootstrap.verifyDshSentinel(dshDir);
       }
@@ -711,12 +1121,31 @@ export class DshBootstrap {
     }
   }
 
-  /** 写入环境版本文件（覆盖旧版本号）。 */
+  /**
+   * 当前设备 CPU 架构识别（哨兵 arch 行用）。
+   * HarmonyOS PC/2in1 为 arm64；x86_64 仅出现在模拟器等特殊镜像上。
+   * marketName 不含 "x86" 即按 arm64 处理（默认值，保证未来新机型不误判）。
+   */
+  static deviceArch(): string {
+    try {
+      const name: string = deviceInfo.marketName;
+      return name.includes('x86') ? 'x86_64' : 'arm64';
+    } catch (e) {
+      return 'arm64';
+    }
+  }
+
+  /**
+   * 写入环境版本文件：第 1 行 = 环境版本号，第 2 行 = arch 绑定（阶段0 B3）。
+   * arch 行用于拒绝「真机/模拟器环境互窜」——x86_64 模拟器上解压过的环境拿到
+   * arm64 真机上时，快速失败并重解压，而不是让 node 报一堆难懂的
+   * ERR_DLOPEN_FAILED（借鉴上游 desktop-runtime.json 的 platform/arch 绑定断言）。
+   */
   private static writeEnvVersion(versionPath: string): void {
     try {
       const file = fileIo.openSync(versionPath,
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
-      fileIo.writeSync(file.fd, ENV_VERSION + '\n');
+      fileIo.writeSync(file.fd, ENV_VERSION + '\n' + 'arch=' + DshBootstrap.deviceArch() + '\n');
       fileIo.closeSync(file);
     } catch (e) {
       DshmLogger.warn(TAG, '写入环境版本失败: ' + String(e));
@@ -725,7 +1154,21 @@ export class DshBootstrap {
 
   /** 递归删除目录（rmdirSync 不支持递归，手动遍历删除文件与子目录）。 */
   private static removeDirRecursive(dir: string): void {
-    if (!fileIo.accessSync(dir)) {
+    // 入口必须「先 lstat 再决定」：accessSync/listFileSync/statSync 都会**跟随**符号
+    // 链接。若入口本身就是链接（典型：profiles/node_modules/@deepseek-ai/* 是指向
+    // <filesDir>/dsh/node_modules/** 的 dsh heal 链接），下面的遍历会把**链接目标的
+    // 真实内容**逐个删掉，最终只留下一个空目录 + 一条悬空链接。
+    // 实测（2026-09-13 10:49）：环境树 @deepseek-ai 下 242 个包被清空，node 预加载
+    // _fetch-shim.cjs 直接 MODULE_NOT_FOUND，两种模式都无法启动。
+    // 因此：链接一律只删链接本身（unlink），非目录（文件/链接）同理，绝不递归。
+    try {
+      const entryStat = fileIo.lstatSync(dir);
+      if (entryStat.isSymbolicLink() || !entryStat.isDirectory()) {
+        fileIo.unlinkSync(dir);
+        return;
+      }
+    } catch (e) {
+      // 路径不存在或不可读：没有可清理的内容，静默返回。
       return;
     }
     let entries: Array<string> = [];
@@ -771,19 +1214,36 @@ export class DshBootstrap {
     fileIo.mkdirSync(dir);
   }
 
-  /** 清除 dsh profiles fallback 缓存（home/.dsh/profiles/node_modules），
+  /**
+   * 两种运行模式各自的 DSH_HOME（[0] 内嵌、[1] 宿主）。
+   *
+   * profiles 卫生清理（clearProfilesFallback / cleanUnmanagedHealFallback）必须同时
+   * 覆盖两份：壳侧在启动前无法预知 auto 模式的最终归属，而清理只针对「dsh 可重建的
+   * 缓存」（符号链接一律保留、真实目录副本才删），对未被使用的那一份执行同样安全。
+   */
+  private static allDshHomes(context: common.UIAbilityContext): Array<string> {
+    const homes: Array<string> = [];
+    homes.push(DshBootstrap.dshHomeForMode(context, false));
+    homes.push(DshBootstrap.dshHomeForMode(context, true));
+    return homes;
+  }
+
+  /** 清除 dsh profiles fallback 缓存（<DSH_HOME>/profiles/node_modules），
    *  让 dsh 下次启动时按新环境重新生成依赖副本。 */
   private static clearProfilesFallback(context: common.UIAbilityContext): void {
-    const fallbackDir: string = context.filesDir + '/home/.dsh/profiles/node_modules';
-    DshBootstrap.removeDirRecursive(fallbackDir);
-    if (fileIo.accessSync(fallbackDir)) {
-      try {
-        fileIo.rmdirSync(fallbackDir);
-      } catch (e) {
-        DshmLogger.warn(TAG, '删除 fallback 目录失败: ' + String(e));
+    const homes: Array<string> = DshBootstrap.allDshHomes(context);
+    for (let i = 0; i < homes.length; i++) {
+      const fallbackDir: string = homes[i] + '/profiles/node_modules';
+      DshBootstrap.removeDirRecursive(fallbackDir);
+      if (fileIo.accessSync(fallbackDir)) {
+        try {
+          fileIo.rmdirSync(fallbackDir);
+        } catch (e) {
+          DshmLogger.warn(TAG, '删除 fallback 目录失败: ' + String(e));
+        }
       }
+      DshmLogger.info(TAG, '已清除 profiles fallback 缓存: ' + fallbackDir);
     }
-    DshmLogger.info(TAG, '已清除 profiles fallback 缓存');
   }
 
   /**
@@ -856,42 +1316,54 @@ export class DshBootstrap {
    * 只清理 `@deepseek-ai/` 命名空间下的条目 —— 那是 dsh 自己的依赖域，
    * 壳侧镜像的 `dshm-*` bundle 不在此列，不会被误删。
    */
-  private static cleanUnmanagedHealFallback(context: common.UIAbilityContext): void {
-    const profilesNM: string = context.filesDir + '/home/.dsh/profiles/node_modules';
-    const scopeDir: string = profilesNM + '/@deepseek-ai';
-    try {
-      if (!fileIo.accessSync(scopeDir)) {
-        return;
-      }
-      const entries: string[] = fileIo.listFileSync(scopeDir);
-      for (let i = 0; i < entries.length; i++) {
-        const name: string = entries[i];
-        const target: string = scopeDir + '/' + name;
-        try {
-          const manifest: string = target + '/package.json';
-          if (!fileIo.accessSync(manifest)) {
-            // 无 package.json：dsh 卸载后的残渣，直接清。
-            DshBootstrap.removeDirRecursive(target);
-            DshmLogger.info(TAG, '已清理 heal 残渣（无 manifest）: @deepseek-ai/' + name);
-            continue;
-          }
-          const text: string = fileIo.readTextSync(manifest);
-          if (text.indexOf('moduleFallback') < 0) {
-            DshBootstrap.removeDirRecursive(target);
-            DshmLogger.info(TAG, '已清理非托管 heal 副本: @deepseek-ai/' + name);
-          }
-        } catch (e) {
-          DshmLogger.warn(TAG, '清理 heal 副本失败（' + name + '）: ' + String(e));
+  static cleanHealFallbackProfiles(context: common.UIAbilityContext): void {
+    // 两种运行模式各有独立会话库（内嵌 <filesDir>/home/.dsh、宿主 <filesDir>/home-host/.dsh），
+    // 都要做同一套卫生清理，不能再硬编码内嵌那一份。
+    const homes: Array<string> = DshBootstrap.allDshHomes(context);
+    for (let h = 0; h < homes.length; h++) {
+      const scopeDir: string = homes[h] + '/profiles/node_modules/@deepseek-ai';
+      try {
+        if (!fileIo.accessSync(scopeDir)) {
+          continue;
         }
+        const entries: string[] = fileIo.listFileSync(scopeDir);
+        for (let i = 0; i < entries.length; i++) {
+          const name: string = entries[i];
+          const target: string = scopeDir + '/' + name;
+          try {
+            // 符号链接就是 dsh 自己 heal 出来的**托管入口**（dsh-app-boot 的
+            // ensureSymlink），必须原样保留。这里必须先 lstat 判链接：
+            // readTextSync(target + '/package.json') 会跟随链接读到环境树里的
+            // manifest（其中没有 dsh.moduleFallback 标记），据此误判「非托管」再
+            // 删除，就等于把 dsh 的 fallback 入口连同其目标一起破坏掉。
+            if (fileIo.lstatSync(target).isSymbolicLink()) {
+              continue;
+            }
+            const manifest: string = target + '/package.json';
+            if (!fileIo.accessSync(manifest)) {
+              // 无 package.json：dsh 卸载后的残渣，直接清。
+              DshBootstrap.removeDirRecursive(target);
+              DshmLogger.info(TAG, '已清理 heal 残渣（无 manifest）: @deepseek-ai/' + name);
+              continue;
+            }
+            const text: string = fileIo.readTextSync(manifest);
+            if (text.indexOf('moduleFallback') < 0) {
+              DshBootstrap.removeDirRecursive(target);
+              DshmLogger.info(TAG, '已清理非托管 heal 副本: @deepseek-ai/' + name);
+            }
+          } catch (e) {
+            DshmLogger.warn(TAG, '清理 heal 副本失败（' + name + '）: ' + String(e));
+          }
+        }
+      } catch (e) {
+        // 目录不存在（首次启动）或不可读：静默跳过，不影响启动。
       }
-    } catch (e) {
-      // 目录不存在（首次启动）或不可读：静默跳过，不影响启动。
     }
   }
 
   static ensureBundleMirror(context: common.UIAbilityContext): void {
-    // 启动前先清掉 dsh 自己 heal 出来的非托管副本（见下方 healProfilesFallback 说明）。
-    DshBootstrap.cleanUnmanagedHealFallback(context);
+    // 启动前先清掉 dsh 自己 heal 出来的非托管副本（见 cleanHealFallbackProfiles 说明）。
+    DshBootstrap.cleanHealFallbackProfiles(context);
     const dshNM: string = context.filesDir + '/' + DSH_SUBDIR + '/node_modules';
     const profilesNM: string = context.filesDir + '/home/.dsh/profiles/node_modules';
     const names: Array<string> = ['dshm-config-editor', 'dshm-ohos-settings', 'dshm-terminal'];
@@ -1143,7 +1615,7 @@ export class DshBootstrap {
   /** native 侧实际采用的运行模式（含宿主 dsh 路径与版本）。 */
   static readActiveMode(context: common.UIAbilityContext): RuntimeModeInfo {
     const info: RuntimeModeInfo =
-      { mode: 'embedded', dshPath: '', version: '', nodeVersion: '', home: '' };
+      { mode: 'embedded', dshPath: '', version: '', nodeVersion: '', home: '', dshHome: '' };
     try {
       const p: string = DshBootstrap.activeModePath(context);
       if (!fileIo.accessSync(p)) {
@@ -1160,6 +1632,8 @@ export class DshBootstrap {
           info.version = t.substring(8);
         } else if (t.indexOf('node=') === 0) {
           info.nodeVersion = t.substring(5);
+        } else if (t.indexOf('dshHome=') === 0) {
+          info.dshHome = t.substring(8);
         } else if (t.indexOf('home=') === 0) {
           info.home = t.substring(5);
         }
@@ -1168,6 +1642,18 @@ export class DshBootstrap {
       DshmLogger.warn(TAG, '读运行模式失败: ' + String(e));
     }
     return info;
+  }
+
+  /**
+   * 当前模式对应的会话库（DSH_HOME）绝对路径。
+   *
+   * 与 dsh_host.cpp 的 DshHomeForMode 保持同一套规则（两处必须一致）：
+   *   内嵌 -> <filesDir>/home/.dsh
+   *   宿主 -> <filesDir>/home-host/.dsh
+   * 两种模式的会话/设置/凭据各自独立：切到哪个模式就自动用哪个库。
+   */
+  static dshHomeForMode(context: common.UIAbilityContext, hostMode: boolean): string {
+    return context.filesDir + (hostMode ? '/home-host/.dsh' : '/home/.dsh');
   }
 
   /**
@@ -1185,6 +1671,84 @@ export class DshBootstrap {
     } catch (e) {
       DshmLogger.warn(TAG, '写重启请求失败: ' + String(e));
     }
+  }
+
+  /**
+   * 停掉当前 dsh 实例，并**确定性等待它退出**（重启 / 切换模式 / 退出应用的统一入口）。
+   *
+   * 两种模式的通道不同，但都落一个「已停」标记，绝不靠 http 探测 loopback 判断
+   * 端口是否释放（该探测不可靠，会让新旧实例抢 3080，见 bug-log 2026-09-11）：
+   *   - embedded：`restart-request` → 进程内适配层 `process.exit(0)` →
+   *     libdsh_host 在 node::Start 返回后写 `<filesDir>/node-exited`；
+   *   - host：`restart-request` → native 守候进程 SIGTERM/SIGKILL 宿主 dsh 子进程后
+   *     **自身退出**并写 `<filesDir>/host-stopped`（2026-09-13 起不再原地重 fork）。
+   *
+   * 返回 true 时旧实例的监听套接字必然已关闭，新实例可安全绑定 3080。
+   *
+   * @param mode 当前**生效**的模式（切换模式时要传旧模式，而不是即将切到的模式）
+   */
+  static async stopDsh(context: common.UIAbilityContext, mode: string,
+    timeoutMs: number): Promise<boolean> {
+    if (mode === 'host') {
+      const stopped: string = context.filesDir + '/host-stopped';
+      try {
+        if (fileIo.accessSync(stopped)) {
+          fileIo.unlinkSync(stopped);
+        }
+      } catch (e) {
+        DshmLogger.warn(TAG, '清理 host-stopped 失败: ' + String(e));
+      }
+      DshBootstrap.requestHostRestart(context);
+      return await DshBootstrap.waitForStopMarker(context, 'host-stopped', timeoutMs);
+    }
+    return await DshBootstrap.requestEmbeddedRestart(context, timeoutMs);
+  }
+
+  /** 请求退出整个应用前，先停掉 dsh（之后由调用方 terminateSelf）。 */
+  static async stopDshForExit(context: common.UIAbilityContext, mode: string,
+    timeoutMs: number): Promise<boolean> {
+    if (mode === 'host') {
+      const stopped: string = context.filesDir + '/host-stopped';
+      try {
+        if (fileIo.accessSync(stopped)) {
+          fileIo.unlinkSync(stopped);
+        }
+      } catch (e) {
+        DshmLogger.warn(TAG, '清理 host-stopped 失败: ' + String(e));
+      }
+      try {
+        const f = fileIo.openSync(context.filesDir + '/stop-request',
+          fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+        fileIo.writeSync(f.fd, '1\n');
+        fileIo.closeSync(f);
+      } catch (e) {
+        DshmLogger.warn(TAG, '写停止请求失败: ' + String(e));
+        return false;
+      }
+      return await DshBootstrap.waitForStopMarker(context, 'host-stopped', timeoutMs);
+    }
+    return await DshBootstrap.requestEmbeddedRestart(context, timeoutMs);
+  }
+
+  /** 轮询某个「已停」标记文件出现（出现即消费掉，避免下次误判）。 */
+  private static async waitForStopMarker(context: common.UIAbilityContext, fileName: string,
+    timeoutMs: number): Promise<boolean> {
+    const path: string = context.filesDir + '/' + fileName;
+    const deadline: number = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (fileIo.accessSync(path)) {
+        try {
+          fileIo.unlinkSync(path);
+        } catch (e) {
+          DshmLogger.warn(TAG, '清理 ' + fileName + ' 失败: ' + String(e));
+        }
+        DshmLogger.info(TAG, '旧实例已退出（' + fileName + '）');
+        return true;
+      }
+      await DshBootstrap.sleepMs(200);
+    }
+    DshmLogger.error(TAG, '等待 ' + fileName + ' 超时（' + timeoutMs + 'ms）');
+    return false;
   }
 
   /**
@@ -1228,28 +1792,35 @@ export class DshBootstrap {
   }
 
   /**
-   * 请求内嵌运行时重启，并**确定性等待旧 node 退出**。
+   * 请求内嵌运行时停止，并**确定性等待旧 node 退出**。
    *
-   * 通道：写 `<filesDir>/restart-request` → 进程内 dshm-terminal 轮询到即 `process.exit(0)`
-   * → libdsh_host 在 `node::Start` 返回后写 `<filesDir>/node-exited` → 本函数轮询到该标记。
+   * 通道（2026-09-13 改为 native 接管）：写 `<filesDir>/kill-request` →
+   * **native 父进程**（独立于 node，不被停机对象拖累）SIGTERM/SIGKILL 掉 node 子进程
+   * → 写 `<filesDir>/node-exited` → 本函数轮询到该标记。
+   *
+   * 为什么不再依赖 JS 侧插件：旧实现是「写 restart-request → dsh 进程内的 dshm-terminal
+   * 插件轮询到就 process.exit(0)」，等于把停机能力放在**要被停掉的那个进程**里。插件没加载、
+   * 事件循环被占住时旧 node 停不下来（实测 30s 超时后 restartDsh 直接放弃，模式切不过去）。
+   * 现在 native 侧直接用文件信号杀子进程，且子进程被 SIGKILL 时由父进程兜底写标记。
+   *
    * 此时 node 的监听套接字已关闭、3080 必然可复用，**不再依赖 ArkTS 侧 http 探测 loopback**
    * （该探测不可靠，据其判断"端口已释放"会让新旧 node 抢端口，见 bug-log 2026-09-11）。
    * @returns 旧 node 是否已在超时内退出
    */
   static async requestEmbeddedRestart(context: common.UIAbilityContext,
     timeoutMs: number): Promise<boolean> {
-    const flag: string = context.filesDir + '/restart-request';
     const exited: string = context.filesDir + '/node-exited';
     try {
+      // 先清陈旧标记（上一轮留下的会让本次误判为"已退出"）。
       if (fileIo.accessSync(exited)) {
         fileIo.unlinkSync(exited);
       }
-      const f = fileIo.openSync(flag,
+      const f = fileIo.openSync(context.filesDir + '/kill-request',
         fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
       fileIo.writeSync(f.fd, '1\n');
       fileIo.closeSync(f);
     } catch (e) {
-      DshmLogger.error(TAG, '写重启信号失败: ' + String(e));
+      DshmLogger.error(TAG, '写停机信号失败: ' + String(e));
       return false;
     }
     const deadline: number = Date.now() + timeoutMs;
@@ -1263,7 +1834,7 @@ export class DshBootstrap {
         DshmLogger.info(TAG, '旧 node 已退出（node-exited 标记）');
         return true;
       }
-      await DshBootstrap.sleepMs(300);
+      await DshBootstrap.sleepMs(200);
     }
     DshmLogger.error(TAG, '等待 node-exited 超时（' + timeoutMs + 'ms）');
     return false;
@@ -1313,8 +1884,19 @@ export class DshBootstrap {
     }
   }
 
-  /** 启动前仅清理上一轮 node 诊断日志，避免超时诊断混入历史进程错误。 */
+  /** 启动前仅清理上一轮 node 诊断日志与陈旧 boot-state，避免超时诊断/旧 token 混入历史进程。 */
   static clearNodeLogs(context: common.UIAbilityContext): void {
+    // 陈旧 boot-state.json 必须先删：其 pid/url 属于上一轮 node，留着会让
+    // readBootState 在新 node 就绪前返回旧 token（ArkWeb 加载后 401）。
+    try {
+      const stale: string = context.filesDir + '/boot-state.json';
+      if (fileIo.accessSync(stale)) {
+        fileIo.unlinkSync(stale);
+        DshmLogger.info(TAG, '已清除上一轮 boot-state.json');
+      }
+    } catch (e) {
+      /* 不阻断 */
+    }
     const logDir: string = context.filesDir + '/log';
     DshBootstrap.removeDirRecursive(logDir);
     if (fileIo.accessSync(logDir)) {
@@ -1533,6 +2115,34 @@ export class DshBootstrap {
       return false;
     } finally {
       request.destroy();
+    }
+  }
+
+  /**
+   * 读取 node 预加载脚本（_fetch-shim.cjs）在 dsh 就绪时写入的
+   * 结构化启动状态（阶段0 A1，借鉴上游 DesktopHostProcess 的类型化 ready 握手）。
+   *
+   * 返回 null 的情形：文件不存在（旧环境/未就绪/剖析模式）、URL 无 token、
+   * 或写文件的 node 进程已死（陈旧残留——重启场景 clearNodeLogs 会先清掉，
+   * 这里再按 PID 活性兜底）。调用方拿到非 null 即可直接加载 URL，不必刮日志。
+   */
+  static readBootState(context: common.UIAbilityContext): DshBootState | null {
+    const p: string = context.filesDir + '/boot-state.json';
+    try {
+      if (!fileIo.accessSync(p)) {
+        return null;
+      }
+      const j: DshBootState = JSON.parse(fileIo.readTextSync(p)) as DshBootState;
+      if (typeof j.url !== 'string' || !j.url.startsWith('http://') || !j.url.includes('token=')) {
+        return null;
+      }
+      if (!DshBootstrap.pidAlive(j.pid)) {
+        DshmLogger.warn(TAG, 'boot-state.json 的写入进程 ' + j.pid + ' 已退出，视为陈旧');
+        return null;
+      }
+      return j;
+    } catch (e) {
+      return null;
     }
   }
 

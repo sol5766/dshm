@@ -17,7 +17,9 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
 import { setContext, clearContext, DshmAbilityContextLike } from '../GlobalContext';
 import { DshmLogger } from '../dshm/utils/Logger';
-import { StatusBarTray, MENU_CODE_EXIT } from '../dshm/system/StatusBarTray';
+import { StatusBarTray, MENU_CODE_EXIT, MENU_CODE_RESTART } from '../dshm/system/StatusBarTray';
+import { DshmAppActions } from '../dshm/system/AppActions';
+import { installQuickBarMenu } from '../dshm/system/QuickBarMenu';
 
 const TAG: string = 'EntryAbility';
 
@@ -78,6 +80,21 @@ export default class EntryAbility extends UIAbility {
       DshmLogger.warn(TAG, '固定浅色模式失败（可忽略）: ' + String(e));
     }
     this.setupStatusBar();
+    // Dock（快捷栏）菜单的「重启」在后台进程被触发，那里不能直接重启 dsh
+    // （native 子进程归属本进程），因此由本 Ability 订阅请求并执行。
+    DshmAppActions.subscribeRestartRequest((): void => {
+      this.restartDshFromMenu();
+    });
+  }
+
+  /** 响应外部（Dock 菜单 / 托盘菜单）重启请求：重启成功后广播事件让页面换新 URL。 */
+  private restartDshFromMenu(): void {
+    DshmLogger.info(TAG, '收到外部重启请求，开始重启 DSH');
+    DshmAppActions.restartDsh(this.context).then((ok: boolean): void => {
+      DshmLogger.info(TAG, '外部重启完成，就绪=' + String(ok));
+    }).catch((e: Object): void => {
+      DshmLogger.warn(TAG, '外部重启失败: ' + String(e));
+    });
   }
 
   onDestroy(): void {
@@ -105,6 +122,11 @@ export default class EntryAbility extends UIAbility {
         DshmLogger.warn(TAG, '隐藏系统标题栏失败（可忽略）: ' + String(e));
       }
       // 使用系统为当前设备形态提供的默认主窗口尺寸，避免将 2in1 强制缩成手机长条比例。
+    });
+    // Dock（快捷栏）右键菜单：在窗口阶段创建后注册，用户即使从不打开页面也能重启/退出。
+    // 幂等且失败静默（非 2in1 设备不支持该能力）。
+    installQuickBarMenu(this.context).catch((e: Object): void => {
+      DshmLogger.warn(TAG, 'Dock 菜单注册异常（可忽略）: ' + String(e));
     });
   }
 
@@ -167,21 +189,47 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
-  /** 确保主窗口处于显示状态（已显示时忽略报错）。 */
+  /**
+   * 确保主窗口处于显示状态（Dock 左键唤回 / 托盘唤回的兜底）。
+   *
+   * Dock 左键点击由系统直接把任务切到前台，只保证触发 `onForeground`，**不是**
+   * startAbility，所以不会走 `onNewWant`。窗口若处于**最小化**状态，仅 `showWindow()`
+   * 不一定能恢复（官方对 `Window.restore()` 的说明是"主窗口最小化且 Ability 处于
+   * onForeground 时恢复到前台，已在前台则仅抬升层级"，且明确 PC/2in1 可正常调用）。
+   * 因此这里优先 `restore()`，失败或无效果时回退 `showWindow()` 兜底。
+   */
   private ensureWindowShown(): void {
     if (this.stage === null) {
       return;
     }
+    let mainWin: window.Window | null = null;
     try {
-      const win: window.Window = this.stage.getMainWindowSync();
-      win.showWindow().then((): void => {
-        DshmLogger.info(TAG, '主窗口已显示');
-      }).catch((e: BusinessError): void => {
-        DshmLogger.warn(TAG, '显示主窗口失败（已显示时属正常）: ' + JSON.stringify(e));
-      });
+      mainWin = this.stage.getMainWindowSync();
     } catch (e) {
       DshmLogger.warn(TAG, '获取主窗口失败: ' + String(e));
+      return;
     }
+    if (mainWin === null) {
+      return;
+    }
+    // 取一个非空别名给回调使用：ArkTS 不会在异步回调里保持外层变量的非空收窄，
+    // 显式别名比在回调里写可选链（?.）更符合本仓库的空值处理规范。
+    const target: window.Window = mainWin;
+    target.restore().then((): void => {
+      DshmLogger.info(TAG, '主窗口已从最小化恢复');
+    }).catch((e: BusinessError): void => {
+      // 未最小化时 restore 可能报错，这属正常路径，用 showWindow 兜底。
+      DshmLogger.info(TAG, 'restore 未生效（' + JSON.stringify(e) + '），回退 showWindow');
+      try {
+        target.showWindow().then((): void => {
+          DshmLogger.info(TAG, '主窗口已显示');
+        }).catch((err: BusinessError): void => {
+          DshmLogger.warn(TAG, '显示主窗口失败（已显示时属正常）: ' + JSON.stringify(err));
+        });
+      } catch (err2) {
+        DshmLogger.warn(TAG, '显示主窗口异常: ' + String(err2));
+      }
+    });
   }
 
   onBackground(): void {
@@ -240,6 +288,8 @@ export default class EntryAbility extends UIAbility {
       StatusBarTray.onMenuClick((menuCode: string): void => {
         if (menuCode === MENU_CODE_EXIT) {
           this.exitApp('托盘右键退出');
+        } else if (menuCode === MENU_CODE_RESTART) {
+          this.restartDshFromMenu();
         } else {
           this.showMainWindow();
         }
@@ -268,17 +318,28 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 真正退出应用：摘掉托盘图标 → 结束主 Ability。
+   * 真正退出应用：**先停掉 DSH** → 摘掉托盘图标 → 结束主 Ability。
    *
-   * DSH 的 node/web 服务跑在本 Ability 所属进程的 native 子进程里，主 Ability
-   * 结束后该进程被系统回收，服务随之停止；后台保活进程会通过公共事件一并结束。
+   * 为什么要显式停 DSH：官方没有任何一句保证 `terminateSelf()` 会清理应用自己
+   * spawn 的 native 子进程。宿主模式下一个 brew dsh 子进程 + 守候进程都挂在
+   * `Native_libdsh_host0` 上，不先发停止信号就会残留在设备里继续占着 3080，
+   * 下次启动时新实例绑不上端口。停止走 AppActions.stopForExit（有超时兜底，
+   * 超时也必须继续退，避免"退不掉"）。
+   *
+   * 后台保活 Ability 通过公共事件一并结束（否则托盘进程残留）。
    */
-  private exitApp(reason: string): void {
+  private async exitApp(reason: string): Promise<void> {
     if (this.exiting) {
       return;
     }
     this.exiting = true;
     DshmLogger.info(TAG, '开始退出应用（' + reason + '）');
+    try {
+      const stopped: boolean = await DshmAppActions.stopForExit(this.context);
+      DshmLogger.info(TAG, '退出前停止 DSH：' + (stopped ? '已确认退出' : '超时未确认，继续退出'));
+    } catch (e) {
+      DshmLogger.warn(TAG, '退出前停止 DSH 失败（继续退出）: ' + String(e));
+    }
     try {
       StatusBarTray.remove(this.context);
     } catch (e) {

@@ -999,3 +999,61 @@ try {
 }
 
 process.stderr.write('[fetch-shim] worker coverage done\n');
+
+// ---------------------------------------------------------------------------
+// DSHM 结构化启动状态（boot-state.json）
+//
+// 目标：ArkTS 侧不再轮询/刮削 node-*.log 去猜「dsh 是否就绪、带 token 的 URL 是什么」——
+// dsh 打印带 token 的 URL 那一刻，由本预加载脚本一次性把结构化状态原子写盘
+// （tmp + rename），壳侧读单文件即可，消灭「先监听端口、后打印 URL」之间的白屏窗口
+// （实测 waitForServer 6.7s 就绪而 token 40-60s 才落盘）。
+//
+// 环境变量 DSHM_FILES_DIR 由 libdsh_host 注入（与 DSHM_KOFFI_PATH 同批）。
+// 注意：本块必须由脚本生成（手改环境树会在重建时丢失，2026-09-13 踩过）。
+// 剖析模式（DSHM_BOOT_PROFILE=1）已自行包装 console.log，这里让位。
+// ---------------------------------------------------------------------------
+if (!__profEnabled) {
+  try {
+    const bootFilesDir = process.env.DSHM_FILES_DIR;
+    if (typeof bootFilesDir === 'string' && bootFilesDir.length > 0) {
+      const bootStatePath = bootFilesDir + '/boot-state.json';
+      const bootTmpPath = bootStatePath + '.tmp';
+      const bootFs = require('node:fs');
+      const bootOrigLog = console.log.bind(console);
+      let bootStateWritten = false;
+      console.log = function bootStateLog(...args) {
+        bootOrigLog(...args);
+        if (bootStateWritten || typeof args[0] !== 'string' || !args[0].startsWith('dsh web: ')) {
+          return;
+        }
+        bootStateWritten = true;
+        try {
+          const line = args[0];
+          const at = line.indexOf('http://');
+          const url = at >= 0 ? line.slice(at).trim() : '';
+          // URL 尚无 token 时（dsh 先监听后打印的窗口期）不写盘，保留壳侧刮削回退，
+          // 避免写入半截状态让 ArkTS 提前判定就绪。
+          if (!url.startsWith('http://') || url.indexOf('token=') < 0) {
+            bootStateWritten = false;
+            return;
+          }
+          const payload = {
+            mode: 'embedded',
+            pid: process.pid,
+            url,
+            dshVersion: typeof process.env.DSHM_DSH_VERSION === 'string' ? process.env.DSHM_DSH_VERSION : '',
+            nodeVersion: process.version,
+            arch: process.arch,
+            readyAt: new Date().toISOString(),
+          };
+          bootFs.writeFileSync(bootTmpPath, JSON.stringify(payload, null, 2) + '\n');
+          bootFs.renameSync(bootTmpPath, bootStatePath);
+        } catch (bootError) {
+          /* 写失败不影响服务；壳侧仍有日志刮削回退 */
+        }
+      };
+    }
+  } catch (bootSetupError) {
+    /* 装配失败同样静默 */
+  }
+}
