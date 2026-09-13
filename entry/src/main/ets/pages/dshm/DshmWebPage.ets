@@ -212,12 +212,17 @@ struct DshmWebPage {
     // 沉浸光感能力探测（同步、带缓存）：必须在首帧前完成，避免顶栏材质闪烁。
     this.immersiveEnabled = ImmersiveMaterialUtil.isUsable();
     DshmLogger.info(TAG, ImmersiveMaterialUtil.describe());
-    // 外部（Dock/托盘菜单）重启完成后 dsh 会换新 token，必须用新 URL 重新加载，
-    // 否则页面停在旧 token 上（401/白屏）。事件由 DshmAppActions 在主进程发布。
+    // 重启完成后 dsh 会换新 token，页面必须用新 URL 重新加载，否则停在旧 token 上
+    //（401/白屏）。事件由 DshmAppActions.restartDsh 广播；**页面自己发起的重启也会
+    // 收到**（restartAndWait 里已经在事件之前写过 webUrl），因此这里只在 URL 真的
+    // 变了才 reload，避免同一次重启触发两次 loadUrl。
     DshmAppActions.subscribeRestartDone((): void => {
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const url: string = DshBootstrap.readWebUrl(ctx);
-      DshmLogger.info(TAG, '收到外部重启完成事件，重新加载 ' + url);
+      if (url.length === 0 || url === this.webUrl) {
+        return;
+      }
+      DshmLogger.info(TAG, '收到重启完成事件，重新加载 ' + url);
       this.webUrl = url;
       this.ready = true;
       this.controller.loadUrl(url);
