@@ -7,21 +7,48 @@
  *
  * 同时负责 PC 系统托盘常驻（见 dshm/system/StatusBarTray）：
  *   - 启动时挂载托盘图标，并拉起绑定的 BackGroundAbility 维持后台保活；
- *   - 左键点托盘图标 / 右键菜单"打开" → showAbility() 把窗口唤回前台；
- *   - 系统关闭按钮（窗口右上角 X、Dock/托盘右键退出）→ 隐藏到托盘常驻；
- *   - 应用内「窗口 → 关闭窗口」或托盘右键"退出" → 真正退出（摘托盘 + 结束
- *     主 Ability，node 服务随进程回收）。
+ *   - 左键点托盘图标 → showAbility() 把窗口唤回前台（右键交给系统默认菜单）；
+ *   - 关闭窗口（右上角 X / 系统菜单里的关闭）→ 隐藏到托盘常驻；
+ *   - 应用内「窗口 → 关闭窗口」→ 真正退出：先停 DSH → 摘托盘 → 结束主 Ability。
+ *   - 另：启动时清理旧版本注册进任务栏（Dock/快捷栏）右键菜单的残留项。
  */
-import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, ConfigurationConstant, UIAbility, Want, abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
 import { setContext, clearContext, DshmAbilityContextLike } from '../GlobalContext';
 import { DshmLogger } from '../dshm/utils/Logger';
-import { StatusBarTray, MENU_CODE_EXIT } from '../dshm/system/StatusBarTray';
+import { StatusBarTray } from '../dshm/system/StatusBarTray';
+import { DshmAppActions } from '../dshm/system/AppActions';
+import { removeQuickBarMenu } from '../dshm/system/QuickBarMenuCleanup';
 
 const TAG: string = 'EntryAbility';
 
+/**
+ * 需要在启动时向用户申请/引导开启的权限。
+ *
+ * - `ACCESS_USER_FULL_DISK`：BrewDSH 的**核心依赖**。工作区默认是个人文件夹，
+ *   没有它 App 读不到 `/storage/Users/currentUser`（工作区选不到个人文件夹）。
+ *   属 `manual_settings` 类型：profile 只给「资格」，**必须由用户在系统设置里手动开启**。
+ * - `READ_WRITE_USER_FILE` / `FILE_ACCESS_PERSIST`：个人文件读写与持久授权。
+ * - `ALLOW_EXTERNAL_NATIVE_CODE`：执行包内签名的原生二进制（busybox、pty helper）。
+ * - `CUSTOM_SANDBOX`：沙箱放宽，pty 终端 fork/exec 依赖它。
+ *
+ * 这些权限无法用 `requestPermissionsFromUser` 弹窗申请（非 user_grant 类型），
+ * 只能用 `openPermissionOnSetting` 引导用户到系统设置页开启。
+ */
+const RUNTIME_PERMISSIONS: Array<Permissions> = [
+  'ohos.permission.ACCESS_USER_FULL_DISK',
+  'ohos.permission.CUSTOM_SANDBOX',
+  'ohos.permission.READ_WRITE_USER_FILE',
+  'ohos.permission.FILE_ACCESS_PERSIST',
+  'ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE'
+];
+
 export default class EntryAbility extends UIAbility {
+  /**
+   * 是否已发起过权限引导（每次进程生命周期只引导一轮，避免反复弹设置页）。
+   */
+  private hasRequestedRuntimePermissions: boolean = false;
   /**
    * 是否处于"用户主动退出"流程。为 true 时 onPrepareToTerminate 放行，
    * 否则系统关闭动作一律按"隐藏到托盘常驻"处理。
@@ -79,6 +106,12 @@ export default class EntryAbility extends UIAbility {
       }
       // 使用系统为当前设备形态提供的默认主窗口尺寸，避免将 2in1 强制缩成手机长条比例。
     });
+    // 清理旧版本在任务栏（Dock/快捷栏）右键菜单里注册的分组。
+    // 该入口已废弃（原因见 QuickBarMenuCleanup.ets 头部注释），但历史注册项会留在系统里，
+    // 必须主动删掉，否则用户的任务栏右键会一直挂着一个点了没反应的「重启」。
+    removeQuickBarMenu(this.context).catch((e: Object): void => {
+      DshmLogger.warn(TAG, 'Dock 菜单清理异常（可忽略）: ' + String(e));
+    });
   }
 
   onForeground(): void {
@@ -86,23 +119,101 @@ export default class EntryAbility extends UIAbility {
     // 兜底：无论从 Dock、任务栏还是托盘唤回，都确保主窗口真的显示出来
     //（窗口被 hideAbility 隐藏后，仅回前台不会自动取消隐藏）。
     this.ensureWindowShown();
+    // 运行时权限引导：缺 ACCESS_USER_FULL_DISK 会让整个 Harmonybrew 集成失效，
+    // 因此在每次进入前台时检查并引导（每进程只引导一轮）。
+    this.ensureRuntimePermissions();
   }
 
-  /** 确保主窗口处于显示状态（已显示时忽略报错）。 */
+  /**
+   * 检查运行时权限并引导用户开启。
+   *
+   * `ACCESS_USER_FULL_DISK` / `CUSTOM_SANDBOX` 等属受限权限，**不是**
+   * `user_grant` 类型，无法用 `requestPermissionsFromUser` 弹窗申请；
+   * 只能通过 `openPermissionOnSetting` 拉起系统级的权限设置页让用户手动开启。
+   *
+   * 检查用 `checkAccessTokenSync`（同步、无弹窗），已授予的权限不重复引导；
+   * 只对**未授予**的权限调用一次设置页跳转（多个未授予权限时系统会在同一
+   * 设置页内呈现，无需逐个跳转）。
+   */
+  private ensureRuntimePermissions(): void {
+    if (this.hasRequestedRuntimePermissions) {
+      return;
+    }
+    this.hasRequestedRuntimePermissions = true;
+    try {
+      const atManager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
+      const tokenId: number = this.context.applicationInfo.accessTokenId;
+      let firstMissing: Permissions | null = null;
+      for (let i = 0; i < RUNTIME_PERMISSIONS.length; i++) {
+        const permission: Permissions = RUNTIME_PERMISSIONS[i];
+        try {
+          const status: abilityAccessCtrl.GrantStatus =
+            atManager.checkAccessTokenSync(tokenId, permission);
+          const granted: boolean = (status === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED);
+          DshmLogger.info(TAG, '权限 ' + permission + (granted ? ' 已授予' : ' 未授予'));
+          if (!granted && firstMissing === null) {
+            firstMissing = permission;
+          }
+        } catch (e) {
+          DshmLogger.warn(TAG, '检查权限 ' + permission + ' 失败: ' + String(e));
+        }
+      }
+      if (firstMissing !== null) {
+        DshmLogger.info(TAG, '引导用户开启权限: ' + firstMissing);
+        atManager.openPermissionOnSetting(this.context, firstMissing)
+          .then((): void => {
+            DshmLogger.info(TAG, '权限设置页已关闭');
+          })
+          .catch((err: BusinessError): void => {
+            DshmLogger.warn(TAG, '打开权限设置页失败: ' + String(err.code) + ' ' + err.message);
+          });
+      }
+    } catch (e) {
+      DshmLogger.warn(TAG, '运行时权限检查失败（跳过）: ' + String(e));
+    }
+  }
+
+  /**
+   * 确保主窗口处于显示状态（Dock 左键唤回 / 托盘唤回的兜底）。
+   *
+   * Dock 左键点击由系统直接把任务切到前台，只保证触发 `onForeground`，**不是**
+   * startAbility，所以不会走 `onNewWant`。窗口若处于**最小化**状态，仅 `showWindow()`
+   * 不一定能恢复（官方对 `Window.restore()` 的说明是"主窗口最小化且 Ability 处于
+   * onForeground 时恢复到前台，已在前台则仅抬升层级"，且明确 PC/2in1 可正常调用）。
+   * 因此这里优先 `restore()`，失败或无效果时回退 `showWindow()` 兜底。
+   */
   private ensureWindowShown(): void {
     if (this.stage === null) {
       return;
     }
+    let mainWin: window.Window | null = null;
     try {
-      const win: window.Window = this.stage.getMainWindowSync();
-      win.showWindow().then((): void => {
-        DshmLogger.info(TAG, '主窗口已显示');
-      }).catch((e: BusinessError): void => {
-        DshmLogger.warn(TAG, '显示主窗口失败（已显示时属正常）: ' + JSON.stringify(e));
-      });
+      mainWin = this.stage.getMainWindowSync();
     } catch (e) {
       DshmLogger.warn(TAG, '获取主窗口失败: ' + String(e));
+      return;
     }
+    if (mainWin === null) {
+      return;
+    }
+    // 取一个非空别名给回调使用：ArkTS 不会在异步回调里保持外层变量的非空收窄，
+    // 显式别名比在回调里写可选链（?.）更符合本仓库的空值处理规范。
+    const target: window.Window = mainWin;
+    target.restore().then((): void => {
+      DshmLogger.info(TAG, '主窗口已从最小化恢复');
+    }).catch((e: BusinessError): void => {
+      // 未最小化时 restore 可能报错，这属正常路径，用 showWindow 兜底。
+      DshmLogger.info(TAG, 'restore 未生效（' + JSON.stringify(e) + '），回退 showWindow');
+      try {
+        target.showWindow().then((): void => {
+          DshmLogger.info(TAG, '主窗口已显示');
+        }).catch((err: BusinessError): void => {
+          DshmLogger.warn(TAG, '显示主窗口失败（已显示时属正常）: ' + JSON.stringify(err));
+        });
+      } catch (err2) {
+        DshmLogger.warn(TAG, '显示主窗口异常: ' + String(err2));
+      }
+    });
   }
 
   onBackground(): void {
@@ -157,14 +268,8 @@ export default class EntryAbility extends UIAbility {
           this.showMainWindow();
         }
       });
-      // 右键菜单。
-      StatusBarTray.onMenuClick((menuCode: string): void => {
-        if (menuCode === MENU_CODE_EXIT) {
-          this.exitApp('托盘右键退出');
-        } else {
-          this.showMainWindow();
-        }
-      });
+      // 托盘右键不注册自定义菜单（见 StatusBarTray.install 注释）：
+      // 「打开」靠左键、「退出」由系统右键菜单自带、「重启」在应用内 Harness 菜单里。
       StatusBarTray.install(ctx).then((): void => {
         this.trayReady = true;
         // 绑定托盘进程的前置条件是"应用已有托盘图标"，故挂图标后再拉起，留一点缓冲。
@@ -189,17 +294,28 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 真正退出应用：摘掉托盘图标 → 结束主 Ability。
+   * 真正退出应用：**先停掉 DSH** → 摘掉托盘图标 → 结束主 Ability。
    *
-   * DSH 的 node/web 服务跑在本 Ability 所属进程的 native 子进程里，主 Ability
-   * 结束后该进程被系统回收，服务随之停止；后台保活进程会通过公共事件一并结束。
+   * 为什么要显式停 DSH：官方没有任何一句保证 `terminateSelf()` 会清理应用自己
+   * spawn 的 native 子进程。宿主模式下一个 brew dsh 子进程 + 守候进程都挂在
+   * `Native_libdsh_host0` 上，不先发停止信号就会残留在设备里继续占着 3080，
+   * 下次启动时新实例绑不上端口。停止走 AppActions.stopForExit（有超时兜底，
+   * 超时也必须继续退，避免"退不掉"）。
+   *
+   * 后台保活 Ability 通过公共事件一并结束（否则托盘进程残留）。
    */
-  private exitApp(reason: string): void {
+  private async exitApp(reason: string): Promise<void> {
     if (this.exiting) {
       return;
     }
     this.exiting = true;
     DshmLogger.info(TAG, '开始退出应用（' + reason + '）');
+    try {
+      const stopped: boolean = await DshmAppActions.stopForExit(this.context);
+      DshmLogger.info(TAG, '退出前停止 DSH：' + (stopped ? '已确认退出' : '超时未确认，继续退出'));
+    } catch (e) {
+      DshmLogger.warn(TAG, '退出前停止 DSH 失败（继续退出）: ' + String(e));
+    }
     try {
       StatusBarTray.remove(this.context);
     } catch (e) {

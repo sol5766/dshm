@@ -29,13 +29,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_dsh-OHDSH_DYFdOedOk_TIQHruRAzXTxIdN2CUr9eWfCDfuI3c3yY=.cer",
+          "certpath": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001A7BA05F694FC1DEFF2549CD4FA3C6AD2714D380AC0C18AEF4DBBFB239CC8F85D7750DC535C46B",
-          "profile": "C:\\Users\\Sol\\.ohos\\config\\default_dsh-OHDSH_DYFdOedOk_TIQHruRAzXTxIdN2CUr9eWfCDfuI3c3yY=.p7b",
+          "keyPassword": "0000001BD97B1E98F41A9A877ABF4F3820B49A048A582E00EDBA0BFFFD04C9CC9FC329C98B5F74D5750F1B",
+          "profile": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_dsh-OHDSH_DYFdOedOk_TIQHruRAzXTxIdN2CUr9eWfCDfuI3c3yY=.p12",
-          "storePassword": "0000001A1C76416FD6FF339D238A4BFF44D7CDA6E5F8D5C9FD8B10DE259D55D221610D20DED09ED3E2DE"
+          "storeFile": "C:\\Users\\Sol\\.ohos\\config\\default_BrewDSH_WR-Ju73J2w7vWq5Mbk5EIalvUJoBrY38yjzo1K-M5mc=.p12",
+          "storePassword": "0000001B76CA9F8D6C55AA6D4646F678F270D7383039CC42AC7F00BD44D3618555C25A432E76C78533F70E"
         }
       }
     ]

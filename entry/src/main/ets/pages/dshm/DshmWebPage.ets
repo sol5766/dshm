@@ -15,29 +15,50 @@
  * 服务端可通过 /dshm-admin/ui/event 请求页面刷新或服务重启（插件安装后常见）。
  */
 import { webview } from '@kit.ArkWeb';
-import { common, bundleManager } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
+import { KeyCode } from '@kit.InputKit';
+import { common, bundleManager, appRecovery } from '@kit.AbilityKit';
+import { window, uiMaterial } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { DshBootstrap, RuntimeModeInfo } from '../../dshm/bootstrap/DshBootstrap';
+import { DshBootstrap, RuntimeModeInfo, DshBootState } from '../../dshm/bootstrap/DshBootstrap';
 import { WorkspaceAccess } from '../../dshm/access/WorkspaceAccess';
 import { writeOhosInfo } from '../../dshm/access/OhosInfoBridge';
 import { DshmLogger } from '../../dshm/utils/Logger';
 import { StatusBarTray } from '../../dshm/system/StatusBarTray';
+import { EnvAssetClient, EnvManifest, EnvDownloadProgress } from '../../dshm/env/EnvAssetClient';
+import { DshmAppActions } from '../../dshm/system/AppActions';
+import { ImmersiveMaterialUtil } from '../../dshm/ui/ImmersiveMaterialUtil';
+
 
 const TAG: string = 'DshmWebPage';
 const HOME_URL: string = 'http://127.0.0.1:3080';
-const RESTART_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/restart';
 const VERSION_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/version';
-// 说明：`/dshm-admin/update`（Harness 在线更新）相关的端点常量、轮询参数与进度浮层
-// 已随「纯净版」一起移除（2026-09-11，用户决定暂不做在线更新）。服务端端点仍在
-// dshm-terminal 插件里（本地回环、无 UI 入口），要恢复见 docs/dsh-version-upgrade.md §3.3。
+const UPDATE_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/update';
+const UPDATE_APPLY_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-admin/update/apply';
+// Harness 更新是服务端后台任务（同进程 Worker 跑 pnpm），ArkTS 侧轮询进度；
+// 单次 HTTP 请求只负责"开始"与"查进度"，不承担长连接等待。
+const UPDATE_POLL_INTERVAL_MS: number = 4000;
+const UPDATE_POLL_TIMEOUT_MS: number = 15 * 60 * 1000;
+// 连续查询失败次数上限（4s 一次 → 默认 40s 无响应即判定服务端已不可用）。
+const UPDATE_POLL_MAX_FAILURES: number = 10;
 const UI_EVENTS_GET: string = 'http://127.0.0.1:3080/dshm-admin/ui/events';
 const TERM_START_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/start';
 const TERM_WRITE_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/write';
 const TERM_READ_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/read';
 const TERM_KILL_ENDPOINT: string = 'http://127.0.0.1:3080/dshm-terminal/kill';
+// Harness 版本检查源：GitHub Releases API 优先（国内加速）。
+// 注意：dsh 的 rc/alpha 都是 GitHub prerelease，`releases/latest` 端点（latest 非预发布）
+// 不会返回它们，因此这里统一用 `releases` 列表接口（?per_page=N，含 prerelease），
+// 由检索逻辑自行从全部 release 中筛选「仅 RC / 稳定版、排除 alpha」并取最新。
+// npm registry 仅作为**下载**源，不参与**版本检测**（镜像只同步到 0.1.5-rc.1，
+// 用它检测会把 0.1.5-rc.2 误判为"没有更新"）。
+const HARNESS_GITHUB_RELEASE_LIST: string = 'https://api.github.com/repos/deepseek-ai/deepseek-harness/releases?per_page=3';
+const HARNESS_VERSION_ENDPOINTS: string[] = [
+  'https://gh-proxy.com/' + HARNESS_GITHUB_RELEASE_LIST,
+  'https://ghproxy.net/' + HARNESS_GITHUB_RELEASE_LIST,
+  HARNESS_GITHUB_RELEASE_LIST
+];
 
 /**
  * 顶栏高度。
@@ -90,18 +111,60 @@ interface StartBody {
 interface WriteBody {
   sid: number;
   text: string;
+  /**
+   * 原始模式：服务端**不补换行**。
+   *
+   * 终端默认（缺省 false）收到的是一行命令，服务端会补 `\n` 执行；而 Tab 补全、
+   * 方向键、Ctrl-C 这类控制序列必须原样送进 pty，补了 `\n` 会变成「补全后立刻执行」。
+   */
+  raw?: boolean;
 }
 
 interface KillBody {
   sid: number;
 }
 
-/** 读本地 dsh package.json 取版本（服务未就绪时的退化路径，不联网）。 */
+interface UpdateBody {
+  version: string;
+}
+
 interface DshPkgVersion {
   version?: string;
 }
 
-/** GET /dshm-admin/version：运行时与环境版本信息（本地，无网络）。 */
+/** GitHub Releases 列表接口的单条 release（/releases?per_page=N，含 prerelease）。 */
+interface GitHubRelease {
+  tag_name?: string;
+  prerelease?: boolean;
+  published_at?: string;
+}
+
+interface UpdateResp {
+  ok?: boolean;
+  message?: string;
+  started?: boolean;
+  running?: boolean;
+  version?: string;
+}
+
+/** GET /dshm-admin/update 的进度应答（后台更新任务状态）。 */
+interface UpdateStatusResp {
+  ok?: boolean;
+  running?: boolean;
+  phase?: string;
+  message?: string;
+  resolved?: number;
+  downloaded?: number;
+  added?: number;
+  percent?: number;
+  elapsedSec?: number;
+  staged?: boolean;
+  done?: boolean;
+  success?: boolean;
+  version?: string;
+}
+
+/** GET /dshm-admin/version：运行时与环境版本信息。 */
 interface VersionResp {
   ok?: boolean;
   message?: string;
@@ -115,11 +178,18 @@ interface VersionResp {
   cwd?: string;
 }
 
-/** “关于版本”面板的一行（左对齐标签 + 值）。 */
+/** "关于版本"面板的一行（左对齐标签 + 值）。 */
 interface AboutRow {
   label: string;
   value: string;
 }
+
+/** 轮询更新的最终结果（ArkTS 不允许元组返回，用具名类型）。 */
+interface UpdateOutcome {
+  success: boolean;
+  message: string;
+}
+
 
 @Entry
 @Component
@@ -129,19 +199,33 @@ struct DshmWebPage {
   @State private webUrl: string = HOME_URL;
   @State private statusText: string = '正在启动 DeepSeek Harness 运行时...';
   @State private restarting: boolean = false;
+  /** 启动是否失败（用于在启动加载页显示恢复按钮）。 */
+  @State private bootError: boolean = false;
   /** 首屏白屏兜底：是否已启动按内容判断的重试流程（只启动一次）。 */
   private initialReloadDone: boolean = false;
   /** 冷启动计时反馈的 interval id（-1 表示未启动）。 */
   private bootTicker: number = -1;
   /** 启动阶段说明（会与计时一起展示；由 boot() 按阶段更新）。 */
   private bootPhase: string = '';
+  // Harness 更新进度浮层：更新由服务端后台任务执行（数分钟），
+  // 主界面就绪后 statusText 不可见，用浮层常显当前阶段。
+  @State private updateRunning: boolean = false;
+  @State private updateMsg: string = '';
+  @State private updatePercent: number = 0;
+  @State private updateElapsed: number = 0;
+  @State private updateDetail: string = '';
+  @State private updateTrack: string = '';
+  private updateTicker: number = -1;
+  @State private updateReady: boolean = false;
+  @State private updateVersion: string = '';
+  @State private applying: boolean = false;
+  @State private applyPhase: string = '';
   // “关于版本”面板（页内浮层，便于左对齐排版，不用系统 alert 的居中文本）
   @State private aboutOpen: boolean = false;
   @State private aboutRows: AboutRow[] = [];
-  // 运行模式面板（宿主 dsh / 内嵌运行时）
-  @State private modeOpen: boolean = false;
-  @State private modeCurrent: string = 'auto';
-  @State private modeActive: string = '';
+  // 沉浸光感能力（空间化 Spatial UI）：设备支持时顶栏等组件使用沉浸式系统材质，
+  // 否则回退传统实色/模糊。探测结果由 ImmersiveMaterialUtil 缓存。
+  @State private immersiveEnabled: boolean = false;
   // 启动加载页品牌动效：brandOpacity 负责淡入，brandBreath 负责常驻呼吸缩放。
   // 拆成两个属性是为了让两段动画作用于不同属性，避免同一属性被并发动画抢占。
   @State private brandOpacity: number = 0;
@@ -178,6 +262,25 @@ struct DshmWebPage {
 
   aboutToAppear(): void {
     webview.WebviewController.setWebDebuggingAccess(true);
+    // 沉浸光感能力探测（同步、带缓存）：必须在首帧前完成，避免顶栏材质闪烁。
+    this.immersiveEnabled = ImmersiveMaterialUtil.isUsable();
+    DshmLogger.info(TAG, ImmersiveMaterialUtil.describe());
+    // 重启完成后 dsh 会换新 token，页面必须用新 URL 重新加载，否则停在旧 token 上
+    //（401/白屏）。事件由 DshmAppActions.restartDsh 广播；**页面自己发起的重启也会
+    // 收到**（restartAndWait 里已经在事件之前写过 webUrl），因此这里只在 URL 真的
+    // 变了才 reload，避免同一次重启触发两次 loadUrl。
+    DshmAppActions.subscribeRestartDone((): void => {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const url: string = DshBootstrap.readWebUrl(ctx);
+      if (url.length === 0 || url === this.webUrl) {
+        return;
+      }
+      DshmLogger.info(TAG, '收到重启完成事件，重新加载 ' + url);
+      this.webUrl = url;
+      this.ready = true;
+      this.controller.loadUrl(url);
+      this.startUiEventPoll();
+    });
     this.boot();
   }
 
@@ -295,7 +398,12 @@ struct DshmWebPage {
       await DshBootstrap.ensureOhosSkills(hostCtx);
       await writeOhosInfo(hostCtx);
       DshBootstrap.clearNodeLogs(hostCtx);
+      // profiles 卫生清理（跳过 dsh 托管符号链接，只清真实目录副本）。
+      DshBootstrap.cleanHealFallbackProfiles(hostCtx);
       DshBootstrap.ensureBundleMirror(hostCtx);
+      // 内置插件市场：把 dshmarket 补进两种模式各自 web profile 的 bundles/dependencies
+      // （全新 profile 由 dsh-app-boot 模板带出，存量 profile 在这里补写一次）。
+      DshBootstrap.ensureMarketBundle(hostCtx);
       // 品牌迁移：用户 profile 里遗留的旧 bundle 名必须在 dsh 启动前改掉，
       // 否则 dsh-app-boot 解析不到 bundle 会直接 abort（实测 SIGNAL 6）。
       DshBootstrap.migrateLegacyProfileBundleNames(hostCtx);
@@ -305,6 +413,28 @@ struct DshmWebPage {
       const serverUp: boolean = await DshBootstrap.waitForServer(hostCtx, 120000);
       mark('t5.serverReady');
       if (serverUp) {
+        // ── A1 快路径（阶段0）：读 _fetch-shim 写的结构化 boot-state.json ──
+        // dsh 打印带 token 的 URL 时文件即就绪（原子写），不必刮日志。
+        // 读不到（旧环境 / 剖析模式 / 嗅探失败）时，回退下方原有轮询刮削路径。
+        const bootState: DshBootState | null = DshBootstrap.readBootState(hostCtx);
+        if (bootState !== null) {
+          this.webUrl = bootState.url;
+          this.statusText = 'DeepSeek Harness 已就绪';
+          DshmLogger.info(TAG, 'boot-state 就绪（A1 快路径），ArkWeb 加载 ' + this.webUrl);
+          this.ready = true;
+          this.ensureFirstPaintVisible();
+          await DshBootstrap.echoNodeLogMarks(hostCtx);
+          this.registerWindowSizeListener();
+          this.startUiEventPoll();
+          if (await WorkspaceAccess.shouldNotifyFullDisk(hostCtx)) {
+            this.showDialog('开启「全盘文件访问」权限',
+              '系统不提供该权限的授权弹窗 —— 它属于受限权限，只能在系统设置中手动开启。\n\n' +
+                '路径：设置 → 应用和元服务 → DeepSeek Harness → 权限 → 全盘文件访问 → 允许。\n\n' +
+                '开启后 DSH 才能读写工作区（默认：个人文件夹）下的任意文件；' +
+                '未开启时仅可访问「下载」「文档」目录。');
+          }
+          return;
+        }
         // 关键：Web 组件以创建时的 webUrl 为准（src 后续改动不会重载）。
         // 必须先把带鉴权 token 的完整 URL 解析好（日志里的
         // "dsh web: http://127.0.0.1:3080/?token=..."），再一次性给 webUrl
@@ -338,6 +468,10 @@ struct DshmWebPage {
         this.statusText = 'DeepSeek Harness 已就绪';
         DshmLogger.info(TAG, 'DSH server 就绪，ArkWeb 加载 ' + this.webUrl);
         this.ready = true;
+        // 启动成功即认定当前环境可用：清掉可能残留的更新备份，释放空间。
+        DshBootstrap.discardEnvBackup(hostCtx);
+        // 若有「待验收的环境切换」，此刻即确认生效（清理标记，保留新环境）
+        DshBootstrap.clearPendingVerify(hostCtx);
         // 首屏白屏兜底：dsh 0.1.5 首页要等 `?token=` → 303 + Set-Cookie → `/` 走完，
         // 并拉一个 11MB 的客户端模块合并包（/plugins/??…），首次加载常赶在服务端就绪前
         // → 白屏；手动「编辑→刷新」即恢复（实测）。
@@ -368,13 +502,28 @@ struct DshmWebPage {
         }
         await DshBootstrap.dumpFallbackDiag(hostCtx);
         await DshBootstrap.dumpWebProfileManifest(hostCtx);
+        // 待验收的环境切换起不来 → 回滚到切换前并再重启一次应用。
+        // 先清标记，避免重启后被再次判定为「待验收」而形成回滚循环。
+        if (DshBootstrap.hasPendingVerify(hostCtx) && DshBootstrap.hasEnvBackup(hostCtx)) {
+          DshmLogger.error(TAG, '环境包切换后启动失败，回滚到切换前环境');
+          DshBootstrap.clearPendingVerify(hostCtx);
+          if (DshBootstrap.rollbackEnv(hostCtx)) {
+            this.statusText = '新环境启动失败，已回滚，正在重启…';
+            await this.sleep(1000);
+            appRecovery.restartApp();
+            return;
+          }
+          DshmLogger.error(TAG, '回滚失败，需用「重置运行环境（故障恢复）」');
+        }
       }
     } catch (e) {
       const msg: string = e instanceof Error ? e.message : String(e);
       this.statusText = '启动失败: ' + msg;
+      this.bootError = true;
       DshmLogger.error(TAG, '启动失败: ' + msg);
     } finally {
       this.stopBootTicker();
+      await this.resolvePendingEnvSwitch();
     }
   }
 
@@ -558,29 +707,22 @@ struct DshmWebPage {
       nodeVer = '未运行（服务未就绪）';
     }
     const modeInfo: RuntimeModeInfo = DshBootstrap.readActiveMode(hostCtxForMode);
-    const modeLabel: string = modeInfo.mode === 'host'
-      ? '宿主 dsh（Harmonybrew' + (modeInfo.version.length > 0 ? ' ' + modeInfo.version : '') + '）'
-      : '内嵌运行时（libnode/jitless）';
-    // 宿主模式下「DSH 版本 / 运行时」应以宿主为准（内嵌端点此时不可用）。
-    if (modeInfo.mode === 'host') {
-      if (modeInfo.version.length > 0) {
-        dshVer = modeInfo.version;
-      }
-      if (modeInfo.nodeVersion.length > 0) {
-        nodeVer = modeInfo.nodeVersion;
-        platform = 'Harmonybrew node';
-      }
-    }
+    const modeLabel: string = '内嵌运行时（libnode/jitless）';
     const rows: AboutRow[] = [
       { label: '应用版本', value: appVer + '（versionCode ' + appCode + '）' },
       { label: 'DSH 版本', value: dshVer },
-      { label: '运行时', value: 'node ' + nodeVer + (platform.length > 0 ? '　' + platform : '') },
-      { label: '内置环境', value: DshBootstrap.envVersion() }
+      { label: '运行时', value: 'node ' + nodeVer + (platform.length > 0 ? '　' + platform : '') }
     ];
+    rows.push({ label: '内置环境', value: DshBootstrap.envVersion() });
+
     rows.unshift({ label: '运行模式', value: modeLabel });
-    if (modeInfo.dshPath.length > 0) {
-      rows.push({ label: '宿主 dsh', value: modeInfo.dshPath });
-    }
+    // 会话库：两种模式各自独立（切换模式即切换会话库），这是用户最常困惑的差异点。
+    rows.push({
+      label: '会话库（DSH_HOME）',
+      value: modeInfo.dshHome.length > 0
+        ? modeInfo.dshHome
+        : DshBootstrap.dshHomeForMode(hostCtxForMode, false)
+    });
     if (stagedVer.length > 0) {
       rows.push({ label: '待应用更新', value: '@deepseek-ai/dsh@' + stagedVer + '（已下载，确认后替换）' });
     }
@@ -600,44 +742,606 @@ struct DshmWebPage {
 
   /** 更新包就绪后的确认：用户点“立即更新”才重启生效。 */
   /** 顶栏更新胶囊文案：有百分比显示百分比，否则退化为明细/已用时。 */
-  /** 打开运行模式面板（宿主 dsh / 内嵌运行时）。 */
-  private openModePanel(): void {
+
+
+
+
+
+
+
+
+
+
+
+
+  /** 读取当前内置 Harness 版本（供检查更新与关于页复用）。 */
+  private async readHarnessVersion(): Promise<string> {
     const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    this.modeCurrent = DshBootstrap.readRuntimeMode(hostCtx);
-    const info: RuntimeModeInfo = DshBootstrap.readActiveMode(hostCtx);
-    this.modeActive = info.mode === 'host'
-      ? '当前生效：宿主 dsh（Harmonybrew' + (info.version.length > 0 ? ' ' + info.version : '') + '）'
-      : '当前生效：内嵌运行时（libnode / --jitless）';
-    this.modeOpen = true;
+    const candidates: string[] = [
+      hostCtx.filesDir + '/dsh/node_modules/@deepseek-ai/dsh/package.json',
+      hostCtx.filesDir + '/home/.dsh/profiles/node_modules/@deepseek-ai/dsh/package.json'
+    ];
+    for (const p of candidates) {
+      if (fileIo.accessSync(p)) {
+        try {
+          const pkg = JSON.parse(fileIo.readTextSync(p)) as DshPkgVersion;
+          return pkg.version ?? '未知';
+        } catch (e) {
+          /* 单个文件解析失败则继续尝试下一个 */
+        }
+      }
+    }
+    return '未知';
   }
 
-  /** 切换运行模式并重启服务。 */
-  private applyRuntimeMode(mode: string): void {
-    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    DshBootstrap.writeRuntimeMode(hostCtx, mode);
-    this.modeOpen = false;
-    const label: string = mode === 'host' ? '宿主 dsh（Harmonybrew）'
-      : (mode === 'embedded' ? '内嵌运行时' : '自动（有宿主就用宿主）');
-    this.showDialog('运行模式已切换',
-      '已设置为：' + label + '\n\n正在重启 Harness 服务以生效…');
-    this.restartService();
+  /**
+   * 版本检测过滤口径：只接受「稳定版（x.y.z）或 RC（x.y.z-rc.n）」，
+   * 排除 alpha / beta / dev 等其它预发布。
+   * @param version 形如 0.1.5 或 0.1.5-rc.2
+   */
+  private isAcceptableRelease(version: string): boolean {
+    const idx: number = version.indexOf('-');
+    if (idx >= 0) {
+      const pre: string = version.substring(idx + 1);
+      // 只认 rc 预发布；alpha/beta/dev 等一概排除
+      return pre === 'rc' || pre.startsWith('rc.');
+    }
+    return true; // 无后缀 = 稳定版
   }
 
-  /** 读取当前生效模式（未启动时回退到用户选择）。 */
-  private currentMode(): string {
-    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    return DshBootstrap.readActiveMode(hostCtx).mode;
+  /** 解析版本号的主.次.修部分；失败返回空串。 */
+  private parseSemverCore(version: string): string {
+    const idx: number = version.indexOf('-');
+    const core: string = idx >= 0 ? version.substring(0, idx) : version;
+    const parts: string[] = core.split('.');
+    if (parts.length !== 3) {
+      return '';
+    }
+    for (let i = 0; i < parts.length; i++) {
+      if (!(/^[0-9]+$/.test(parts[i]))) {
+        return '';
+      }
+    }
+    return core;
   }
 
+  /**
+   * 比较两个版本，返回 >0 / 0 / <0。
+   * 先比 主.次.修；相同再比 RC 序号（rc.n 越大越新），无后缀（稳定）> 任何 rc。
+   */
+  private compareVersions(a: string, b: string): number {
+    const coreA: string = this.parseSemverCore(a);
+    const coreB: string = this.parseSemverCore(b);
+    if (coreA.length === 0 || coreB.length === 0) {
+      return a.localeCompare(b);
+    }
+    const pa: string[] = coreA.split('.');
+    const pb: string[] = coreB.split('.');
+    for (let i = 0; i < 3; i++) {
+      const na: number = parseInt(pa[i], 10);
+      const nb: number = parseInt(pb[i], 10);
+      if (na !== nb) {
+        return na > nb ? 1 : -1;
+      }
+    }
+    const aIsStable: boolean = a.indexOf('-') < 0;
+    const bIsStable: boolean = b.indexOf('-') < 0;
+    if (aIsStable !== bIsStable) {
+      return aIsStable ? 1 : -1;
+    }
+    if (aIsStable) {
+      return 0;
+    }
+    const ar: number = this.prereleaseNum(a);
+    const br: number = this.prereleaseNum(b);
+    return ar === br ? 0 : (ar > br ? 1 : -1);
+  }
 
+  /** 提取 rc 序号，如 0.1.5-rc.2 → 2；解析失败返回 0。 */
+  private prereleaseNum(version: string): number {
+    const idx: number = version.indexOf('-rc');
+    if (idx < 0) {
+      return 0;
+    }
+    let tail: string = version.substring(idx + 3);
+    if (tail.startsWith('.')) {
+      tail = tail.substring(1);
+    }
+    // tail 形如 "2" 或 "2.x…"，取第一段数值
+    const dot: number = tail.indexOf('.');
+    const numStr: string = dot >= 0 ? tail.substring(0, dot) : tail;
+    if (!/^[0-9]+$/.test(numStr)) {
+      return 0;
+    }
+    return parseInt(numStr, 10);
+  }
 
+  /** 探测指定版本是否已同步到 npm 镜像（淘宝优先，失败回退官方源）。 */
+  private async isNpmVersionSynced(version: string): Promise<boolean> {
+    const npmEndpoints: string[] = [
+      'https://registry.npmmirror.com/@deepseek-ai/dsh/' + version,
+      'https://registry.npmjs.org/@deepseek-ai/dsh/' + version
+    ];
+    for (let i = 0; i < npmEndpoints.length; i++) {
+      try {
+        await this.httpGetJson(npmEndpoints[i]);
+        return true;
+      } catch (e) {
+        DshmLogger.warn(TAG, 'npm 版本探测未命中 ' + npmEndpoints[i] + ': ' + this.errOf(e));
+      }
+    }
+    return false;
+  }
 
+  /** 从 GitHub Releases 可接受候选中取最新版本（仅 RC / 稳定版，排除 alpha）。 */
+  private pickLatestRelease(list: GitHubRelease[]): string {
+    let best: string = '';
+    for (let i = 0; i < list.length; i++) {
+      const tag: string = list[i].tag_name ?? '';
+      let v: string = '';
+      if (tag.startsWith('dsh-v')) {
+        v = tag.substring(5);
+      } else if (tag.length > 0) {
+        v = tag;
+      }
+      if (v.length === 0 || !this.isAcceptableRelease(v)) {
+        continue;
+      }
+      if (best.length === 0 || this.compareVersions(v, best) > 0) {
+        best = v;
+      }
+    }
+    return best;
+  }
 
+  /** Harness: 检查 Harness 更新 —— 仅 GitHub Releases（含 prerelease）检测，只取最新 RC / 稳定版、排除 alpha。 */
+  private async checkHarnessUpdate(): Promise<void> {
+    const harnessVer: string = await this.readHarnessVersion();
+    let latest: string = '';
+    let source: string = '';
+    for (let i = 0; i < HARNESS_VERSION_ENDPOINTS.length && latest.length === 0; i++) {
+      const endpoint: string = HARNESS_VERSION_ENDPOINTS[i];
+      let label: string = '';
+      if (endpoint.includes('gh-proxy.com')) {
+        label = 'GitHub (gh-proxy.com 加速)';
+      } else if (endpoint.includes('ghproxy.net')) {
+        label = 'GitHub (ghproxy.net 加速)';
+      } else {
+        label = 'GitHub 直连';
+      }
+      try {
+        const remote = await this.httpGetJson(endpoint);
+        const list = remote as GitHubRelease[];
+        const picked: string = this.pickLatestRelease(list);
+        if (picked.length > 0) {
+          latest = picked;
+          source = label;
+        }
+      } catch (e) {
+        DshmLogger.warn(TAG, '版本检查源失败 ' + endpoint + ': ' + this.errOf(e));
+      }
+    }
+    if (latest.length === 0) {
+      this.showDialog('检查 Harness 更新', '当前内置 Harness 版本：' + harnessVer +
+        '\n\n远端版本检查失败（GitHub 加速源与直连均不可达），暂时无法自动更新。');
+      return;
+    }
+    if (latest === harnessVer || (harnessVer !== '未知' && harnessVer.includes(latest))) {
+      this.showDialog('检查 Harness 更新', '当前内置 Harness 版本：' + harnessVer +
+        '\n远端最新版：' + latest + '（' + source + '）\n\n已经是最新版，无需更新。');
+      return;
+    }
+    // 校验该版本是否已发布到 npm 镜像：dsh 是纯 npm 包，下载只能从 npm 拉。
+    // GitHub 上打了 rc tag 但尚未同步到 npm 镜像时，无法在线安装，需明确提示，不假下载。
+    const synced: boolean = await this.isNpmVersionSynced(latest);
+    if (!synced) {
+      this.showDialog('检测到 Harness 更新',
+        '当前版本：' + harnessVer + '\nGitHub 最新版：' + latest + '（' + source + '）' +
+        '\n\n该版本已发布（RC/稳定版），但尚未同步到 npm 镜像，当前无法在线安装。' +
+        '\n可稍后重试，或等待上游发布该版本到 npm 后再更新。');
+      return;
+    }
+    this.showDialogWithConfirm('检测到 Harness 更新',
+      '当前版本：' + harnessVer + '\n远端最新版：' + latest + '（' + source + '）' +
+      '\n\n更新包将从国内镜像下载（registry.npmmirror.com），失败自动回退官方源。' +
+      '\n\n是否立即自动更新并重启服务？', '立即更新', () => this.doAutoUpdate(latest));
+  }
 
+  /** 执行自动更新：调服务端 /update 端点（dsh 目录内 pnpm add），成功后重启服务。 */
+  private async doAutoUpdate(version: string): Promise<void> {
+    DshmLogger.info(TAG, '开始自动更新 Harness to ' + version);
+    this.updateRunning = true;
+    this.updateReady = false;
+    this.updateVersion = version;
+    this.updateMsg = '正在连接更新服务…';
+    this.updatePercent = 0;
+    this.updateElapsed = 0;
+    this.updateDetail = '';
+    this.updateTrack = 'download';
+    this.startUpdateTicker();
+    try {
+      const body: UpdateBody = { version: version };
+      const resp = await this.postJson(UPDATE_ENDPOINT, body);
+      if (resp === null || resp.responseCode !== 200) {
+        this.updateRunning = false;
+        this.showDialog('自动更新失败', '服务端 /update 不可用或已离线。\n请手动重新安装应用安装包完成更新。');
+        return;
+      }
+      let started: boolean = false;
+      let message: string = '更新请求未被受理。';
+      try {
+        const payload = JSON.parse(resp.result as string) as UpdateResp;
+        started = (payload.ok === true && payload.started === true) || payload.running === true;
+        message = payload.message ?? message;
+      } catch (e) {
+        message = '服务端应答无法解析。';
+      }
+      if (!started) {
+        this.updateRunning = false;
+        this.showDialog('自动更新失败', message + '\n\n请手动重新安装应用安装包完成更新。');
+        return;
+      }
+      if (message.length > 0) {
+        this.updateMsg = message;
+      }
+      const outcome: UpdateOutcome = await this.pollHarnessUpdate();
+      this.updateRunning = false;
+      this.stopUpdateTicker();
+      if (!outcome.success) {
+        this.updateTrack = '';
+        DshmLogger.warn(TAG, '自动更新失败: ' + outcome.message);
+        this.showDialog('自动更新失败', outcome.message + '\n\n请手动重新安装应用安装包完成更新。');
+        return;
+      }
+      this.updateReady = true;
+      this.updateTrack = '';
+      this.updatePercent = 100;
+      this.updateMsg = outcome.message;
+      this.promptApplyUpdate(outcome.message);
+    } finally {
+      this.stopUpdateTicker();
+      this.updateRunning = false;
+    }
+  }
 
+  /** 顶栏更新胶囊文案：有百分比显示百分比，否则退化为明细/已用时。 */
+  private updateChipText(): string {
+    if (this.updateTrack === 'download') {
+      return '下载中 ' + this.updatePercent + '%';
+    }
+    if (this.updateTrack === 'apply') {
+      return '更新中 ' + this.updatePercent + '%';
+    }
+    if (this.updateTrack === 'rollback') {
+      return '回滚中…';
+    }
+    if (this.updatePercent > 0) {
+      return '更新中 ' + this.updatePercent + '%';
+    }
+    if (this.updateDetail.length > 0) {
+      return '更新中 ' + this.updateDetail;
+    }
+    if (this.updateElapsed > 0) {
+      return '更新中 ' + this.updateElapsed + 's';
+    }
+    return '更新中…';
+  }
 
+  private startUpdateTicker(): void {
+    this.stopUpdateTicker();
+    this.updateElapsed = 0;
+    this.updateTicker = setInterval((): void => {
+      this.updateElapsed += 2;
+      if (this.updateTrack === 'apply' || this.updateTrack === 'download') {
+        if (this.updatePercent < 90) {
+          this.updatePercent = Math.min(90, this.updatePercent + 1);
+        }
+      }
+    }, 2000);
+  }
+
+  private stopUpdateTicker(): void {
+    if (this.updateTicker !== -1) {
+      clearInterval(this.updateTicker);
+      this.updateTicker = -1;
+    }
+  }
+
+  private promptApplyUpdate(message: string): void {
+    this.showDialogWithConfirm('更新包已就绪',
+      (this.updateVersion.length > 0 ? 'Harness v' + this.updateVersion + ' ' : '') +
+        '已下载并完成适配，暂存在本地（当前运行环境未改动）。\n\n' +
+        message + '\n\n现在应用更新并重启 Harness 服务吗？\n' +
+        '（若新版本在当前鸿蒙环境无法启动，会自动回滚到更新前的版本）',
+      '立即更新', (): void => {
+        this.applyUpdateWithRollback(message);
+      });
+  }
+
+  private async applyUpdateWithRollback(updateMessage: string): Promise<void> {
+    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    this.updateReady = false;
+    this.applying = true;
+    this.applyPhase = '正在应用更新包…';
+    this.updateTrack = 'apply';
+    this.updatePercent = 0;
+    this.updateRunning = true;
+    this.startUpdateTicker();
+    let applied: boolean = false;
+    try {
+      const resp = await this.postJson(UPDATE_APPLY_ENDPOINT, {} as EmptyBody);
+      if (resp !== null && resp.responseCode === 200) {
+        const payload = JSON.parse(resp.result as string) as UpdateResp;
+        applied = payload.ok === true;
+        if (!applied) {
+          this.showDialog('更新失败', (payload.message ?? '替换运行环境失败') + '\n\n当前环境未受影响。');
+        }
+      }
+    } catch (e) {
+      DshmLogger.warn(TAG, '应用更新包失败: ' + this.errOf(e));
+    }
+    if (!applied) {
+      this.stopUpdateTicker();
+      this.updateTrack = '';
+      this.updateRunning = false;
+      this.applying = false;
+      this.applyPhase = '';
+      if (!DshBootstrap.hasEnvBackup(hostCtx)) {
+        this.showDialog('更新失败', '更新包替换失败，运行环境未改变，可继续使用当前版本。');
+      }
+      return;
+    }
+    this.applyPhase = '正在校验新版本能否启动…';
+    if (this.updatePercent < 30) {
+      this.updatePercent = 30;
+    }
+    const booted: boolean = await this.restartAndWait();
+    if (booted) {
+      this.stopUpdateTicker();
+      DshBootstrap.discardEnvBackup(hostCtx);
+      this.applying = false;
+      this.applyPhase = '';
+      this.updatePercent = 100;
+      this.updateTrack = '';
+      this.updateRunning = false;
+      this.showDialog('更新已生效', updateMessage);
+      return;
+    }
+    if (!DshBootstrap.hasEnvBackup(hostCtx)) {
+      this.stopUpdateTicker();
+      this.applying = false;
+      this.applyPhase = '';
+      this.updateTrack = '';
+      this.updateRunning = false;
+      this.showDialog('更新后启动失败',
+        '新版本在当前设备上无法启动，且没有可用的回滚备份。\n请重新安装应用安装包恢复环境。');
+      return;
+    }
+    this.updateTrack = 'rollback';
+    this.updateMsg = '新版本无法启动，正在回滚到更新前的版本…';
+    this.applyPhase = '新版本启动失败，正在回滚…';
+    const rolled: boolean = DshBootstrap.rollbackEnv(hostCtx);
+    let backOk: boolean = false;
+    if (rolled) {
+      this.applyPhase = '正在用旧版本恢复服务…';
+      backOk = await this.restartAndWait();
+    }
+    this.updateRunning = false;
+    this.stopUpdateTicker();
+    this.updateTrack = '';
+    this.applying = false;
+    this.applyPhase = '';
+    if (rolled && backOk) {
+      this.showDialog('已回滚更新',
+        '新版本在当前鸿蒙环境无法启动，已自动回滚到更新前的版本，应用可继续使用。\n\n' +
+          '原因通常是新版本缺少构建期的鸿蒙适配（原生模块/插件补丁）。\n\n' + updateMessage);
+    } else {
+      this.showDialog('回滚失败', '自动回滚未能恢复运行，请重新安装应用安装包。');
+    }
+  }
+
+  private async installEnvAsset(): Promise<void> {
+    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    this.updateRunning = true;
+    this.updateTrack = 'download';
+    this.updatePercent = 0;
+    this.updateMsg = '正在获取环境清单…';
+    this.startUpdateTicker();
+    try {
+      const manifest: EnvManifest | null = await EnvAssetClient.fetchManifest(EnvAssetClient.defaultSources());
+      if (manifest === null) {
+        this.showDialog('环境包安装失败',
+          '所有清单源均不可达或内容非法。\n\n开发期请确认本机静态服务器已启动、且 hdc fport 已映射到设备 loopback。');
+        return;
+      }
+      const zipPath: string | null = await EnvAssetClient.downloadAsset(hostCtx, manifest,
+        (p: EnvDownloadProgress): void => {
+          this.updateMsg = '下载中（' + p.source + '）' + (p.received / 1048576).toFixed(1) +
+            '/' + (p.total / 1048576).toFixed(1) + ' MB' +
+            (p.attempt > 1 ? '（第 ' + p.attempt + ' 次尝试）' : '');
+          this.updatePercent = p.total > 0 ? Math.min(99, Math.floor((p.received / p.total) * 100)) : 0;
+        });
+      if (zipPath === null) {
+        this.showDialog('环境包安装失败', '所有下载源均失败，或 sha256 校验不通过（已拒绝该包）。');
+        return;
+      }
+      this.updateMsg = '正在解压（共 ' + manifest.asset.entries + ' 个条目）…';
+      this.updatePercent = 99;
+      const stage: string = hostCtx.filesDir + '/env-staging';
+      DshBootstrap.resetDirForStaging(stage);
+      await EnvAssetClient.extractZip(zipPath, stage);
+      const missing: string[] = EnvAssetClient.missingSentinels(stage, manifest.asset.sentinels);
+      if (missing.length > 0) {
+        this.showDialog('环境包校验未通过', '解压后缺少关键文件：\n' + missing.join('\n'));
+        return;
+      }
+      this.updateMsg = '正在替换运行环境…';
+      const err: string = DshBootstrap.installStagedEnv(hostCtx, stage, manifest.version);
+      if (err.length > 0) {
+        this.showDialog('环境包安装失败', err + '\n\n当前运行环境未受影响。');
+        return;
+      }
+      this.applyPhase = '';
+      this.updateMsg = '';
+      this.showDialogWithConfirm('环境包已就绪，需重启生效',
+        '已切换为在线环境包 v' + manifest.version + '（' + manifest.asset.entries + ' 个条目）。\n\n' +
+          '点击「重启并生效」后重启 DeepSeek Harness 服务；' +
+          '若新环境无法启动，会自动回滚到当前环境。',
+        '重启并生效', (): void => {
+          this.restartAfterEnvSwitch(manifest.version);
+        });
+    } catch (e) {
+      this.showDialog('环境包安装异常', this.errOf(e));
+    } finally {
+      this.stopUpdateTicker();
+      this.updateRunning = false;
+      this.updateTrack = '';
+      this.updateMsg = '';
+    }
+  }
+
+  private async restartAfterEnvSwitch(version: string): Promise<void> {
+    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    this.updateRunning = true;
+    this.applyPhase = '正在重启服务…';
+    this.updateMsg = '正在重启服务…';
+    this.startUpdateTicker();
+    try {
+      const booted: boolean = await this.restartAndWait();
+      if (booted) {
+        DshBootstrap.discardEnvBackup(hostCtx);
+        DshBootstrap.clearPendingVerify(hostCtx);
+        this.showDialog('环境包已生效', '已切换到在线环境包 v' + version + '。');
+        return;
+      }
+      DshmLogger.error(TAG, '在线环境包启动失败，回滚');
+      DshBootstrap.clearPendingVerify(hostCtx);
+      if (DshBootstrap.hasEnvBackup(hostCtx) && DshBootstrap.rollbackEnv(hostCtx)) {
+        const back: boolean = await this.restartAndWait();
+        this.showDialog(back ? '已回滚' : '回滚失败',
+          back ? '在线环境包在当前设备无法启动，已回滚到原有环境。'
+            : '请用菜单「重置运行环境（故障恢复）」。');
+      } else {
+        this.showDialog('环境包启动失败', '无可用回滚备份，请用菜单「重置运行环境（故障恢复）」。');
+      }
+    } catch (e) {
+      this.showDialog('重启失败', this.errOf(e));
+    } finally {
+      this.stopUpdateTicker();
+      this.updateRunning = false;
+      this.applyPhase = '';
+      this.updateMsg = '';
+    }
+  }
+
+  private async resolvePendingEnvSwitch(): Promise<void> {
+    const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (!DshBootstrap.hasPendingVerify(hostCtx)) {
+      return;
+    }
+    try {
+      const ready: boolean = DshBootstrap.countWebReadyMarkers(hostCtx) > 0;
+      if (ready) {
+        DshmLogger.info(TAG, '在线环境包验收通过（日志已见 dsh web:）');
+        DshBootstrap.discardEnvBackup(hostCtx);
+        DshBootstrap.clearPendingVerify(hostCtx);
+        return;
+      }
+      DshmLogger.error(TAG, '在线环境包验收失败（日志无 dsh web:），回滚');
+      DshBootstrap.clearPendingVerify(hostCtx);
+      if (DshBootstrap.hasEnvBackup(hostCtx) && DshBootstrap.rollbackEnv(hostCtx)) {
+        this.statusText = '新环境启动失败，已回滚';
+        await this.sleep(800);
+        appRecovery.restartApp();
+      }
+    } catch (e) {
+      DshmLogger.warn(TAG, '待验收收尾异常: ' + this.errOf(e));
+    }
+  }
+
+  private async showUpdateProgress(): Promise<void> {
+    if (this.updateReady) {
+      this.promptApplyUpdate(this.updateMsg);
+      return;
+    }
+    try {
+      const status = await this.httpGetJson(UPDATE_ENDPOINT) as UpdateStatusResp;
+      const msg: string = status.message ?? '';
+      if (this.updateRunning || status.running === true) {
+        this.showDialog('Harness 更新进行中',
+          '阶段：' + (status.phase ?? '') + '\n' + (msg.length > 0 ? msg : '正在进行中…') +
+            '\n\n更新在后台执行，可继续使用应用；完成后会提示是否应用。');
+        return;
+      }
+      if (status.done === true && status.success === true) {
+        this.updateVersion = status.version ?? this.updateVersion;
+        this.updateReady = true;
+        this.updateMsg = msg;
+        this.promptApplyUpdate(msg);
+        return;
+      }
+      if (status.staged === true) {
+        this.updateVersion = status.version ?? this.updateVersion;
+        this.updateReady = true;
+        this.updateMsg = msg;
+        this.promptApplyUpdate(msg);
+        return;
+      }
+      this.showDialog('Harness 更新', msg.length > 0 ? msg : '当前没有进行中的更新任务。');
+    } catch (e) {
+      this.showDialog('查看更新进度', '无法读取更新状态：' + this.errOf(e));
+    }
+  }
+
+  private async pollHarnessUpdate(): Promise<UpdateOutcome> {
+    const deadline: number = Date.now() + UPDATE_POLL_TIMEOUT_MS;
+    let failures: number = 0;
+    let lastPhase: string = '';
+    while (Date.now() < deadline) {
+      await this.sleep(UPDATE_POLL_INTERVAL_MS);
+      let status: UpdateStatusResp | null = null;
+      try {
+        status = await this.httpGetJson(UPDATE_ENDPOINT) as UpdateStatusResp;
+        failures = 0;
+      } catch (e) {
+        failures++;
+        if (failures >= UPDATE_POLL_MAX_FAILURES) {
+          return { success: false, message: '更新过程中服务端持续无响应（已等待约 ' +
+            (UPDATE_POLL_INTERVAL_MS / 1000 * UPDATE_POLL_MAX_FAILURES) + 's），已中止等待。' };
+        }
+        continue;
+      }
+      const phase: string = status.phase ?? '';
+      if (phase.length > 0 && phase !== lastPhase) {
+        lastPhase = phase;
+        DshmLogger.info(TAG, '更新阶段: ' + phase);
+      }
+      const text: string = status.message ?? '';
+      if (text.length > 0 && text !== this.updateMsg) {
+        this.updateMsg = text;
+      }
+      const percent: number = status.percent ?? 0;
+      if (percent > this.updatePercent && percent <= 100) {
+        this.updatePercent = percent;
+      }
+      const resolved: number = status.resolved ?? 0;
+      const added: number = status.added ?? 0;
+      const downloaded: number = status.downloaded ?? 0;
+      const detail: string = resolved > 0
+        ? ('已就绪 ' + added + '/' + resolved + '，已下载 ' + downloaded)
+        : '';
+      if (detail.length > 0 && detail !== this.updateDetail) {
+        this.updateDetail = detail;
+      }
+      if (status.done === true) {
+        return { success: status.success === true, message: text };
+      }
+    }
+    return { success: false, message: '等待更新完成超时；服务端可能仍在安装，可稍后重启应用确认。' };
+  }
 
   private resetRuntimeEnv(): void {
+
     this.showDialogWithConfirm('重置运行环境',
       '将从安装包重新解压一份干净的 DSH 运行环境（约 10–60 秒），用于修复更新失败或环境损坏。\n\n' +
         '会话、工作区与 API Key 保存在应用数据目录的 home 下，不会被清除。\n\n确定继续吗？',
@@ -649,16 +1353,18 @@ struct DshmWebPage {
   private async doResetRuntimeEnv(): Promise<void> {
     if (this.restarting) return;
     this.restarting = true;
-    this.statusText = '正在重新解压运行环境…';
+    this.updateRunning = true;
+    this.updateMsg = '正在重新解压运行环境…';
+    this.updatePercent = 0;
     const hostCtx = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
-      // 先让旧服务退出，避免它继续引用即将被删除的文件。
-      try {
-        await this.postJson(RESTART_ENDPOINT, {} as EmptyBody);
-      } catch (e) {
-        DshmLogger.warn(TAG, '重置前停止服务失败（可能已退出）: ' + this.errOf(e));
+      // 先按内嵌模式的通道停掉旧实例并**等它真正退出**，再重解压，避免旧 node
+      // 继续引用即将被删除的文件（等价于旧实现的 /dshm-admin/restart + 端口探测，
+      // 但用 node-exited 标记判定，确定且不依赖 http 探测）。
+      const stopped: boolean = await DshBootstrap.stopDsh(hostCtx, 'embedded', 30000);
+      if (!stopped) {
+        DshmLogger.warn(TAG, '重置前旧 node 未确认退出，仍继续重解压（旧进程可能已死）');
       }
-      await this.waitPortDown(10000);
       this.stopUiEventPoll();
       this.closeTerminal();
       const rebuilt: boolean = await DshBootstrap.forceReinstallEnv(hostCtx);
@@ -683,6 +1389,7 @@ struct DshmWebPage {
     } catch (e) {
       this.showDialog('重置失败', this.errOf(e));
     } finally {
+      this.updateRunning = false;
       this.restarting = false;
     }
   }
@@ -696,7 +1403,18 @@ struct DshmWebPage {
 
   /**
    * 重启服务并等待就绪，返回是否成功。
-   * 更新后的环境仅靠服务端静态校验无法证明可启动，这里在重启后做最终验收。
+   *
+   * 统一流程（2026-09-13 重写，同时服务「重启服务」与「切换运行模式」）：
+   *   1. 按**当前生效模式**停掉旧实例，并确定性等待它真正退出（host 等 host-stopped、
+   *      embedded 等 node-exited）——旧实例的监听套接字必须先释放，否则新模式实例
+   *      绑不上 3080 或两个实例交替抢端口；
+   *   2. 清掉上一轮日志与陈旧 boot-state（就绪判据要读新日志）；
+   *   3. 重新 launchDsh()：起一个**读当前 runtime-mode.txt** 的 native 进程，
+   *      因此切换模式后不需要任何额外分支，新模式自然生效；
+   *   4. 等 `dsh web:` 标记出现（文件读取，可靠）。
+   *
+   * 关键点：切换模式时这里读的是**旧模式**（要用旧模式的通道去停它），
+   * 而第 3 步起的是新模式，两者不能混。
    */
   private async restartAndWait(): Promise<boolean> {
     if (this.restarting) return false;
@@ -706,33 +1424,11 @@ struct DshmWebPage {
     this.stopUiEventPoll();
     this.closeTerminal();
     const hostCtx0 = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    const hostMode: boolean = DshBootstrap.readActiveMode(hostCtx0).mode === 'host'
-      && DshBootstrap.readRuntimeMode(hostCtx0) !== 'embedded';
+
     try {
-      if (hostMode) {
-        // 宿主模式：native 守候进程负责结束并重新拉起 dsh（无 /dshm-admin 端点）
-        const markersBefore: number = DshBootstrap.countWebReadyMarkers(hostCtx0);
-        DshBootstrap.requestHostRestart(hostCtx0);
-        this.ready = await this.waitForNewWebMarker(hostCtx0, markersBefore, 90000);
-      } else {
-        // 内嵌模式：文件信号让旧 node 退出 → 等 node-exited（确定性）→ 拉起新实例。
-        // 全程不依赖 http 探测 loopback（不可靠，会造成新旧 node 抢 3080）。
-        const exited: boolean = await DshBootstrap.requestEmbeddedRestart(hostCtx0, 25000);
-        if (!exited) {
-          this.statusText = '旧服务未退出，重启已取消';
-          DshmLogger.error(TAG, '旧 node 未在超时内退出，放弃重启（避免抢端口）');
-          return false;
-        }
-        DshmLogger.info(TAG, '旧进程已退出，拉起新实例');
-        DshBootstrap.clearNodeLogs(hostCtx0);
-        // 重启也必须重做 bundle 镜像：profile 的 web bundles 里挂着 dshm-*，
-        // 而 ensureDshDir 在版本变化时会清掉 profiles/node_modules；不重镜像
-        // 就会 ERR_MODULE_NOT_FOUND: Cannot find package 'dshm-terminal' 直接崩。
-        DshBootstrap.ensureBundleMirror(hostCtx0);
-        await DshBootstrap.launchDsh();
-        // 就绪判定用日志里的 `dsh web:`（文件读取，可靠）
-        this.ready = await DshBootstrap.waitForWebMarker(hostCtx0, 120000);
-      }
+      // 停旧 → 清日志 → 重做镜像 → 按当前 mode 拉起 → 等 `dsh web:` 标记。
+      // 与 Dock 菜单、托盘菜单共用 DshmAppActions.restartDsh（唯一实现，避免漂移）。
+      this.ready = await DshmAppActions.restartDsh(hostCtx0);
       if (this.ready) {
         this.webUrl = DshBootstrap.readWebUrl(hostCtx0);
         this.statusText = 'Harness 服务已重启';
@@ -749,18 +1445,6 @@ struct DshmWebPage {
     } finally {
       this.restarting = false;
     }
-  }
-
-  /** 等待日志里出现新的 `dsh web:` 标记（宿主模式重启用）。 */
-  private async waitForNewWebMarker(hostCtx: common.UIAbilityContext, before: number, timeoutMs: number): Promise<boolean> {
-    const deadline: number = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await this.sleep(1000);
-      if (DshBootstrap.countWebReadyMarkers(hostCtx) > before) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /** 编辑: 撤销（Ctrl+Z）。 */
@@ -808,6 +1492,24 @@ struct DshmWebPage {
       this.startTerminalSession();
       // 面板刚展开，输入行要等首帧渲染后才存在，延后一帧再交还焦点。
       setTimeout(() => { this.focusTermInput(); }, 100);
+    }
+  }
+
+  /**
+   * 展开终端并等待 pty 会话建立（供「运行环境」面板的一键命令使用）。
+   *
+   * `startTerminalSession` 内部是异步建会话 + 轮询，这里按会话 id 就绪为条件
+   * 做有限次等待，避免把命令发给尚不存在的会话。
+   */
+  private async openTerminal(): Promise<void> {
+    if (!this.terminalOpen) {
+      this.terminalOpen = true;
+      this.startTerminalSession();
+    }
+    for (let i = 0; i < 40 && this.termSid <= 0; i++) {
+      await new Promise<void>((resolve: () => void) => {
+        setTimeout(() => { resolve(); }, 150);
+      });
     }
   }
 
@@ -929,21 +1631,7 @@ struct DshmWebPage {
     }
   }
 
-  private async httpProbe(timeoutMs: number): Promise<http.HttpResponse> {
-    const client = http.createHttp();
-    try {
-      return await client.request(HOME_URL, {
-        method: http.RequestMethod.GET,
-        connectTimeout: timeoutMs,
-        readTimeout: timeoutMs,
-        usingProxy: false
-      });
-    } finally {
-      client.destroy();
-    }
-  }
-
-  private async postJson(url: string, body: EmptyBody | StartBody | WriteBody | KillBody): Promise<http.HttpResponse | null> {
+  private async postJson(url: string, body: EmptyBody | UpdateBody | StartBody | WriteBody | KillBody): Promise<http.HttpResponse | null> {
     const client = http.createHttp();
     try {
       return await client.request(url, {
@@ -960,20 +1648,6 @@ struct DshmWebPage {
     } finally {
       client.destroy();
     }
-  }
-
-  /** 探测端口直到不再响应（驱动旧进程退出），最多 maxWaitMs，间隔 200ms。 */
-  private async waitPortDown(maxWaitMs: number): Promise<boolean> {
-    const deadline: number = Date.now() + maxWaitMs;
-    while (Date.now() < deadline) {
-      try {
-        await this.httpProbe(300);
-      } catch (e) {
-        return true;
-      }
-      await this.sleep(200);
-    }
-    return false;
   }
 
   private async sleep(ms: number): Promise<void> {
@@ -998,11 +1672,13 @@ struct DshmWebPage {
     } as AlertDialogParamWithButtons);
   }
 
-  /** 打开 pty 终端会话并启动轮询（zsh，服务端自动回退 /bin/sh）。 */
+  /** 打开 pty 终端会话并启动轮询（shell 按运行模式选择，服务端自动回退 /bin/sh）。 */
   private async startTerminalSession(): Promise<void> {
     if (this.termSid > 0) return;
     try {
-      const body: StartBody = { shell: 'zsh' };
+      // 内嵌模式沙箱内没有 brew，用 hnp bash（dshm-terminal 找不到时回退 /bin/sh）。
+      const shellName: string = 'bash';
+      const body: StartBody = { shell: shellName };
       const resp = await this.postJson(TERM_START_ENDPOINT, body);
       if (resp !== null && resp.responseCode === 200) {
         const payload = JSON.parse(resp.result as string) as TermStartResp;
@@ -1010,13 +1686,19 @@ struct DshmWebPage {
           this.termSid = payload.sid;
           this.termPty = payload.pty === true;
           this.termConnected = true;
-          this.termShell = payload.shell ?? '';
+          // 只取可执行文件名（如 "zsh"），完整路径又长又没有交互价值
+          // （实测会显示 "/storage/Users/currentUser/.harmonybrew/bin/zsh"）。
+          const shellRaw: string = payload.shell ?? '';
+          const slashAt: number = shellRaw.lastIndexOf('/');
+          this.termShell = slashAt >= 0 ? shellRaw.substring(slashAt + 1) : shellRaw;
           this.termUser = payload.user ?? '';
           this.termHost = payload.host ?? '';
           this.termCwd = payload.cwd ?? '';
-          const shellName: string = payload.shell ?? 'zsh';
-          this.termLines = ['DeepSeek Harness 终端 · ' + shellName +
-            (this.termPty ? '（pty）' : '（管道回退）') + '。输入命令，回车执行。'];
+          // 横幅极简：模式已由标题栏徽标表达（pty/pipe），shell 名只取文件名。
+          const shellRaw2: string = payload.shell ?? 'zsh';
+          const slashAt2: number = shellRaw2.lastIndexOf('/');
+          const shellName: string = slashAt2 >= 0 ? shellRaw2.substring(slashAt2 + 1) : shellRaw2;
+          this.termLines = ['终端已连接 · ' + shellName + '。输入命令，回车执行。'];
           this.startPoll();
           this.focusTermInput();
           return;
@@ -1063,11 +1745,36 @@ struct DshmWebPage {
     }
   }
 
-  /** 移除终端输出中的 ANSI 转义序列（仅显示文本，保色码丢弃）。 */
+  /**
+   * 清理终端输出为纯文本（仅显示用，丢弃所有控制序列）。
+   *
+   * 管道回退模式下 shell 不经过 pty 的行规程，大量非 CSI 控制序列会泄漏进
+   * 输出流（2026-09-12 实测）：
+   *   - OSC 9278 序列：`\u001b]9278;f;{"event": "SetupComplete"}\u0007`
+   *     （ArkWeb 桥接的 viewport 标记，终端里纯属噪音）；
+   *   - zsh 的粗体/反显提示符：`\u001b[1m\u001b[7m%\u001b[27m\u001b[0m`；
+   *   - 其它 CSI（色码/光标）与 OSC 标题设置等。
+   *
+   * 原 stripAnsi 只匹配 `\u001b[...` 形式的 CSI，对 OSC（`\u001b]...` 终止于
+   * BEL 或 ST）与独立 BEL 字符不生效，导致用户看到 `"SetupComplete"}` 这类
+   * 半截 JSON。这里统一处理四类：CSI、OSC(BEL/ST 终止)、独立 BEL、其余 C0
+   * 控制符（保留 \n \r \t）。
+   */
   private stripAnsi(s: string): string {
+    let out: string = s;
+    // 1) OSC 序列：ESC ] ... 终止于 BEL(\x07) 或 ST(ESC \)
     // eslint-disable-next-line no-control-regex
-    const re = /\u001b\[[0-9;?]*[A-Za-z]/g;
-    return s.replace(re, '');
+    out = out.replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '');
+    // 2) CSI 序列：ESC [ ... 参数字节 + 终止字母
+    // eslint-disable-next-line no-control-regex
+    out = out.replace(/\u001b\[[0-9;?<>=! ]*[A-Za-z@`]/g, '');
+    // 3) 独立 BEL（OSC 被截断时残留）
+    // eslint-disable-next-line no-control-regex
+    out = out.replace(/\u0007/g, '');
+    // 4) 其余 C0 控制符（保留 \n \r \t）
+    // eslint-disable-next-line no-control-regex
+    out = out.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    return out;
   }
 
   /**
@@ -1150,6 +1857,68 @@ struct DshmWebPage {
     }
   }
 
+  /**
+   * 向终端会话发送**原始控制序列**（不 trim、不补换行）。
+   *
+   * 为什么必须与 `sendTermCommand()` 分开：
+   *   - `sendTermCommand()` 会 `trim()` 并补 `\n`，而 `'\t'.trim() === ''`，
+   *     Tab 会在发出前就被丢掉；
+   *   - Tab / 方向键 / Ctrl-C / Esc 都是控制序列（`\t`、`\x1b[A`、`\x03`、`\x1b`），
+   *     语义上也不是「一行命令」，不能附加回车。
+   *
+   * 仅在 pty 会话（`termPty === true`）下有意义：管道回退模式下 shell 的 stdin
+   * 不是 tty，本就没有行编辑与补全，发了也不会有反应。
+   */
+  private async sendTermRaw(text: string): Promise<void> {
+    if (this.termSid <= 0 || text.length === 0) return;
+    const body: WriteBody = { sid: this.termSid, text: text, raw: true };
+    await this.postJson(TERM_WRITE_ENDPOINT, body);
+    this.focusTermInput();
+  }
+
+  /**
+   * 终端按键直通：把键盘事件翻译成 shell 需要的控制序列。
+   *
+   * 背景（2026-09-13 实测）：终端输入行是 ArkUI `TextInput`，而 ArkUI 默认把
+   * **Tab 当作焦点切换键**在框架层消费掉，`onChange/onSubmit` 永远收不到 `\t`，
+   * 于是「Tab 补全没反应」。这里在 `onKeyEvent` 里拦下并 `stopPropagation()`，
+   * 把按键交给 pty，行为与真实终端一致；返回 true 表示事件已消费。
+   *
+   * 触摸/无实体键盘场景由标题栏的 Tab / ^C / ↑ 按钮兜底（见终端标题栏）。
+   */
+  private onTermKeyEvent(event: KeyEvent): boolean {
+    if (event.type !== KeyType.Down) return false;
+    if (event.keyCode === KeyCode.KEYCODE_TAB) {
+      this.sendTermRaw('\t');
+      event.stopPropagation();
+      return true;
+    }
+    if (event.keyCode === KeyCode.KEYCODE_DPAD_UP) {
+      this.sendTermRaw('\u001b[A');
+      event.stopPropagation();
+      return true;
+    }
+    if (event.keyCode === KeyCode.KEYCODE_DPAD_DOWN) {
+      this.sendTermRaw('\u001b[B');
+      event.stopPropagation();
+      return true;
+    }
+    if (event.keyCode === KeyCode.KEYCODE_ESCAPE) {
+      this.sendTermRaw('\u001b');
+      event.stopPropagation();
+      return true;
+    }
+    // Ctrl-C 中断当前前台命令。
+    if (event.keyCode === KeyCode.KEYCODE_C
+      && event.getModifierKeyState !== undefined
+      && event.getModifierKeyState(['ctrl'])) {
+      this.sendTermRaw('\u0003');
+      event.stopPropagation();
+      return true;
+    }
+    return false;
+  }
+
   /** 发送一行命令到终端。 */
   private async sendTermCommand(): Promise<void> {
     const text = this.termInput.trim();
@@ -1184,18 +1953,26 @@ struct DshmWebPage {
     this.terminalOpen = false;
   }
 
+
   // ============ 三下拉菜单数据 ============
 
+  /**
+   * Harness 菜单。
+   */
   private harnessMenu(): Array<MenuElement> {
-    return [
-      { value: '主页', action: (): void => { this.goHome(); } },
-      { value: '关于版本', action: (): void => { this.showAboutVersions(); } },
-      { value: '运行模式（宿主 / 内嵌）', action: (): void => { this.openModePanel(); } },
-      { value: '检查 App 更新', action: (): void => { this.checkAppUpdate(); } },
-      { value: '重置运行环境（故障恢复）', action: (): void => { this.resetRuntimeEnv(); } },
-      { value: '重启服务', action: (): void => { this.restartService(); } }
+    const items: Array<MenuElement> = [
+      { value: '主页', action: (): void => { this.goHome(); } }
     ];
+    items.push({ value: '关于版本', action: (): void => { this.showAboutVersions(); } });
+    items.push({ value: '检查 App 更新', action: (): void => { this.checkAppUpdate(); } });
+    items.push({ value: '检查 Harness 更新（自动）', action: (): void => { this.checkHarnessUpdate(); } });
+    items.push({ value: '查看更新进度', action: (): void => { this.showUpdateProgress(); } });
+    items.push({ value: '安装在线环境包（开发）', action: (): void => { this.installEnvAsset(); } });
+    items.push({ value: '重置内嵌运行环境（故障恢复）', action: (): void => { this.resetRuntimeEnv(); } });
+    items.push({ value: '重启服务', action: (): void => { this.restartService(); } });
+    return items;
   }
+
 
   private editMenu(): Array<MenuElement> {
     return [
@@ -1216,27 +1993,7 @@ struct DshmWebPage {
   // ============ UI ============
 
   @Builder
-  ModeRow(mode: string, text: string) {
-    Row() {
-      Text(this.modeCurrent === mode ? '●' : '○')
-        .fontSize(12)
-        .fontColor(this.modeCurrent === mode ? '#1c2430' : '#94a3b8')
-        .width(18)
-      Text(text)
-        .fontSize(12)
-        .fontColor('#1c2430')
-        .layoutWeight(1)
-        .textAlign(TextAlign.Start)
-    }
-    .width('100%')
-    .padding({ top: 8, bottom: 8 })
-    .alignItems(VerticalAlign.Center)
-    .onClick((): void => {
-      this.applyRuntimeMode(mode);
-    })
-  }
 
-  @Builder
   MenuTitle(text: string, items: Array<MenuElement>) {
     Text(text)
       .fontSize(12)
@@ -1247,33 +2004,106 @@ struct DshmWebPage {
       .onClick(() => { /* bindMenu 点击弹出 */ })
   }
 
+  /** 运行环境面板的一行状态：名称 + 就绪指示。 */
+  @Builder
+  EnvRow(name: string, ready: boolean) {
+    Row() {
+      Text(ready ? '\u2713' : '\u2715')
+        .fontSize(12)
+        .fontColor(ready ? '#1a9e6a' : '#c0392b')
+        .width(18)
+      Text(name)
+        .fontSize(12)
+        .fontColor(this.immersiveEnabled ? $r('sys.color.font_primary') : '#1c2430')
+        .layoutWeight(1)
+      Text(ready ? '已就绪' : '未安装')
+        .fontSize(11)
+        .fontColor(ready ? '#1a9e6a' : '#94a3b8')
+    }
+    .width('100%')
+    .height(26)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /**
+   * 顶栏（**必须为不透明实色**）。
+   *
+   * ⚠️ 回归教训（2026-09-12，实测踩坑）：本顶栏**不能**使用沉浸式系统材质。
+   *
+   * `EntryAbility.onWindowStageCreate` 调用了 `setWindowDecorVisible(false)`
+   * 隐藏系统标题栏，于是系统的最小化/最大化/关闭三个窗口按钮**浮在应用顶栏之上**
+   * 并由系统按浅色模式绘制**深色图标**。一旦顶栏改为半透明材质
+   * （`systemMaterial` 会把 `backgroundColor` 恢复为透明色），会出现两个后果：
+   *   1. 顶栏文字与系统按钮图标同时落在"半透明底 + Web 内容"之上，对比度崩溃，
+   *      实测表现就是**菜单文字和右上角三个按钮全都看不清**（用户直接反馈）；
+   *   2. Web 内容透出后与顶栏文字混叠，可读性进一步恶化。
+   *
+   * 结论：沉浸光感适用于「下方有内容可透出」的卡片/浮层，**不适用于背后压着系统
+   * 按钮层的固定工具条**。顶栏保持白底 + 底部描边；沉浸光感只用在下方的面板卡片上
+   * （那些场景背景有半透明遮罩，材质效果安全且观感更好）。
+   */
+  @Builder
+  TopBar() {
+    Row() {
+      Image($r('app.media.logo_dark'))
+        .width(16)
+        .height(16)
+        .borderRadius(3)
+      Text('DeepSeek')
+        .fontSize(12)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#1c2430')
+        .margin({ left: 6, right: 12 })
+      this.MenuTitle('Harness', this.harnessMenu())
+      this.MenuTitle('编辑', this.editMenu())
+      this.MenuTitle('窗口', this.windowMenu())
+      // 更新状态小胶囊：只在顶栏占一格，不覆盖内容、不拦截点击，
+      // 点它才展开详情/确认应用。
+      if (this.updateRunning) {
+        Row() {
+          Text(this.updateChipText())
+            .fontSize(11)
+            .fontColor('#78350f')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+        .backgroundColor('#fef3c7')
+        .borderRadius(10)
+        .border({ width: 1, color: '#fcd34d' })
+        .margin({ left: 8 })
+        .onClick((): void => {
+          this.showUpdateProgress();
+        })
+      } else if (this.updateReady) {
+        Row() {
+          Text('更新已就绪')
+            .fontSize(11)
+            .fontColor('#065f46')
+        }
+        .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+        .backgroundColor('#d1fae5')
+        .borderRadius(10)
+        .border({ width: 1, color: '#6ee7b7' })
+        .margin({ left: 8 })
+        .onClick((): void => {
+          this.showUpdateProgress();
+        })
+      }
+      Blank()
+    }
+    .width('100%')
+    .height(TOP_BAR_HEIGHT)
+    .padding({ left: 10, right: 4 })
+    .backgroundColor('#ffffff')
+    .alignItems(VerticalAlign.Center)
+    .border({ width: { bottom: 1 }, color: '#e4e7ec' })
+  }
+
   build() {
     Column() {
-      // 顶栏：品牌 + 三菜单 —— 全部同一条水平线。
-      // 底色取白：EntryAbility 隐藏了系统标题栏，系统窗口按钮（最小化/最大化/
-      // 关闭）会浮在顶栏右端，系统按浅色模式绘制深色图标，深色底会让它们完全看不见。
-      // 因此顶栏用浅色主题：白底 + 深色 logo + 深色文字。
-      Row() {
-        Image($r('app.media.logo_dark'))
-          .width(16)
-          .height(16)
-          .borderRadius(3)
-        Text('DeepSeek')
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#1c2430')
-          .margin({ left: 6, right: 12 })
-        this.MenuTitle('Harness', this.harnessMenu())
-        this.MenuTitle('编辑', this.editMenu())
-        this.MenuTitle('窗口', this.windowMenu())
-        Blank()
-      }
-      .width('100%')
-      .height(TOP_BAR_HEIGHT)
-      .padding({ left: 10, right: 4 })
-      .backgroundColor('#ffffff')
-      .alignItems(VerticalAlign.Center)
-      .border({ width: { bottom: 1 }, color: '#e4e7ec' })
+      // 顶栏：沉浸光感材质，见 TopBar() 实现。
+      this.TopBar()
 
       // 内容区：Web + 右侧终端边栏
       Row() {
@@ -1312,6 +2142,20 @@ struct DshmWebPage {
                 .margin({ top: 24 })
                 .textAlign(TextAlign.Center)
                 .padding({ left: 24, right: 24 })
+              // 启动失败时显示恢复按钮（借鉴 dsh 官方 desktop 的 emergency document）
+              if (this.bootError) {
+                Button('重置内嵌运行环境')
+                  .fontSize(13)
+                  .fontColor('#ffffff')
+                  .backgroundColor('#4f6bed')
+                  .borderRadius(6)
+                  .height(36)
+                  .margin({ top: 20 })
+                  .onClick(() => {
+                    this.bootError = false;
+                    this.resetRuntimeEnv();
+                  })
+              }
             }
             .width('100%')
             .height('100%')
@@ -1321,6 +2165,31 @@ struct DshmWebPage {
             .onAppear(() => {
               this.startBrandAnimation();
             })
+          }
+
+          // 应用更新/回滚期间：旧 Web 还在内存里但即将被替换，内容不可用，
+          // 用一层全屏提示把真实阶段说清楚（下载阶段不会出现这层）。
+          if (this.applying) {
+            Column() {
+              LoadingProgress()
+                .width(36)
+                .height(36)
+                .color('#f59e0b')
+              Text(this.applyPhase)
+                .fontSize(14)
+                .fontColor('#334155')
+                .margin({ top: 16 })
+                .textAlign(TextAlign.Center)
+                .padding({ left: 32, right: 32 })
+              Text('请稍候，期间请不要关闭应用。')
+                .fontSize(12)
+                .fontColor('#94a3b8')
+                .margin({ top: 8 })
+            }
+            .width('100%')
+            .height('100%')
+            .justifyContent(FlexAlign.Center)
+            .backgroundColor('#F3F7FB')
           }
 
           // “关于版本”面板：页内浮层，左对齐排版。
@@ -1382,98 +2251,88 @@ struct DshmWebPage {
             .height('100%')
             .justifyContent(FlexAlign.Center)
             .alignItems(HorizontalAlign.Center)
-            .backgroundColor('#66000000')
+            .backgroundColor('#33000000')
           }
 
-          // 运行模式面板：宿主 dsh（Harmonybrew）/ 内嵌运行时 / 自动
-          if (this.modeOpen) {
-            Column() {
-              Column() {
-                Text('运行模式')
-                  .fontSize(16)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor('#1c2430')
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                Text(this.modeActive)
-                  .fontSize(11)
-                  .fontColor('#64748b')
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                  .margin({ top: 4, bottom: 12 })
 
-                this.ModeRow('auto', '自动（检测到 Harmonybrew 的 dsh 就用宿主模式）')
-                this.ModeRow('host', '宿主 dsh —— Harmonybrew 安装，原生 node/JIT，插件能力完整')
-                this.ModeRow('embedded', '内嵌运行时 —— 应用自带 libnode（--jitless），不依赖 brew')
-
-                Text('宿主模式需要已安装 Harmonybrew 且执行过 brew install deepseek-harness；' +
-                  '切换后会重启 Harness 服务。宿主模式下的版本升级请在终端执行 brew upgrade deepseek-harness。')
-                  .fontSize(11)
-                  .fontColor('#94a3b8')
-                  .width('100%')
-                  .textAlign(TextAlign.Start)
-                  .margin({ top: 12 })
-
-                Row() {
-                  Button('关闭')
-                    .fontSize(12)
-                    .height(30)
-                    .backgroundColor('#1c2430')
-                    .fontColor('#ffffff')
-                    .onClick((): void => {
-                      this.modeOpen = false;
-                    })
-                }
-                .width('100%')
-                .justifyContent(FlexAlign.End)
-                .margin({ top: 16 })
-              }
-              .width(520)
-              .padding(20)
-              .alignItems(HorizontalAlign.Start)
-              .backgroundColor('#ffffff')
-              .borderRadius(12)
-              .border({ width: 1, color: '#e4e7ec' })
-            }
-            .width('100%')
-            .height('100%')
-            .justifyContent(FlexAlign.Center)
-            .alignItems(HorizontalAlign.Center)
-            .backgroundColor('#66000000')
-          }
         }
         .width('100%')
         .height('100%')
         .layoutWeight(1)
 
-        // 终端侧边栏（终端样式）
+        // 终端侧边栏：与 dsh 本体 UI 视觉语言对齐
+        //（浅色底、圆角、系统字体、语义状态色；顶栏同色系，避免黑白割裂）
         if (this.terminalOpen) {
           Column() {
+            // 标题栏：状态点 + 标题 + 环境标记 + 操作
             Row() {
-              Circle({ width: 8, height: 8 })
-                .fill(this.termConnected ? '#4ade80' : '#9ca3af')
-                .margin({ right: 6 })
-              Text('终端')
-                .fontSize(12)
-                .fontColor('#e5e7eb')
-                .layoutWeight(1)
-              Text(this.termPty ? 'pty · ' + (this.termShell ?? 'zsh') : 'pipe')
-                .fontSize(11)
-                .fontColor('#6b7280')
+              Circle({ width: 7, height: 7 })
+                .fill(this.termConnected ? '#1a9e6a' : '#c0c6d0')
                 .margin({ right: 8 })
+              Text('终端')
+                .fontSize(13)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#1c2430')
+              Text(this.termPty ? 'pty' : 'pipe')
+                .fontSize(10)
+                .fontColor('#64748b')
+                .backgroundColor('#eef2f7')
+                .borderRadius(4)
+                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+                .margin({ left: 8 })
+              Blank()
+              // 触摸兜底：实体键盘的 Tab/↑/Ctrl-C 由 onTermKeyEvent 直通，
+              // 触屏（平板/手机）上没有这些键，用按钮发送同样的控制序列。
+              Text('Tab')
+                .fontSize(12)
+                .fontColor(this.termPty ? '#64748b' : '#c0c6d0')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .onClick(() => { this.sendTermRaw('\t'); })
+              Text('↑')
+                .fontSize(12)
+                .fontColor(this.termPty ? '#64748b' : '#c0c6d0')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .margin({ left: 2 })
+                .onClick(() => { this.sendTermRaw('\u001b[A'); })
+              Text('^C')
+                .fontSize(12)
+                .fontColor(this.termPty ? '#64748b' : '#c0c6d0')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .margin({ left: 2 })
+                .onClick(() => { this.sendTermRaw('\u0003'); })
               Text('清屏')
                 .fontSize(12)
-                .fontColor('#9ca3af')
+                .fontColor('#64748b')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
                 .onClick(() => { this.termLines = []; })
-              Text('断开')
+              Text('关闭')
                 .fontSize(12)
-                .fontColor('#9ca3af')
-                .margin({ left: 12 })
+                .fontColor('#64748b')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .borderRadius(5)
+                .margin({ left: 4 })
                 .onClick(() => this.closeTerminal())
             }
-            .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+            .padding({ left: 12, right: 8, top: 8, bottom: 8 })
             .width('100%')
-            .backgroundColor('#0d1117')
+            .backgroundColor('#f7f9fc')
+            .border({ width: { bottom: 1 }, color: '#e4e7ec' })
+
+            // 会话信息条：user@host + cwd（对齐 dsh 的语义化信息展示）
+            if (this.termConnected == false) {
+              Row() {
+                Text('正在连接终端…')
+                  .fontSize(11)
+                  .fontColor('#94a3b8')
+              }
+              .width('100%')
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .backgroundColor('#fbfcfe')
+            }
 
             List({ space: 0, scroller: this.listScroller }) {
               ForEach(this.termLines, (line: string) => {
@@ -1482,8 +2341,8 @@ struct DshmWebPage {
                     .width('100%')
                     .fontSize(12)
                     .fontFamily('monospace')
-                    .fontColor('#e6edf3')
-                    .padding({ left: 10, right: 6, top: 1, bottom: 1 })
+                    .fontColor('#24292f')
+                    .padding({ left: 12, right: 8, top: 1.5, bottom: 1.5 })
                     .textAlign(TextAlign.Start)
                 }
               }, (line: string, index: number) => index.toString())
@@ -1495,34 +2354,36 @@ struct DshmWebPage {
                   Text(this.termPrompt())
                     .fontSize(12)
                     .fontFamily('monospace')
-                    .fontColor('#00ff9c')
+                    .fontColor('#1a9e6a')
                     .maxLines(1)
                   TextInput({ text: this.termInput })
                     .id(TERM_INPUT_ID)
                     .layoutWeight(1)
                     .fontSize(12)
                     .fontFamily('monospace')
-                    .fontColor('#e6edf3')
-                    .caretColor('#00ff9c')
+                    .fontColor('#24292f')
+                    .caretColor('#1a9e6a')
                     .backgroundColor(Color.Transparent)
                     .borderRadius(0)
                     .padding({ left: 6, right: 0, top: 0, bottom: 0 })
                     .onChange((v: string) => { this.termInput = v; })
                     .onSubmit(() => { this.sendTermCommand(); })
+                    // Tab 补全 / 历史 / Esc / Ctrl-C 直通到 pty（见 onTermKeyEvent 注释）。
+                    .onKeyEvent((event: KeyEvent): boolean => this.onTermKeyEvent(event))
                 }
                 .width('100%')
                 .alignItems(VerticalAlign.Center)
-                .padding({ left: 10, right: 6, top: 1, bottom: 1 })
+                .padding({ left: 12, right: 8, top: 1.5, bottom: 1.5 })
               }
             }
             .layoutWeight(1)
-            .backgroundColor('#010409')
+            .backgroundColor('#ffffff')
             .scrollBar(BarState.Auto)
           }
-          .width(420)
+          .width(440)
           .height('100%')
-          .backgroundColor('#0d1117')
-          .border({ width: { left: 1 }, color: '#21262d' })
+          .backgroundColor('#ffffff')
+          .border({ width: { left: 1 }, color: '#e4e7ec' })
         }
       }
       .width('100%')

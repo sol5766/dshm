@@ -1,9 +1,15 @@
-cmake_minimum_required(VERSION 3.5.0)
+﻿cmake_minimum_required(VERSION 3.5.0)
 project(dsh_host)
 
 set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 
 include_directories(${NATIVERENDER_ROOT_PATH}/include/node)
+
+# 工具链给共享库注入 -Wl,--no-undefined，会拒绝 pty_host_napi 里 N-API 的未定义符号
+# （napi_* 由宿主 node 在 dlopen 时解析，这是 N-API 的标准用法）。lld 没有对应的
+# 「放行」开关（只有 --no-undefined），因此把该标志从本目录的链接参数里摘掉。
+# 对其它目标只是少一道链接期检查——它们本就链接 libnode.so.137，没有未定义符号。
+string(REPLACE "-Wl,--no-undefined" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
 
 add_library(dsh_host SHARED dsh_host.cpp)
 
@@ -44,3 +50,24 @@ add_custom_command(TARGET pty_host POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory ${PTY_NODE_DEST}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:pty_host> ${PTY_NODE_DEST}/pty_host.node
 )
+
+# pty_host_napi —— 同上，但**不链接 libnode.so.137**（宿主模式专用）。
+#
+# 为什么需要第二个变体：上面的 pty_host 把 libnode.so.137 写进了 DT_NEEDED
+# （工具链默认 -Wl,--no-undefined，N-API 的 15 个未定义符号必须先满足）。
+# 内嵌模式没问题——进程里本来就 dlopen 了同一份 libnode；但宿主模式跑的是
+# brew 的原生 node（v26），进程里没有 libnode.so.137，dlopen 直接报
+# 「Error loading shared library libnode.so.137」，宿主终端于是永远退化成管道会话
+# （无 Tab 补全 / 无行编辑）。往 brew node 进程里塞内嵌 libnode 更不可取（两份 V8）。
+#
+# N-API 是跨版本 ABI 稳定的：把 napi_* 留作未定义符号，交给**加载它的那个 node**
+# 在 dlopen 时解析即可（内嵌 libnode 与 brew node 都导出这些符号）。
+add_library(pty_host_napi SHARED pty_terminal.cpp)
+target_include_directories(pty_host_napi PRIVATE ${NATIVERENDER_ROOT_PATH}/include/node)
+set_target_properties(pty_host_napi PROPERTIES
+  OUTPUT_NAME pty_host_napi
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+  LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+  LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+)
+

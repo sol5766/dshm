@@ -23,6 +23,130 @@
 
 ## Bug 列表（新→旧）
 
+## Bug 列表（新→旧）
+
+### [2026-09-14] 终端 pty 会话打开即「会话退出，code=null」
+- **现象**：内嵌模式打开右侧 pty 终端，立即提示 `[会话退出，code=null]`（`DshmWebPage.ets:1051` 渲染 `payload.exitCode` 为 null）。
+- **根因（待确认）**：pty 会话 spawn 的 shell 启动即失败/异常退出且无退出码。内嵌沙箱下 `dsh_host.cpp` 选 `SHELL` 优先 `/data/service/hnp/bin/bash`（Harmonybrew hnp bash，`hnpUsable` 时），否则 `/system/bin/sh`。若当前用的是 `<hnp>` bash 而在内嵌（无 host 特权/`~` 沙箱）下 fork+exec 失败，pty 立即退出 → exitCode=null。
+  - `pty_terminal.cpp` 用 `openpty`（master）`+ socketpair` 泵给 JS `net.Socket`；`NAPI_MODULE(pty_host, Init)` 链接 `libnode.so.137`（内嵌可用）。`pty_host_napi`（不链 libnode，宿主专用）只在内嵌已剥离，应与本次无关。
+  - 复现箭头指向「spawn 的 shell 可执行文件在本沙箱不能 exec」（hnp zsh/bash 在应用沙箱无权访问，见 `ohos-shell.md`：`/usr/local` 特权目录沙箱不可调）。
+- **待办**：实机确认 `term/session` 协议的 `payload.shell`（取到的 shell 路径）与 spawn 结果；核对 dshm-terminal 用 hnp zsh 是否有失败冒烟日志；必要时把 pty shell 兜底改为沙箱可达的 `/system/bin/sh`（内嵌无 hnp 时）。
+- **状态**：🟡 已定位根因方向，待实机日志确认 shell select / spawn 失败点后修复。
+
+### [2026-09-14] 内嵌模式插件市场/目录加载失败（30S,2 attempts 超时）
+- **现象**：内嵌运行（embedded / libnode --jitless）下，插件市场「插件目录加载失败，请稍后重试」/ `this operation was aborted (30S, 2 attempts)`；对话/会话正常。
+- **根因**：dshmarket 默认 region=**global**，插件目录直连 `https://awesome-dsh-plugin.com/plugins.json`、npm 走 `registry.npmjs.org`，在国内设备网络 30s 无响应 → `registry.js` 的 `describeFetchFailure`（2 次尝试）报「目录加载失败」。`/dsh-market/status` 显示 `githubRoutes` 全 null、`githubProxy:null`。
+- **定位依据**：`dshmarket/lib/regions.js`（global catalog=官方 URL、无代理；china 才走腾讯 npm 镜像 + gh-proxy + `dsh-plugin-catalog` npm 包）；`registry.js`（目录 fetch 超时=30s/2 次）。
+- **修复（用户侧，无需改码）**：在 dsh 设置里把「下载区域」切到**中国大陆**，市场目录经腾讯镜像/gh-proxy 可达，插件市场恢复正常。
+- **状态**：✅ 已由用户通过切 region=China 解决。（如需固化：可在 `dsh_host.cpp RunEmbeddedNode` 的 env 里注入 `DSHM_GITHUB_PROXY`/`DSHM_NPM_MIRROR`，或 domain 预留 region。）
+
+### [2026-09-14] 工作区目录选择：createDirectory 报 invalid payload（粘贴路径回归）
+- **现象**：之前可用工作流 =「系统文件管理复制目标文件夹 → 粘贴完整路径到工作区地址框 → 选中该文件夹即可使用」；现在同一操作报 `invalid payload for host.createDirectory`。
+- **根因**：`@deepseek-ai/dsh-api-workspace-controller/lib/index.js:349-352` 的 `createDirectory(path,name)` 校验**只接受单个非空路径段名**：
+  `name.trim()!=="" && name!=="." && name!==".." && !/[/\\]/.test(name)`。当「新建文件夹」把**完整路径（含 `/`）当作 name** 传进来即被判 invalid。
+  - 正确落地路径是 `dsh-client-ui-workspace` 里 `adoptDirectory(path)=>createWorkspace({path})`（`workspace.create`，resolve 已有目录）**并非是 createDirectory**；
+  - 触发链路：`dsh-client-ui-directory-picker-browse` 的「新建文件夹」`confirmCreate` 用 `createDirectory(targetPath, folderDraft)`，`folderDraft` 为输入名字（不含路径则合法）。
+- **状态**：🟡 复现/回归需要确认影响调用方（粘贴路径为何进了 createDirectory 的 name）。候选修复：在麒麟/ArkWb 场景放宽 `createDirectoryRequestSchema` 允许多段路径（`/[/\\]/`）或将空 name 走 `workspace.create` 兜底。待用户确认「设置个人文件夹」时的具体入口与输入内容后定修法。
+
+### [2026-09-14] 宿主模式完全剥离——只保留内嵌运行时
+- **现象**：用户要求把 dsh 宿主模式（host mode / Harmonybrew dsh）完全剥离，只保留内嵌运行时（embedded / libnode --jitless），并确保内嵌模式下插件/pnpm/设置等所有功能正常。
+- **根因**：宿主模式是双模式架构（auto/host/embedded）的一部分，涉及 C++ native 层、ArkTS bootstrap 层、UI 层、scripts 多层代码。剥离需要系统性删除所有宿主相关功能。
+- **修复**：
+  - **dsh_host.cpp**：删除 `RunHostDsh` 函数（fork/exec brew dsh + 守候循环）、`runtime-mode.txt` 读取逻辑、`hostDsh`/`hostAvailable` 探测、宿主分支与回退分支。固定为 embedded 模式，直接写 `runtime-mode-active.txt` 为 `embedded`。
+  - **DshBootstrap.ets**：删除 `readRuntimeMode`/`writeRuntimeMode`/`runtimeModePath`/`ensurePnpmWrapper`/`ensureHostModeTerminal`/`requestHostRestart`/`writeHostDiag` 方法。简化 `RuntimeModeInfo` 接口（移除 dshPath/version/nodeVersion/home 字段）、`readActiveMode`（固定返回 embedded）、`dshHomeForMode`（固定返回内嵌路径）、`stopDsh`/`stopDshForExit`（只走 embedded 通道）、`allDshHomes`（只返回内嵌会话库）、`ensureMarketBundle`（只处理内嵌 profile）。
+  - **DshmWebPage.ets**：删除运行模式面板（modeOpen/modeCurrent/modeActive/modeEnvDetail 状态变量 + openModePanel/applyRuntimeMode/ModeRow 方法 + 面板 UI）、运行环境面板（envOpen/envSummary/envStatus 状态变量 + openEnvPanel/runEnvCommand 方法 + 面板 UI）、repairHostProfile 方法、currentMode 方法。简化 boot 函数（移除 bootMode 分支、ensurePnpmWrapper 调用、ensureHostModeTerminal 调用）、harnessMenu（移除宿主菜单项）、restartAndWait（移除模式切换逻辑）、resetRuntimeEnv（移除宿主模式拒绝检查）、关于版本面板（移除宿主版本展示）、shell 选择（固定 bash）。
+  - **AppActions.ets**：删除 `restartDsh` 中的宿主模式分支（`readRuntimeMode` 调用 + `ensureBundleMirror` 条件），简化 `stopForExit` 注释。
+  - **BrewEnvProbe.ets**：整文件删除（Harmonybrew 环境探测，已无消费者）。
+  - **EntryAbility.ets**：更新 `ACCESS_USER_FULL_DISK` 权限注释（移除 Harmonybrew/hostDsh 引用）。
+  - **scripts/patch-terminal-pty-host.mjs**：整文件删除（宿主模式 PTY addon 补丁，已无消费者）。
+- **验证**：静态复核——grep 确认 `entry/src/main` 中零残留引用（`readRuntimeMode`/`writeRuntimeMode`/`ensurePnpmWrapper`/`ensureHostModeTerminal`/`requestHostRestart`/`BrewEnvProbe`/`'host'`/`modeInfo.dshPath` 等全部清零）；`dsh_host.cpp` 中 `RunHostDsh`/`hostDsh`/`hostAvailable`/`runtime-mode.txt` 零残留。未执行设备验证（PR-003）。
+- **回归测试**：不适用（架构剥离，非 UI 布局变更）。
+- **状态**：✅ 已修复
+
+### [2026-09-14] M1：dsh_host.cpp 拖留进程清理静默失效（awk 不在 toybox，无条件白等 400ms）
+- **现象**：每次启动 libdsh_host Main() 时，残留 dsh web 进程清理不生效——旧进程继续运行，且启动无条件多等 400ms。
+- **根因**：`dsh_host.cpp:482-490` 的 `ps|grep|awk|xargs kill` 管道在 `InjectBusyboxEnv()` **之前**执行，PATH 上只有 toybox，toybox 无 `awk` → 管道断 → kill 不执行，`2>/dev/null` 吞掉报错；且 `usleep(400000)` 无条件执行。
+- **修复**：把清理块移到 `InjectBusyboxEnv(dshDir)` 之后（PATH 有 busybox），改用 `popen("ps -ef | grep ... | grep -v grep")` + C 内 `kill(pid, SIGKILL)` 解析 PID，去掉 awk/xargs 依赖；仅在实际 kill 了进程时才 `usleep(200000)`。
+- **验证**：静态复核——grep 确认 dsh_host.cpp 清理代码不再含 awk/xargs 管道（仅注释和 busybox applet 列表保留）。未执行设备验证（PR-003）。
+- **回归测试**：不适用（native 启动路径，非 UI）。
+- **状态**：✅ 已修复
+
+### [2026-09-14] H1：node_shim / pnpm wrapper 链路不可用（el2 ELF execv EACCES + flags 注入位置错误）
+- **现象**：嵌入式模式下 pnpm 子进程 spawn 永远失败——`node_shim` wrapper 用 `exec /system/bin/nativespawn <node> pnpm.cjs "$@"` 启动，但 el2 的 ELF execv 返回 EACCES，nativespawn 也不可访问。即使能 exec，`node_shim.cpp:87-105` 把 `--jitless`/`--expose-internals` 追加到 argv **末尾**（脚本路径之后），V8 不解析脚本后的 flag → flags 不生效。
+- **根因**：与项目自身实测结论矛盾——`docs/pitfalls-and-gotchas.md` §1.4、`scripts/patch-market-pnpm-bridge.mjs` 注释、bug-log 2026-09-10 均明确 el2 ELF 不可 exec。node_shim 链路是已废弃方案残留。
+- **修复**：删除整条链路——CMakeLists.txt node_shim 段、`node_shim.cpp`、`DshBootstrap.prepareNodeShim()` 方法、`DshmWebPage.boot` 中的 embedded 分支调用、rawfile 产物 `dsh/node/bin/node`。所有模式统一走 `ensurePnpmWrapper`（桥接 Harmonybrew node）。
+- **验证**：静态复核——grep 确认 `entry/src/main` 中 `node_shim`/`node_flags`/`prepareNodeShim` 仅剩 2 处删除注释。未执行设备验证（PR-003）。
+- **回归测试**：不适用（pnpm spawn 路径，非 UI）。
+- **状态**：✅ 已修复
+
+### [2026-09-14] H2：pnpm 桥接脚本与 rawfile 副本语义分叉（重跑脚本静默回退 v1）
+- **现象**：`scripts/patch-market-pnpm-bridge.mjs`（v1，仅 `DSHM_FILES_DIR` 门控）与 rawfile 实际副本（v2，含 `DSHM_INPROCESS_PNPM` 双重门控）不一致。重跑脚本会把 rawfile 回退到 v1，导致 `dshmPnpmCli()` 在仅设 `DSHM_FILES_DIR` 而未设 `DSHM_INPROCESS_PNPM=1` 时仍返回非空 → 宿主模式误启用同进程 pnpm → 拿环境树里那份 dsh 去装插件，与 brew 的 dsh 版本不一致。
+- **根因**：脚本 BRIDGE 块未同步 rawfile v2 的 `DSHM_INPROCESS_PNPM_ENABLED` 常量与门控判断。`dsh_host.cpp:634-635` 已正确导出两个环境变量，但脚本生成的桥接代码只检查了一个。
+- **修复**：把脚本的 BRIDGE 块同步为 v2——补 `const DSHM_INPROCESS_PNPM_ENABLED = (process.env.DSHM_INPROCESS_PNPM ?? '') === '1'`，`dshmPnpmCli()` guard 改为 `if (!DSHM_INPROCESS_PNPM_ENABLED || DSHM_FILES_DIR === '')`。
+- **验证**：静态复核——grep 确认脚本含 `DSHM_INPROCESS_PNPM_ENABLED` 常量与门控。未执行设备验证（PR-003）。
+- **回归测试**：不适用（pnpm 桥接路径，非 UI）。
+- **状态**：✅ 已修复
+
+### [2026-09-14] 宿主端（brew deepseek-harness）web 的 `/api/*` 全部 HTTP 403 → 设置/模型/插件/预设/选工作区都用不了
+- **现象**：用户在鸿蒙 PC **本机终端**启动宿主端 dsh web（brew 装的 `deepseek-harness` formula，`harmonybrew.atomgit.com`；宿主 version `0.1.5-rc.2_2` + node `v26.8.2`），在浏览器/设置打开时，所有走 `/api/*` 的页面报 **HTTP 403**：`settings/describe`、`llm/listProviders`、`agentPresets/list`（预设）、插件（pluginInventory）、`directorypicker`（选工作区目录）——并表现为"无法选择工作区目录/插件看不到"。（注意：`/dsh-market/status` 这类非 `/api` 前缀不受此 fence 管控，能通。）
+- **根因**：dsh 的 `/api` 共享 RPC channel 挂了个 **Host/Origin trust fence**（`@deepseek-ai/dsh-client-connection/lib/index.js`）：
+  - `requestRejection()` → `if (!isTrustedApiRequest(req, trustedHosts)) return 403`（line 553-556）；prefix router 命中后 `res.writeHead(403)`，end `"forbidden"`（line 608-613）。
+  - `isTrustedApiRequest()`（line 201-214）三条目：
+    1. `host` 头解析后 `!isLoopbackHostname(hostname) && !isTrustedAuthority(host, trustedHosts)` → `false`；
+    2. `sec-fetch-site === "cross-site"` → `false`；
+    3. `Origin` 头存在 且 `new URL(origin).host !== hostUrl.host` → `false`。
+  - 宿主 web 实证捆绑 `http://127.0.0.1:3080`（node-*.log 的 `dsh web: ...`）。loopback Host(127.0.0.1) 能过线 ①。故本场景 403 落在 ②（经代理/端口转发导致 `sec-fetch-site: cross-site`）或 ③（访问地址「Host/Origin 非同源于 127.0.0.1:3080」，如用 `localhost`/机器名/真实 IP，或 DevEco 预览 / rport 转发按跨源处理）。
+- **修复方向（待定）**：让浏览器会话源与宿主 web 权威（127.0.0.1:3080）同源 —— 用 `http://127.0.0.1:3080/?token=…` 直接访问；若绑/经代理则要么改绑 loopback、要么把 `trustedHosts`（`dsh web --expose`/host 选项或 config）加上访问 origin。**宿主是 brew formula 的 d，改的是启动参数/配置，不动 DSH 代码**。用同源方式访问、或终端 `dsh web` 用正确 handle 可规避。
+- **验证**：待用户按同源地址重开后 `settings/describe` 等转非 403 再确认。
+- **回归测试**：待补。
+- **状态**：🟡 根因已定位；取决于用户实际访问地址，待同源验证。
+
+### [2026-09-14] 宿主模式「选择工作区」能选但选完不生效 —— 宿主 web 的 directory-picker seam
+- **现象**：宿主模式（brew dsh `0.1.5-rc.2_2` + node `v26.8.2`，日志确认 `runtime mode=host` / `exec /storage/Users/currentUser/.harmonybrew/bin/dsh` / `host dsh started` / `dsh web` 就绪）下，宿主 web 侧边栏的「选择工作区」能弹出目录浏览、能选目录，但选完不生效（会话 cwd / 落盘不变）。
+- **已排除**：宿主模式本身未启动 / 个人文件夹不存在 —— 均系 `hdc shell` 隔离视图误判，宿主一直在跑。
+- **根因（初步）**：宿主 web 的「选择工作区」走 d 的 **directory-picker seam**（`@deepseek-ai/dsh-host-directory-picker-auto`），它在 `native` 与 `browse` 两个后端间自适应选择：
+  - `@deepseek-ai/dsh-host-directory-picker-native` 是 **Windows 桌面专用**（`user32.dll` / `koffi` / WIN32 文件对话框驱动，见 rawfile `node_modules/@deepseek-ai/dsh-host-directory-picker-native/lib/index.js` 顶部 win32-dialog-bindings），鸿蒙下不可用。
+  - `browse` 是纯前端浏览器文件夹导航（`dsh-client-ui-directory-picker-browse`）。
+  - 选完"生效"依赖后端把选中的目录提升为新会话的 `cwd`（`process.chdir` / `session.create cwd` / 落盘 preferences），宿主 0.1.5 此链路对鸿蒙支持不完整。（**待用设备 real 前端点击时抓 `browse`/`native` 对应 RPC 落盘行为确认**。）
+- **正确 debug 工具（本地 DevEco，已验证）**：android 补充到上文。先 `hdc shell aa appdebug -b com.brewdsh.app -p`（会话粒再 `hdc file recv` 读 `/data/app/el2/100/base/com.brewdsh.app/haps/entry/files/…/log/node-*.log` 与 `runtime-mode-active.txt`，读完 `aa appdebug -c`。
+- **状态**：🟡 已定位到 directory-picker seam；具体"选完不落 cwd"路径待用户补充宿主 web 选完时的 Web 前端行为（是否提示成功/报错）后用 `hilog`/前端 console 或新增 `directory-picker/browse` 日志坐实。
+
+### [2026-09-14]「宿主模式没有启动/服务器文件夹不存在」被误判 —— 正确证据必须来自应用进程视图（修正 hdc shell 误判）
+- **现象**：用户装好 brew 的 dsh 后，当前模式实际已在宿主模式运行，但排查时一度据 `hdc shell ls /storage/` 只见 `cloud`/`media`、不见 `/storage/Users`，而误判「宿主模式没起、个人文件夹不存在」。实际宿主 dsh 一直在跑。
+- **根因（排查方法论，非代码）**：`hdc shell` 是 **shell uid 的隔离视图**，看不到 `/storage/Users`（用户存储挂载点对 shell 不展开），`/data/storage/el2/base/haps/entry/files` 也因 `drwx------` + 权限隔离读不到。**shell 视图不能推断应用行为**（与本文件 line 96 的既有教训一致，再次踩坑）。
+- **正确的设备证据工具（本地 DevEco，已验证）**：
+  - **读应用 native/runtime 文件**：`hdc file recv "<真实沙箱路径>" <本地>`；真实路径是 `/data/app/el2/100/base/com.brewdsh.app/haps/entry/files/...`（**el2/100**，userId 用 100 而**不是**简单 uid；`bm dump -n com.brewdsh.app` 的 `hapPath/uiId` 可佐证）。命令前须先 `aa appdebug -b com.brewdsh.app -p` 建立调试会话，否则 file recv 被拒；拉完即 `aa appdebug -c` 清理。
+  - **关键证据文件**：
+    - `runtime-mode-active.txt` → 当前运行模式 + host dsh 路径 + home（本机实测：`host` / `/storage/Users/currentUser/.harmonybrew/bin/dsh` / `0.1.5-rc.2_2` / node `v26.8.2`）。
+    - `log/node-<pid>.log` → libdsh_host 全量 stderr：`=== runtime mode=host host入…===`、`=== host mode: exec … ===`、`=== host dsh started … ===`、`dsh web: http://127.0.0.1:3080/?token=…`（**native 的 host/embedded 判定打在这个文件，不进 hilog**）。
+  - **ArkTS 应用日志**：DshmLogger 走 `hilog(DOMAIN=0x01)`，但本应用在 `hilog -x`/`-t app`/`-P <pid>` 下**几乎抓不到**（疑似流控/日志缓冲），不要依赖；native 的 host 判定以 `log/node-*.log` 为准。
+- **结论**：本轮确认**宿主模式在正常运行**（日志：`runtime mode=host`, `exec /storage/Users/currentUser/.harmonybrew/bin/dsh`, `host dsh started`, `dsh web` 就绪）。所谓「无法选择工作区」是宿主 web（brew dsh `0.1.5-rc.2` 自身）前端行为/版本问题，或 DSHM ArkTS 菜单 `WorkspaceAccess` 的文件夹选择器问题，与「宿主未启动」无关。
+- **回归测试**：建议 `scripts/ui-test` 或人工检查：读 `runtime-mode-active.txt` 判断模式，读 `log/node-*.log` 的 `runtime mode=` 行确认 host/embedded 判定。
+- **状态**：✅ 方法论已修正并验证；「宿主 web 无法选择工作区」的根因仍待用户反馈具体报错样（web 前端错误文本 / 浏览器 network 4xx / 菜单 Picker 对话框文案）后继续。
+
+### [2026-09-14] dshmarket 同进程 pnpm 桥接不生效 → `/dsh-market/status` 恒 `pnpm:false`，插件装不上
+- **现象**：内嵌模式下插件市场能正常打开、能看到插件列表，但点安装必然失败；`GET /dsh-market/status` 返回 `"pnpm":false`（正常应为 `true`）。市场 UI 表现为"能看不能装"。
+- **根因**：随包分发的 `dshmarket@1.45.1` 其 `lib/dsh-cli.js` 已带壳侧「同进程 pnpm 桥接」补丁（标记 `同进程 pnpm 桥接（仅内嵌模式）`），但该补丁由**两个环境变量双重门控**：
+  ```js
+  const DSHM_INPROCESS_PNPM_ENABLED = (process.env.DSHM_INPROCESS_PNPM ?? '') === '1';
+  const DSHM_FILES_DIR = (process.env.DSHM_FILES_DIR ?? '').trim();
+  function dshmPnpmCli() {
+      if (!DSHM_INPROCESS_PNPM_ENABLED || DSHM_FILES_DIR === '') return '';
+      ...
+  }
+  ```
+  而 `entry/src/main/cpp/dsh_host.cpp` **两者都没有导出**（只导出了 `DSHM_KOFFI_PATH`、`TMPDIR`、`DSH_PERMISSION_MODE` 等）。于是 `dshmPnpmCli()` 恒返回空串 → `dshmInProcessPnpm()` 恒 false → 桥接整体惰性关闭 → 回落到上游 `spawn('pnpm'|'corepack'|'npm', …)`。而鸿蒙沙箱里 ①PATH 上没有 pnpm/npm/corepack；②filesDir 内可执行文件 spawn/execv 一律 EACCES —— 这条路必然失败，即 `pnpm:false`。
+- **修复**：在 `dsh_host.cpp` 的**内嵌路径**补两行 setenv（宿主分支 `RunHostDsh()` 在第 609 行已 return，不会走到这里，宿主仍走原生 fork/exec 安装路径，不会拿环境树里的 dsh 去装插件而与 brew 版本冲突）：
+  ```cpp
+  setenv("DSHM_FILES_DIR", filesDir.c_str(), 1);
+  setenv("DSHM_INPROCESS_PNPM", "1", 1);
+  ```
+  位置：写完 `runtime-mode-active.txt`（embedded 分支确定）之后、`RunEmbeddedNode()` 之前，并加 stderr 日志便于核对。
+- **验证**：重新构建安装后 `GET /dsh-market/status` → `"pnpm":true`（此前恒 false）；`aa force-stop` 后冷启动重测仍为 `true`，稳定复现。
+- **遗留（未修，非本次阻塞）**：`scripts/patch-market-pnpm-bridge.mjs` 仍是 **v1**（不含 `DSHM_INPROCESS_PNPM` 门控），而 rawfile 里的实际副本是 **v2**。两者未被 git 跟踪，重跑该脚本会**静默回退到 v1**。若后续要重建环境树，必须先同步脚本到 v2，否则桥接会因缺少 `DSHM_FILES_DIR` 判定而再次失效（v1 无 `DSHM_INPROCESS_PNPM` 门控，仅靠 `DSHM_FILES_DIR`，本次已导出故 v1 亦可工作，但两者语义已分叉，需统一）。
+- **回归测试**：未加入 `scripts/ui-test-phone.sh`（该脚本当前包名仍是旧的 `com.dshm.agentic`，整体不可用，见 device-hdc.local.md）。建议后续：断言 `GET /dsh-market/status` 的 `pnpm` 为 true。
+- **状态**：✅ 已修复（内嵌模式）
+
 ### [2026-09-11] `appRecovery.restartApp()` 在本设备是空操作 →「环境包已替换」后应用不重启、界面停在对话框
 - **现象**：在线环境包切换成功后，代码调用 `appRecovery.restartApp()` 期望重启应用生效。实测**应用完全没重启**：应用进程 pid 不变、界面停在提示对话框「环境包已替换…应用即将重启以生效」上。用户视角就是"环境包替换了，但卡在某个环节"。磁盘状态其实已经切好（`.dshm-version`/`.dshm-asset-version` 均为目标版本、服务在跑）。
 - **根因**：`appRecovery.restartApp()`（`@ohos.app.ability.appRecovery` 声明存在）在本设备/本配置下**不产生重启**，疑似需要先 `enableAppRecovery()` 或在 `module.json5` 配置故障恢复才生效。本次未继续深挖该 API。

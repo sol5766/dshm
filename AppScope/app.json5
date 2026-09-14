@@ -1,7 +1,7 @@
 {
   "app": {
-    "bundleName": "com.dshm.agentic",
-    "vendor": "DSHM",
+    "bundleName": "com.brewdsh.app",
+    "vendor": "BrewDSH",
     "versionCode": 1000000,
     "versionName": "1.0.0",
     "buildVersion": "1",

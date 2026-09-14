@@ -13,6 +13,7 @@
  */
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { window } from '@kit.ArkUI';
 import { DshmLogger } from '../dshm/utils/Logger';
 import { StatusBarTray } from '../dshm/system/StatusBarTray';
 
@@ -24,23 +25,46 @@ export default class BackGroundAbility extends UIAbility {
     // 用户从应用内发起整体退出时，本进程也要结束，否则托盘进程会残留。
     StatusBarTray.subscribeExitRequest((): void => {
       DshmLogger.info(TAG, '收到整体退出事件，结束后台进程');
-      this.context.terminateSelf().then((): void => {
-        DshmLogger.info(TAG, '后台进程已结束');
-      }).catch((e: BusinessError): void => {
-        DshmLogger.warn(TAG, '结束后台进程失败: ' + JSON.stringify(e));
-      });
+      this.terminateSelfQuietly();
+    });
+  }
+
+  private terminateSelfQuietly(): void {
+    this.context.terminateSelf().then((): void => {
+      DshmLogger.info(TAG, '后台进程已结束');
+    }).catch((e: BusinessError): void => {
+      DshmLogger.warn(TAG, '结束后台进程失败: ' + JSON.stringify(e));
     });
   }
 
   /**
-   * 系统结束本 Ability（用户从 Dock / 托盘右键退出，或系统回收）时触发。
-   * 这里只广播事件，由 EntryAbility 负责摘掉托盘图标并结束自己 —— 否则会出现
+   * 系统结束本 Ability（用户从系统右键菜单退出，或系统回收）时触发。
+   * 这里只广播事件，由 EntryAbility 负责停 DSH、摘掉托盘图标并结束自己 —— 否则会出现
    * "后台进程已销毁、主 Ability 却还活着"的半死状态（官方文档第 8 步明确提示）。
    */
   onPrepareToTerminate(): boolean {
     DshmLogger.info(TAG, 'onPrepareToTerminate：通知主 Ability 一并退出');
     StatusBarTray.notifyBgTerminating();
     return false;
+  }
+
+  /**
+   * 窗口阶段兜底：本 Ability 是"无窗口保活"设计，正常情况下由 EntryAbility 以
+   * `startupVisibility: STARTUP_HIDE` + 托盘绑定 processMode 拉起，不显示窗口。
+   *
+   * 但**任何以普通 startAbility 拉起它的路径都会得到一个正常窗口**（系统只看
+   * abilityName，不带那些参数），而它没有任何 UI 内容 → 屏幕上会多出一个只显示
+   * 启动图、永远进不去的窗口（实测 2026-09-13）。这里立刻隐藏窗口作为兜底。
+   */
+  onWindowStageCreate(windowStage: window.WindowStage): void {
+    DshmLogger.info(TAG, 'onWindowStageCreate：隐藏窗口（本 Ability 无 UI 内容）');
+    // 用 UIAbilityContext.hideAbility() 而不是 Window.hide()：后者在 API 26 已不存在
+    //（本项目其它地方也是用 hideAbility，见 EntryAbility.onPrepareToTerminate）。
+    this.context.hideAbility().then((): void => {
+      DshmLogger.info(TAG, '窗口已隐藏');
+    }).catch((e: BusinessError): void => {
+      DshmLogger.warn(TAG, '隐藏窗口失败: ' + JSON.stringify(e));
+    });
   }
 
   onDestroy(): void {

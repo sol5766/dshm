@@ -86,140 +86,6 @@ static void InstallCrashDiagnostics() {
     }
 }
 
-/**
- * 宿主模式（Plan A）：直接执行 Harmonybrew 安装的 dsh。
- *
- * brew 的 `bin/dsh` 是 `#!/bin/sh` 包装脚本，内部 exec 的是 brew 自带的
- * HarmonyOS 移植版 node（原生 V8，非 --jitless），且 koffi/node-pty 是宿主编译
- * 好的真原生模块 —— 因此插件能力完整，不需要任何 DSHM 适配补丁。
- * 本进程 fork 出 /bin/sh 执行它并作为父进程守候，stdout/stderr 已由 Main()
- * 重定向到 <filesDir>/log/node-<pid>.log，ArkTS 侧沿用 `dsh web:` 就绪判定。
- */
-static int RunHostDsh(const std::string& dshPath, const std::string& home, const std::string& filesDir) {
-    fprintf(stderr, "=== host mode: exec %s (HOME=%s) ===\n", dshPath.c_str(), home.c_str());
-    fflush(stderr);
-    // 从包装脚本里提取 Cellar 版本号（脚本内含 Cellar/deepseek-harness/<ver>/...），
-    // 供 ArkTS「关于版本」与更新检查展示，无需额外起进程。
-    std::string dshVersion;
-    {
-        FILE* fw = fopen(dshPath.c_str(), "r");
-        if (fw != nullptr) {
-            std::string content;
-            char chunk[512];
-            size_t n = 0;
-            while ((n = fread(chunk, 1, sizeof(chunk), fw)) > 0) {
-                content.append(chunk, n);
-                if (content.size() > 8192) break;
-            }
-            fclose(fw);
-            const std::string marker = "Cellar/deepseek-harness/";
-            const std::string::size_type at = content.find(marker);
-            if (at != std::string::npos) {
-                const std::string::size_type from = at + marker.size();
-                const std::string::size_type to = content.find('/', from);
-                if (to != std::string::npos && to > from) {
-                    dshVersion = content.substr(from, to - from);
-                }
-            }
-        }
-    }
-    // 记录当前生效模式，供 ArkTS「关于版本」展示。
-    // 顺带取一次 brew node 版本（宿主模式下的真实运行时版本）。
-    std::string nodeVersion;
-    {
-        const std::string nodeBin = home + "/.harmonybrew/opt/node/bin/node";
-        if (access(nodeBin.c_str(), X_OK) == 0) {
-            FILE* pp = popen((nodeBin + " --version 2>/dev/null").c_str(), "r");
-            if (pp != nullptr) {
-                char buf[64] = {0};
-                if (fgets(buf, sizeof(buf), pp) != nullptr) {
-                    nodeVersion = buf;
-                    while (!nodeVersion.empty() &&
-                           (nodeVersion.back() == '\n' || nodeVersion.back() == '\r')) {
-                        nodeVersion.pop_back();
-                    }
-                }
-                pclose(pp);
-            }
-        }
-    }
-    {
-        FILE* f = fopen((filesDir + "/runtime-mode-active.txt").c_str(), "w");
-        if (f != nullptr) {
-            fprintf(f, "host\n");
-            fprintf(f, "dsh=%s\n", dshPath.c_str());
-            fprintf(f, "version=%s\n", dshVersion.c_str());
-            fprintf(f, "node=%s\n", nodeVersion.c_str());
-            fprintf(f, "home=%s\n", home.c_str());
-            fclose(f);
-        }
-    }
-    if (!nodeVersion.empty()) {
-        fprintf(stderr, "=== host node %s ===\n", nodeVersion.c_str());
-        fflush(stderr);
-    }
-    // 宿主 dsh 没有 /dshm-admin/* 端点可用来请求退出，重启改为文件信号：
-    // ArkTS 侧创建 <filesDir>/restart-request，本进程守候到它即结束子进程并重启。
-    const std::string restartFlag = filesDir + "/restart-request";
-    int lastStatus = 0;
-    for (;;) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            fprintf(stderr, "=== host mode fork failed: %s ===\n", strerror(errno));
-            fflush(stderr);
-            return -1;
-        }
-        if (pid == 0) {
-            setenv("HOME", home.c_str(), 1);
-            // brew formula 在包装脚本里设置的 OpenSSL 移植开关，这里保持一致。
-            setenv("OPENSSL_armcap", "0", 1);
-            const std::string cmd = dshPath + " web --no-open";
-            execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
-            fprintf(stderr, "=== host mode exec failed: %s ===\n", strerror(errno));
-            fflush(stderr);
-            _exit(127);
-        }
-        fprintf(stderr, "=== host dsh started pid=%d ===\n", pid);
-        fflush(stderr);
-        bool restartRequested = false;
-        for (;;) {
-            int status = 0;
-            const pid_t done = waitpid(pid, &status, WNOHANG);
-            if (done == pid) {
-                lastStatus = status;
-                fprintf(stderr, "=== host dsh exited: status=%d ===\n", status);
-                fflush(stderr);
-                break;
-            }
-            if (done < 0) {
-                fprintf(stderr, "=== host mode waitpid failed: %s ===\n", strerror(errno));
-                fflush(stderr);
-                lastStatus = -1;
-                break;
-            }
-            if (access(restartFlag.c_str(), F_OK) == 0) {
-                unlink(restartFlag.c_str());
-                fprintf(stderr, "=== restart requested: stopping host dsh pid=%d ===\n", pid);
-                fflush(stderr);
-                kill(pid, SIGTERM);
-                usleep(400 * 1000);
-                if (waitpid(pid, &status, WNOHANG) == 0) {
-                    kill(pid, SIGKILL);
-                    waitpid(pid, &status, 0);
-                }
-                restartRequested = true;
-                break;
-            }
-            usleep(400 * 1000);
-        }
-        if (!restartRequested) {
-            break;
-        }
-        fprintf(stderr, "=== host dsh restarting ===\n");
-        fflush(stderr);
-    }
-    return lastStatus;
-}
 
 /** node::Start(int argc, char** argv) 符号（libnode.so 导出）。 */
 typedef int (*NodeStartFn)(int argc, char** argv);
@@ -481,6 +347,37 @@ extern "C" __attribute__((visibility("default"))) void Main() {
 
     InjectBusyboxEnv(dshDir);
 
+    // ── 清理残留 dsh web 进程 ─────────────────────────────────────
+    // 必须在 InjectBusyboxEnv 之后：此前 PATH 上只有 toybox，无 awk → 管道断，
+    // kill 不执行，2>/dev/null 吞掉报错，且无条件白等 400ms。
+    // 改用 busybox ps + C 内 kill(pid, SIGKILL)，不依赖 awk/xargs；
+    // 仅在实际 kill 了进程时才短暂等待。
+    {
+        FILE* pp = popen("ps -ef 2>/dev/null | grep 'bin\\.js web' | grep -v grep", "r");
+        if (pp != nullptr) {
+            char line[256];
+            bool killed = false;
+            while (fgets(line, sizeof(line), pp) != nullptr) {
+                // ps -ef: UID PID PPID ... — 解析第二列 PID
+                char* p = line;
+                while (*p == ' ' || *p == '\t') p++;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                while (*p == ' ' || *p == '\t') p++;
+                int pid = atoi(p);
+                if (pid > 1 && pid != getpid()) {
+                    if (kill(pid, SIGKILL) == 0) {
+                        killed = true;
+                        fprintf(stderr, "=== killed stale dsh web pid=%d ===\n", pid);
+                    }
+                }
+            }
+            pclose(pp);
+            if (killed) {
+                usleep(200000);
+            }
+        }
+    }
+
     // 鸿蒙沙箱 seccomp 过滤器禁止 io_uring（aarch64 syscall 425），
     // libuv 在 uv_loop_init 中调用 io_uring_setup 会触发 SIGSYS 崩溃。
     // 通过环境变量让 libuv 回退到 epoll 事件循环（与标准 Linux 行为一致）。
@@ -570,39 +467,7 @@ extern "C" __attribute__((visibility("default"))) void Main() {
     // 工具面探测（M0.5）：host 侧候选（bash/python3/brew/zsh）实际 access 结果。
     ProbeHostTools();
 
-    // ── 运行模式选择 ────────────────────────────────────────────────
-    // 模式由 <filesDir>/runtime-mode.txt 控制（内容 auto | host | embedded，
-    // 由 ArkTS 侧菜单写入，缺省 auto）：
-    //   host     优先宿主 dsh，没有则回退内嵌并打印原因
-    //   embedded 强制内嵌运行时（libnode + --jitless + 适配环境）
-    //   auto     有宿主 dsh 就用宿主，否则内嵌
-    std::string mode = "auto";
-    {
-        FILE* fm = fopen((filesDir + "/runtime-mode.txt").c_str(), "r");
-        if (fm != nullptr) {
-            char buf[64] = {0};
-            if (fgets(buf, sizeof(buf), fm) != nullptr) {
-                mode = buf;
-                while (!mode.empty() && (mode.back() == '\n' || mode.back() == '\r' || mode.back() == ' ')) {
-                    mode.pop_back();
-                }
-            }
-            fclose(fm);
-        }
-    }
-    const std::string hostDsh = wsDir + "/.harmonybrew/bin/dsh";
-    const bool hostAvailable = (access(hostDsh.c_str(), X_OK) == 0);
-    fprintf(stderr, "=== runtime mode=%s hostDsh=%s (%s) ===\n",
-            mode.c_str(), hostDsh.c_str(), hostAvailable ? "executable" : "missing");
-    fflush(stderr);
-    if (mode != "embedded" && hostAvailable) {
-        RunHostDsh(hostDsh, wsDir, filesDir);
-        return;
-    }
-    if (mode == "host" && !hostAvailable) {
-        fprintf(stderr, "=== 请求宿主模式但没有可执行的 %s，回退内嵌运行时 ===\n", hostDsh.c_str());
-        fflush(stderr);
-    }
+    // ── 运行模式：固定内嵌运行时（宿主模式已剥离）──────────────────────
     {
         FILE* f = fopen((filesDir + "/runtime-mode-active.txt").c_str(), "w");
         if (f != nullptr) {
@@ -610,6 +475,17 @@ extern "C" __attribute__((visibility("default"))) void Main() {
             fclose(f);
         }
     }
+    // ── 启用 dshmarket 的「同进程 pnpm 桥接」────────────────────
+    // dshmarket 的安装链路默认走 node:child_process spawn pnpm / corepack / dsh CLI，
+    // 而鸿蒙沙箱里 ①PATH 上没有 pnpm/npm/corepack；②filesDir 内的可执行文件
+    // spawn/execv 一律 EACCES。壳侧补丁把安装改走 dsh 自带的同进程 worker + 内置 pnpm，
+    // 由两个环境变量双重门控：
+    //   DSHM_FILES_DIR      —— 定位内置 pnpm.cjs 与 @deepseek-ai/dsh/lib/plugin-*.js
+    //   DSHM_INPROCESS_PNPM=1 —— 开关
+    setenv("DSHM_FILES_DIR", filesDir.c_str(), 1);
+    setenv("DSHM_INPROCESS_PNPM", "1", 1);
+    fprintf(stderr, "=== in-process pnpm bridge: DSHM_FILES_DIR=%s ===\n", filesDir.c_str());
+    fflush(stderr);
 
 std::string bin = dshDir + "/node_modules/@deepseek-ai/dsh/lib/bin.js";
     // argv: node --jitless --expose-internals <dsh bin> web

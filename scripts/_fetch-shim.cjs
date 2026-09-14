@@ -916,16 +916,32 @@ function installGlobal(name, value) {
     enumerable: true,
   });
 }
-installGlobal('fetch', shimFetch);
-installGlobal('Headers', ShHeaders);
-installGlobal('Request', ShRequest);
-installGlobal('Response', ShResponse);
-installGlobal('FormData', ShFormData);
-installGlobal('MessageEvent', ShMessageEvent);
-installGlobal('CloseEvent', ShCloseEvent);
-installGlobal('ErrorEvent', ShErrorEvent);
-installGlobal('WebSocket', ShWebSocket);
-installGlobal('EventSource', ShEventSource);
+
+// ---------------------------------------------------------------------------
+// JIT 模式（方案 A）下不覆盖任何 Web 全局：
+//   有 ohos.permission.kernel.ALLOW_EXECUTABLE_FORT_MEMORY 的签名里 node 不带
+//   --jitless 启动，真 WebAssembly/undici fetch 全部可用。shim 此时只做诊断日志
+//   （WebAssembly 桩本身已是条件式：真全局存在时不装）。
+// 判定：node --jitless 会把 process.execArgv 含 --jitless；或 V8 报告无 JIT。
+// ---------------------------------------------------------------------------
+const execArgv = (process.execArgv || []);
+const isJitless = execArgv.includes('--jitless');
+if (isJitless) {
+  installGlobal('fetch', shimFetch);
+  installGlobal('Headers', ShHeaders);
+  installGlobal('Request', ShRequest);
+  installGlobal('Response', ShResponse);
+  installGlobal('FormData', ShFormData);
+  installGlobal('MessageEvent', ShMessageEvent);
+  installGlobal('CloseEvent', ShCloseEvent);
+  installGlobal('ErrorEvent', ShErrorEvent);
+  installGlobal('WebSocket', ShWebSocket);
+  installGlobal('EventSource', ShEventSource);
+  process.stderr.write('[fetch-shim] jitless mode: globals shimmed (fetch=' +
+    globalThis.fetch.name + ')\n');
+} else {
+  process.stderr.write('[fetch-shim] JIT mode detected: native WebAssembly/undici available, globals untouched\n');
+}
 
 // ---- diagnostics: prove preload order + catch undici loaders ----
 process.stderr.write('[fetch-shim] installed globals; fetch.name=' +
@@ -953,18 +969,17 @@ if (CJS) {
 // hook above stays as the load tracer; ESM-side, if the app imports undici
 // at all, the globals + stub installed here still cover it.
 
-globalThis.__fetchShimLoaded = { status: 'ok', undici: 'blocked' };
+globalThis.__fetchShimLoaded = { status: 'ok', undici: isJitless ? 'blocked' : 'native' };
 
 process.stderr.write('[fetch-shim] loaded OK\n');
 // ---------------------------------------------------------------------------
-// Worker-thread coverage: jitless is permanent, so every worker thread also
-// lacks WebAssembly. Worker threads start with a fresh global context and
-// undici's own fetch lazily — the preload shim does NOT propagate to them by
-// default. Wrap Worker so every new thread preloads this same shim.
+// Worker-thread coverage: in jitless mode every worker thread also lacks
+// WebAssembly (fresh global context). In JIT mode workers inherit native
+// WebAssembly, so the wrap is only needed for jitless.
 // ---------------------------------------------------------------------------
 try {
   const workerThreads = require('node:worker_threads');
-  if (workerThreads.isMainThread && workerThreads.Worker) {
+  if (workerThreads.isMainThread && workerThreads.Worker && isJitless) {
     const shimPath = __filename;
     const OrigWorker = workerThreads.Worker;
     class ShimWorker extends OrigWorker {
@@ -984,3 +999,61 @@ try {
 }
 
 process.stderr.write('[fetch-shim] worker coverage done\n');
+
+// ---------------------------------------------------------------------------
+// DSHM 结构化启动状态（boot-state.json）
+//
+// 目标：ArkTS 侧不再轮询/刮削 node-*.log 去猜「dsh 是否就绪、带 token 的 URL 是什么」——
+// dsh 打印带 token 的 URL 那一刻，由本预加载脚本一次性把结构化状态原子写盘
+// （tmp + rename），壳侧读单文件即可，消灭「先监听端口、后打印 URL」之间的白屏窗口
+// （实测 waitForServer 6.7s 就绪而 token 40-60s 才落盘）。
+//
+// 环境变量 DSHM_FILES_DIR 由 libdsh_host 注入（与 DSHM_KOFFI_PATH 同批）。
+// 注意：本块必须由脚本生成（手改环境树会在重建时丢失，2026-09-13 踩过）。
+// 剖析模式（DSHM_BOOT_PROFILE=1）已自行包装 console.log，这里让位。
+// ---------------------------------------------------------------------------
+if (!__profEnabled) {
+  try {
+    const bootFilesDir = process.env.DSHM_FILES_DIR;
+    if (typeof bootFilesDir === 'string' && bootFilesDir.length > 0) {
+      const bootStatePath = bootFilesDir + '/boot-state.json';
+      const bootTmpPath = bootStatePath + '.tmp';
+      const bootFs = require('node:fs');
+      const bootOrigLog = console.log.bind(console);
+      let bootStateWritten = false;
+      console.log = function bootStateLog(...args) {
+        bootOrigLog(...args);
+        if (bootStateWritten || typeof args[0] !== 'string' || !args[0].startsWith('dsh web: ')) {
+          return;
+        }
+        bootStateWritten = true;
+        try {
+          const line = args[0];
+          const at = line.indexOf('http://');
+          const url = at >= 0 ? line.slice(at).trim() : '';
+          // URL 尚无 token 时（dsh 先监听后打印的窗口期）不写盘，保留壳侧刮削回退，
+          // 避免写入半截状态让 ArkTS 提前判定就绪。
+          if (!url.startsWith('http://') || url.indexOf('token=') < 0) {
+            bootStateWritten = false;
+            return;
+          }
+          const payload = {
+            mode: 'embedded',
+            pid: process.pid,
+            url,
+            dshVersion: typeof process.env.DSHM_DSH_VERSION === 'string' ? process.env.DSHM_DSH_VERSION : '',
+            nodeVersion: process.version,
+            arch: process.arch,
+            readyAt: new Date().toISOString(),
+          };
+          bootFs.writeFileSync(bootTmpPath, JSON.stringify(payload, null, 2) + '\n');
+          bootFs.renameSync(bootTmpPath, bootStatePath);
+        } catch (bootError) {
+          /* 写失败不影响服务；壳侧仍有日志刮削回退 */
+        }
+      };
+    }
+  } catch (bootSetupError) {
+    /* 装配失败同样静默 */
+  }
+}
