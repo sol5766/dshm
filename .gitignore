@@ -59,6 +59,7 @@ Thumbs.db
 # 签名材料（密钥库口令 / 证书路径）是**机器绑定**的。因此：
 #   · 仓库里那份 = 模板（占位符）
 #   · 你本机那份 = build-profile.local.json5（本条忽略）
+/build-profile.json5
 /build-profile.local.json5
 
 # ── 第三方调研副本（他人的仓库内容，版权不属于本项目）─────────────────
