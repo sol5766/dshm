@@ -1,0 +1,13 @@
+# Define project specific obfuscation rules here.
+# Obfuscation options:
+# -disable-obfuscation: disable all obfuscations
+# -enable-property-obfuscation
+# -enable-toplevel-obfuscation
+-enable-filename-obfuscation
+-enable-export-obfuscation
+
+# 【本模块】platform 是纯 ArkTS 工具层，无手写 JSON 字段名解析，
+# 但仍显式关闭属性/顶层混淆：与其它模块保持同一份规则，避免"某模块开了、
+# 某模块没开"导致 release 产物行为不一致。
+-disable-property-obfuscation
+-disable-toplevel-obfuscation

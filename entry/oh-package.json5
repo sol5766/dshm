@@ -1,0 +1,20 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "DSHM 入口模块（DeepSeek Harness 鸿蒙客户端）",
+  "main": "",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "connection": "file:../connection",
+    "sherpa_onnx": "file:../third_party/sherpa_onnx-1.13.3.har",
+    "appstate": "file:../appstate",
+    "dshcompat": "file:../dshcompat",
+    "platform": "file:../platform",
+    "hostruntime": "file:../hostruntime"
+  },
+  "devDependencies": {
+    "libdshhost.so": "file:./src/main/cpp/types/libdshhost",
+    "libentryprobe.so": "file:./src/main/cpp/types/libentryprobe"
+  }
+}

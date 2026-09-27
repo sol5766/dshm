@@ -1,0 +1,13 @@
+{
+  "name": "entry_test",
+  "type": "module",
+  "description": "协议兼容层与状态层的单元测试（Hypium）",
+  "main": "",
+  "version": "1.0.0",
+  "dependencies": {
+    "appstate": "file:../../appstate",
+    "connection": "file:../../connection",
+    "dshcompat": "file:../../dshcompat",
+    "platform": "file:../../platform"
+  }
+}

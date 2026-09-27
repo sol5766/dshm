@@ -1,0 +1,11 @@
+{
+  "name": "dshcompat",
+  "version": "1.0.0",
+  "description": "DSH 上游兼容面：端点上表、参数模式、能力表、字段别名、漂移判定。上游升级只需改动本模块。",
+  "main": "Index.ets",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "connection": "file:../connection"
+  }
+}

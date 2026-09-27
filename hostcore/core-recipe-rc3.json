@@ -1,0 +1,63 @@
+{
+  "$comment": "DSHM 端侧 dsh 核心树的配方（唯一事实来源）。tools/pack-core.mjs 读它来物化、裁剪、校验、打包。改版本/换移植件都只改这里。",
+  "coreVersion": "0.1.5-rc.3",
+  "platform": {
+    "os": "openharmony",
+    "cpu": "arm64"
+  },
+  "$comment_overrides": "把 dsh 的硬原生依赖别名到鸿蒙移植版。键是上游包名，值是 npm 别名。",
+  "overrides": {
+    "node-pty": "npm:@ohos-ports/node-pty@1.1.0-beta.0",
+    "koffi": "npm:@ohos-ports/koffi@2.16.2-beta.0",
+    "sharp": "npm:@ohos-ports/sharp@0.34.5-beta.12"
+  },
+  "$comment_profile": "端侧 profile 名；打包时把 hostcore/profile/<name>/ 放到核心树的 profiles/<name>/。",
+  "profile": "ondevice",
+  "$comment_prune": "只删这些规则命中的路径，绝不广谱清理。keepOnlyDirs：保留列出的子目录，其余子目录删除。remove：整目录删除。removeGlobs：按 glob 删除文件。",
+  "prune": [
+    {
+      "why": "koffi 一个包自带 19 个平台的 .node（其中仅非鸿蒙就 25.2 MB），只留鸿蒙",
+      "dir": "koffi/build/koffi",
+      "keepOnlyDirs": [
+        "openharmony_arm64"
+      ]
+    },
+    {
+      "why": "node-pty 的 prebuilds 里只有 openharmony-arm64 有用",
+      "dir": "node-pty/prebuilds",
+      "keepOnlyDirs": [
+        "openharmony-arm64"
+      ]
+    },
+    {
+      "why": "node-pty 的 third_party/conpty 是 Windows 控制台宿主（OpenConsole.exe），鸿蒙用不到",
+      "dir": "node-pty/third_party",
+      "remove": true
+    },
+    {
+      "why": "node-pty 的构建脚本与源码不需要随包分发",
+      "dir": "node-pty/scripts",
+      "remove": true
+    },
+    {
+      "why": "Windows 可执行文件在鸿蒙沙箱里既不可执行也不该分发",
+      "removeGlobs": [
+        "**/*.exe",
+        "**/*.dll",
+        "**/*.pdb"
+      ]
+    }
+  ],
+  "$comment_pruneCandidate_wasm32": "候选裁剪项（**尚未启用**）：@ohos-ports/img-sharp-wasm32 是 sharp 的 wasm32 平台回退包，在鸿蒙/arm64 上用不到；而且它是全树唯一的 .wasm（D6 E20），在 --jitless 下 WASM 为 undefined，这个回退**即使被选中也必然失败**。删掉它能少一份体积、并把 sharp 的失败语义从'走到 WASM 然后 undefined'变成'明确说没有可用原生二进制'。之所以先不启用：需要先确认 sharp 的加载器是不是**无条件** require 这个包——若是条件 require，删掉安全；若无条件，删掉会直接抛错。这一步要能跑一次 Node 才能验，别凭猜删。",
+  "$comment_requiredNative": "打包后必须存在的原生产物；缺任何一个即失败（否则会在设备上以 boot 失败的形式暴露）",
+  "requiredNative": [
+    "koffi/build/koffi/openharmony_arm64/koffi.node",
+    "node-pty/prebuilds/openharmony-arm64/pty.node",
+    "node-pty/prebuilds/openharmony-arm64/spawn-helper"
+  ],
+  "$comment_optionalNative": "存在则校验签名、缺失只告警（sharp/libvips 的可选库）",
+  "optionalNativeGlobs": [
+    "@ohos-ports/**/*.node",
+    "@ohos-ports/**/*.so*"
+  ]
+}

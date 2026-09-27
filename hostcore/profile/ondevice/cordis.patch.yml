@@ -1,0 +1,314 @@
+# DSHM 端侧 profile —— 用户 patch 层
+#
+# dsh 的 patch 应用顺序（见 D6 §5.3）：
+#   bundle 层 patch（按 dsh.profile.bundles 顺序）
+#     → 本文件（profile 的 cordis.patch.yml）
+#     → $DSH_HOME/cordis.patch.yml
+#     → --patch 覆盖层
+# 本文件里的覆盖**整块替换**目标行的 config；`{insert: […]}` 是追加。
+#
+# ── 纪律 ────────────────────────────────────────────────────────────────
+# 只放**有证据支持**的覆盖，每条都写清证据与恢复条件。
+#
+# ── 判别口径（哪些该禁、哪些必须留）──────────────────────────────────────
+# 判据不是"用了原生模块就禁"，而是**这件事在鸿蒙上能否直接实现**：
+#   · koffi（FFI）**能用**：我们已用应用自身的 OHOS 工具链自建 3.2.1（D6 E51），
+#     DT_NEEDED 结构性满足。所以 `web-startup` / `web-runtime` / `session-persistence-jsonl`
+#     这些"经由 koffi"的行**必须保留**——`web-startup` 正是起 webserver 的那一行，
+#     禁掉它 Host 就永远不会监听（这就是早先"runProfile 返回了但没有 webServer"的成因链）。
+#   · node-pty（PTY + `spawn-helper`）**不能用**：要 `posix_openpt`/`forkpty` 并
+#     **创建进程**执行同目录下的 `spawn-helper`，而鸿蒙对应用创建进程有平台级限制（D6 E15）。
+#     依赖它的整条链都得禁（见下）。
+#   · sharp/libvips **不能用**：缺 `libvips-cpp.so.42`、且其加载器要建软链（沙箱禁止），
+#     WASM 回退在 `--jitless` 下必失败（D6 E46）。
+# 另外：koffi 3.x 是**刚自建**的（E51）。在只有 2.16.2 移植版的那段时间里，
+# “经由 koffi”的行会因 2.x↔3.x 代差而加载失败（E47），那份禁用是为了先跑通主流程的
+# **临时**措施；koffi 3.x 到位后，与 koffi 有关的临时禁用全部撤销（见下）。
+
+# ── 永久禁用（鸿蒙上无法直接实现）────────────────────────────────────────
+
+# ⓪ web-runtime 的三个默认值里有两个与本应用不符（E85）
+#
+# 依据（`dsh-web-app/lib/index.js`）：`openBrowser` / `printUrl` / `surfaceContext` 的
+# 默认值都是 **true**。
+#   · `surfaceContext: true` 会**注入一段系统提示**，内容是"你正在通过 DeepSeek Harness
+#     Web GUI 与用户交互……浏览器不提供隐式 DOM/路由/截图上下文"（`lib/index.js:177`）。
+#     我们的端侧页面是**原生 ArkUI**，不是 Web GUI——留着它等于对模型说了一句假话，
+#     而且它会塑造模型对"界面能力"的判断（E85 引用实现的同一处）。
+#   · `printUrl: true` **必须保留**：我们的 token 正是从这行 stdout 抓的
+#     （`hostcore/app/main.js` 的 `watchdogAuthUrl`）。关掉它等于关掉自己的凭据来源。
+#   · `openBrowser: false` 显式写死：端侧没有可打开的浏览器；虽然启动参数里已有
+#     `--no-open`，但那是**命令行**层的约定，写在 profile 里的是**部署**层的事实，
+#     两者都写，任何一侧被改动时另一侧仍然成立。
+- id: web-runtime
+  config:
+    surfaceContext: false
+    printUrl: true
+    openBrowser: false
+
+# ① PTY / 进程创建链（D6 E15；E47 已由 koffi 3.2.1 修复——真机 natives 探针
+#    koffi ok:true，subprocess-local 的 POSIX 路径 koffi.load(null)→fcntl/execve 可用）。
+#    subprocess 已启用（真机验证通过：terminal-controller / workspace-changes /
+#    ui-deliverables 三个下游随之激活）。sandbox 一并实验启用：若 start 阶段
+#    clone/setns 被 seccomp 拦（E15 预期），回退为 disabled 并记录 fail 模式。
+- id: subprocess
+  disabled: false
+- id: sandbox
+  disabled: false
+# bash/pwsh 执行器（`dsh-bash-sandbox` → `dsh-bash-local`、`dsh-pwsh-sandbox` → `dsh-pwsh-local`，
+# 两者的 `static inject = ["subprocess"]`）。provider 禁用后它们必然缺服务。
+#
+# 【bash-sandbox 实测链路（2026-09-21）】保留本包已验证的执行链：
+#   bash-sandbox enabled（probe-bash-5 实测 `uname -a` 通过，debug 签名 exec
+#   /bin/sh 无 EACCES）+ sandbox-policy danger-full-access（workspace-write 在
+#   ohos 名存实亡，见下方注释）。DSHM 走的是 bash-local 直连 + sandboxMode
+#   声明的另一条链；本包不照搬——已实测的链路优先，fs 侧才补注册
+#   dsh-fs-local（dsh-base 行内注释，2026-09-21）。
+- id: bash-sandbox
+  disabled: false
+- id: pwsh-sandbox
+  disabled: true
+# 【sandbox-policy 端侧实验（2026-09-21）】danger-full-access。
+#   实测证据（session probe-bash-3，standard preset turn#1）：workspace-write 模式下
+#   bash 一律 SandboxUnavailableError —— "no sandbox backend is usable on this
+#   host"（Landlock/bubblewrap 在 ohos 缺席，landlock-run launcher probe 返回
+#   unusable）。confinement 层在端侧不存在 ⇒ workspace-write 名存实亡。
+#   danger-full-access = LocalBashExecutor 直接 spawn（node:child_process →
+#   libuv fork/exec），是端侧唯一能真实执行的路径；真正的安全闸是
+#   approval escalation 流（实测正常：模型升级请求会挂 approval/asked 等批准）。
+#   回退条件：若将来端侧有 confinement 后端（或 permission-presets 重设计），
+#   恢复 workspace-write。
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
+# ⑤ 内置终端（P0-2，2026-09-26）
+#    官方 desktop 有终端；端侧 terminal-controller / ui-sidebar-terminal / terminal-bash
+#    都已挂载且启用，但 `@deepseek-ai/dsh-terminal-bash` 的默认 `shellPath` 是
+#    **`/bin/bash`**——鸿蒙 `/bin→/system/bin` 下没有 bash ⇒ PTY 启动 ENOENT
+#    （真机实证：终端打不开）。它的默认 `shellArgs`（`--noprofile --norc -i`）也不适用：
+#    端侧真正可用的是 busybox ash，不认那两个长选项。两处在此显式给定：
+#      · shellPath = 随包布置的 bash 垫片（hostcore/app/main.js 的 ensureBashShim；
+#        逐级探测真 bash → busybox ash → /system/bin/sh，见 BASH_SHIM_LINES）；
+#      · shellArgs = ["-i"]（交互即可；ash 不认 --noprofile/--norc）。
+#    绝对路径 = 应用沙箱根（BOOT_10 实测 sandbox=/data/storage/el2/base/haps/entry/files），
+#    端侧稳定；与应用 PATH 首项同源（见 SANDBOX_HOME 定义）。
+- id: terminal-bash
+  config:
+    shellPath: /data/storage/el2/base/haps/entry/files/bin/bash
+    shellArgs: ['-i']
+#    鸿蒙确实没有 PowerShell：官方 `terminal-pwsh`（dsh-sdk-minimal 里另一行，name 同为
+#    dsh-terminal-bash、shellDialect: pwsh）在端侧必 ENOENT，显式关闭。
+- id: terminal-pwsh
+  disabled: true
+
+# 【P1-2（2026-09-26）过时覆盖已清理】原在这里的 `- id: tool-bash disabled: true`
+# 是 bring-up 期的权宜——当时端侧 `bash` 是 busybox 副本、必报 `applet not found`，
+# 留着工具只会让模型拿到一个必然失败的工具。现在 bash 垫片随包布置且真机实测
+# `bash=ok`（见 hostcore/app/main.js 的 ensureBashShim 与 exec 探测锚点），
+# 官方默认（`disabled: process.platform === 'win32'`）在端侧即"启用"，故删掉本覆盖。
+# 保留 `tool-pwsh`：鸿蒙确实没有 PowerShell，工具留着必然 ENOENT。
+- id: tool-pwsh
+  disabled: true
+
+# ② sharp / libvips（D6 E46）
+#    三个独立阻塞点：缺 libvips-cpp.so.42、加载器要建软链（沙箱禁止）、WASM 回退在 jitless 下必失败。
+#    恢复线索：`@ohos-ports/img-sharp-libvips-openharmony-arm64/lib/libvips-cpp.so.42.20.3`
+#    确实在核心树里，将来可连同依赖搬进 HAP libs 并处理带版本号的 SONAME。
+# 【P1-2（2026-09-26）】原 `- id: attachment-local disabled: false` 已删：那是 bring-up
+# 期的临时行（当时该 provider 被禁、下游 file-upload/session-controller 级联 pending），
+# 官方 bundle 默认即启用，留着只是冗余覆盖。
+
+# ③ "在应用中打开"依赖 subprocess 服务（`@deepseek-ai/dsh-host-open-in-app` 的
+#    `inject = ['webServer','connection','subprocess']`）。端侧就是本应用自身，
+#    这个"把外部 Host 的产物丢给本机程序打开"的能力没有对应物。
+- id: open-in-app
+  disabled: true
+
+# ── 依赖级联（**临时**：为了先让插件树起来）────────────────────────────────
+#
+# dsh 的 boot 要求**所有行都 activate**，所以禁掉一个 provider 会把它下游的消费者
+# 拖成 pending，并让整棵树 fail-loud。本地实测（`node --jitless hostcore/app/main.js`，
+# 与真机同参）第一轮就打出：
+#     dsh: 4 entries did not activate
+#     @deepseek-ai/dsh-permission-presets: pending (waiting for service: shell)
+#     @deepseek-ai/dsh-api-session-controller: pending (waiting for services: attachments, fileUploads)
+#     @deepseek-ai/dsh-client-file-upload: pending (waiting for service: attachments)
+#     @deepseek-ai/dsh-client-ui-deliverables: pending (waiting for service: sessionController)
+#
+# 链路是：`attachment-local`（attachments provider，本例禁用）→ `file-upload`（fileUploads）
+# → `session-controller`（sessionController）→ 依赖它的客户端行；另一边
+# `bash-sandbox`/`pwsh-sandbox`（shell provider，本例禁用）→ `permission-presets`。
+#
+# 【这一段是临时的】目的只是把"Host 能否起来"这条主流程跑通。恢复顺序应当是：
+#   ① 让 `attachment-local` 真正可用（把 libvips 及其依赖搬进 HAP libs 并处理带版本号的
+#      SONAME，见 E46 的恢复线索）→ 撤销下面 3 条；
+#   ② shell 链在鸿蒙上没有对应物（无法创建进程，E15）→ 这条级联要长期评估。
+# ④ 权限预设：启用（2026-09-24 本机实测链路与本修复证据）。
+#    E116 时代禁用的前提——"shell 只能由 bash-sandbox/pwsh-sandbox 提供，两者在
+#    鸿蒙上没有对应物（无法创建进程，E15）"——已被 2026-09-21 的 bash-sandbox
+#    实测启用（见上方 bash-sandbox 行注释，probe-bash-5 通过）撤销：shell 服务
+#    现已存在。启用仍需两个配套，缺一即 fail-loud：
+#      a. executor 必须带 sandboxMode（dsh-permission-presets 构造期硬校验，
+#         lib/index.js:173）——bash-sandbox 的 LocalBashExecutor 满足；
+#      b. config.defaultPreset 必须显式给——构造期 derive(EMPTY_KNOBS) 用
+#         sandbox-policy 的 danger-full-access + approval 默认策略（ask）组合，
+#         不在默认预设表 {workspace-write+ask, danger-full-access+never} 里，
+#         推导为 "custom" 直接拒活（"composed sandbox and approval defaults
+#         match no preset"）。显式指向 danger-full-access 与 sandbox-policy
+#         实测链路一致；approval escalation 流照常生效（见 sandbox-policy 行）。
+#    实测：include:permission → active，permissionPresets/catalog → 200
+#    （workspace-write / danger-full-access 两预设），通用设置权限行不再 404。
+- id: permission
+  disabled: false
+  config:
+    defaultPreset: danger-full-access
+# 【P1-2（2026-09-26）】原 file-upload / session-controller / ui-deliverables 三条
+# `disabled: false` 已删：同 attachment-local 一样是 bring-up 期的临时覆盖，
+# 官方 bundle 默认即启用（dsh-web-app 注册这三行且不带 disabled）。留着只是冗余；
+# 且它们在 agent preset 之外、按 id 覆盖全局，长期会掩盖官方默认的变化。
+
+# ⑦ workflow / PTC：**端侧不可用，禁用**（P1-1，2026-09-26）
+#    结论来自实测：`@deepseek-ai/dsh-ptc-runtime-node` 的执行入口调用
+#    `node:module` 的 `stripTypeScriptTypes`（lib/index.js:930 剥离用户脚本的 TS 类型），
+#    而该 API 在 `--jitless` 下抛
+#      `WebAssembly is not supported in this environment, but is required for TypeScript`
+#    （本机 Node v24.14.1 `--jitless` 逐字复现；端侧 BOOT_00 报 jitless=true）。
+#    PTC 还额外 spawn 一个子 Node 进程，那条链在端侧同样受进程创建限制。
+#    【两处都要治】：
+#      ① host 面这两行（dsh-base 声明）——下面这两条 id 覆盖；
+#      ② 模型的**工具清单**由 agent preset 决定（dsh-web-app/presets/*.patch.yml 的
+#         `delegation` 组里另有 workflow-ptc / tool-workflow 两份副本，在 isolate
+#         作用域内按 id 查不到），profile 的 patch 行够不着 ⇒ 由打包层
+#         tools/pack-core.mjs 的 patchAgentPresetWorkflow() 直接给 preset 文件加 disabled。
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
+
+# 【P1-1 附带修正（2026-09-26）】原此处为：
+#     - id: agent-presets
+#       config:
+#         default: ondevice
+#    这是**无效行**：Loader 树里没有 id 为 `agent-presets` 的条目（提供该服务的行
+#    真名是 `agent-preset-registry`，由 dsh-web-app 声明、`default: standard`），
+#    applyEntryPatches 对查不到的 id 只 warn 后静默跳过。也就是说本行从未生效，
+#    实际生效的一直是 `standard` preset（含 tool-bash / tool-workflow）。
+#    端侧**不需要**再复制一份 preset：`standard` 在端侧语义已正确（tool-bash 的
+#    `!!js process.platform === 'win32'` 在鸿蒙为 false ⇒ 启用；tool-pwsh 反之禁用），
+#    而 workflow 已由上面的 id 覆盖 + 打包层 preset 补丁摘掉。故直接删除本行，
+#    不再制造"写了却没人读"的假象。
+
+# ④b 语音输入（实验 bundle）：端侧策略（2026-09-26 修订）
+#
+#    【历史】报告 5 §2.5 / 报告 7 §3 曾把整条链**默认禁用**（四行 disabled: true），
+#    因为点语音会红字报 `Local speech is unavailable for openharmony-arm64`。
+#    三条平台缺口至今未变：
+#      ① `dsh-experimental-speech-to-text-sensevoice` 的 `resolveRuntime()` 白名单只有
+#         `darwin-arm64/x64`、`linux-arm64/x64`、`win32-x64`，**没有 openharmony**
+#         （lib/index.js:201-207 逐字可见）⇒ 直接抛 "unavailable for …"；
+#      ② 它依赖 `sherpa-onnx-node`，而该包在端侧**没有任何 .node/.so** 产物
+#         （需要 `sherpa-onnx-openharmony-arm64`，上游不存在）；
+#      ③ 即便补上产物，`.node` 还要过签名域（与本项目 git/rg 同一条约束），
+#         且模型是 int8 228MB / fp32 894MB。
+#
+#    【2026-09-26 为什么改为启用】目标是验证**麦克风授权通路**（模块权限 +
+#    WebView onPermissionRequest），而不是本地识别。读了上游代码确认"启用不会毁启动"：
+#      · `sensevoice` 的 `apply()`（lib/index.js:920-954）**不调** resolveRuntime，
+#        只做路径校验 + 注册 provider 元信息 + `worker.inspect()`；
+#      · `inspect()`（:632-663）把 inspectRuntime 的异常**吞进** env，最终 publish
+#        成 `phase: "failed"`，不冒泡 ⇒ **开机不会因它失败**；
+#      · `ui-voice-input` 的 inject 是 `["remote","slots","locale","pluginNavigation"]`,
+#        **不含 speechToText** ⇒ UI 正常渲染，只是按钮处于"待配置"态。
+#    UI 侧（client.js）的行为已核实：provider 不可用时点麦克风**只弹配置对话框**
+#    （`start()` 首行 `if (!catalog || !usable …) return;`，:5036；onClick 分支 :5090），
+#    不会触发 getUserMedia ⇒ 因此本项的麦克风验证**不依赖**它，改由
+#    WebApp.ets 的「应用 → 麦克风自检」独立探针完成（见 MIC_PROBE_JS 注释）。
+#
+#    【代价】插件面板会列出语音组件；点麦克风会弹"需安装依赖"引导（预期行为，
+#    不是新 bug）。若只想保持界面干净，把这四行恢复 disabled: true 即可回退。
+#
+#    【2026-09-26 改为：把 sensevoice 的识别服务换成 HMOS 系统语音识别】
+#    目标形态与官方一致：点官方那个麦克风按钮就能说话、识别、出字。
+#
+#    【为什么"改现有插件"而不是"新增一个 provider 插件"】真机实测否掉了后者：
+#    loader 解析裸包名要经过一张**由 bundle 依赖闭包构成的包表**
+#      真机读数：speech-to-text-stub (@deepseek-ai/dsh-speech-to-text-stub): failed to import
+#    对照：`@deepseek-ai/dsh-host-directory-picker-browse` 能解析，因为它 ⊂ dsh-web-app
+#    的 dependencies。新增的包不在任何闭包里 ⇒ 无解析路径。
+#    而本行（speech-to-text-sensevoice）已在 `dsh-experimental-voice-input-bundle`
+#    的 dependencies 内、profile 也已有它的行 ⇒ **替换其实现无需任何新接线**：
+#      · provider id 仍用 `config.providerId`（= `sensevoice-local`）
+#        ⇒ bundle 里 `speech-to-text` 行的 `defaultProvider: sensevoice-local` 无需改；
+#      · 替换动作在打包期由 `tools/pack-core.mjs` 的 patchSensevoiceForHms() 完成
+#        （把 apply 换成 hmsApply），**profile 这一层不用动**。
+#
+#    【为什么这样按钮就会变可点】官方 UI 的门是
+#      usable = readiness.connected && provider.preparation.phase ∈ {ready, standby, waking}
+#    而服务端 snapshot() 写的是
+#      preparation: provider.preparation?.snapshot() ?? { phase: "ready" }
+#    ⇒ HMS provider **不提供 preparation** ⇒ 被报成 ready ⇒ 按钮可用。
+#    SenseVoice 恰恰因鸿蒙不在其平台白名单（lib/index.js:201-207）而永远进不了
+#    ready —— 这就是"点语音按钮只会跳设置"的根因。
+- id: speech-to-text
+  config:
+    # 【defaultProvider 必须在这里重复写一遍】本文件的覆盖是**整块替换** config
+    # （见本文件开头第 8 行的纪律说明；实现是 dsh-app-boot 的
+    #  `applyEntryPatches`：`target[key] = value`，逐键赋值整个 config 对象）。
+    # 所以只写 language 会把 bundle 里设的 defaultProvider 抹掉 ⇒ 必须一并写出。
+    defaultProvider: sensevoice-local
+    # 【language 必须钉成 zh-CN】服务 config 的 language **默认是 "auto"**，
+    # 而服务端 `selectedProvider()`（lib/index.js:135）会校验
+    #   `provider.info.languages.includes(language)`
+    # HMS 的真实能力只有 zh-CN（真机 `listLanguages()` 只返回 ["zh-CN"]），
+    # 所以 provider 只声明 zh-CN ⇒ 用默认 "auto" 会报真机见过的错：
+    #   Speech provider sensevoice-local does not support language: auto
+    # 该字段用户可在设置页改（"识别语言"下拉，选项来自 provider.info.languages），
+    # 因而合法值就是 zh-CN。
+    language: zh-CN
+- id: speech-to-text-sensevoice
+- id: api-speech-to-text
+- id: ui-voice-input
+
+# ⑤ 目录选择：native 面 + browse 后端（2026-09-21）#    官方 bundle（dsh-web-app/cordis.patch.yml）默认只挂 `directory-picker`
+#    （= dsh-host-directory-picker-auto），auto 启动时解析环境并**动态挂载**
+#    native/browse 两个交互面之一（SURFACE_PACKAGES）。端侧（openharmony 沙箱）
+#    非 win32 且 PATH 无 zenity/kdialog → auto 挂的是 browse 面——列式浏览器
+#    列的是 Host 进程可见的沙箱目录，用户"选不到真实项目"，这就是
+#    "选了目录无法建会话"的根因。bundle 注释明示出路："Mount -native or -browse
+#    directly in an overlay to pin the interaction."
+#    端侧组合：
+#      · 禁 auto（阻止它挂 browse 面）；
+#      · 挂 native 面（dsh-client-ui-directory-picker-native）：它的 apply() 读
+#        globalThis.__DSH_DIRECTORY_PICKER__（WebApp.ets 的 javaScriptProxy 注入，
+#        DocumentViewPicker 系统目录选择器）——真实用户目录可选；
+#      · 挂 browse **后端**（dsh-host-directory-picker-browse）：它 provide
+#        `directoryPicker` 服务（pick/list/createDirectory），uiWorkspace 的
+#        侧栏目录浏览等功能仍依赖该服务——只缺 UI 面不影响服务。
+#    恢复条件：若官方 auto 今后支持 openharmony 平台检测，可撤销本节回归 auto。
+- id: directory-picker
+  disabled: true
+#    插入新条目必须用 insert: 语法——applyEntryPatches 的普通 patch 行是
+#    “按 id 更新已有条目”，id 不存在时仅告警跳过（本节第一版就踩了这个坑：
+#    两条“新增”写成了 id+name 形式，Loader 树里没有 → 静默 skip → wire
+#    里始终没有 native 面，用户点击“选择文件夹”无任何反应）。
+- insert:
+    - id: directory-picker-browse
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+- insert:
+    - id: ui-directory-picker-native
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-native'
+
+# ⑥ 侧栏浏览器 tab（2026-09-24 官方功能对齐）：官方 bundle 把它限制为仅 desktop
+#    profile 启用（dsh-web-app/cordis.patch.yml 的 `disabled: !!js
+#    "ctx.get('profileContext')?.name !== 'desktop'"`——"Web profiles opt in;
+#    Desktop retains sandboxed HTTP(S) Browser tabs"）。端侧 ondevice ≠ desktop
+#    → 该行被禁 → 连带通用设置"网页链接默认打开方式"行消失：LinkOpeningRow 的
+#    渲染守卫是 `useBrowserAvailable` = sidebarRightTabs 里 "browser" tab 已注册
+#    （dsh-client-ui-chat/lib/client.js:11967,12124-12125），tab 不注册则整行
+#    return null（用户验收："通用设置里网页链接默认打开方式没有了"）。
+#    启用成本为零：该包 host 半边是空 apply（纯 client），浏览器 tab 为沙箱化
+#    HTTP(S) iframe（ArkWeb 支持）；desktop 载体（globalThis.dshDesktop.browser）
+#    未注入时走可选链 undefined → Web 内置实现，正是官方 Web 形态。
+#    恢复条件：无（对齐官方桌面功能是验收目标，非临时措施）。
+- id: ui-sidebar-browser
+  disabled: false
