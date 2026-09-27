@@ -1,0 +1,12 @@
+# Define project specific obfuscation rules here.
+# Obfuscation options:
+# -disable-obfuscation: disable all obfuscations
+# -enable-property-obfuscation
+# -enable-toplevel-obfuscation
+-enable-filename-obfuscation
+-enable-export-obfuscation
+
+# 协议层依赖手写的 JSON 字段名访问（Object 取值 + 显式收窄），
+# 若开启属性混淆会破坏线格式解析，故在 release 中显式关闭属性/顶层混淆。
+-disable-property-obfuscation
+-disable-toplevel-obfuscation
