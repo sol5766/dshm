@@ -1,0 +1,74 @@
+# DSHM —— 入库边界
+#
+# 【本文件的职责】把"**可再生**"与"**必须随仓库走的源码**"分开。判据是
+# README「不入库的产物」表：凡由 tools/ 下的脚本生成、或由构建器产出的，一律不入库；
+# 而生成它们的**方法**（脚本、CMakeLists、配置）必须入库。
+#
+# 【为什么这次要补全】此前本文件只有两行（.git/ 与 *.class），而 docs/README.md 的
+# 「清理与留档纪律」早就写着"临时过程产物一律只落 dist/（已 gitignore）"
+# ——**文档与事实不符**：dist/ 从未被忽略。这类"文档说了、配置没做"的偏差比单个
+# bug 更危险，因为下一个人会按文档行事（以为不会误提交），直到某次 `git add -A`
+# 把 500MB 中间产物带进去。修配置，不修文档措辞。
+
+# ── 构建器输出（全部可再生；跑 README「构建」的步骤即可重建）──────────────
+/dist/
+/build/
+/entry/build/
+/.hvigor/
+/.appanalyzer/
+/.local-rules/
+/.codegenie/
+/.cache/
+oh_modules/
+/hvigor/
+
+# ── 工具链原始归档（体积大；由 tools/place-toolchain.mjs 从 third_party/ 放置）──
+# 【为什么不入库】third_party/ 是"手工取得的原始素材"（apk / tar.gz），
+# 入库会让仓库膨胀几十 MB 且与上游版本脱钩；新克隆按 README 备齐即可。
+__pycache__/
+*.pyc
+/third_party/
+
+# ── 由脚本生成的资源（生成器与自检在 tools/ 里：方法入库、产物不入库）──────
+# pack-core 物化出的核心树 zip（69MB，跑 tools/pack-core.mjs 重建）
+/entry/src/main/resources/resfile/*.zip
+# place-toolchain 放置并自签名的归档（跑 tools/place-toolchain.mjs 重建）
+/entry/src/main/resources/resfile/toolchain/
+# place-host-app 从 hostcore/app 复制出的入口脚本
+/entry/src/main/resources/resfile/resources/app/
+
+# ── 编译需要、但不入库的外部产物（README「不入库的产物」表）───────────────
+# 【node-headers】编 libdshhost 只需要头文件；来源见 README
+/entry/src/main/cpp/node-headers/
+# 【原生库】运行期必需（libnode.so.137 等）；来源见 README
+/entry/libs/
+
+# ── IDE / 编辑器 ──────────────────────────────────────────────────────────
+/.idea/
+.vscode/
+*.iml
+
+# ── 编译中间物与系统垃圾 ─────────────────────────────────────────────────
+*.class
+*.o
+.DS_Store
+Thumbs.db
+
+# ── 本地签名配置（含真实口令，**绝不入库**；模板见 build-profile.json5）──────
+# 【为什么单独一条】build-profile.json5 是**必须入库**的工程配置，但它里面的
+# 签名材料（密钥库口令 / 证书路径）是**机器绑定**的。因此：
+#   · 仓库里那份 = 模板（占位符）
+#   · 你本机那份 = build-profile.local.json5（本条忽略）
+/build-profile.local.json5
+
+# ── 第三方调研副本（他人的仓库内容，版权不属于本项目）─────────────────
+/.research/
+
+# ── 原生构建中间物（CMake / hvigor 产物）───────────────────────────────
+/entry/.cxx/
+/entry/build/
+/entry/oh_modules/
+/.hvigor/
+
+# ── 内部构建报告（含本机取样值）────────────────────────────────────────
+/hostkit/BUILD-REPORT.md

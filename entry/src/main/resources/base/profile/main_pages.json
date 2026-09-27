@@ -1,0 +1,7 @@
+{
+  "src": [
+    "pages/WebApp",
+    "pages/Index",
+    "pages/Poc1"
+  ]
+}

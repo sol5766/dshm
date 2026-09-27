@@ -1,0 +1,13 @@
+# Define project specific obfuscation rules here.
+# Obfuscation options:
+# -disable-obfuscation: disable all obfuscations
+# -enable-property-obfuscation
+# -enable-toplevel-obfuscation
+-enable-filename-obfuscation
+-enable-export-obfuscation
+
+# 【本模块】hostruntime 是宿主运行时的 ArkTS 编排层（Naming/DshHost 等）。
+# 其中 Naming 的版本比较依赖语义明确的字符串处理，混淆会让栈号难读、
+# 也不带来实际收益（本模块体量小），故显式关闭属性/顶层混淆。
+-disable-property-obfuscation
+-disable-toplevel-obfuscation

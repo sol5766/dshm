@@ -1,0 +1,12 @@
+{
+  "name": "connection",
+  "version": "1.0.0",
+  "description": "dsh 协议兼容层（D2 事实基线的实现）：RemoteRpc / RemoteMux / EventStream / AuthSession / Reconnect。零 UI 依赖。",
+  "main": "Index.ets",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohos/hypium": "1.0.25"
+  }
+}

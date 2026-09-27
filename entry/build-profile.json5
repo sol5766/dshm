@@ -1,0 +1,49 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "resOptions": {
+      "copyCodeResource": {
+        "enable": false
+      }
+    },
+    // 走 DevEco 的标准 CMake 路径构建原生模块（见 src/main/cpp/CMakeLists.txt 的说明）：
+    // 目的是让 **hvigor 自己** 编译/链接出 .so 并生成原生模块映射，
+    // 而不是我们手工把预编译 .so 丢进 entry/libs/（那条路实测绑不上，D6 E25–E29）。
+    "externalNativeOptions": {
+      "path": "./src/main/cpp/CMakeLists.txt",
+      // 目标 ABI：
+      //   arm64-v8a = 真机 / 鸿蒙 PC（出货与调试目标）
+      //
+      // 【为什么现在只编 arm64】（2026-09-20 收敛）：本机只有 arm64 的 libnode.so.137
+      // （Node 26.7.0，真机已验证）。x86_64 缺 libnode ⇒ CMake 里 koffi 与 flock 会被
+      // **跳过**，编出来的 x86_64 产物天然不完整（subprocess/sandbox 行跑不起来），
+      // 留着它只会得到"能装、起来就缺能力"的包。等有 x86_64 的 libnode 再开回来。
+      // 注意：**核心运行时的原生件**（libnode.so.137 / koffi / node-pty）不在这里编，
+      // 它们是预编译件，按 ABI 放在 entry/libs/<abi>/ 下（见 tools/node-runtime/）。
+      "abiFilters": ["arm64-v8a"]
+    }
+  },
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": false,
+            "files": [
+              "./obfuscation-rules.txt"
+            ]
+          }
+        }
+      }
+    },
+  ],
+  "targets": [
+    {
+      "name": "default"
+    },
+    {
+      "name": "ohosTest",
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "hostruntime",
+  "version": "1.0.0",
+  "description": "DSHM 端侧核心运行层：核心版本仓库与激活事务、端侧 profile、插件清单、运行时载体接口（D6 §2/§6）。只提供机制，不含 UI 与产品策略。",
+  "main": "Index.ets",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {}
+}

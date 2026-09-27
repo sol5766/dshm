@@ -1,0 +1,224 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "DSHM"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DSHM"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DSHM"
+    },
+    {
+      "name": "perm_internet_reason",
+      "value": "连接你指定的 DeepSeek Harness Host（本机或局域网/隧道地址）以收发会话与事件"
+    },
+    {
+      "name": "perm_network_info_reason",
+      "value": "检测网络状态切换，用于断线后自动重连与局域网 Host 发现"
+    },
+    {
+      "name": "perm_keep_background_reason",
+      "value": "在后台维持与 Host 的长连接并接收审批/提问事件，避免待决事项被错过"
+    },
+    {
+      "name": "perm_external_native_reason",
+      "value": "本应用为开发工具（AI 编程助手宿主），其内置的核心运行时随包携带原生扩展模块与辅助可执行文件，需要在本应用数据目录内加载和运行它们"
+    },
+    {
+      "name": "perm_file_access_persist_reason",
+      "value": "持久化用户授权的工作区目录访问，以便跨会话持续读写项目文件"
+    },
+    {
+      "name": "perm_store_persist_reason",
+      "value": "在应用沙箱的持久存储区保存核心运行时数据，避免每次启动重复解包"
+    },
+    {
+      "name": "perm_user_file_reason",
+      "value": "读写用户选择的项目目录（工作区），用于文件浏览、代码编辑与版本管理"
+    },
+    {
+      "name": "perm_full_disk_reason",
+      "value": "访问用户磁盘上的项目文件以支持工作区目录的完整读写（开发工具场景）"
+    },
+    {
+      "name": "perm_custom_sandbox_reason",
+      "value": "为核心运行时的子进程与原生扩展配置自定义沙箱，支持开发工具执行外部构建与命令"
+    },
+    {
+      "name": "perm_microphone_reason",
+      "value": "语音输入需要麦克风：录音在你确认后开始，音频仅用于本机/你配置的服务转写，不写入会话记录"
+    },
+    {
+      "name": "tab_workspaces",
+      "value": "工作区"
+    },
+    {
+      "name": "tab_core",
+      "value": "核心"
+    },
+    {
+      "name": "tab_settings",
+      "value": "设置"
+    },
+    {
+      "name": "settings_general",
+      "value": "通用"
+    },
+    {
+      "name": "settings_models",
+      "value": "模型"
+    },
+    {
+      "name": "settings_plugins",
+      "value": "插件"
+    },
+    {
+      "name": "settings_core",
+      "value": "核心"
+    },
+    {
+      "name": "settings_device",
+      "value": "设备"
+    },
+    {
+      "name": "settings_inventory",
+      "value": "插件清单"
+    },
+    {
+      "name": "settings_presets",
+      "value": "预设"
+    },
+    {
+      "name": "settings_skills",
+      "value": "技能"
+    },
+    {
+      "name": "action_new_session",
+      "value": "新建会话"
+    },
+    {
+      "name": "action_choose_folder",
+      "value": "选择文件夹"
+    },
+    {
+      "name": "action_files",
+      "value": "文件"
+    },
+    {
+      "name": "action_reset",
+      "value": "重置"
+    },
+    {
+      "name": "badge_default",
+      "value": "默认"
+    },
+    {
+      "name": "badge_overridden",
+      "value": "已覆盖"
+    },
+    {
+      "name": "view_chat",
+      "value": "对话"
+    },
+    {
+      "name": "view_trajectory",
+      "value": "轨迹"
+    },
+    {
+      "name": "settings_local_debug",
+      "value": "本地调试"
+    },
+    {
+      "name": "composer_placeholder",
+      "value": "发消息或创建任务, / 调用指令, @ 文件或对话"
+    },
+    {
+      "name": "composer_placeholder_offline",
+      "value": "会话不可用"
+    },
+    {
+      "name": "composer_commands",
+      "value": "指令"
+    },
+    {
+      "name": "composer_stop",
+      "value": "停止生成"
+    },
+    {
+      "name": "composer_send",
+      "value": "发送消息"
+    },
+    {
+      "name": "action_delete",
+      "value": "删除"
+    },
+    {
+      "name": "action_delete_confirm",
+      "value": "确认删除"
+    },
+    {
+      "name": "action_archive",
+      "value": "归档"
+    },
+    {
+      "name": "section_archive",
+      "value": "归档"
+    },
+    {
+      "name": "status_running",
+      "value": "运行中"
+    },
+    {
+      "name": "status_not_started",
+      "value": "还没有说话"
+    },
+    {
+      "name": "label_unnamed_session",
+      "value": "（未命名会话）"
+    },
+    {
+      "name": "connecting_local_core",
+      "value": "正在连接本机核心…"
+    },
+    {
+      "name": "confirm_delete_workspace_note",
+      "value": "再按一次「确认删除」即移除该工作区的登记；磁盘上的目录与文件不会被删除。"
+    },
+    {
+      "name": "note_workspace_deleted",
+      "value": "已从工作区列表移除（目录与文件未删除）。"
+    },
+    {
+      "name": "note_session_archived",
+      "value": "已归档（可在「归档」里查看）。"
+    },
+    {
+      "name": "note_no_workspace_id",
+      "value": "这个工作区不在宿主注册表里（列表是由会话目录归并出来的），没有可删除的登记。"
+    },
+    {
+      "name": "note_archive_no_session",
+      "value": "未选择会话。"
+    },
+    {
+      "name": "note_offline",
+      "value": "尚未连接 Host，操作未执行。"
+    },
+    {
+      "name": "note_workspace_delete_failed",
+      "value": "删除工作区失败："
+    },
+    {
+      "name": "note_archive_failed",
+      "value": "归档失败："
+    },
+    {
+      "name": "note_contract_missing",
+      "value": "兼容面缺少该端点的参数契约（属于本客户端的缺陷，请提交诊断报告）："
+    }
+  ]
+}

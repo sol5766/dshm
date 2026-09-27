@@ -1,0 +1,9 @@
+{
+  "name": "platform",
+  "version": "1.0.0",
+  "description": "DSHM 设备能力层（D1 §6.4）：通知、长时任务、剪贴板、分享、文件选择、窗口与形态、快捷键机制。只提供机制，不含产品策略与 UI。",
+  "main": "Index.ets",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {}
+}

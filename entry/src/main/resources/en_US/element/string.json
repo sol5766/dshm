@@ -1,0 +1,196 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "DSHM"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "DSHM"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "DSHM"
+    },
+    {
+      "name": "perm_internet_reason",
+      "value": "Connect to the DeepSeek Harness host you specify (on this device, or a LAN/tunnel address) to exchange sessions and events"
+    },
+    {
+      "name": "perm_network_info_reason",
+      "value": "Detect network changes so a dropped connection can be restored and a LAN host can be found"
+    },
+    {
+      "name": "perm_keep_background_reason",
+      "value": "Keep the long-lived connection to the host while in the background so approval and question events are not missed"
+    },
+    {
+      "name": "tab_workspaces",
+      "value": "Workspaces"
+    },
+    {
+      "name": "tab_core",
+      "value": "Core"
+    },
+    {
+      "name": "tab_settings",
+      "value": "Settings"
+    },
+    {
+      "name": "settings_general",
+      "value": "General"
+    },
+    {
+      "name": "settings_models",
+      "value": "Models"
+    },
+    {
+      "name": "settings_plugins",
+      "value": "Plugins"
+    },
+    {
+      "name": "settings_core",
+      "value": "Core"
+    },
+    {
+      "name": "settings_device",
+      "value": "Device"
+    },
+    {
+      "name": "settings_inventory",
+      "value": "Plugin inventory"
+    },
+    {
+      "name": "settings_presets",
+      "value": "Presets"
+    },
+    {
+      "name": "settings_skills",
+      "value": "Skills"
+    },
+    {
+      "name": "action_new_session",
+      "value": "New session"
+    },
+    {
+      "name": "action_choose_folder",
+      "value": "Choose folder"
+    },
+    {
+      "name": "action_files",
+      "value": "Files"
+    },
+    {
+      "name": "action_reset",
+      "value": "Reset"
+    },
+    {
+      "name": "badge_default",
+      "value": "Default"
+    },
+    {
+      "name": "badge_overridden",
+      "value": "Overridden"
+    },
+    {
+      "name": "view_chat",
+      "value": "Chat"
+    },
+    {
+      "name": "view_trajectory",
+      "value": "Trajectory"
+    },
+    {
+      "name": "settings_local_debug",
+      "value": "Local diagnostics"
+    },
+    {
+      "name": "composer_placeholder",
+      "value": "Send a message or create a task, / for commands, @ for files or conversations"
+    },
+    {
+      "name": "composer_placeholder_offline",
+      "value": "Session unavailable"
+    },
+    {
+      "name": "composer_commands",
+      "value": "Commands"
+    },
+    {
+      "name": "composer_stop",
+      "value": "Stop generating"
+    },
+    {
+      "name": "composer_send",
+      "value": "Send message"
+    },
+    {
+      "name": "action_delete",
+      "value": "Delete"
+    },
+    {
+      "name": "action_delete_confirm",
+      "value": "Confirm delete"
+    },
+    {
+      "name": "action_archive",
+      "value": "Archive"
+    },
+    {
+      "name": "section_archive",
+      "value": "Archived"
+    },
+    {
+      "name": "status_running",
+      "value": "Running"
+    },
+    {
+      "name": "status_not_started",
+      "value": "No messages yet"
+    },
+    {
+      "name": "label_unnamed_session",
+      "value": "(untitled session)"
+    },
+    {
+      "name": "connecting_local_core",
+      "value": "Connecting to the on-device core…"
+    },
+    {
+      "name": "confirm_delete_workspace_note",
+      "value": "Press “Confirm delete” again to remove this workspace registration; the folder and its files on disk are not deleted."
+    },
+    {
+      "name": "note_workspace_deleted",
+      "value": "Removed from the workspace list (the folder and its files were not deleted)."
+    },
+    {
+      "name": "note_session_archived",
+      "value": "Archived (see “Archived”)."
+    },
+    {
+      "name": "note_no_workspace_id",
+      "value": "This workspace is not in the host registry (the list is derived from session directories), so there is no registration to delete."
+    },
+    {
+      "name": "note_archive_no_session",
+      "value": "No session selected."
+    },
+    {
+      "name": "note_offline",
+      "value": "Not connected to the host; nothing was executed."
+    },
+    {
+      "name": "note_workspace_delete_failed",
+      "value": "Failed to delete the workspace: "
+    },
+    {
+      "name": "note_archive_failed",
+      "value": "Failed to archive: "
+    },
+    {
+      "name": "note_contract_missing",
+      "value": "The compatibility surface has no parameter contract for this endpoint (a client defect — please attach a diagnostics report): "
+    }
+  ]
+}

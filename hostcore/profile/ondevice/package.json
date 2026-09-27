@@ -1,0 +1,17 @@
+{
+  "name": "dshm-ondevice-profile",
+  "private": true,
+  "version": "0.0.0",
+  "description": "DSHM 端侧 profile：应用内自足运行 dsh Host 时使用的组合（bundle 顺序 + 用户 patch 层）。",
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app"
+      ],
+      "removeBundles": [],
+      "patchReload": "startup"
+    }
+  }
+}
