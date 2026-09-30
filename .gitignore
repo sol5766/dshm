@@ -14,11 +14,19 @@
 /dist/
 /build/
 /entry/build/
+# 【模块级 build/】上面两条只覆盖仓库根与 entry/；appstate、connection、dshcompat、
+# hostruntime、platform 这几个模块各有自己的 build/（hvigor merge_profile 中间物），
+# 漏掉这条会让它们随 `git add -A` 入库。用 `*/build/` 一并覆盖（不含子目录更深层）。
+*/build/
 /.hvigor/
 /.appanalyzer/
 /.local-rules/
 /.codegenie/
 /.cache/
+# 【临时探针目录】复现文档读数用的临时脚本与输出（`.probe/*.py`、`*.cjs`、`*.txt`）。
+# 与 `/dist/` 同性质：**过程产物，不是源码**。文档里要复现的读数一律写成
+# `python -c …` 一行命令或 `tools/` 下的门禁（"能重放的方法入库，产物不入库"）。
+/.probe/
 oh_modules/
 /hvigor/
 

@@ -9,7 +9,7 @@
 · 右下角：`HM` / `OS` 四字母 2×2 加粗，单个 O 下加短横线，整体逆时针 45°；
 · 背景：纯白（分层图标的 background 层）。
 
-──────────────────────── 产物（6 个，全是 APP 图标用途） ────────────────────────
+──────────────────────── 产物（8 个，全是图标用途） ────────────────────────
 | 路径 | 尺寸 | 说明 |
 |---|---|---|
 | `AppScope/resources/base/media/foreground.png`   | 1024 | 分层图标前景（系统遮罩） |
@@ -18,6 +18,15 @@
 | `entry/src/main/resources/base/media/background.png` | 1024 | 同上 |
 | `docs/brand/dshm-icon.png` | 512 | README 展示图（白底合成版） |
 | `docs/brand/dshm-mark.png` | 256 | 纯标记（透明底，物料用） |
+| `entry/src/main/resources/rawfile/tray_white.png` | 72 | **系统托盘（状态栏）图标·深色栏用**，纯白剪影 |
+| `entry/src/main/resources/rawfile/tray_black.png` | 72 | **系统托盘图标·浅色栏用**，纯黑剪影 |
+
+──────────────────── 托盘图标为什么是"纯鲸鱼单色"，不是 APP 图标 ────────────────────
+`statusBarManager.StatusBarIcon` 要求**同一图案给两份**（`white` / `black`），由系统
+按状态栏明暗二选一 ⇒ 托盘图标在定义上就是**单色剪影**，不能是带白底/带角标的彩色
+图（那会变成一块白方块，且与微信等其它托盘图标风格不一致）。
+因此这里取 APP 图标的**主标记**（鲸鱼，来自 `FISH_LOGO_PATH`）单独出图，
+**不带**右下角 `HM`/`OS` 角标 —— 24vp 的尺寸下角标只有几像素，必然糊成一团。
 
 ────────────────── 🔴 本脚本**不产出**启动画面资源（2026-09-27 起） ──────────────────
 | 不再产出的文件 | 现在由谁负责 |
@@ -68,6 +77,22 @@ FISH_SVG = os.path.join(ROOT, 'entry', 'src', 'main', 'resources', 'base', 'medi
 INK = (0x15, 0x15, 0x17, 255)          # 官方墨色 #151517
 WHITE = (255, 255, 255, 255)
 SS = 3                                  # 超采样倍数
+
+# ── 托盘（状态栏）图标参数 ──
+TRAY_PX = 72                            # 官方建议 24vp×24vp；实产 72px 供高分屏
+# 鲸鱼宽度占画布比。
+# 【为什么是 0.861 这个"零头"数】取自**上一代 DSHM 项目在真机上跑通过的**
+# tray_white.png 实测：其墨迹外接框 62×46（72px 画布）⇒ 62/72 = 0.861。
+# 旁证同源：62/46 = 1.348，鲸鱼 viewBox 23.16/17.04 = 1.359（差异是像素取整）。
+# 这个值在真机托盘里视觉边距合适，没理由重新发明。
+TRAY_RATIO = 0.861
+TRAY_WHITE = (255, 255, 255, 255)
+TRAY_BLACK = (0, 0, 0, 255)
+# 墨迹外接框期望值（**真正的判据**，见自检⑤处为什么覆盖率不能当判据）。
+# 取自上一代真机跑通的 tray_white.png 实测：62×46 @ x[5..66] y[13..58]。
+# 本脚本硬边渲染得 63×46 @ x[5..67]，差 1px 是边界取整 —— 判定带 ±1。
+TRAY_BBOX_W = 62
+TRAY_BBOX_H = 46
 FONTS = [
     # 【优先加粗】用户要求"字体加粗一点"。顺序即优先级：
     #   ① 各家的 **Bold** 独立字体文件（真正的粗体字形，不是合成加粗）
@@ -177,6 +202,25 @@ def fill_evenodd(size, subs, sx, sy, ox, oy, color):
             for x in range(max(0, a), min(size - 1, b) + 1):
                 px[x, y] = color
     return img
+
+
+def make_tray(subs):
+    """产出托盘（状态栏）图标：同一鲸鱼图案的**纯白**与**纯黑**两份单色剪影。
+
+    【为什么复用 `fill_evenodd` 而不是另写一份路径解析】鲸鱼 path 是"带洞"图形
+    （外轮廓 CW、三个内腔 CCW）。任何绕过 even-odd 的简化实现都会把内腔填实，
+    得到一团黑块 —— 托盘只有 24vp，这种错误在小尺寸下就是"一个方块"。
+    共用同一段填充逻辑，等于共用同一份已经过绕向自检的正确性。
+    """
+    px = TRAY_PX
+    whale_w = px * TRAY_RATIO
+    sc = whale_w / 23.16
+    whale_h = 17.04 * sc
+    ox = (px - whale_w) / 2
+    oy = (px - whale_h) / 2
+    white = fill_evenodd(px, subs, sc, sc, ox, oy, TRAY_WHITE)
+    black = fill_evenodd(px, subs, sc, sc, ox, oy, TRAY_BLACK)
+    return white, black
 
 
 def main():
@@ -340,6 +384,9 @@ def main():
     # 修法：从**未合成角标**的 `whale_base` 另存 mark。
     mark = whale_base.resize((512, 512), Image.LANCZOS)        # 透明底纯标记（物料用，无角标）
 
+    # ── 托盘（状态栏）图标：同一鲸鱼的纯白/纯黑单色剪影 ──
+    tray_white, tray_black = make_tray(subs)
+
     # 【只写 APP 图标用途的文件】
     # ⚠️ **不含** startIcon.png / logo_dark.png —— 那两个是**启动画面**资源，
     # 用户明确要求"用原版"。它们的正本归档在 `third_party/brand-original/`；
@@ -351,6 +398,8 @@ def main():
         ('entry/src/main/resources/base/media/background.png', bg),
         ('docs/brand/dshm-icon.png', showcase),
         ('docs/brand/dshm-mark.png', mark.resize((256, 256), Image.LANCZOS)),
+        ('entry/src/main/resources/rawfile/tray_white.png', tray_white),
+        ('entry/src/main/resources/rawfile/tray_black.png', tray_black),
     ]
     # ── 写盘前先把所有自检跑完 ──
     # 【为什么"先自检后写盘"】旧版先落盘再自检：自检失败时坏图**已经写进资源目录**，
@@ -411,6 +460,74 @@ def main():
     # （品牌文档要求：不同则不同入口图标不一致）。写盘后校验实际落盘文件。
     # 注：outs 里两处写的是同一个内存对象，理论上必然相同；这条断言防的是
     # 将来有人把其中一处改成"另一版本图"（例如单独给 entry 换图）。
+
+    # 【自检④】托盘图标：两份必须**同形**、且各自颜色正确、覆盖率在带内。
+    #
+    # 【为什么必须判"同形"】系统按状态栏明暗二选一渲染（white/black），两份若
+    # 形状不同，用户在切换深浅色时图标会"变样"。alpha 通道必须逐像素相等。
+    tw_a = tray_white.split()[3].load()
+    tb_a = tray_black.split()[3].load()
+    shape_diff = sum(1 for y in range(TRAY_PX) for x in range(TRAY_PX) if tw_a[x, y] != tb_a[x, y])
+    print(f'[make-icon] 托盘 白/黑 alpha 差异像素 {shape_diff}（必须 0）')
+    if shape_diff != 0:
+        failures.append(f'托盘 white/black 形状不一致（alpha 差异 {shape_diff} 像素）')
+
+    # 颜色必须纯粹：白图所有不透明像素都是纯白、黑图都是纯黑。
+    # 旧项目实测正是这样（中心像素 R=G=B=255 / R=G=B=0），系统据此做明暗适配。
+    tw_rgb = tray_white.convert('RGBA').load()
+    tb_rgb = tray_black.convert('RGBA').load()
+    bad_color = 0
+    for y in range(TRAY_PX):
+        for x in range(TRAY_PX):
+            if tw_a[x, y] > 128:
+                r, g, b, _ = tw_rgb[x, y]
+                if not (r == 255 and g == 255 and b == 255):
+                    bad_color += 1
+            if tb_a[x, y] > 128:
+                r, g, b, _ = tb_rgb[x, y]
+                if not (r == 0 and g == 0 and b == 0):
+                    bad_color += 1
+    print(f'[make-icon] 托盘 非纯色像素 {bad_color}（必须 0；白图须纯白、黑图须纯黑）')
+    if bad_color != 0:
+        failures.append(f'托盘图标含非纯色像素（{bad_color} 个）—— 状态栏明暗适配会失准')
+
+    # 【自检⑤】墨迹外接框必须与"上代真机跑通的那张图"一致。
+    #
+    # ⚠️ 这里曾经用过"墨迹覆盖率百分比"作判据，**标定错了**（实测被抓）：
+    #   我拿上代 tray_white.png 的 `A==255` 计数 1232 当基准（= 23.76%），
+    #   但那张图是**抗锯齿**渲染（半透明 351 像素），而本脚本 `fill_evenodd`
+    #   是**硬边**（半透明 0）⇒ 两者口径不同，硬边图的覆盖率天然更高（29.59%）。
+    #   于是自检把一张**几何完全正确**的图判成失败。
+    #   ⇒ 教训：拿另一个渲染器的像素计数当基准，必须先把口径对齐；对不齐就别用。
+    #
+    # 正确判据用**外接框**：它是"形状"的度量，与抗锯齿/取整无关 ——
+    # 抗锯齿只会把边界像素变灰，不会改变外接框落在哪一行哪一列。
+    # 期望值即上代真机图的实测值（x[5..66] y[13..58]，63×46），容差 ±1px
+    # 吸收硬边/抗锯齿在边界上的取整差。
+    xs = [x for y in range(TRAY_PX) for x in range(TRAY_PX) if tw_a[x, y] > 128]
+    ys = [y for y in range(TRAY_PX) for x in range(TRAY_PX) if tw_a[x, y] > 128]
+    if not xs or not ys:
+        failures.append('托盘图标整张全透明 —— 鲸鱼根本没画上去')
+    else:
+        bw, bh = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+        print(f'[make-icon] 托盘 墨迹外接框 x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]'
+              f' = {bw}×{bh}（上代真机 62×46 @ x[5..66] y[13..58]，容差 ±1）')
+        if abs(bw - TRAY_BBOX_W) > 1 or abs(bh - TRAY_BBOX_H) > 1:
+            failures.append(f'托盘鲸鱼外接框 {bw}×{bh} 偏离预期 {TRAY_BBOX_W}×{TRAY_BBOX_H}'
+                            f'（±1）—— 缩放/留边算错')
+        if min(xs) < 1 or min(ys) < 1 or max(xs) > TRAY_PX - 2 or max(ys) > TRAY_PX - 2:
+            failures.append(f'托盘鲸鱼贴边（x[{min(xs)}..{max(xs)}] y[{min(ys)}..{max(ys)}]）'
+                            f'—— 状态栏里会被裁掉边缘')
+
+    # 鲸鱼内腔（洞）必须在托盘小图上仍保留：取鲸鱼中部偏上一处本该透明的点。
+    # 【坐标怎么定】72px 下鲸鱼占 x[5..67] y[13..58]，其身体内部三个内腔之一
+    # 落在画布中心附近。这里不写死单点（易受取整影响），改为统计"内腔带"里的
+    # 透明像素数：even-odd 生效则该带必须有透明点，被填实则恒为 0。
+    hole_band_transparent = sum(
+        1 for y in range(26, 42) for x in range(24, 48) if tw_a[x, y] <= 128)
+    print(f'[make-icon] 托盘 内腔带透明像素 {hole_band_transparent}（必须 > 0，否则洞被填黑）')
+    if hole_band_transparent == 0:
+        failures.append('托盘鲸鱼内腔被填实（even-odd 失效）—— 在 24vp 下会显示成一个方块')
 
     if failures:
         for f in failures:

@@ -4,8 +4,11 @@
  * 【为什么必须自己垫】`--jitless` 隐含 `--no-expose-wasm` ⇒ `WebAssembly === undefined`。
  * Node 自带的 undici 用 **WASM 版 llhttp** 解析响应，所以它一初始化就抛
  * `WebAssembly is not defined`（触发点是 `node:http` 的惰性 getter → `lazyUndici`，见 E38）。
- * 我们的处置是：入口脚本里封掉那些惰性 getter（E39）+ 用 `--no-experimental-fetch`
- * 让 Node **不安装** globalThis.fetch。这两步能让 Host 起来，但会让 `fetch` 变成 undefined——
+ * 我们的处置是：入口脚本里封掉那些惰性 getter（E39），并让 `fetch` 改由本垫片接管。
+ * 【2026-09-28 更正】原方案是"再加 `--no-experimental-fetch` 让 Node 不安装 globalThis.fetch"，
+ * 但 Node 24 起该 flag 已被移除（传了会死在 CLI 解析：`invalid negation`，见 `installFetchShim()` 内注释），
+ * 端侧**不带它启动**；接管改由运行期判定（`installFetchShim()`：WASM 不可用即无条件覆盖）。
+ * 这两步能让 Host 起来，否则 `fetch` 在 jitless 下不可用——
  * 而 dsh 调模型正是用 fetch：
  *     @deepseek-ai/dsh-llm-deepseek/lib/index.js:1770
  *       response = await fetch(`${connection.baseURL}/chat/completions`, {method:'POST', headers, body, signal})
@@ -18,7 +21,20 @@
  * 【覆盖范围】按 dsh 实际用到的面实现：POST JSON + 自定义 headers + `signal` 中止、
  * `response.ok/status/statusText/headers.get/text()/json()/body`（`body` 是 ReadableStream，
  * SSE 流式响应要用）。另外补了 `Headers`/`FormData`/`Blob`/`File` 的最小实现——
- * 它们在 Node 里同样来自 undici，jitless 下都不存在，而 dsh 上传附件要用 FormData。
+ * 它们在**旧版** Node 里来自 undici、jitless 下不存在，而 dsh 上传附件要用 FormData。
+ *
+ * 【2026-09-28 更正：Node 24 里这四个全局**存在**，且与 undici/WASM 无关】
+ * `Headers`/`Request`/`Response`/`FormData`/`Blob`/`File` 在 Node 24 下启动即可用
+ * （实测 `[JS]` 而非 `[native code]`，来自内部实现，**不碰 WASM**），因此
+ * `installFetchShim()` 里那六行只在 `undefined` 时补 ⇒ 实际等于**一个都不补**，`globalThis.FormData` 保持原生。
+ * 而 `encodeRequestBody` 原先只认 `instanceof DshmFormData` ⇒ 原生 FormData 落到最后一行的
+ * `Buffer.from(String(body))`，**请求体变成字面量 `"[object FormData]"`**（17 字节）。
+ * 这条路径的调用方是 dsh 的附件上传（`dsh-llm-deepseek/lib/index.js:686`、
+ * `dsh-client-connection/lib/index.js:747`），症状是"上传静默失败/服务端收到乱码"，
+ * 且**本机（有 WASM、结构一致）用同一份代码也会踩**，与 jitless 无关。
+ * 处置：编码侧按**能力**识别外来 FormData（`isForeignFormData`），不再靠 `instanceof`；
+ * 这一层比"替换全局"更稳——调用方拿的是哪个实现都能编对。
+ * 同一族取舍见 `isBlobLike` 的注释（那里早就写明了"不能只用 instanceof"）。
  *
  * 【已知取舍】① 只跟随最多 5 次重定向，且只对 303 改写成 GET；
  * ② 请求体支持 string/Buffer/TypedArray/FormData/Blob/ReadableStream，够用即可；
@@ -183,7 +199,8 @@ class DshmFormData {
 }
 
 /** 像 Blob 就行（**不能只用 instanceof**：Node 原生就有 `Blob`/`File`，来自 `node:buffer`，
- *  它们与 undici 无关，因此 `--no-experimental-fetch` 下依然存在，dsh 可能直接把原生 Blob 传进来）。*/
+ *  它们与 undici 无关，因此在"关掉原生 fetch"的配置下依然存在，dsh 可能直接把原生 Blob 传进来；
+ *  在 Node 24 上更是**启动即存在**，见文件头 2026-09-28 更正）。*/
 function isBlobLike(value) {
   return value !== null && typeof value === 'object' && typeof value.arrayBuffer === 'function' && typeof value.size === 'number';
 }
@@ -194,6 +211,33 @@ async function blobBytes(value) {
   return Buffer.from(await value.arrayBuffer());
 }
 
+/**
+ * 是不是**外来的** FormData（Node 原生那个）。
+ *
+ * 【为什么必须按能力判、不能只靠 instanceof】见文件头「2026-09-28 更正」：
+ * Node 24 启动就自带 `FormData`，`installFetchShim()` 不会（也不该）替换它，
+ * 所以 dsh 传进来的 FormData **通常就是原生实例**。原先只认 `instanceof DshmFormData`
+ * ⇒ 整条 multipart 编码被跳过 ⇒ 体变成 `"[object FormData]"`。
+ *
+ * 【为什么还要 `toString.call` 这一条】只判 `append`+`entries` 会把 `URLSearchParams`
+ * 也认成 FormData（它也有这两个，且 `String()` 是查询串）。用 `Symbol.toStringTag`
+ * 精确到 `[object FormData]`，既认原生 FormData，又不误收 URLSearchParams。
+ */
+function isForeignFormData(value) {
+  return value !== null && typeof value === 'object'
+    && !(value instanceof DshmFormData)
+    && typeof value.append === 'function'
+    && typeof value.entries === 'function'
+    && Object.prototype.toString.call(value) === '[object FormData]';
+}
+
+/** 把外来 FormData 的条目搬进自家实现再编码——复用 `_encode()`，不复制一份 multipart 逻辑。 */
+async function encodeForeignFormData(form) {
+  const copy = new DshmFormData();
+  for (const [name, value] of form.entries()) copy.append(name, value);
+  return await copy._encode();
+}
+
 // ── body 编码（异步：原生 Blob 的字节只能异步取）─────────────────────────────
 async function encodeRequestBody(body) {
   if (body === undefined || body === null) return { data: null, type: null, stream: null };
@@ -202,6 +246,12 @@ async function encodeRequestBody(body) {
   if (body instanceof ArrayBuffer) return { data: Buffer.from(body), type: null, stream: null };
   if (ArrayBuffer.isView(body)) return { data: Buffer.from(body.buffer, body.byteOffset, body.byteLength), type: null, stream: null };
   if (body instanceof DshmFormData) return await body._encode();
+  /*
+   * 【原生 FormData 也要编（2026-09-28）】dsh 传进来的是 Node 原生 FormData
+   * （`installFetchShim()` 不替换已存在的全局），原先这一支漏掉 ⇒ 体退化成
+   * `Buffer.from(String(body))` = `"[object FormData]"`。见 `isForeignFormData` 的注释。
+   */
+  if (isForeignFormData(body)) return await encodeForeignFormData(body);
   if (isBlobLike(body)) return { data: await blobBytes(body), type: body.type === '' ? null : body.type, stream: null };
   if (typeof body.getReader === 'function') return { data: null, type: null, stream: body };
   return { data: Buffer.from(String(body), 'utf8'), type: null, stream: null };
@@ -476,7 +526,8 @@ async function dshmFetch(input, init = {}, options = {}) {
  * 【为什么必须有它（E75，本次 400 的真因）】dsh 的 `/api` 挂载点会构造 Fetch 的 `Request`：
  *   dsh-client-connection/lib/index.js:68
  *     request = new Request(url, { method, headers, body: Buffer.concat(chunks), signal });
- * 而 Host 用 `--no-experimental-fetch` 启动（为避开 undici 的 WASM 初始化），此时
+ * 而 Host 启动时 `globalThis.Request` 可能**不存在**（旧方案靠 `--no-experimental-fetch` 关掉原生
+ * fetch，那个 flag 会连带不装 `Request`；该 flag 在 Node 24 已不可用，见文件头 2026-09-28 更正），此时
  * `globalThis.Request` **不存在** ⇒ `new Request(...)` 抛 `ReferenceError`
  * ⇒ 被 `dsh-host-webserver` 的 catch-all 兜成 **空体 400**（`res.writeHead(400); res.end()`）。
  * 这正是实测现象：`GET /` 正常 200，而**所有** `POST /api/<endpoint>` 都是 400 空体，
@@ -527,7 +578,7 @@ class DshmRequest {
  * 安装垫片。
  *
  * 【为什么改成"缺哪个补哪个"】原先以"原生 fetch 是否可用"为唯一开关，于是
- * `--no-experimental-fetch` 之外若缺 `Request`/`Response` 也不会补——而 dsh 的 `/api`
+ * 该开关为真时若缺 `Request`/`Response` 也不会补——而 dsh 的 `/api`
  * 挂载点**必须**有 `Request`（E75）。现在这几个全局只要缺失就补；只有 `fetch` 本身
  * 在原生可用时才不覆盖。
  * @returns 是否安装了 `fetch` 本身（供入口脚本打日志）

@@ -63,6 +63,7 @@ ls entry/libs/arm64-v8a/ | grep libnode     # → libnode.so.137  126,809,264 B
 | 文档 | 什么时候读 |
 |---|---|
 | [`00-开发任务书.md`](00-开发任务书.md)（D1）| 范围 / 目标 / 验收的权威（注意其"远程客户端"定位已被 D6 更正）|
+| [`HANDOFF.md`](HANDOFF.md)（**H2**）| **接手先读**：一句话现状、Windows 端 dsh desktop 重装步骤、**未完成事项**（连接抖动机制与修法、启动 40s 自杀嫌疑链）|
 | [`50-端侧核心运行架构.md`](50-端侧核心运行架构.md)（**D6**）| 架构权威；本文档大量引用它 |
 | [`70-鸿蒙移植踩坑与修复总览.md`](70-鸿蒙移植踩坑与修复总览.md)（**D8**）| **按技术主题**的坑库；本文档第五章给四段式速查并指向它 |
 | [`device-validation.md`](device-validation.md)| 47 个批次的真机验收原始记录 |
@@ -192,13 +193,13 @@ node --jitless -e "console.log(typeof WebAssembly)"  # undefined
 已实证的受害者是 `web_fetch`（`dsh-web-fetch-http` 自建 `Agent` 并把 `dispatcher` 传进 fetch），
 而 `web_search` 正常，因为它走的是全局 `fetch`（我们自己的纯 JS 垫片）。
 **同一核心树、同一个本地 HTTP 服务，只有 `--jitless` 一个变量就能复现两组结果**
-（`README.md:54-68`、`docs/parity-matrix.md:209-223`）。
+（`README.md:54-68`、`docs/parity-matrix.md:233-247`）。
 
 #### 2.1.4 怎么绕过：**两层**垫片（缺一层就会出现"Host 起来了、模型也能回话，但某个工具静默坏掉"）
 
 | 层 | 落点 | 做什么 | 不做的后果 |
 |---|---|---|---|
-| 全局 `fetch` 垫片 | `hostcore/app/fetch-shim.js`（`installFetchShim()` 在 `:535`），由 `main.js:378-379` 装载 | 用 `node:http/https`（**原生 llhttp**，与 WASM 无关）重写 `fetch/Request/Response/Headers/FormData/Blob/File` | **调模型就走不通**（dsh 调模型就是用 fetch） |
+| 全局 `fetch` 垫片 | `hostcore/app/fetch-shim.js`（`installFetchShim()` 在 `:586`），由 `main.js:378-379` 装载 | 用 `node:http/https`（**原生 llhttp**，与 WASM 无关）重写 `fetch/Request/Response/Headers/FormData/Blob/File` | **调模型就走不通**（dsh 调模型就是用 fetch） |
 | `undici` **模块名**解析钩子 | `hostcore/app/undici-shim.mjs` + `undici-loader.mjs`，由 `main.js:411-425` 的 `installUndiciNameHook()` 注册 | 让上游 `await import("undici")` 拿到同一个垫片，并把 `dispatcher` 翻译成 `lookup` | **`web_fetch` 打不开任何网页**（`web_search` 仍正常，因为后者走第一层） |
 
 三个必须记住的实现细节（都来自真机/门禁的对抗实验，不是推断）：
@@ -206,7 +207,7 @@ node --jitless -e "console.log(typeof WebAssembly)"  # undefined
 1. **钩子只在 `WebAssembly` 不可用时注册**（`main.js:412-415`）。原生 undici 可用时不该被替换
    —— 它的连接池与协议实现比垫片完整得多。
 2. **垫片必须尊重 `redirect: 'manual'`**：上游 `web_fetch` 靠它自己实现"仅同源跳转"的安全策略，
-   垫片擅自跟跳等于绕过它（`docs/parity-matrix.md:222`）。
+   垫片擅自跟跳等于绕过它（`docs/parity-matrix.md:233`）。
 3. **不要先读 `globalThis.fetch` 的原值**：Node 用 getter 惰性装 fetch，一读就触发 undici 初始化
    （`docs/50` E36，`:124`）。同一个坑还有一个变体：`node:http` 上有一批惰性 getter
    （实测 `maxHeaderSize, globalAgent, WebSocket, CloseEvent, MessageEvent`），
@@ -214,9 +215,11 @@ node --jitless -e "console.log(typeof WebAssembly)"  # undefined
    `main.js:168-183` 因此在任何人访问之前用 `defineProperty` 把**全部**惰性 getter 封掉
    —— 这一步是"WASM 阻塞被消除"的直接原因（E39，`:127`）。
 
-守护它的门禁自带**对照实验**：`tools/check-web-fetch-jitless.mjs` 要求在 Node 22 下
+守护它的门禁自带**对照实验**：`tools/check-web-fetch-jitless.mjs` 要求
 A 臂（不注册钩子）**必须失败且必须给出 WASM 因果证据**，B 臂**必须全过**，且**跨源跳转仍须被拒**
-（`:47-111`、`:231`；用法见 `:41-43`）。
+（`:47-111`、`:231`；用法见 `:41-43`）。**2026-09-28 起不再需要 Node 22**：子进程 flag 改为**运行时探测**
+（此前写死 `--no-experimental-fetch`，该 flag 的否定形态在 Node 24 已无效 ⇒ 两臂同时哑火），
+loader 路径改用 `pathToFileURL`（此前裸盘符路径使 **B 臂从未跑成过**）——详见 §3.6。
 
 ```bash
 # 端侧同参：本机复现整条链（秒级迭代，只把最终结论拿上设备）
@@ -473,9 +476,10 @@ hdc shell "grep -E 'exec 探测：' /data/app/el2/100/base/com.dshm.dshclient/ha
 │           ——**不挂该回调 = 一律被拒**，网页只会拿到 NotAllowedError         │
 │                                                                            │
 │  ③ hostcore（Node 宿主脚本，跑在 libnode 里）  hostcore/app/**             │
-│     main.js 4084 行：诊断 / 垫片 / 重定向 / exec 探测 / 工具链 / Python 桥   │
+│     main.js 4204 行：诊断 / 垫片 / 重定向 / exec 探测 / 工具链 / Python 桥   │
 │     + fetch-shim.js · undici-shim.mjs · undici-loader.mjs                  │
 │     + require-builtin-shim.cjs · dshm-installer.js · dshm-user-rows.js     │
+│     + dshm-skills.js（内容哈希同步）· dshm-compat.js（兼容性豁免）          │
 │                                                                            │
 │  ④ dsh 核心树（按版本可切换）    <filesDir>/dsh/cores/<ver>/                │
 │     由 resfile/dsh-core-<ver>-openharmony-arm64.zip 首启解包（zip 容器）     │
@@ -551,7 +555,7 @@ aa start
 | 9 | 语音模型存放 | **沙箱目录（启动后在线下载）**，不放 HAP `rawfile` | 模型 228 MB 量级，放 rawfile 会让 HAP 暴涨；而 sherpa-onnx 的鸿蒙实现**不传 `resourceManager` 时走通用文件路径**（源码级确认：`use_resource_manager` 为假时调 `SherpaOnnxCreateOfflineRecognizer`），⇒ 沙箱绝对路径可行。**当前 `entry/src/main/resources/rawfile/` 实测为空（0 个文件）** | `docs/device-validation.md:3413-3415`、`:3487-3508`；`entry/src/main/ets/speech/SenseVoiceRecognizer.ets:64-73,90,124` |
 | 10 | 语音识别后端 | **sherpa-onnx 端侧离线**（`sherpa_onnx@1.13.3` HAR） | HMS `speechRecognizer` 是**流式听写引擎**，单会话只处理**开头 4~5 秒**且端点检测不可关（七轮真机实测）⇒ 长语音此路线无法稳定实现。sherpa-onnx **官方已有鸿蒙移植**（源码内置 6 个示例、官方 `build-ohos-arm64-v8a.sh`、预编译件零 glibc 依赖） | `docs/70:892-946`、`:976-987` |
 | 11 | 权限面 | **10 项普通权限，不申请任何 ACL 特殊权限** | 需 JIT 的方案一律不进入选型，以保证可正常上架；代价（WASM 不可用）由 §2.1.4 的两层垫片吸收 | `README.md:36`、`module.json5:17-119`、`tools/check-store-readiness.mjs`（本机 PASS） |
-| 12 | 其它 JS 引擎（QuickJS / Hermes / Bun / Deno 等） | **无选型记录** | `README.md`、`AGENTS.md`、`docs/*.md` 全库检索 `QuickJS`/`Hermes`/`JerryScript`/`Bun`/`Deno` **零命中**（唯一的 `quickjs` 命中在**上游核心树**里：`dsh-client-ui-sidebar-documentpreview` 的 pdf.js 自带一个 **WASM 版** QuickJS 沙箱，与运行时选型无关，而且在 `--jitless` 下必然不可用 —— 顺带印证约束一）。⇒ **不作论断**：不是评估后否决，而是从未进入候选 | `grep -rn "QuickJS\|Hermes\|JerryScript" README.md AGENTS.md docs/` → 0；核心树命中见 `dist/core/work/dsh-core-0.1.7-rc.2/node_modules/@deepseek-ai/dsh-client-ui-sidebar-documentpreview/lib/client.pdf.js` |
+| 12 | 其它 JS 引擎（QuickJS / Hermes / Bun / Deno 等） | **无选型记录** | `README.md`、`AGENTS.md`、`docs/*.md` 全库检索 `QuickJS`/`Hermes`/`JerryScript`/`Bun`/`Deno` **零命中**（唯一的 `quickjs` 命中在**上游核心树**里：`dsh-client-ui-sidebar-documentpreview` 的 pdf.js 自带一个 **WASM 版** QuickJS 沙箱，与运行时选型无关，而且在 `--jitless` 下必然不可用 —— 顺带印证约束一）。⇒ **不作论断**：不是评估后否决，而是从未进入候选 | `grep -rn "QuickJS\|Hermes\|JerryScript" README.md AGENTS.md docs/` → 0；核心树命中见 `dist/core/work/dsh-core-0.2.0-rc.1/node_modules/@deepseek-ai/dsh-client-ui-sidebar-documentpreview/lib/client.pdf.js` |
 
 ---
 
@@ -597,13 +601,13 @@ print([ (n, b'.codesign' in z.read(n)) for n in ['libs/arm64-v8a/libnode.so.137'
 
 # ── 宿主侧结构性门禁（AGENTS.md 必跑链 + 断言计数）─────────────────────
 node tools/assert-cli-shim.mjs            # 实跑：40 项
-node tools/assert-resfile-sync.mjs        # 实跑：8 件快照同步
+node tools/assert-resfile-sync.mjs        # 实跑：10 件快照同步
 node tools/assert-exec-fix.mjs            # 实跑：35 项
 node tools/assert-python-bridge.mjs       # 实跑：69 项
 node tools/assert-fs-search-fallback.mjs  # 实跑：39 通过 / 0 失败
 node tools/check-native-closure.mjs       # 实跑：PASS
 node tools/check-parity.mjs               # 实跑：通过
-node tools/compat-drift.mjs               # 实跑：135/135 无漂移
+node tools/compat-drift.mjs               # 实跑：140/140 无漂移（核心 0.2.0-rc.2）
 
 # ── 真机（只覆盖安装，永不卸载）─────────────────────────────────────────
 .\tools\update-device.ps1 -SkipRebuild
@@ -650,24 +654,31 @@ hdc file recv $F/dshm-host.log   ./dshm-host.log   && grep -E "exec 探测|归�
 ### 6.3 `docs/70` 的 HAP 体积表停在旧时点
 
 `docs/70:331-337`（§3.6 "HAP 体积的两次大回收"）把末行写成"现状 **277 MB**"，
-而当前构建产物实测
-`entry/build/default/outputs/default/entry-default-signed.hap` = **314,055,094 B**
-（= 299.5 MiB / 314.1 MB，`dist/sideload/README.md:13-17`）。
-差额来自后续批次引入的语音库（`libsherpa_onnx.so` / `libonnxruntime.so` /
-`libsherpa-onnx-c-api.so`）等。⇒ 引用体积时**以实测为准**，不要引用那张表的末行。
+而当前构建产物实测（核心 0.2.0-rc.2）
+`entry/build/default/outputs/default/entry-default-signed.hap` = **314,166,762 B**
+（= 299.62 MiB / 314.17 MB；核心 0.2.0-rc.1 时为 314,673,276 B = 300.10 MiB）。
+差额来自 rc.1 → rc.2 的核心树变化（78,705,318 → 78,081,448 B，−623,870 B）与 libvips 家族从
+46 件减为 45 件（−121,328 B）。⇒ 引用体积时**以实测为准**，不要引用那张表的末行。
 
 ---
 
 ## 7. 与相邻章节的分工
 
+> **历史说明（2026-09-28 补）**：本文档合并自三份分章草稿——`A-总览与根本约束.md`、
+> `C-端侧运行时.md`、`E-验收运维与踩坑总表.md`。合并后它们分别是本文档的
+> **第一章**「总览与两个根本约束」、**第三章**「端侧运行时：HAP 里有什么、启动时发生什么」、
+> **第五章**「真机验收、运维与踩坑总表」。`docs/90-staging/` 这个目录
+> **从未入库**（`git log --all -- docs/90-staging` 为空），因此正文里任何
+> `docs/90-staging/…` 形态的旧引用都按上面的对应关系解读为本文档的章。
+
 | 章 | 覆盖 |
 |---|---|
-| **A（本章）** | 项目是什么、**两个根本约束**（含"构建期自签名"整套与 E-TS2）、整体架构、选型表、文档与实物不一致 |
-| `C-端侧运行时.md` | HAP 目录布局与职责、首启解包与 `.dshm-bundled-stamp`、`BOOT_00→70` 逐阶段、argv/env 契约、`hostcore/app` 补丁清单、沙箱布局、网络与端口 |
-| `E-验收运维与踩坑总表.md` | 真机数据保全、验收流程与门禁清单、诊断手段、按主题的踩坑索引 |
+| **第一章**（本节所在） | 项目是什么、**两个根本约束**（含"构建期自签名"整套与 E-TS2）、整体架构、选型表、文档与实物不一致 |
+| **第三章** | HAP 目录布局与职责、首启解包与 `.dshm-bundled-stamp`、`BOOT_00→70` 逐阶段、argv/env 契约、`hostcore/app` 补丁清单、沙箱布局、网络与端口 |
+| **第五章** | 真机数据保全、验收流程与门禁清单、诊断手段、按主题的踩坑索引 |
 
-**读法建议**：本章给"为什么必须这样"，`C` 给"具体长什么样、怎么起来的"，
-`E` 给"怎么安全地送上去、怎么判定真的生效了"。三者冲突时，
+**读法建议**：第一章给"为什么必须这样"，第三章给"具体长什么样、怎么起来的"，
+第五章给"怎么安全地送上去、怎么判定真的生效了"。三者冲突时，
 以代码与实测读数为准，并在本节第 6 条的模式下**登记差异**。
 
 ---
@@ -755,8 +766,8 @@ print(sorted({m.group(0).decode() for m in re.finditer(rb'v\d+\.\d+\.\d+-openhar
 
 **这条对构建的实际影响**：`libdshhost.so` 由 `node-headers/` 编译，所以它自述的
 `runtimeVersion()` 是**编译期头文件版本**（26.7.0），而运行中的 `libnode` 是 24.2.0
-（`docs/90-staging/A-总览与根本约束.md:542-562` 记录了这条不一致的完整证据链与
-它对核心页那一行的后果——该章另有"未验证：无设备在此环境"的如实标注）。
+（`docs/90:623-646`（§6.1）记录了这条不一致的完整证据链与
+它对核心页那一行的后果——那一节另有"未验证：无设备在此环境"的如实标注）。
 构建侧只需要记住：**头文件与 libnode 是两套版本号，改任一方时不要用另一方的数字做判据。**
 
 CMake 已按 soname **候选列表**探测而不是写死
@@ -962,11 +973,16 @@ if (text.includes(MARK)) { /* 旧版：先删掉旧注入段再注入新版 */ }
 > 用 tar.gz 就得在 ArkTS 里手写 tar 解析 + gzip 解压——纯额外风险与代码量
 > （pack-core.mjs:2073-2077）。
 
-规模核对（同处）：本机实测 zip **29,201 条目**（manifest.json:24），< 65535；
-解包约 253 MB < 4 GB ⇒ **不需要 zip64**。
+规模核对（同处）：本机实测 zip **29,351 条目**（`dist/core/dsh-core-0.2.0-rc.2.manifest.json` 的
+`package.entries`），< 65535；解包约 241 MB < 4 GB ⇒ **不需要 zip64**。
+（`0.2.0-rc.1` 时代为 29,602 条目 / 242.7 MiB，同量级。）
 
-另一个刻意的设计：**固定时间戳 ⇒ 同一份输入产出逐字节相同的包，便于比对与审计**
-（pack-core.mjs:2094-2096，`DOS_TIME`/`DOS_DATE` 写死）。
+另一个刻意的设计：**zip 条目时间戳固定**（pack-core.mjs:2095-2096，`DOS_TIME`/`DOS_DATE` 写死）。
+⚠️ 但这**不等于"包可复现"**：清单与树内元数据都带 `generatedAt`/`builtAt`
+（`pack-core.mjs:2002`、`:2244`，值来自 `new Date().toISOString()`），
+实测同一配方连跑三次，**条目数与体积恒定、sha256 每次不同**
+（`0.2.0-rc.1` 三次：`9279c4d5…` / `b8b48252…` / `67b85c26…`）。
+所以"固定时间戳"只保证**同一批文件在同一次运行内的可比性**，不要拿它推断"重跑一次应当同哈希"。
 这条对"交付包是否真的等于构建产物"的校验很有用——但要注意
 **签名会引入非确定性**：实测对同一个源码归档跑两次 `sign-tar-elf.py`，
 产出 sha256 不同（27,719,980 B 相同、哈希不同），因为签名块含时间/随机因子。所以
@@ -1004,23 +1020,34 @@ if (text.includes(MARK)) { /* 旧版：先删掉旧注入段再注入新版 */ }
 node tools/pack-core.mjs --skip-install --place-in-app
 
 # 2) 看清单：版本、体积、条目数、sha256、签名清单
-cat dist/core/dsh-core-0.1.7-rc.2.manifest.json
+cat dist/core/dsh-core-0.2.0-rc.2.manifest.json
 
 # 3) resfile 里的 zip 与 dist 里的逐字节相同（本机实测同 sha256）
-node -e "const c=require('node:crypto'),f=require('node:fs');for(const p of ['dist/core/dsh-core-0.1.7-rc.2-openharmony-arm64.zip','entry/src/main/resources/resfile/dsh-core-0.1.7-rc.2-openharmony-arm64.zip'])console.log(p,c.createHash('sha256').update(f.readFileSync(p)).digest('hex'))"
+node -e "const c=require('node:crypto'),f=require('node:fs');for(const p of ['dist/core/dsh-core-0.2.0-rc.2-openharmony-arm64.zip','entry/src/main/resources/resfile/dsh-core-0.2.0-rc.2-openharmony-arm64.zip'])console.log(p,c.createHash('sha256').update(f.readFileSync(p)).digest('hex'))"
 
 # 4) 幂等性：连跑两次，第二次的补丁应全部报"已存在（跳过）"
 ```
 
-本机基线（`dist/core/dsh-core-0.1.7-rc.2.manifest.json` + `dist/pack-logs/pack-017b.out.log`）：
+本机基线（`dist/core/dsh-core-0.2.0-rc.2.manifest.json`）：
 
 ```text
-核心版本      0.1.7-rc.2
-解包体积      252,812,513 B (241.1 MiB) / 25,914 文件
-分发包        78,104,023 B (74.49 MiB) / 29,201 条目
-sha256        eb00ade21c1aacb9555f7009cb80ea0b23e60073fcd6e3cee64ccb747bf0c12f
-原生          signed 47 / unsigned 1（koffi.node）+ selfSign attempted=1 signed=1
+核心版本      0.2.0-rc.2
+解包体积      252,069,490 B (240.8 MiB) / 26,066 文件（node_modules 段）
+分发包        78,081,448 B (74.46 MiB) / 29,351 条目
+sha256        45836d8a34b0b6d40e4d8b3997492b557cc87853c19813e2df4e070173fff3b3
+原生          signed 47 / unsigned 1 + selfSign attempted=1 signed=1
 ```
+
+> **`unsigned 3 → 1` 的变化要说清**：上面 `unsigned 1` 就是清单里那一条
+> `koffi/build/koffi/openharmony_arm64/koffi.node`（走 `dlopen`，`dlopen` 通道不要求
+> `.codesign`，见下方注）。`0.2.0-rc.1` 时代清单额外记进去的两个
+> `@deepseek-ai/node-addon-system-linux-arm64/bin/{glibc,musl}/system.node`，是 `pack-core`
+> 自己写的**占位文本**（非 ELF，真身是 HAP `libs/` 里的 `libsystem.so`，见
+> `docs/device-validation.md:1984-1991`）；它们在当前清单里不再出现。
+> **判据一律看清单内容，不看计数**（下一条正好说明了计数为什么不可靠）。
+> ⚠️ **`selfSignNatives()` 不幂等**：`ensureRipgrepPlatformPackage()` 会把未签名的 `rg` 拷回原位，
+> 所以"再跑一次 pack-core"会**重新签 1 个**（实测 run2/run3 各签 1/1）。这不是缺陷，
+> 但会让"签名数"的比对失去意义——**比对要看 `signed`/`unsigned` 清单内容，不看计数**。
 
 > `koffi.node` 长期在 `unsigned` 清单里**是正常的**：它走 `dlopen`，`dlopen` 通道
 > **不要求 `.codesign`**（真机已验证），重签反而有破坏已验证链路的风险。
@@ -1069,6 +1096,8 @@ sha256        eb00ade21c1aacb9555f7009cb80ea0b23e60073fcd6e3cee64ccb747bf0c12f
 | `require-builtin-shim.cjs` | **Host 直接起不来**（`No usable native binding found for …openharmony-arm64`） |
 | `dshm-installer.js` | 插件安装器缺失 |
 | `dshm-user-rows.js` | 用户插件行读写缺失 |
+| `dshm-skills.js` | **不报错**，只让内置技能退回旧的「字节数判等」⇒ `hdsh-*`→`dshm-*` 这类**等长替换**永远推不下去（P0-1） |
+| `dshm-compat.js` | **不报错**，只让兼容性豁免通道失效 ⇒ `.compat-req` 队列被忽略、插件照旧被 0.2.0 跳过（P1-3） |
 
 `dshm-installer.js` 那一行还带着一条**具体教训**（place-host-app.mjs:40-41）：
 
@@ -1077,6 +1106,7 @@ sha256        eb00ade21c1aacb9555f7009cb80ea0b23e60073fcd6e3cee64ccb747bf0c12f
 
 ⇒ **加文件时必须同时改两处**：本脚本的 `FILES`（place-host-app.mjs:42）与
 `tools/assert-resfile-sync.mjs:18-26` 的同名清单。否则门禁不认识新文件、等于没有门禁。
+（2026-09-28 新增 `dshm-skills.js` 与 `dshm-compat.js` 时正是照这条做的：两处清单一同扩到 **9 项**。）
 
 ### 3.3 `package.json` 是内联生成的，且**刻意不带 `type` 字段**
 
@@ -1093,20 +1123,21 @@ sha256        eb00ade21c1aacb9555f7009cb80ea0b23e60073fcd6e3cee64ccb747bf0c12f
 
 ```bash
 node tools/place-host-app.mjs
-node tools/assert-resfile-sync.mjs     # 必须「8 件快照全部同步」
+node tools/assert-resfile-sync.mjs     # 必须「10 件快照全部同步」
 
-# 源与快照逐字节比对（本机实测 7/7 相同）
+# 源与快照逐字节比对（本机实测 9/9 相同 + package.json 语义锁）
 ```
 
-本机实测（`assert-resfile-sync.mjs` 输出）：
+本机实测（`assert-resfile-sync.mjs` 输出，2026-09-28）：
 
 ```text
-ok  ：main.js 一致（200369B）        ok  ：dshm-installer.js 一致（56174B）
-ok  ：fetch-shim.js 一致（29723B）   ok  ：dshm-user-rows.js 一致（48866B）
-ok  ：undici-shim.mjs 一致（5530B）  ok  ：package.json 语义锁（main=main.js，无 type 字段 ⇒ CommonJS）
-ok  ：undici-loader.mjs 一致（1223B）
+ok  ：main.js 一致（208567B）        ok  ：dshm-installer.js 一致（60096B）
+ok  ：fetch-shim.js 一致（33278B）   ok  ：dshm-user-rows.js 一致（48866B）
+ok  ：undici-shim.mjs 一致（5530B）  ok  ：dshm-skills.js 一致（4995B）
+ok  ：undici-loader.mjs 一致（1223B）ok  ：dshm-compat.js 一致（10154B）
 ok  ：require-builtin-shim.cjs 一致（2453B）
-assert-resfile-sync：8 件快照全部同步
+ok  ：package.json 语义锁（main=main.js，无 type 字段 ⇒ CommonJS）
+assert-resfile-sync：10 件快照全部同步
 ```
 
 ---
@@ -1618,19 +1649,19 @@ The bundleName in app.json5/hvigorfile.ts does not match the bundleName in the g
 
 ```text
 entry/build/default/outputs/default/
-├── entry-default-unsigned.hap     312,041,944 B  (297.59 MiB)
-├── entry-default-signed.hap       314,055,094 B  (299.50 MiB)   ← 装机用这个
+├── entry-default-unsigned.hap     312,150,304 B  (297.69 MiB)
+├── entry-default-signed.hap       314,166,762 B  (299.61 MiB)   ← 装机用这个
 ├── pack.info
 └── mapping/
 ```
 
-签名只多两样东西（本机逐条目对比）：
+签名只多两样东西（本机逐条目对比，2026-09-29 / 核心 0.2.0-rc.2）：
 
 | 差异 | 大小 |
 |---|---|
-| 新增条目 `.pages.info` | 23,792 B |
-| 条目总和解包量 | 312,026,400 → 312,050,192 B（**差额就是 `.pages.info`**）；其余 106 个条目**大小逐条相同** |
-| 文件级附加块（中央目录 + 签名块） | 15,544 → 2,004,902 B |
+| 新增条目 `.pages.info` | 23,800 B |
+| 条目总和解包量 | 312,134,144 → 312,157,944 B（**差额就是 `.pages.info`**）；其余 110 个条目**大小逐条相同** |
+| 文件级附加块（中央目录 + 签名块） | 16,160 → 2,008,818 B |
 
 ⇒ 两个 HAP 的差异**只有签名块与 `.pages.info`**，内容零差异。
 这条对"签名没改内容"是个有用的断言。
@@ -1654,22 +1685,34 @@ hdc install -r entry\build\default\outputs\default\entry-default-signed.hap
 `update-device.ps1` 把这条做成了代码约束——第 0 步**自检脚本自身不含卸载调用**（:46-70），
 且装前记录 `home` 条目数、装后比对，减少就判 FAIL（:145-167）。
 
-> ⚠️ **两处版本硬编码，升级核心后必须同步改**（否则脚本会误判失败，或被误当成"没验证"）：
+> ⚠️ **版本硬编码，升级核心后必须同步改**（否则脚本会误判失败，或被误当成"没验证"）。
+> 其中核心版本判据**已于 2026-09-28（批次三十五）改为从 recipe 读取**，不再需要手改：
 >
-> | 位置 | 内容 | 说明 |
+> | 位置 | 内容 | 状态 |
 > |---|---|---|
-> | `update-device.ps1:168` | `if ($afterCores -notmatch '0\.1\.7-rc\.2') { Bad '核心树里没看到 rc.2' }` | 核心版本升到 rc.3 后，这一行会**报 FAIL** 并把结论置为"更新未完全通过"（:203-204 `exit 1`）——它是对的还是错的，取决于你是不是真换了核心 |
-> | `update-device.ps1:180` | `if ($okCount -ge 7)` | exec 探测项数。新增探测目标（如 docs/50 §12.10 记的 `git-ls-remote`）后要同步——否则新项失败也不会被发现 |
+> | `update-device.ps1` 的核心版本判据 | `$wantCore = (Get-Content hostcore/core-recipe.json -Raw \| ConvertFrom-Json).coreVersion` → `if ($afterCores -notmatch [regex]::Escape($wantCore)) { Bad … }` | ✅ 已改为读配方（2026-09-28）。判据是"**新版在不在**"，不要求旧版不在——新旧核心树并存是预期行为（`docs/50:45`） |
+> | `update-device.ps1` Step 8 的 exec 探测判据 | 原 `if ($okCount -ge 7)`；现改为 `$probe = [regex]::Match($log,'exec 探测：(.*)')` → 按 `[，,]` 切分逐项要求 `=ok$`，全通才 `$execOk = $true`，结论段用 `if ($dataOk -and $execOk)` | ✅ **已改为逐项判定**（2026-09-28）。写死总数会在新增探测目标后失效（8 项只 ok 7 项仍算通过） |
 >
 > 这两条都是"**写死总数/版本**"的门禁形态。本项目在
-> `docs/70` §8.13（`docs/70-鸿蒙移植踩坑与修复总览.md:802`）已把这类问题
+> `docs/70` §8.13（`docs/70-鸿蒙移植踩坑与修复总览.md:885`）已把这类问题
 > 登记为一条独立教训（E381/E382：「写死总数」的断言会让人放松警惕）。
+> 同一形态的三处脚本硬编码**已于 2026-09-28 一并清理**（原记"留档未改"）：
+> `tools/func_test_final.py`（`'0.1.7-rc.2' in ls` ⇒ 改为读 recipe 的 `want_core()`；另 T0.2 的
+> `detail.count('=ok') >= 7` 同步改为逐项判定）、`tools/repro_report9.py:41`
+> （`DSHM_CORE_DIR=…/cores/0.1.7-rc.2` ⇒ 属一次性脚本，随清理 `git rm`）、
+> `tools/scan-core-plugins.mjs`（默认 `coreDir` 停在 `dsh-core-0.1.5-rc.2` ⇒ 改为
+> `join(ROOT,'dist','core','work', \`dsh-core-${RECIPE.coreVersion}\`)`）。
+> 清理明细见本章 §5.3。
 
 ---
 
 ## 9. 步骤 8：交付包归置 `dist/sideload/`
 
-**内容**（本机实测）：`DSHM-1.0.0-arm64-signed.hap`（314,055,094 B）、`README.md`、`SHA256SUMS.txt`。
+**内容**（本机实测）：`DSHM-1.0.0-arm64-signed.hap`（314,166,762 B / 299.62 MiB，2026-09-29 22:48 / 核心 0.2.0-rc.2）、`README.md`、`SHA256SUMS.txt`。
+
+> **2026-09-30 复核：这份交付包又落后了一整个核心版本**（仍嵌 `dsh-core-0.2.0-rc.1`，缺托盘图标、
+> `dshm-compat.js`、`dshm-skills.js`），已按 §9.2 四步刷新到 2026-09-29 22:48 的构建产物。
+> ⇒ **E-DL1 的教训是"会复发"的**：四步纪律只是人记得住的部分，缺的仍是脚本约束（见 §9.3）。
 
 ### 9.1 踩过的坑：顺序错一次，交付包就落后一个版本
 
@@ -1737,36 +1780,44 @@ $n = (Get-Item $dist).Length
 
 ## 10. 步骤 9：体积账
 
-### 10.1 HAP 总量与构成（签名版，本机实测）
+### 10.1 HAP 总量与构成（签名版，本机实测，2026-09-29 22:48 / 核心 0.2.0-rc.2）
 
 | 分组 | 条目数 | 字节 | MiB | 占比 |
 |---|---:|---:|---:|---:|
-| `libs/arm64-v8a/*` | 59 | 191,791,760 | 182.91 | 61.46% |
-| `└ libnode.so.137` | 1 | 126,809,264 | 120.93 | 40.64% |
-| `└ libpython3.12.so.1.0` | 1 | 20,461,032 | 19.51 | 6.56% |
-| `└ libvips 家族`（含 sharp 与 46 个库） | 46 | 24,011,312 | 22.90 | 7.69% |
-| `└ CMake 编出 + HAR 带入`（`libkoffi`/`libdshhost`/`libsystem`/`libpython_runner`/`libentryprobe`/`libdshm-gitcompat` + onnxruntime + sherpa 2 件 + `libc++_shared`） | 10 | 20,466,312 | 19.52 | 6.56% |
+| `libs/arm64-v8a/*` | 59 | 191,791,760 | 182.91 | 61.44% |
+| `└ libnode.so.137` | 1 | 126,809,264 | 120.93 | 40.62% |
+| `└ libpython3.12.so.1.0` | 1 | 20,461,032 | 19.51 | 6.55% |
+| `└ libvips 家族`（含 sharp 与 44 个库） | 45 | 23,889,984 | 22.78 | 7.65% |
+| `└ CMake 编出 + HAR 带入`（`libkoffi`/`libdshhost`/`libsystem`/`libpython_runner`/`libentryprobe`/`libdshm-gitcompat` + onnxruntime + sherpa 2 件 + `libc++_shared` + `libz`） | 11 | 20,587,640 | 19.63 | 6.60% |
 | `└ libpty.so` | 1 | 43,840 | 0.04 | 0.01% |
-| 核心树 zip（`resfile/dsh-core-*.zip`） | 1 | 78,104,023 | 74.49 | 25.03% |
-| `resources/` 其余 | 40 | 37,699,278 | 35.95 | 12.08% |
+| 核心树 zip（`resfile/dsh-core-*.zip`） | 1 | 78,081,448 | 74.46 | 25.01% |
+| `resources/` 其余 | 44 | 37,744,474 | 36.00 | 12.09% |
 | `└ toolchain/python/`（归档 + 标记） | 2 | 27,720,031 | 26.44 | 8.88% |
 | `└ toolchain/git/`（15 apk + 标记） | 16 | 8,501,150 | 8.11 | 2.72% |
 | `└ busybox` | 1 | 1,042,048 | 0.99 | 0.33% |
-| `└ hostcore 入口（`resources/app/*`，7 文件 + package.json）` | 8 | 344,539 | 0.33 | 0.11% |
-| `└ 媒体 / skills / profile` | 13 | 91,510 | 0.09 | 0.03% |
-| `ets/` 与其他（`modules.abc`/`sourceMaps.map`/`module.json`/`pack.info`/`.pages.info`） | 7 | 4,455,131 | 4.25 | 1.43% |
-| **条目合计（stored，未压缩）** | **107** | **312,050,192** | **297.59** | 100% |
-| 中央目录 + 签名块 | — | 2,004,902 | 1.91 | — |
-| **`.hap` 文件** | — | **314,055,094** | **299.51** | — |
+| `└ hostcore 入口（`resources/app/*`，9 文件 + package.json）` | 10 | 388,800 | 0.37 | 0.12% |
+| `└ 媒体 / skills / rawfile / profile` | 15 | 92,445 | 0.09 | 0.03% |
+| `ets/` 与其他（`modules.abc`/`sourceMaps.map`/`module.json`/`pack.info`/`.pages.info`） | 7 | 4,540,262 | 4.33 | 1.45% |
+| **条目合计（stored，未压缩）** | **111** | **312,157,944** | **297.70** | 100% |
+| 中央目录 + 签名块 | — | 2,008,818 | 1.92 | — |
+| **`.hap` 文件** | — | **314,166,762** | **299.62** | — |
 
-`libs/` 的 59 = 1（libnode）+ 1（libpython）+ 46（libvips 家族）+ 10（CMake 编出 / HAR 带入）+ 1（libpty），
-其中**与 `entry/libs/arm64-v8a/` 同名的 49 个、只存在于 HAP 的 10 个**（后者就是表里第 5 行）。
+`libs/` 的 59 = 1（libnode）+ 1（libpython）+ 45（libvips 家族）+ 11（CMake 编出 / HAR 带入）+ 1（libpty）。
+其中第 5 行那 11 个，**10 个只存在于 HAP**（`libc++_shared.so` / `libdshhost.so` / `libdshm-gitcompat.so` /
+`libentryprobe.so` / `libkoffi.so` / `libonnxruntime.so` / `libpython_runner.so` / `libsherpa-onnx-c-api.so` /
+`libsherpa_onnx.so` / `libsystem.so`），另 1 个 `libz.so` 在 `entry/libs/arm64-v8a/` 里也有。
+逐条实测：HAP `libs/` 59 条、`entry/libs/arm64-v8a/` 49 条，`only-in-HAP` = 10 条（即上面那 10 个）、
+`only-in-repo` = 0 条。
+**vips 家族的 45 件**判据是核心 manifest 的 `native.signed` 清单（47 项里 45 项来自
+`@ohos-ports/img-sharp-libvips-openharmony-arm64/lib/*`（44 个 `.so`）+ `@ohos-ports/img-sharp-openharmony-arm64/lib/sharp-openharmony-arm64.node`
+（其一，对应 HAP 里的 `libsharp-openharmony-arm64.so`），另 2 项是 `node-pty` 的 `pty.node` / `spawn-helper`，不在 `libs/` 下）。
+注意 manifest 里记的是 `libvips.so.42.20.3` 这类**带版本号的名字**，入 HAP 后统一改名为 `libvips.so`，
+所以**不能按文件名直接对表**，要按去版本号的基名比。
 
 > **关于"压缩"**：本 HAP 内**所有条目 `compress_type == 0`（stored，不压缩）**
 > （实测 `sorted({i.compress_type for i in z.infolist()}) == [0]`）。
-> 所以"解包体积"与"条目字节和"是同一个数——**不要**以为 299.5 MiB 是压缩后的。
-> 单位口径：299.50 MiB = 314.06 MB（十进制）= 314,055,094 B，同一个文件三种写法
-> （`dist/sideload/README.md:13-17` 已经写明这一点）。
+> 所以"解包体积"与"条目字节和"是同一个数——**不要**以为 299.62 MiB 是压缩后的。
+> 单位口径：299.62 MiB = 314.17 MB（十进制）= 314,166,762 B，同一个文件三种写法。
 
 ### 10.2 各次回收
 
@@ -1778,17 +1829,17 @@ $n = (Get-Item $dist).Length
 | HAR 源裁剪 x86_64 | 解包 HAR 删 `package/libs/x86_64`（4 个文件 / 21,397,080 B = **20.41 MiB**）后重打包 | **320.1 → 299.5 MB（−20.6 MB）** | 同上；本机复核 `.har` 4 个 `arm64-v8a` / `.har.bak` 8 个含 `x86_64` |
 | 构建期 `DoNativeStrip` | hvigor 自动 strip `entry/libs` 后入库 | **回收 10.43 MiB**（49 个同名条目磁盘 173.82 MiB → HAP 163.39 MiB）；另有 10 个 HAP 独有件（CMake 编出 + HAR 带入）19.52 MiB | 本机逐条目比对；`entry/build/default/intermediates/stripped_native_libs/` 59 个文件 |
 
-**当前状态**：299.50 MiB。项目自身体积门是 `≤ 400 MB`（docs/50 §7 的 G2″，docs/device-validation.md:3389），
+**当前状态**：299.62 MiB（2026-09-29 22:48 产物，核心 0.2.0-rc.2）。项目自身体积门是 `≤ 400 MB`（docs/50 §7 的 G2″，docs/device-validation.md:3389），
 **已达标**。
 
 ### 10.3 体积的下一步空间（如实登记，未做）
 
-- `libs/arm64-v8a/` 里 59 个条目中，有 **46 个**是"libvips 家族"（含 `sharp` 绑定与它的
-  依赖闭包），HAP 内合计 22.90 MiB = `libs/` 的 12.5% / 整包的 7.69%。
+- `libs/arm64-v8a/` 里 59 个条目中，有 **45 个**是"libvips 家族"（含 `sharp` 绑定与它的
+  依赖闭包），HAP 内合计 **23,889,984 B = 22.78 MiB** = `libs/` 的 12.5% / 整包的 7.65%。
   它们服务于**图片附件**（sharp）。若产品接受"图片附件降级"，这一段可整体回收——
   但那是**产品决策**，不是构建优化。
 - `libnode.so.137` 单件 120.93 MiB（占 HAP 40.5%）是自建 Node 运行时，**不可裁**。
-- 核心树 zip 74.49 MiB 已按"只删命中的路径，绝不广谱清理"（`core-recipe.json` 的 `$comment_prune`）裁过；
+- 核心树 zip 74.46 MiB 已按"只删命中的路径，绝不广谱清理"（`core-recipe.json` 的 `$comment_prune`）裁过；
   `core-recipe.json:51` 记着一个**尚未启用**的候选裁剪项（`@ohos-ports/img-sharp-wasm32`），
   注释写明**先不启用**的理由：需要先确认 sharp 的加载器是不是**无条件** `require` 这个包——
   "若是条件 require，删掉安全；若无条件，删掉会直接抛错。这一步要能跑一次 Node 才能验，**别凭猜删**"。
@@ -1883,7 +1934,7 @@ node tools/check-store-readiness.mjs
 
 ### 1.1 实测的 HAP 条目清单
 
-下面这份清单是**对当前产物逐条读出来的**（107 个条目），不是设计文档里的设想：
+下面这份清单是**对当前产物逐条读出来的**（111 个条目），不是设计文档里的设想：
 
 ```bash
 # 按目录桶统计 HAP 条目（用随项目可用的 Python zipfile，不依赖 unzip）
@@ -1905,23 +1956,24 @@ PY
 | 条目数 | 位置 | 关键读法 |
 |---|---|---|
 | 59 | `libs/arm64-v8a/*.so` | 含 `libnode.so.137`（126,809,264 B）与 `libpython3.12.so.1.0`（20,461,032 B） |
-| 1 | `resources/resfile/dsh-core-0.1.7-rc.2-openharmony-arm64.zip` | 78,104,023 B，dsh 核心树的容器 |
-| 8 | `resources/resfile/resources/app/` | 宿主入口脚本族（见 §6） |
+| 1 | `resources/resfile/dsh-core-0.2.0-rc.2-openharmony-arm64.zip` | 78,081,448 B，dsh 核心树的容器 |
+| 10 | `resources/resfile/resources/app/` | 宿主入口脚本族（见 §6） |
 | 16 + 2 | `resources/resfile/toolchain/git/`、`toolchain/python/` | 15 个 Alpine apk + 1 个签名标记；1 个 CPython 归档 + 1 个签名标记 |
 | 1 | `resources/resfile/busybox/busybox` | 1,042,048 B，arm64 静态 busybox |
 | 5 | `resources/resfile/ohos-skills/*.md` | 端侧知识技能（Python/Shell/PC/工作区/插件安装） |
 | 6 | `resources/base/media/*` | 图标与鲸鱼 SVG（见 §1.2） |
+| 2 | `resources/rawfile/tray_{white,black}.png` | 状态栏托盘图标（494 / 441 B） |
 | 2 | `resources/base/profile/` | `main_pages.json`、`backup_config.json` |
-| 2 | `ets/` | `modules.abc`（2,955,428 B）+ `sourceMaps.map`（1,454,145 B） |
+| 2 | `ets/` | `modules.abc`（3,012,044 B）+ `sourceMaps.map`（1,481,152 B） |
 
-**只有 107 个条目**这件事本身就是一条设计结论：核心树的 2.9 万个条目**不在 HAP 里平铺**，而是压在一个 zip 里（`tools/pack-core.mjs` 的自建 zip 写入器，`tools/pack-core.mjs:2098-2199`）。原因见 §2。
+**只有 111 个条目**这件事本身就是一条设计结论：核心树的 2.9 万个条目**不在 HAP 里平铺**，而是压在一个 zip 里（`tools/pack-core.mjs` 的自建 zip 写入器，`tools/pack-core.mjs:2098-2199`）。原因见 §2。
 
 ### 1.2 每个位置放什么、谁生成它
 
 | 位置 | 里面是什么 | 谁生成 | 该由谁维护 |
 |---|---|---|---|
-| `resources/resfile/*.zip` | dsh 核心树（519 包 / 25,914 文件 / 241 MB 解包后，`dist/core/dsh-core-0.1.7-rc.2.manifest.json`） | `node tools/pack-core.mjs --skip-install --place-in-app`（放置点：`tools/pack-core.mjs:2226-2231`） | `hostcore/core-recipe.json`（唯一事实来源）+ `tools/pack-core.mjs` 的补丁函数 |
-| `resources/resfile/resources/app/` | `main.js` / `fetch-shim.js` / `undici-shim.mjs` / `undici-loader.mjs` / `require-builtin-shim.cjs` / `dshm-installer.js` / `dshm-user-rows.js` / `package.json` | `node tools/place-host-app.mjs`（清单：`tools/place-host-app.mjs:42`；`package.json` 由脚本内联生成，`:57-65`） | `hostcore/app/`（源），放置件是**快照** |
+| `resources/resfile/*.zip` | dsh 核心树（**518 个包 / 26,066 文件 / 252,069,490 B（240.8 MiB）解包后**，`dist/core/dsh-core-0.2.0-rc.2.manifest.json`；解包后树里 `dsh-client-ui-*` 53 个） | `node tools/pack-core.mjs --skip-install --place-in-app`（放置点：`tools/pack-core.mjs:2226-2231`） | `hostcore/core-recipe.json`（唯一事实来源）+ `tools/pack-core.mjs` 的补丁函数 |
+| `resources/resfile/resources/app/` | `main.js` / `fetch-shim.js` / `undici-shim.mjs` / `undici-loader.mjs` / `require-builtin-shim.cjs` / `dshm-installer.js` / `dshm-user-rows.js` / `dshm-skills.js` / `dshm-compat.js` / `package.json`（**10 件**） | `node tools/place-host-app.mjs`（清单：`tools/place-host-app.mjs:29` 的 `FILES`；`package.json` 由脚本内联生成，`:43-50`） | `hostcore/app/`（源），放置件是**快照** |
 | `resources/resfile/toolchain/{python,git}/` | CPython 3.12.14 musl 归档（27,720,007 B）+ Alpine git 2.47.3 及 14 个依赖 apk（合计 8,501,127 B） | `node tools/place-toolchain.mjs`（目标目录：`tools/place-toolchain.mjs:31`） | `third_party/`（不入库） |
 | `resources/resfile/busybox/busybox` | 单文件多合一 busybox | 入库资产（不在 `tools/` 脚本里生成） | 手工更新 |
 | `resources/resfile/ohos-skills/*.md` | 5 个技能文档 | 入库资产 | 手写 |
@@ -2015,7 +2067,7 @@ python -c "import zipfile;z=zipfile.ZipFile('entry/build/default/outputs/default
 
 **为什么重解包要删它**：指纹是"归档字节数 vs 上次记下的字节数"。改 `hostcore/**` 只影响入口脚本（进 HAP），不影响核心 zip；改 `tools/pack-core.mjs` 的补丁但产物大小恰好相同，设备也**不会**更新。装机后固定删 stamp 可消除这个不确定性（`docs/device-validation.md:3150`）。
 
-**删它的代价（必须写清）**：该次启动要重解 25,914 个文件，实测宿主启动耗时 **+6,648 ms**（`docs/device-validation.md:3606-3607`、`:3615`）。由此引出一个**安装流程导致的启动竞态**：WebView 早于宿主就绪发起加载 ⇒ 拿到 HTTP 404 ⇒ `fail()` ⇒ `phase=ERROR` ⇒ 白屏；重启即恢复（`docs/70-鸿蒙移植踩坑与修复总览.md` E-SV16）。**所以删 stamp 只能当"验证新代码真的进了设备"的手段用，不能进常规装机流程。**
+**删它的代价（必须写清）**：该次启动要重解 26,066 个文件（`0.2.0-rc.1` 时代为 26,267 个），实测宿主启动耗时 **+6,648 ms**（`docs/device-validation.md:3606-3607`、`:3615`）。由此引出一个**安装流程导致的启动竞态**：WebView 早于宿主就绪发起加载 ⇒ 拿到 HTTP 404 ⇒ `fail()` ⇒ `phase=ERROR` ⇒ 白屏；重启即恢复（`docs/70-鸿蒙移植踩坑与修复总览.md` E-SV16）。**所以删 stamp 只能当"验证新代码真的进了设备"的手段用，不能进常规装机流程。**
 
 **删 stamp 是安全的**：它是几十字节的安装元数据，只影响"下次启动是否重解包"，不碰用户数据（`docs/device-validation.md:3159`）。
 
@@ -2025,8 +2077,8 @@ python -c "import zipfile;z=zipfile.ZipFile('entry/build/default/outputs/default
 
 | 项 | 数值 | 出处 |
 |---|---|---|
-| 核心 zip | 78,104,023 B / 29,201 条目 | `dist/core/dsh-core-0.1.7-rc.2.manifest.json` |
-| 核心树解包后 | 25,914 文件 / 252,812,513 B（node_modules 部分） | 同上 |
+| 核心 zip | 78,081,448 B / 29,351 条目 | `dist/core/dsh-core-0.2.0-rc.2.manifest.json` |
+| 核心树解包后 | 26,066 文件 / 252,069,490 B（node_modules 部分） | 同上 |
 | CPython 归档 | 27,720,007 B / 4,530 文件 | 仓内实测；`docs/device-validation.md:642` |
 | git apk 组 | 15 个包，合计 8,501,127 B | 仓内实测（与 `toolchain/git/dshm-signed.txt` 的标记一致） |
 
@@ -2035,7 +2087,7 @@ python -c "import zipfile;z=zipfile.ZipFile('entry/build/default/outputs/default
 1. **侧载包 README 的口径**：`首次启动会解包核心树（约 60–90 秒）`（`dist/sideload/README.md:27`，同 `:89`）。
 2. **日常冷启动逐段实测**（不删 stamp 的稳态）：`aa start → Node 起来 ~2.1 s`、`Node → BOOT_40 0.3 s`、`BOOT_40 → BOOT_50 7.4 s`、`→ BOOT_70 0.2 s`、`WebView 加载 → 200 1.7 s`，**合计 ~10.1 s**（`docs/device-validation.md:3927-3934`）。
 
-**这两个数字差在哪儿**：稳态 ~10 s 里**不含核心解包**（trees 已在设备上）；首启的 60–90 s 额外包含：① 25,914 文件的 `decompressFile`；② 首启必然触发的**工具链后台解包**（`main.js:3197-3301`：`tar xmzf` 解 CPython 4,530 文件 + 15 个 apk，`hmfs` 上每个文件还会打一条 `settime: Permission denied`）；③ 首次 core 执行位补齐与 exec 探测（`main.js:2204-2235`、调用点 `:3410-3412`）。
+**这两个数字差在哪儿**：稳态 ~10 s 里**不含核心解包**（trees 已在设备上）；首启的 60–90 s 额外包含：① 26,066 文件的 `decompressFile`（`0.2.0-rc.1` 时代为 26,267 个）；② 首启必然触发的**工具链后台解包**（`main.js:3197-3301`：`tar xmzf` 解 CPython 4,530 文件 + 15 个 apk，`hmfs` 上每个文件还会打一条 `settime: Permission denied`）；③ 首次 core 执行位补齐与 exec 探测（`main.js:2204-2235`、调用点 `:3410-3412`）。
 
 > **未验证**：本项目**没有**对首启做过"核心解包 vs 工具链解包"的逐段计时分解，上面 ①②③ 是按代码路径列出的耗时来源，不是分摊过的实测值。要拿到分解，可在 `installBundled` 前后与 `finishToolchainExtraction` 处临时插桩（注意：**临时插桩必须在同一次改动内撤除**，见 `docs/device-validation.md:3940-3943` 的先例）。
 
@@ -2048,7 +2100,7 @@ python -c "import zipfile;z=zipfile.ZipFile('entry/build/default/outputs/default
 
 ```bash
 # 容器规模与指纹（构建侧）
-cat dist/core/dsh-core-0.1.7-rc.2.manifest.json
+cat dist/core/dsh-core-0.2.0-rc.2.manifest.json
 # 真机：stamp 与已装版本（读设备需要 hdc，路径见 §7）
 hdc shell "ls -la /data/app/el2/100/base/com.dshm.dshclient/haps/entry/files/dsh/cores"
 hdc shell "cat  /data/app/el2/100/base/com.dshm.dshclient/haps/entry/files/dsh/cores/<ver>/.dshm-bundled-stamp"
@@ -2135,7 +2187,7 @@ function stage(name, extra) {
 ```bash
 # 本机（不需要设备）：完整 BOOT 链 + 就绪探测
 #   env/argv 与端侧同口径，见 hostcore/app/main.js 头部
-DSHM_CORE_DIR=dist/core/work/dsh-core-0.1.7-rc.2 \
+DSHM_CORE_DIR=dist/core/work/dsh-core-0.2.0-rc.2 \
 DSHM_HOME=dist/localtest/boot-home DSHM_SANDBOX_HOME=dist/localtest/boot-home \
 DSHM_PORT=3120 DSHM_PROFILE=ondevice \
 node --jitless --experimental-sqlite --expose-internals hostcore/app/main.js
@@ -2177,7 +2229,7 @@ export function buildHostArgv(entryScript: string): string[] {
 
 **③ `--expose-internals`**（`:153-159`）：`0.1.6-alpha.2` 的 host preparation（`dsh-app-boot` 的 `internalModules`，经 `node-addon-require-builtin`）要访问 internal 模块做 profile 的 link 解析。端侧没有该 addon 的 openharmony 平台包，`main.js` 的 `installRequireBuiltinShim()` 用纯 JS shim 顶替，而 shim 的前提就是 `require("internal/…")` 可用 —— 即本开关。官方桌面端同样开它（`apps/desktop/src/host-process.ts` 的 spawn 参数第 1 位）。
 
-**④ 为什么没有 `--no-experimental-fetch`**（`:141-147`）：端侧 `libnode` 已升到 Node 24 及以后的线（`libnode.so.137`），fetch 那时已转正 —— `--experimental-fetch` 不再是 boolean 选项，`--no-` 否定形态会让进程**死在 CLI 解析**（真机实测 `invalid negation because it is not a boolean option`，Host 因此从未启动，见 `files/node-output.log`）。原 flag 的目的（不装原生 fetch、避开 undici 的 WASM llhttp）改由运行期垫片兜底：`fetch-shim.js` 的 `installFetchShim()` 在 WASM 不可用时无条件覆盖 `globalThis.fetch`（`hostcore/app/fetch-shim.js:535-552`）。原生 fetch 在 jitless 下反正不可用，覆盖是无损的。
+**④ 为什么没有 `--no-experimental-fetch`**（`:141-147`）：端侧 `libnode` 已升到 Node 24 及以后的线（`libnode.so.137`），fetch 那时已转正 —— `--experimental-fetch` 不再是 boolean 选项，`--no-` 否定形态会让进程**死在 CLI 解析**（真机实测 `invalid negation because it is not a boolean option`，Host 因此从未启动，见 `files/node-output.log`）。原 flag 的目的（不装原生 fetch、避开 undici 的 WASM llhttp）改由运行期垫片兜底：`fetch-shim.js` 的 `installFetchShim()` 在 WASM 不可用时无条件覆盖 `globalThis.fetch`（`hostcore/app/fetch-shim.js:586-603`）。原生 fetch 在 jitless 下反正不可用，覆盖是无损的。
 
 > **口径冲突（接手时必须先确认的一件事）**：仓库内对"当前 libnode 是哪个 Node 版本"有**两种互斥的说法**，不要在没核对设备前把任何一个当定论：
 > - `libnode.so.137` 是 **Node 26.x** 的 soname（`hostruntime/src/main/cpp/dshhost.cc:483`、`:487-490`；`entry/src/main/cpp/CMakeLists.txt:104` 注释"26.x=.137、24.x=.127"，且 `:6` 提到"换到 26.7.0 的头文件"）；
@@ -2404,11 +2456,12 @@ grep -m1 "BOOT_00" node-output.log   # 期望 jitless=true node=<版本>
 
 ### 6.4 两个垫片家族
 
-**（A）fetch 垫片（`fetch-shim.js`，554 行）**：用 `node:http/https`（**原生 llhttp**，与 WASM 无关）重写 `fetch/Request/Response/Headers/FormData/Blob/File`。三条踩过的坑直接写在代码里：
-- `DshmHeaders` 必须单独处理"原生 Headers / Map"（数据不在自有可枚举属性上）—— 之前 `Object.keys(nativeHeaders)` 返回 `[]`，**一个请求头都不发**，提供方回 401 `invalid_api_key`（`:44-63`）。
-- 已知长度的 body **必须显式给 `Content-Length`**：node 在首次 write 时自动改用 `Transfer-Encoding: chunked`，而部分网关的前置 WAF 直接拒 chunked POST（412 空体）（`:435-458`）。
-- **必须尊重 `redirect: 'manual'`**：上游 `web_fetch` 靠它自己做"仅同源跳转"的安全策略，垫片擅自跟跳等于绕过它（`:460-470`）。
-- `DshmRequest` 是必需的：dsh 的 `/api` 挂载点会 `new Request(...)`，缺它 ⇒ `ReferenceError` ⇒ 被 catch-all 兜成**空体 400**（`:473-485`）。
+**（A）fetch 垫片（`fetch-shim.js`，605 行）**：用 `node:http/https`（**原生 llhttp**，与 WASM 无关）重写 `fetch/Request/Response/Headers/FormData/Blob/File`。五条踩过的坑直接写在代码里：
+- `DshmHeaders` 必须单独处理"原生 Headers / Map"（数据不在自有可枚举属性上）—— 之前 `Object.keys(nativeHeaders)` 返回 `[]`，**一个请求头都不发**，提供方回 401 `invalid_api_key`（`:59-79`）。
+- 已知长度的 body **必须显式给 `Content-Length`**：node 在首次 write 时自动改用 `Transfer-Encoding: chunked`，而部分网关的前置 WAF 直接拒 chunked POST（412 空体）（`:485-508`）。
+- **必须尊重 `redirect: 'manual'`**：上游 `web_fetch` 靠它自己做"仅同源跳转"的安全策略，垫片擅自跟跳等于绕过它（`:510-517`）。
+- `DshmRequest` 是必需的：dsh 的 `/api` 挂载点会 `new Request(...)`，缺它 ⇒ `ReferenceError` ⇒ 被 catch-all 兜成**空体 400**（`:523-536`）。
+- **原生 `FormData` 必须按能力识别**（2026-09-28 加）：Node 24 启动就自带 `FormData`（与 WASM 无关，`installFetchShim()` **不替换**它），而 `encodeRequestBody` 原先只认 `instanceof DshmFormData` ⇒ 体退化成 `Buffer.from(String(body))` = 字面量 `"[object FormData]"`（`:248`、`:254`，见 §3.6 末段）。
 
 **（B）undici 模块名垫片（`undici-shim.mjs` 114 行 + `undici-loader.mjs` 22 行）**：上游 `dsh-web-fetch-http` **不用全局 fetch** —— 它 `await import("undici")` 自建 Agent（HTTP 解析器是 WASM）⇒ jitless 下 `web_fetch` 打不开任何网页和 IP，而走第一层的 `web_search` 正常。做法是**运行期组合**：注册解析钩子让 `import("undici")` 解析到本仓垫片，并把 `dispatcher` 翻译成垫片认识的 `lookup`，**保住上游的 DNS 钉住/SSRF 防护**。核心树一个字节都不动。
 
@@ -2423,7 +2476,7 @@ grep -m1 "BOOT_00" node-output.log   # 期望 jitless=true node=<版本>
 ```bash
 # 改 hostcore/** 之后的固定三步（缺一步都可能"改了、构建绿、设备上没生效"）
 node tools/place-host-app.mjs
-node tools/assert-resfile-sync.mjs      # 8 件快照必须全一致
+node tools/assert-resfile-sync.mjs      # 10 件快照必须全一致（9 个 FILES + package.json 语义锁）
 devecocli build
 ```
 
@@ -2436,11 +2489,16 @@ node --check hostcore/app/main.js
 node --check hostcore/app/fetch-shim.js
 node --check hostcore/app/dshm-user-rows.js
 node --check hostcore/app/dshm-installer.js
+node --check hostcore/app/dshm-skills.js
+node --check hostcore/app/dshm-compat.js
 node tools/assert-cli-shim.mjs            # CLI 假壳 40 项
 node tools/assert-python-bridge.mjs
 node tools/assert-exec-fix.mjs
 node tools/assert-fs-search-fallback.mjs
 node tools/assert-resfile-sync.mjs
+node tools/check-skill-sync.cjs           # 32 passed（含等长改动用例）
+node tools/check-compat-exemption.cjs     # 48 passed（臂 A 透传 + 臂 B 上游挂载决策）
+node tools/check-dshm-installer.cjs       # 43 passed（含版本漂移双向用例 + GitHub→npm 回退 / monorepo 子包判定）
 ```
 
 ---
@@ -2465,8 +2523,9 @@ node tools/assert-resfile-sync.mjs
 | `dsh/home/host-stop-request` | 协作式停止的请求文件 | ArkTS 写（`DshHost.ets:633-643`），入口脚本 1.5 s 巡检消费 | 消费即删 |
 | `dsh/home/host-exit-mode` | `app-restart` 表示"停完要冷启动" | 入口脚本 `main.js:3953-3964`，ArkTS 1.5 s 巡检 | 消费即删 |
 | `dsh/home/.dshm-boot-failed` | 上次启动失败的标记（含 stage 与原因） | `dshm-user-rows.js:600-611` | 自愈后删 |
-| `dsh/home/install-queue/` | `*.req` / `*.rem` / `*.dir` → `*.done` / `*.fail` | 假壳写、入口脚本消费 | 是 |
-| `dsh/home/skills/` | 内置技能（5 个 `.md`） | `ensureBundledSkills` `main.js:1258-1284` | 是（大小指纹幂等同步） |
+| `dsh/home/install-queue/` | `*.req` / `*.rem` / `*.dir` / **`*.compat-req`** → `*.done` / `*.fail` | 假壳写、入口脚本消费（`.compat-req` 走 `dshm-compat.js` `applyRequest`） | 是 |
+| `dsh/home/profiles/ondevice/compatibility.json` | **兼容性豁免表**（`{"<包名>@<精确版本>": ["<dsh 版本>"]}`，如 `{"dshmarket@1.66.2":["0.2.0-rc.1"]}`） | 上游 `dsh-app-boot` 的 `setProfileVersionExemption`（经 `dshm-compat.js` 薄封装），**先于任何插件加载读取** | 是（P1-3；写坏时上游 `rewritable=false` 拒绝改写，界面如实回报） |
+| `dsh/home/skills/` | 内置技能（5 个 `.md`） | `ensureBundledSkills` `main.js:1261-1285` → `dshm-skills.js` `syncSkills` | 是（**内容 sha256 幂等**同步，2026-09-28 P0-1 修） |
 | `dsh/home/profiles/ondevice/` | `package.json`、`cordis.patch.yml`（**每次启动重拼**）、`.dshm-plugin-rows.yml`、`.dshm-market-rows.yml`、若干 `.quarantine-<ts>` | `ensureProfile` + `dshm-user-rows.js` | 混合（见 §6.2） |
 | `dsh/home/speech-to-text/{hms-bridge,sensevoice}/` | 语音桥队列与模型 | `entry/src/main/ets/speech/HmsSpeechBridge.ets:106`、`SenseVoiceRecognizer.ets:124` | 是 |
 | `workspace/` | 会话的默认工作目录（写进 `host-ready.json` 的 `workspace`） | `main.js:963-966` | 是 |
@@ -2582,7 +2641,7 @@ hdc shell "cat /proc/net/tcp" | grep -i "0C30" | grep -i " 0A "   # 状态 0A = 
 ```bash
 # ── 布局与产物 ─────────────────────────────────────────────────────────
 python -c "import zipfile;z=zipfile.ZipFile('entry/build/default/outputs/default/entry-default-signed.hap');print(len(z.namelist()))"
-cat dist/core/dsh-core-0.1.7-rc.2.manifest.json
+cat dist/core/dsh-core-0.2.0-rc.2.manifest.json
 
 # ── 入口脚本与垫片一致性（改 hostcore/** 之后必跑）───────────────────────
 node tools/place-host-app.mjs
@@ -2602,7 +2661,7 @@ node tools/check-plugin-toggle.mjs
 node tools/check-web-fetch-jitless.mjs
 
 # ── 本机以端侧同参跑一次完整启动（看 BOOT 链）───────────────────────────
-DSHM_CORE_DIR=dist/core/work/dsh-core-0.1.7-rc.2 \
+DSHM_CORE_DIR=dist/core/work/dsh-core-0.2.0-rc.2 \
 DSHM_HOME=dist/localtest/boot-home DSHM_SANDBOX_HOME=dist/localtest/boot-home \
 DSHM_PORT=3120 DSHM_PROFILE=ondevice \
 node --jitless --experimental-sqlite --expose-internals hostcore/app/main.js
@@ -2711,7 +2770,7 @@ done
 grep -rn "from '@kit\|from '@ohos" appstate/src/main/ets --include=*.ets
 ```
 
-本机实测读数（2026-09-27，本次成稿时实跑）：`arch-check` 扫描 **131** 个文件、**无违规**，自检 8/8 通过。注意 `docs/parity-matrix.md:119` 记录的旧读数是"扫描 75 文件"，`:121` 记的是"99 个 `@Builder`"，`:122` 记的是"81 文件 / 1855 处声明"—— 这类数字随文件数增长，**引用时必须以当场实跑为准**（本次实跑：`check-feature-wiring` 扫 133 文件 / 18 功能 / 1 条反面规则；`check-dead-code` 扫 99 文件 / 2224 处声明 / 256 个门面字段）。
+本机实测读数（2026-09-28 重测）：`arch-check` 扫描 **131** 个文件、**无违规**，自检 10/10 通过 —— `docs/parity-matrix.md:119` 已同步为同一读数（此前记的是"扫描 75 文件"）；`:121` 记 99 文件 / 102 个 `@Builder`、`:122` 记 99 文件 / **2237** 处判定声明 / 256 个门面字段（此前记的是"81 文件 / 1855 处声明"），与本章当场实跑一致。这类数字随文件数增长，**引用时仍必须以当场实跑为准**（本次同时实跑：`check-feature-wiring` 扫 133 文件 / 18 功能 / 1 条反面规则；`check-dead-code` 扫 99 文件 / 2237 处声明 / 256 个门面字段）。
 
 ---
 
@@ -3336,7 +3395,7 @@ node tools/place-host-app.mjs && node tools/assert-resfile-sync.mjs
 |---|---|---|---|
 | **`arch-check` 的 `SCAN_ROOTS` 不含 `hostruntime/src`** | 扫描根只有 `connection/src`、`appstate/src`、`platform/src`、`entry/src/main/ets`；脚本注释只解释了 `hostkit` 的排除理由 | `tools/arch-check.mjs:46-51`、`:36-45` | 要么把 `hostruntime/src` 加入扫描根，要么在注释里写明它的合规依据（**现状是"没扫也没说明"**）|
 | **`check-dead-code` 规则①（零使用 import）的实际有效性存疑** | `stripCommentsAndStrings` 消费块注释时**不补回换行** ⇒ 剥注释后的行号与原文整体偏移；而规则的"排除导入行"用的是**原文行号**、计数用的是**剥离后文本**。两者错位后，被排除的行不是真正的导入行，于是**导入标识符被自己计成了一次使用** | 机制在 `tools/check-dead-code.mjs:59-91`（块注释分支不 `out += '\n'`）与 `:284-294`；实测：对 `entry/src/main/ets/pages/WebApp.ets` 做 A/B ——**原样 0 处违规，去掉头部块注释后立刻报出 10 处**（`HMS_CHUNK_BYTES`/`makeTonePcm16`/`slicePcmChunks`/`resamplePcm16`/`pcmDurationMs`/`mergeTranscript`/`isNearSilence`/`speechRecognizer`/`textToSpeech`/`copyText`）。另对 4 个文件确认头部块注释净换行数 > 0（WebApp 28 / Index 18 / HmsSpeechBridge 35 / SpeechPcm 12）| 修法二选一：剥离时**保留换行**（块注释分支按 `\n` 计数补回），或把"排除导入行"改成**按文本匹配**而非行号。**修完必须先在已知坏版本上红过一次**（`docs/README.md:62` 纪律 6）|
-| 同上，`WebApp.ets` 里确实存在**零使用符号** | `INSERT_TEXT_JS`（`WebApp.ets:156`）、`applyThemeFromProbe`（`:1413`）、`lastMicProbe`（`:1031`）、`hmsEngineInfo`（`:1037`）、`hmsTranscript`（`:1038`）、`hmsE2eTranscript`（`:1041`）、`hmsE2eDetail`（`:1042`）全仓各仅 1 次出现（= 声明本身）。`probeTimerId`（`:741`）只在 `aboutToDisappear` 里被清（`:1053-1055`），**没有任何地方给它赋过值** ⇒ 那个"10s DOM 探针"已不存在，字段是残留。`PROBE_INTERVAL_MS`（`:303`）仅出现在注释里。**连带影响**：`applyTopBarTheme`（`:1510`）的唯一调用点在 `:1438`（= `applyThemeFromProbe` 体内）⇒ 它同样不可达 | 调用图核对：`Select-String -Path entry\src\main\ets\pages\WebApp.ets -Pattern 'applyThemeFromProbe\|applyTopBarTheme\|applySystemBarTheme'`（`applyThemeFromProbe` 只命中声明行 `:1413`；`applyTopBarTheme` 命中 `:1438` 与声明 `:1510`；`applySystemBarTheme` 命中 `:747`（桥回调）/`:1515`（探针路径内）与声明 `:1460`）；`node tools/check-dead-code.mjs` 当前**报绿**（`扫描 99 个文件 · 判定声明 2224 处` → "无死代码"）| 逐条判断：`INSERT_TEXT_JS` / `applyThemeFromProbe` 与已删除的探针/自检菜单配套，删除前先确认没有"非本文件"的调用点；字段类残留可直接删。**注意"探针没了"这条的连带后果**：外观跟随现在**只**靠 `THEME_SHIM_JS` 桥这一条路径，而 `WebApp.ets:1504-1509` 的注释仍按"桥 + 探针兜底两条路径"描述（"探针每 10s 一轮，保证桥万一没装上也能最终收敛"）—— **该注释已与实现不符，需同步更正**。这属于 `docs/70` §8.2「静默失效」：注释让人以为还有兜底，实际没有 |
+| 同上，`WebApp.ets` 里确实存在**零使用符号** | `INSERT_TEXT_JS`（`WebApp.ets:156`）、`applyThemeFromProbe`（`:1413`）、`lastMicProbe`（`:1031`）、`hmsEngineInfo`（`:1037`）、`hmsTranscript`（`:1038`）、`hmsE2eTranscript`（`:1041`）、`hmsE2eDetail`（`:1042`）全仓各仅 1 次出现（= 声明本身）。`probeTimerId`（`:741`）只在 `aboutToDisappear` 里被清（`:1053-1055`），**没有任何地方给它赋过值** ⇒ 那个"10s DOM 探针"已不存在，字段是残留。`PROBE_INTERVAL_MS`（`:303`）仅出现在注释里。**连带影响**：`applyTopBarTheme`（`:1510`）的唯一调用点在 `:1438`（= `applyThemeFromProbe` 体内）⇒ 它同样不可达 | 调用图核对：`Select-String -Path entry\src\main\ets\pages\WebApp.ets -Pattern 'applyThemeFromProbe\|applyTopBarTheme\|applySystemBarTheme'`（`applyThemeFromProbe` 只命中声明行 `:1413`；`applyTopBarTheme` 命中 `:1438` 与声明 `:1510`；`applySystemBarTheme` 命中 `:747`（桥回调）/`:1515`（探针路径内）与声明 `:1460`）；`node tools/check-dead-code.mjs` 当前**报绿**（`扫描 99 个文件 · 判定声明 2237 处` → "无死代码"）| 逐条判断：`INSERT_TEXT_JS` / `applyThemeFromProbe` 与已删除的探针/自检菜单配套，删除前先确认没有"非本文件"的调用点；字段类残留可直接删。**注意"探针没了"这条的连带后果**：外观跟随现在**只**靠 `THEME_SHIM_JS` 桥这一条路径，而 `WebApp.ets:1504-1509` 的注释仍按"桥 + 探针兜底两条路径"描述（"探针每 10s 一轮，保证桥万一没装上也能最终收敛"）—— **该注释已与实现不符，需同步更正**。这属于 `docs/70` §8.2「静默失效」：注释让人以为还有兜底，实际没有 |
 | `hostcore/speech-provider/index.js` 的注释与代码互相矛盾 | 文件头注释（`:18-25`）说"**刻意不提供 preparation**"，而代码 `:186` 是 `preparation: prep` 且 `createPreparation` 是实际实现 | `grep -n "preparation" hostcore/speech-provider/index.js` | 注释描述的是"模型随包内置"时代的形态；应改写成"模型在线下载后**必须**提供 preparation"，否则下一个读注释的人会把它删掉 |
 | 宿主**彻底起不来**时无启动超时兜底 | `fail()` 只挂在 Web 回调上；`retry()` 在 `launchUrl` 为空时会排重试，`adoptLocalHost` 成功后会经 `@Watch` 触发加载 —— 但宿主**完全起不来**时没有任何超时判据 | `docs/device-validation.md:4136`（独立审查结论，经核实后**有意未改**）| 既有设计依赖宿主自行报错；加超时兜底会改变既有语义，属独立决策 |
 | 本节涉及的真机读数全部来自 `docs/device-validation.md` 已有批次 | 本稿未新跑任何真机验证（无设备通道）| 批次二十五/二十六/二十七/三十/三十一，见 `docs/device-validation.md:3074/3167/3407/3921/4060` | 任何"启动页/语音"改动落地后，必须按 `AGENTS.md` 的回归纪律重跑基线并对照，且**只允许 `hdc install -r`**（`docs/80-真机更新与数据保全.md:40-56`）|
@@ -3564,7 +3623,7 @@ hdc shell "ls /data/app/el2/100/base/com.dshm.dshclient/haps/entry/files | head"
 hdc shell "ls /data/app/el2/100/base/com.dshm.dshclient/haps/entry/files/dsh/home"   # 期望 Permission denied
 
 # D. 装机后：exec 七项
-.\tools\device-acceptance.ps1            # 见 §2.4，它会自动判定 6 项
+.\tools\device-acceptance.ps1            # 见 §2.4，它会自动判定 5 项并逐个点开设置分区
 ```
 
 ---
@@ -3589,13 +3648,13 @@ node tools/assert-fs-search-fallback.mjs
 | 门禁 | 守什么 | 本次实跑 |
 |---|---|---|
 | `assert-cli-shim.mjs` | `pnpm`/`npm`/`npx`/`dsh` 四个 CLI 假壳：队列路径**生成期写死**（不再运行时读 `$DSH_HOME`）、`--dir` 取值与跳过口径、不写死总数而逐壳断言 | `exit 0`，**40 项断言全过** |
-| `assert-resfile-sync.mjs` | `hostcore/app/**` 与 `entry/src/main/resources/resfile/resources/app/**` **逐字节一致**（快照漂移是静默的：改了源码忘了 `place-host-app`，构建照打旧文件）| `exit 0`，**8 件快照全部同步** |
+| `assert-resfile-sync.mjs` | `hostcore/app/**` 与 `entry/src/main/resources/resfile/resources/app/**` **逐字节一致**（快照漂移是静默的：改了源码忘了 `place-host-app`，构建照打旧文件）| `exit 0`，**10 件快照全部同步** |
 | `check-parity.mjs` | `docs/parity-matrix.md` 不能注水、不能悄悄漂移（覆盖 39 个官方能力面 / token 合法 / 不许整体 DONE 盖住某形态缺口 / 非 DONE 必须有缺口登记 / 统计与实算逐项相等）| `exit 0`，§6 缺口登记 36 个 id |
-| `compat-drift.mjs` | 上游漂移：对当前 checkout 的上游重新提取端点表，与仓库里已提交的 `dshcompat/.../Endpoints.ets` 逐条比对 | `exit 0`，**期望 135 / 基线 135，无漂移** |
+| `compat-drift.mjs` | 上游漂移：对当前 checkout 的上游重新提取端点表，与仓库里已提交的 `dshcompat/.../Endpoints.ets` 逐条比对 | `exit 0`，**期望 138 / 基线 138，无漂移** |
 | `assert-exec-fix.mjs` | exec 探测链（`probeExec` / `ensureExecutables` / rg wrapper）的结构与**语义锁**：`denied` 只映射 `EACCES`、`so-fail` 正则覆盖 musl+glibc、Phase 5 已拆除的实验代码**不得复存** | `exit 0`，**35 项断言全过** |
 | `assert-python-bridge.mjs` | 内嵌 Python 桥（`python_runner.cpp` + el1 `libpython` + `main.js` 自检）的结构锁，含 `pipMode` 不再生成 `-V\|--version` 分支 | `exit 0`，**69 项断言全过** |
 | `assert-fs-search-fallback.mjs` | fs-search 降级 patch（rg 被拒时切 `find`/`grep`）的**三层防线**：结构（五个注入函数、两段替换、旧段已消失）、语法（`vm.SourceTextModule` 全文解析）、行为（从注入块提纯函数跑参数转换与 NDJSON 转换） | `exit 0`，**39 通过 / 0 失败** |
-| `device-acceptance.ps1` | 真机端侧验收：装机 + 抓日志/布局/截图 + 生成 `dist/acceptance/<ts>/report.md`，**自动判定 6 项**（设备在线 / 核心已启动 / 客户端已接入 / 平台标识=ohos / 文件变更流已开 / 无崩溃）| 需真机；用法见 §2.4 |
+| `device-acceptance.ps1` | 真机端侧验收：装机 + **冷启动** + 抓日志/布局/截图 + 生成 `dist/acceptance/<ts>/report.md`，**自动判定 5 项**（设备在线 / 核心已启动并读出运行核心版本 / 客户端已接入 / 平台标识=ohos / 本次启动后无异常退出），另逐个点开设置九个分区并记 `nav.md` | 需真机；用法与首跑踩到的坑见 §2.4 |
 
 > **"必跑"为什么只有 7 条**：这七条覆盖的是**最容易被静默破坏**的接线点（假壳、快照、台账、上游契约、
 > exec 链、Python 桥、fs-search）。更完整的门禁清单在 `docs/50-端侧核心运行架构.md` §15.1（该文件在演化，
@@ -3610,7 +3669,7 @@ node tools/assert-fs-search-fallback.mjs
 | `check-store-readiness.mjs` | 上架红线：不申请 `ohos.permission.kernel.*`（尤其 `ALLOW_WRITABLE_CODE_MEMORY`）、包名/权限等级/设备类型/jitless | 早期 |
 | `check-native-closure.mjs` | 原生依赖闭包：SONAME 必须等于文件名、每个 `DT_NEEDED` 必须解析到同一 HAP 内的库或已登记的系统库 | 上一轮补 `librawfile.z.so` 白名单（`E-SV17`）|
 | `check-origin-fence.mjs` | WS 升级的 `Origin` 围栏（clean/absent/duplicated → 101；foreign → 403；no-cookie → 401）| 早期 |
-| `check-plugin-toggle.mjs` | 插件启停：写 `$DSH_HOME/cordis.patch.yml` 后行状态真的翻转（155 条目 → `ui-deliverables enabled=false`）| 早期 |
+| `check-plugin-toggle.mjs` | 插件启停：写 `$DSH_HOME/cordis.patch.yml` 后行状态真的翻转（186 条目 → `ui-deliverables enabled=false`）| 早期 |
 | `check-feature-wiring.mjs` | **功能接线回归**：对已实现功能检查"中枢实现 + **界面调用点**"是否都在。构建查不出"调用点被删" | 早期 |
 | `check-builder-recursion.mjs` | `@Builder` 体里不许出现自己的名字（自递归在真机上是 `Stack overflow` 直接杀进程）| `E343` |
 | `check-dead-code.mjs` | 零使用 import / `@Builder` / 组件成员 / 门面字段 | `E-DC1`、`E-DC2` |
@@ -3629,6 +3688,17 @@ node tools/assert-fs-search-fallback.mjs
 2026-09-27 在本机（Windows / Node **v24.19.0**）逐条跑全量清单，结果如下。
 **"没跑成"与"通过"必须分开记**——这是本项目的既有约定（退出码 3 = 环境受阻，不算通过）。
 
+> **2026-09-28 重测（收尾批）**：同机同 Node，跑 23 条核心门禁得 **`20×0 / 1×3 / 2×1`**
+> （旧记的 `23×0 / 2×3 / 7×1` 已过期——其中 `check-arkts-entry.mjs`、`check-fetch-shim.cjs`、
+> `check-web-fetch-jitless.mjs`、`check-dshm-installer.cjs` 四条**已修至 0**；
+> 下表各行的"退出码"列已就地改为 `… → 0（已修）` 形态）。
+> **2026-09-30 再重测：`22×0 / 1×1`** —— 唯一剩下的 1 条是 `check-model-roundtrip.mjs`（本机缺 koffi，
+> 加 `--no-prompt` 后 exit 0）。`check-layout-fixtures.mjs` 与随之级联的 `neg-test-piai.mjs`
+> **已随 `findTsc()` 补上 Windows 回退而变绿**（§2.4），**exit 3 已清零**。
+> 三条新增门禁的读数：`check-skill-sync.cjs` ⇒ `RESULT: 32 passed, 0 failed`；
+> `check-compat-exemption.cjs` ⇒ `RESULT: 48 passed, 0 failed`；`check-doc-refs.mjs` ⇒ **21 个文档 / 247 条引用 / 0 问题**（2026-09-30 读数；引用数随文档增改漂移）。
+> `assert-resfile-sync.mjs` 的快照数已由 8 件增至 **10 件**（9 个 `FILES` + `package.json` 语义锁）。
+
 | 脚本 | 退出码 | 读数摘要 |
 |---|---|---|
 | `arch-check.mjs` | 0 | 扫描 131 个文件，无违规 |
@@ -3637,12 +3707,12 @@ node tools/assert-fs-search-fallback.mjs
 | `assert-fs-search-fallback.mjs` | 0 | 39 通过 / 0 失败 |
 | `assert-python-bridge.mjs` | 0 | 69 项断言全过 |
 | `assert-report9-fixes.mjs` | 0 | 通过 29 / 失败 0 |
-| `assert-resfile-sync.mjs` | 0 | 8 件快照全部同步 |
+| `assert-resfile-sync.mjs` | 0 | 10 件快照全部同步（9 个 `FILES` + `package.json` 语义锁；2026-09-28 由 8 件增至 10 件）|
 | `assert-speech-syntax.mjs` | 0 | 语法门禁通过（检查 1 个文件）|
 | `check-builder-recursion.mjs` | 0 | 99 文件 / 102 个 `@Builder`，无自递归 |
 | `check-custom-api-discovery.mjs` | 0 | 端点探测在垫片上可用 |
 | `check-custom-api-save.mjs` | 0 | 创建/编辑/存密钥/重启存活/删除全链路成立 |
-| `check-dead-code.mjs` | 0 | 99 文件 / 2224 处声明 / 256 个门面字段 ⇒ **无死代码** |
+| `check-dead-code.mjs` | 0 | 99 文件 / 2237 处声明 / 256 个门面字段 ⇒ **无死代码** |
 | `check-dead-handlers.mjs` | 0 | 未发现空实现 |
 | `check-design-tokens.mjs` | 0 | 棘轮未增长 |
 | `check-feature-wiring.mjs` | 0 | 扫描 133 文件 / **18 个功能** / 1 条反面规则，全部在 |
@@ -3650,56 +3720,125 @@ node tools/assert-fs-search-fallback.mjs
 | `check-native-closure.mjs` | 0 | `RESULT: PASS`（含 `libsharp-openharmony-arm64.so` 的 SONAME 不一致告警，该库按路径 dlopen，属可接受）|
 | `check-origin-fence.mjs` | 0 | `RESULT: PASS`（no-cookie → 401 等）|
 | `check-parity.mjs` | 0 | 覆盖完整、状态合法、无形态注水、缺口已登记、统计与实算一致 |
-| `check-plugin-toggle.mjs` | 0 | 185 条目 → `ui-deliverables enabled=false`，`RESULT: PASS` |
+| `check-plugin-toggle.mjs` | 0 | 186 条目 → `ui-deliverables enabled=false`，`RESULT: PASS` |
 | `check-store-readiness.mjs` | 0 | `RESULT: PASS` |
 | `check-toolchain-sign.mjs` | 0 | git `dshm-signed-v1+8501127`、python `dshm-signed-v1+27720007`，与归档实际大小自洽 |
 | `check-user-rows-preflight.cjs` | 0 | 86 项通过 / 0 项失败 |
-| `compat-drift.mjs` | 0 | 期望 135 / 基线 135，无漂移 |
-| `audit-unused-exports.mjs` | 0 | 审计报告（非门禁）：entry 未引用 417 个，近零引用 144 个 |
+| `compat-drift.mjs` | 0 | 期望 138 / 基线 138，无漂移 |
+| `audit-unused-exports.mjs` | 0 | 审计报告（非门禁）：entry 未引用 416 个，近零引用 144 个 |
 | `check-model-roundtrip.mjs --no-prompt --wait-ms 60000` | 0 | 真起 Host → 铸 cookie → 读模型目录 → 建会话 → 开 mux → 收到 snapshot（含 projections）|
-| `check-arkts-entry.mjs` | **3** | 缺 DevEco CLT（tsc）⇒ **没跑成，不是通过** |
-| `check-layout-fixtures.mjs` | **3** | 同上（设 `DEVECO_CLI_CLT_PATH` 后本机仍找不到 tsc：`<CLT>\codelinter\node_modules\typescript\bin\tsc` 不存在）|
-| `check-fetch-shim.cjs` | **1** | 需 `node --jitless --no-experimental-fetch`；本机 Node 24.19.0 **已移除该 flag**，直接报 `--no-experimental-fetch is an invalid negation` |
+| `check-arkts-entry.mjs` | **3 → 0（2026-09-28 已修）** | 原因**不是**"缺 DevEco CLT"（CLT 本机就在 `<IDE>\tools`），而是脚本里**四处 Linux 布局写死**；修后 exit 0，日志含 `CompileArkTS` + `BUILD SUCCESSFUL`（§2.4）|
+| `check-layout-fixtures.mjs` | **3 → 0**（2026-09-30 已把回退写进脚本，**不再需要 junction**） | 设 `DEVECO_CLI_CLT_PATH` 后仍找不到 tsc：`<CLT>\codelinter\node_modules\typescript\bin\tsc` 不存在；当时用 junction 指向 `<IDE>\tools\hvigor\hvigor\node_modules\typescript` 后 **768 条断言 / 0 失败**。**现已根治**：`findTsc()` 自己找 `<IDE>\tools\hvigor\{hvigor,hvigor-ohos-plugin}\...\typescript` 与 `<IDE>\tools\ohpm\...\typescript`（§2.4）|
+| `check-fetch-shim.cjs` | **1 → 0（2026-09-28 已修）** | 修前：① 前提断言建在 `--no-experimental-fetch` 上，而 Node 24.19.0 **已移除该 flag**（传了死在 CLI 解析）⇒ 不带 flag 时 ① 报"原生 fetch 竟然可用"、带上 flag 时进程起不来，**两条路都红**；② 取证探针打在 `127.0.0.1:9`，**9 是 fetch 规范禁用端口** ⇒ 入口就返回 `bad port`，探不出 WASM 因果；③ 判据含 `fetch failed` 太宽。修后：前提改为 **WASM 不可用**、探针改用活着的本地 server、判据收紧为 `/WebAssembly\|not defined/`；**并且这一修顺带暴露一个产品真 bug**（见 §3.6 末段）|
 | `check-model-roundtrip.mjs`（默认带 prompt）| **1** | `session/page -> connect ECONNREFUSED`（等待窗口到了就绪超时）⇒ 用 `--no-prompt` 复跑通过；**这是可复现的失败（连续两次同形），不是环境缺件，应单独排查** |
-| `check-dshm-installer.cjs` | **1** | 既有设计不匹配（断言 installer 写 `.dshm-plugin-rows.yml`，而 `appendUserRow` 已于 2026-09-25 有意删除）|
-| `check-web-fetch-jitless.mjs` | **1** | 自 spawn 子进程时给的 flag 在 Node 24.19.0 下无效 ⇒ 双臂都"没有产出断言汇总"；脚本未把这种情形归为 exit 3，而是报 FAIL。**属门禁自身在 Node 24 上失灵** |
+| `check-dshm-installer.cjs` | **1 → 0（2026-09-28 已修）** | 两处陈旧断言：① 期望依赖值带 `^`（`^4.3.4`），而实现自 2026-09-26 起优先写**请求 spec** ⇒ 实为 `4.3.4`；② 断言 installer 写 `.dshm-plugin-rows.yml`，而 `appendUserRow` 已于 2026-09-25 有意删除 ⇒ ENOENT 恒红。两处已重写（改为锁**不再写用户行**），并补 P1-2 双向用例（5a 真幂等 / 5b 版本漂移必重装 / 5c 一次追平后回幂等）⇒ `RESULT: 24 passed, 0 failed`（**2026-09-29 随 GitHub 安装修复增至 43 passed**，见 §2.5）|
+| `check-web-fetch-jitless.mjs` | **1 → 0（2026-09-28 已修）** | 两处硬缺陷：① flag 写死 `--no-experimental-fetch` 在 Node 24.19.0 下无效 ⇒ **两臂同时哑火**；② loader 传裸盘符路径 ⇒ 默认 ESM 加载器拒收 ⇒ **B 臂从未跑成过**。修后 A 臂 4/4 按预期失败（`WebAssembly is not defined`）、B 臂 8/8 全过、`PASS：对照实验成立`（§3.6）|
 
-> **读这张表的方式**：三条 `exit 3` 与 `check-fetch-shim.cjs`、`check-web-fetch-jitless.mjs` 的红
+> **读这张表的方式**：`exit 3` 与 `check-fetch-shim.cjs` 的红
 > 都已在 `docs/device-validation.md:4423-4435` 登记为"环境不足 / 需特定 flag"。
+> **但其中 `check-arkts-entry.mjs`、`check-layout-fixtures.mjs`、`check-web-fetch-jitless.mjs`、
+> `check-fetch-shim.cjs` 四条已在 2026-09-28 查明并修掉，实际原因都不是环境**（详见 §2.4 与 §3.6）；
+> 其中 `check-fetch-shim.cjs` 那条的代价最重——它被"环境"这个标签挡住的这段时间里，
+> 内部藏着的**产品真 bug**（原生 `FormData` 被编成 `"[object FormData]"`，直接砸 dsh 附属的附件上传）
+> 一直没人看见（§3.6 末段）。
+> `check-dshm-installer.cjs` 的两处陈旧断言同期重写（原来它一直是红的，见 §2.5）。
 > **`check-model-roundtrip.mjs` 默认参数那条红不在既有登记里**，本章如实登记为待查：
 > 它在 `mux open` 之后、`session/page` 之前失去连接，属"Host 在 60 秒内已就绪但随后不可达"，
 > 需要单独复现并定位（可能是 Host 提前退出，也可能是等待窗口与 Host 冷启动时长不匹配）。
 
 ### 2.4 真机端侧验收：`tools/device-acceptance.ps1`
 
-**用法**（`tools/device-acceptance.ps1:1-15`）：
+**用法**（`tools/device-acceptance.ps1:1-25`，全文 307 行）：
 
 ```powershell
 powershell -NoProfile -File tools\device-acceptance.ps1
-powershell -NoProfile -File tools\device-acceptance.ps1 -SkipInstall   # 已装最新包，只抓证据
+powershell -NoProfile -File tools\device-acceptance.ps1 -SkipInstall   # 已装最新包，只冷启动取证据
 ```
 
-它**不做通过/失败判断**，只采集可脚本化的证据并生成报告骨架；判定按
-`docs/50-端侧核心运行架构.md` §12.9 / §14 由人来做（`tools/device-acceptance.ps1:13-15`）。
+它**自动判定 5 项可脚本化的读数**（设备在线 / 核心已启动并读出运行核心版本 / 客户端已接入 /
+平台标识 = ohos / 本次启动后无异常退出，`tools/device-acceptance.ps1:240-244`）；
+**界面行为类项不做通过/失败判断**，只把布局与截图摆好，判定按
+`docs/50-端侧核心运行架构.md` §12.9 / §14 由人来做。脚本全文只用
+`hdc install -r` / `aa force-stop` / `aa start`，**没有 `hdc uninstall`** ⇒ 不碰设备数据。
 
-两个已经记下来的环境坑（`docs/50-端侧核心运行架构.md` §15.3）：
+#### 2.4.1 首跑的 4 项"FAIL"全部是脚本缺陷（不是应用缺陷）
 
-1. 本机无 `pwsh` 时用 `powershell -NoProfile -File`；
-2. Windows PowerShell 5.1 读 **UTF-8 无 BOM** 的 `.ps1` 会按 ANSI 解码 ⇒ 中文乱码 + 解析报错
-   （**看起来像语法错，其实是编码错**），必须写 BOM，且 `GetBytes()` 不含 Preamble。
+2026-09-30 首次真机跑，6 项判定里 4 项 FAIL。逐条坐实真因后**全部归到脚本**：
 
-**它自动判定的 6 项**（`tools/device-acceptance.ps1:148-158`）：设备在线 / 核心已启动
-（`BOOT_10_ENV_READY`）/ 客户端已接入（`ok=true`）/ 平台标识 = `ohos` / 文件变更流已开
-（`cancel=ok`）/ 无崩溃记录（无 `CppCrash|AppKilledReporter|JS_ERROR|exitSigno`）。
+| 现象 | 真因 |
+|---|---|
+| 5 份 hilog 摘录全部 **5 字节**（只有一个换行） | hilog 是环形缓冲，**实测覆盖仅约 8–10 秒**；而"等核心就绪"要 45 秒 ⇒ 一次性启动事件早被冲掉。`hilog -r` 又把仅存的也清了 |
+| 9 组 json/jpeg **尺寸完全相同**（`*.json` 恒 261,513 B、`*.jpeg` 恒 232,434 B） | 6 次 `Click-Text` 一次都没点动：**主界面上根本没有「设置」这个文本** |
+| 「核心已启动 / 客户端已接入 / 平台标识 / 文件变更流」4 项 FAIL | 判据源（hilog）取不到 ⇒ 假 FAIL，见下 |
+| 加 `-SkipInstall` 时"重启"是 no-op | `aa start` 对已运行进程不重启 ⇒ **冷启动必须显式 force-stop**，否则抓到的是上一次启动的日志（假 PASS） |
 
-**按文本点击，不写死坐标**（`tools/device-acceptance.ps1:54-90`）：
+#### 2.4.2 判据改读设备侧持久日志（`E385`）
+
+hilog 判"启动事件"必然假 FAIL。改读设备侧文件（shell 身份可读，实测）：
+
+- `node-output.log` —— **每次启动轮转**，含本次启动全量 ⇒ 本轮权威；
+- `dshm-host.log` —— **跨启动累积** ⇒ 必须用本次启动标记（`写锁巡检`）切片后才有效。
+
+判据与信号源（改后）：
+
+| 判据 | 信号源 |
+|---|---|
+| 核心已启动（**并读出运行核心版本**） | `node-output.log` 的 `BOOT_10_ENV_READY`（`cores/<版本>` 一眼可见） |
+| 客户端已接入（凭据豁免生效） | `node-output.log` 的 `IN-UPGRADE GET /api/remote.mux` |
+| 平台标识 = `ohos` | `node-output.log` 的 `平台标识：DSHM_PLATFORM=ohos` |
+| 本次启动后无异常退出 / 无崩溃 | 上述两源里无 `!! process.exit` / `CppCrash` / `JS_ERROR` 等 |
+
+**两条原判据被撤销，原因是结构性取不到**（不是"暂时取不到"）：
+
+1. **`DSHM-AUTH connect`**：唯一产出点是 `entry/src/main/ets/pages/Index.ets:1365`，
+   而当前入口是 `windowStage.loadContent('pages/WebApp')` ⇒ `pages/Index` **不可达**，
+   这条判据永远取不到（`E264` 记过同一件事的另一面）；
+2. **`files changes opened`**：唯一产出点在 `SessionHub.ets:2500`，经 `console.info`
+   走 hilog（缓冲过后即失）；且设备侧日志里 `fs-watch` **全史只出现过 1 次**
+   （2026-09-27）⇒ 不是每次启动都有，**不能当每次验收的判据**。该
+   项**降级为人工看界面**（"改一个工作区文件 → 右侧「文件变动」是否出现条目"）。
+
+#### 2.4.3 导航：设置对话框不在主界面上
+
+主界面**没有「设置」文本**。真实路径 = 点「账号菜单」`popUpButton` → 弹出菜单里才有
+`设置` / `意见反馈` / `退出登录` → 点「设置」。改前脚本点的「通用 / 核心 / 预设 / 技能」
+**一个都不存在**（这就是 6 行"未找到可点文本…跳过"的来源）。
+
+设置对话框（实测 `[711,391][2112,1529]`）左栏九个分区：
+`账号与余额 / 通用设置 / 模型 / 内置插件 / Agent 预设 / Our Free Model / 插件市场 /
+皮肤市场 / 侧边卡片`。脚本逐个点开并各存一份布局与截图，点动与否记进同目录 `nav.md`。
+
+**按文本点击，不写死坐标**（`tools/device-acceptance.ps1:93` 起）：
 dump 布局 → 找 `attributes.text` 匹配的节点 → 取其 bounds 中心点击。
 理由写在注释里：**坐标依赖分辨率与布局**，换台设备必然点错，而"点错"在验收里最危险——
-它看起来像"功能坏了"（`E261`）。
+它看起来像"功能坏了"（`E261`）。实测同一台设备**重启后主窗口整体位移**
+（`应用` 从 `[67,90]` 变 `[513,302]`）⇒ 硬编码坐标在单机上也会失效。
+菜单未打开时点旧坐标会落到**系统桌面**（把应用切到后台），这也是"看起来像功能坏了"的一例。
+
+#### 2.4.4 另外两个修掉的坑
+
+- **`hdc` 只认写死单一路径**（`E386`）：原实现只试 `D:\Huawei\DevEco Studio\...`，
+  本机不存在即 `exit 2`；它和前一章那些"环境受限"是同一类**误报**。改为
+  `DSHM_HDC` 优先 + 探测 `%LOCALAPPDATA%\OpenHarmony\Sdk\<版本>\toolchains\hdc.exe`
+  （多版本降序取第一个存在的）。
+- **`hdc shell cat` 读中文日志必乱**（`E387`）：输出经控制台 GBK 解码。必须
+  `hdc file recv` 落盘后用 `[System.IO.File]::ReadAllText(..., UTF8)` 读。
+  同类坑在 `.ps1` 自身的编码上也存在：**UTF-8 无 BOM 的 `.ps1`** 会被
+  Windows PowerShell 5.1 按 ANSI 解码 ⇒ 中文乱码 + 解析报错（看起来像语法错）。
+
+#### 2.4.5 修后实跑（2026-09-30 12:01，设备 `86E0226429000417`）
+
+```
+dist/acceptance/20260930-120131/
+  自动判定：设备在线 PASS / 核心已启动 PASS（运行核心 0.2.0-rc.2）
+            客户端已接入 PASS / 平台标识 = ohos PASS / 无异常退出 PASS
+  nav.md：账号菜单 OK → 设置 OK → 9 个分区全部 OK
+  device-node-output.log 165,601 B、device-dshm-host.log 209,907 B（UTF-8 原文）
+```
 
 **报告里"必须看界面"的项为什么不能自动化**：它们考的是"行为与呈现"
 （命令面板、模型选择、计划模式、轨迹、插件启停、删除/归档、多形态、目标栏、消息反馈），
-日志判不出来（`tools/device-acceptance.ps1:184-201`）。
+日志判不出来（`tools/device-acceptance.ps1:275-296`）。
 
 ### 2.5 回归纪律：不允许"修好后面、前面又坏"
 
@@ -3819,18 +3958,23 @@ powershell -NoProfile -File tools\device-acceptance.ps1
 
 | 标记 | 用途 | 写入点 |
 |---|---|---|
-| `diag-pick-called` | 目录选择的同步入口被调（**证明桥真的被调过**）| `WebApp.ets:485` |
-| `diag-select-returned` | 系统选择器返回，`count=` 选了几个 | `WebApp.ets:529` |
-| `diag-select-error` | 选择器抛错（`code=` + `message`）| `WebApp.ets:524` |
-| `diag-persist-done` / `diag-persist-skip` | 目录授权持久化的结果（失败不影响本次选择）| `WebApp.ets:555,559` |
-| `diag-resolve-dispatched` | 结果回传 H5 的三态：`path=` / `error=` / `cancelled` | `WebApp.ets:576,578,580` |
-| `diag-dispatch-error` | 回传阶段自身抛错 | `WebApp.ets:585,590` |
-| `diag-file-selector` | 区分"用户看到的是 ArkWeb 默认选择器"还是"我们的 DocumentViewPicker" | `WebApp.ets:2080` |
-| `diag-web-load` | Web 加载三态：失败（含"已排第 N 次自动重试"）/ 保持启动页 / 成功 200 | `WebApp.ets:1158,1180,1212,2056` |
-| `diag-web-permission` | 每次 `onPermissionRequest` 都落一条：`origin=` / `requested=` / `audio=` / `loopback=` | `WebApp.ets:1355` |
-| `diag-mic-permission` | 麦克风权限申请结果 | `WebApp.ets:791,796` |
-| `diag-native` | 原生采集：启动 / 取走 N 字节（含 ms 与 peak）/ 落盘 wav | `WebApp.ets:905,987,1001,1004` |
-| `diag-native-error` | 原生采集失败（权限未授予 / 启动失败 / 落盘失败）| `WebApp.ets:825,833,918` |
+| `diag-pick-called` | 目录选择的同步入口被调（**证明桥真的被调过**）| `WebApp.ets:737` |
+| `diag-select-returned` | 系统选择器返回，`count=` 选了几个 | `WebApp.ets:781` |
+| `diag-select-error` | 选择器抛错（`code=` + `message`）| `WebApp.ets:776` |
+| `diag-persist-done` / `diag-persist-skip` | 目录授权持久化的结果（失败不影响本次选择）| `WebApp.ets:807,811` |
+| `diag-resolve-dispatched` | 结果回传 H5 的三态：`path=` / `error=` / `cancelled` | `WebApp.ets:828,830,832` |
+| `diag-dispatch-error` | 回传阶段自身抛错 | `WebApp.ets:837,842` |
+| `diag-file-selector` | 区分"用户看到的是 ArkWeb 默认选择器"还是"我们的 DocumentViewPicker" | `WebApp.ets:2420` |
+| `diag-web-load` | Web 加载三态：失败（含"已排第 N 次自动重试"）/ 保持启动页 / 成功 200 | `WebApp.ets:1498,1520,1552,2396` |
+| `diag-web-permission` | 每次 `onPermissionRequest` 都落一条：`origin=` / `requested=` / `audio=` / `loopback=` | `WebApp.ets:1695` |
+| `diag-mic-permission` | 麦克风权限申请结果 | `WebApp.ets:1130,1135` |
+| `diag-native` | 原生采集：启动 / 取走 N 字节（含 ms 与 peak）/ 落盘 wav | `WebApp.ets:1244,1326,1340,1343` |
+| `diag-native-error` | 原生采集失败（权限未授予 / 启动失败 / 落盘失败）| `WebApp.ets:1164,1172,1257` |
+| `diag-openlink` | 外链外开请求：`auto <url>`（授权页自动外开）/ `confirm <url>`（外链二次确认）/ `failed <url>`（`openLink` 未受理）/ `error <msg>` | `WebApp.ets:1041,1086,1100` |
+
+> 行号随 `WebApp.ets` 增删浮动（2026-09-28 加外链外开垫片后整体后移 340 行，已按新行号更新一遍）。
+> 判断某个标记是否还存在，**以标记名 grep `WebApp.ets` 为准**，不要照行号找；
+> 本表在 `docs/70` §7.9（m00001 修复）落地时同步补入 `diag-openlink` 一行。
 
 **已经被删掉、不再存在的标记**：当前源码里**没有写入点**的包括
 `diag-mic-probe`、`diag-hms-speech`、`diag-hms-e2e`、`diag-loadpath`
@@ -3975,8 +4119,8 @@ hdc fport tcp:3120 tcp:3120 && curl -s -o /dev/null -w '%{http_code}\n' http://1
 | `E32` | `建立端侧核心目录失败：13900015 File exists` | OHOS 的 `fs.mkdirSync(path, true)` 在**目标目录已存在时抛错**，而 Node 的 `recursive:true` 是幂等的 ⇒ "幂等"的 `ensureLayout()` 第二次调用必然失败（安装与启动都会调）| 先 `fs.accessSync` 判存在 | 连续两次启动都成功建目录 | `docs/70:270-276`、`docs/50` E32 |
 | `E32②` | 诊断日志落 `cacheDir` 后取不到 | `hdc shell` 对 `cacheDir` 无读权限（`Permission denied`），`files` 目录可读 | 落点从 `cacheDir` 改 **`filesDir`**（`DSHM_SANDBOX_HOME` 一并指向 filesDir）| `hdc shell cat .../files/dshm-host.log` 有内容 | `docs/70:283` |
 | `E149` | 点「切换」核心 → 进程**原生崩溃**（`exitSigno = 6` / SIGABRT），无 `DSHM-CORE 切换结果` | 同一进程内**第二次** `node::Start` 让进程 abort（libnode 在一个应用进程里被设计为只启动一次）| 未解决；界面**不得**声称"切换/回滚"可用（"界面不撒谎"）| `uitest dumpLayout` 取精确 bounds 后再点，仍复现即确认 | `docs/50` E149 |
-| `E-SP4` | 进程 0、无 diag、hilog 无异常 ⇒ 误判"应用崩溃" | `aa start` 返回 `Error Code:10106102 The device screen is locked during the application launch`——**设备锁屏** | 读 `aa start` 的返回值再下结论 | 解锁后同一命令成功 | §3.6；`docs/70:1096` |
-| `E-SV20` | 据 `dshm-host.log` 判定"宿主从未就绪"，得出"真实启动失败" | **`BOOT_*`/`DSHM_READY` 打在 `node-output.log`**，不在 `dshm-host.log` | 两个文件都拉；时序类排查用**文件标记** | `grep -c 'BOOT_' node-output.log` > 0 | §3.2；`docs/70:1090` |
+| `E-SP4` | 进程 0、无 diag、hilog 无异常 ⇒ 误判"应用崩溃" | `aa start` 返回 `Error Code:10106102 The device screen is locked during the application launch`——**设备锁屏** | 读 `aa start` 的返回值再下结论 | 解锁后同一命令成功 | 本章 §3.6；`docs/70:1204` |
+| `E-SV20` | 据 `dshm-host.log` 判定"宿主从未就绪"，得出"真实启动失败" | **`BOOT_*`/`DSHM_READY` 打在 `node-output.log`**，不在 `dshm-host.log` | 两个文件都拉；时序类排查用**文件标记** | `grep -c 'BOOT_' node-output.log` > 0 | 本章 §3.2；`docs/70:1198` |
 | 端口互斥 | `EADDRINUSE: address already in use 127.0.0.1:3120` | 两个 bundle 都硬编码 3120 ⇒ 互斥；`/proc/net/tcp` 的 `0C30` LISTEN socket 属**旧应用**的 uid | `aa force-stop` 旧应用（**只停进程、不删数据**）| `pidof` 空、`/proc/net/tcp` 无 `0C30` | `docs/device-validation.md:2581-2585,2624` |
 
 ### 4.2 hmfs 文件系统
@@ -4039,7 +4183,7 @@ hdc fport tcp:3120 tcp:3120 && curl -s -o /dev/null -w '%{http_code}\n' http://1
 | **`E-SP3`** | "启动慢"的主体在哪 | 实测分段：`aa start`→Node ~2.1s；→`BOOT_40` 0.3s；**→`BOOT_50` 7.4s（`runProfile` 内部，dsh 加载插件树）**；→`BOOT_70` 0.2s；WebView→200 1.7s；合计 **~10.1s** ⇒ **主体在上游**（对上游零 patch）| 要真正缩短只能**减少启动插件数**（设备上 19 个非种子行），属产品决策 | 量化手段：临插计时桩读到 `enter-runProfile +0ms` / `runProfile-returned +7261ms`；**插桩已撤除并核验无残留** | `docs/70:1095`、`docs/device-validation.md:3925-3943` |
 | `E-SV16` / `E-SV18` | 装机后首次打开**白屏**（宿主首启解包后固定 6～7s 才可用，WebView 早于它就绪 ⇒ **HTTP 404** ⇒ `fail()` ⇒ `phase=ERROR`，且**原实现停住不动**）| 竞态**无法消除**（宿主启动耗时可长可短）⇒ 修在**自愈** | 新增 `scheduleAutoRetry()`（退避 0.6s→1.2s→…，最多 6 次）+ `loadFailed` 标志（`onPageEnd` 在失败时也会触发，会**无条件置 READY 抹掉 ERROR**，必须阻断）| `diag-web-load`：`失败：HTTP 404（已排第 1 次自动重试）` → `第 1 次自动重试，延迟 600ms` → `成功：页面已就绪（200）`（**1.6 秒后自愈，零用户干预**）| `docs/70:1086,1088`、`docs/device-validation.md:3685-3719` |
 | `E-SV15` | 频谱（波形）**恒为最小值** | 官方 `Waveform` 每 50ms 调 `recording.amplitude()`，它读 `this.analyser`；而原生采集覆盖了 `start()` ⇒ 创建 analyser 的那段被跳过 ⇒ 恒返回 0 | 覆盖 `Recording.prototype.amplitude`，改读 ArkTS 侧 `nativeCaptureState()` 的 `rms`。**用 RMS 而非峰值**（真机数据反推：官方映射 `height=1+min(1,level*5)*17`，peak=21020 时 peak/4=14.6、真 RMS=9.1，与官方同口径）| 用户确认识别正常、频谱正常；平方和在**已有**采样循环里顺带累加，**不新增遍历** | `docs/70:1085`、`docs/device-validation.md:3563-3588` |
-| `E-DC1` | `check-dead-code` 长期红（3 处 PIAI/View 零使用声明）| 真死代码 + 搬迁未收尾 | 删 `Index.ets` 的 `protocolLabel` import、`SettingsModels` 的 `@Prop piAiProtocols`，**以及"转发一个没人读的字段"的末三跳**（`SettingsPane.states → TabContentView.facade → Index.facade`）| `扫描 99 文件 · 声明 2224 处 · 门面字段 256 个` → **无死代码** | `docs/device-validation.md:4443-4456` |
+| `E-DC1` | `check-dead-code` 长期红（3 处 PIAI/View 零使用声明）| 真死代码 + 搬迁未收尾 | 删 `Index.ets` 的 `protocolLabel` import、`SettingsModels` 的 `@Prop piAiProtocols`，**以及"转发一个没人读的字段"的末三跳**（`SettingsPane.states → TabContentView.facade → Index.facade`）| `扫描 99 文件 · 声明 2237 处 · 门面字段 256 个` → **无死代码** | `docs/device-validation.md:4443-4456` |
 | `E-DC1` 的关键判断（差点删错）| — | `Index.ets` 的 `@State piAiProtocols` **不能删**——它在 `Index.ets:2177` 传给了 `PiAiProviderSheet.protocols`，而浮层**确实在读**它（`PiAiProviderSheet.ets:239/246` 渲染协议下拉）| 只删**末三跳**（转发链），保留源头与真实读者 | 删完构建报错（`piAiProtocols does not exist in type TabContentFacade`）⇒ 说明还有一处 facade 字面量没删干净；这正是"编译器会兜住转发链断裂"的体现 | `docs/device-validation.md:4451-4456` |
 | `E-DC2` | `check-dead-code` 报一条**指向注释**的假阳性 | `importedNames()` 把 `import {…}` 块按逗号切分，而块内**可以写 `//` 注释** ⇒ 注释被当成一个待检查的"名字" | 切片后先按 `//` 截断，再要求匹配合法标识符（含 `A as B`），否则视为解析噪声跳过 | 重跑无该条。**留档口径：假阳性比漏报更糟——它让人不再相信这份报告** | `docs/device-validation.md:4458-4470` |
 | `E-DH1` | `check-dead-handlers` 报 **180 处**，逐条分拣后 **177 处是误报**、**2 处是真·死按钮** | 旧判据报"所有跨行空箭头"，而绝大多数是**回调 prop 的必需默认值**（ArkTS 组件若回调 prop 无默认值，父组件不传就编译失败）⇒ 180 处的报告量让门禁**彻底失去信号** | 收紧为只报"**调用处内联空实现**"（`onX: () => { },` 写在组件构造参数里）；声明默认值 + 本文件别处用到 ⇒ 不报 | **180 → 2 → 0**（两处真 bug 经核实是**有意的空实现**，处置是**补注释说明"为什么空"**，而不是为了门禁变绿去改能跑的代码）| `docs/device-validation.md:4472-4515` |
@@ -4075,7 +4219,7 @@ hdc fport tcp:3120 tcp:3120 && curl -s -o /dev/null -w '%{http_code}\n' http://1
 | 硬编码清单升级失效 | `GIT_SYMLINK_REPLICA` 只有 1 条而实际 **141** 条 | 硬编码清单会在升级时**静默失效** | 改为**从归档现读**（同类：平台别名表、preset 补丁标记）| 补齐条数等于归档内 symlink 条数 | `docs/70:780-784` |
 | "文档说了、配置没做" | `docs/README.md` 的「清理与留档纪律」早就写着"临时过程产物一律只落 `dist/`（**已 gitignore**）"，而 `.gitignore` **从未包含 `dist/`** | 下一个人会按文档行事（以为不会误提交），直到某次 `git add -A` 把 500MB 中间产物带进去 | **修配置，不修文档措辞** | `.gitignore` 与实际边界一致 | `docs/70:786-791` |
 | "快速分支"绕过功能路径 | `npx -v ✓` 没暴露 `DSH_HOME` 恒定缺失（`-v` 排在检查**之前**）；`pip3 --version` 被 `-V\|--version` 分支拦截去 echo banner（而 pip 本体无恙）| **版本探测 ≠ 功能路径探测** | 验收要靠**功能路径**的探针（`ls-remote`、`-m pip list`）| 两条都被功能路径探针抓住 | `docs/70:793-800` |
-| 门禁在 Node 24 上失灵 | `check-fetch-shim.cjs` / `check-web-fetch-jitless.mjs` 自 spawn 子进程时给的 flag 在 Node 24.19.0 下无效 | `--no-experimental-fetch` 在 Node 22+ 已移除；门禁未把"子进程没产出断言汇总"归为环境受阻 | **待排查**（见 §2.3 的登记）| 用与端侧同版本的 Node（曾用 **v22.23.2**）跑应恢复 | §2.3；`docs/parity-matrix.md:110` |
+| 门禁在 Node 24 上失灵 | `check-fetch-shim.cjs` / `check-web-fetch-jitless.mjs` 自 spawn 子进程时给的 flag 在 Node 24.19.0 下无效 | `--no-experimental-fetch` 在 Node 22+ 已移除；门禁未把"子进程没产出断言汇总"归为环境受阻 | **已修（2026-09-28）**：`check-web-fetch-jitless.mjs` 改为**运行时探测可用 flag** + `pathToFileURL` 修掉 loader 路径（后者使 B 臂**从未跑成过**）；`check-fetch-shim.cjs` 同理修掉 flag 语义、禁用端口探针、取证引用时机三处缺陷，**并顺带挖出产品真 bug**（原生 `FormData` 被编成字面量）；见 §3.6 | 两条门禁均 **exit 0**（`check-web-fetch-jitless` A 臂 4/4 按预期失败、B 臂 8/8；`check-fetch-shim` 6 条 ok） | §3.6；`docs/parity-matrix.md:110` |
 | 用户报"还是不对" | 同一个卸载残留行 bug **复现**：上批只修了"名字来源"、**漏了引号** | **别重做同一个修法，先换测量工具**；要问"**这条链上还有几个判据**" | 修法：`removeRowBlockById` **剥引号再比较** + 后缀匹配兜残局 | 五场景验证（正常 / 残局 / 不误伤 / 反向不串味 / npm 包回归）| `docs/70:744-752`、`docs/70:755-757` |
 | 序列化改字面量 | 凡"写进去的和读出来的不是同一串"的地方都要单独验：YAML 自动加引号 ⇒ `m[1] === name` 永假 | 字符串比对会被格式噪声淹没（378 处差异），**语义比对**才看得出真差异（1 处） | 剥引号 + 语义级比对 | 五场景验证 | `docs/70:753-757` |
 
@@ -4136,7 +4280,7 @@ hdc shell "ls -la .../files/diag-*"
 
 > **编译通过、界面无感、既有门禁全绿，但功能其实不对。**
 
-`docs/70-鸿蒙移植踩坑与修复总览.md:726-736`（§8.2）把这一族缺陷命名为「**静默失效**家族」，并给出六种形态。
+`docs/70-鸿蒙移植踩坑与修复总览.md:802-812`（§8.2）把这一族缺陷命名为「**静默失效**家族」，并给出六种形态。
 `docs/70` 的开篇进一步解释了它为什么在本项目格外致命：两条根本约束
 （`jitless ⇒ WebAssembly === undefined`、**execve 受签名域管辖**）使得
 "能跑 ≠ 跑通"（`docs/70-鸿蒙移植踩坑与修复总览.md:14-51`）。
@@ -4154,7 +4298,7 @@ hdc shell "ls -la .../files/diag-*"
 ### 1.3 推论：门禁不是"锦上添花"，它是这条路线上**唯一**能自动发现该类缺陷的手段
 
 四例的共同点：**症状与成因之间隔着一次真机运行或一次人工分拣**。
-构建器、类型系统、`codelinter` 都不会红（`docs/parity-matrix.md:104` 与 `:143` 记录过实测：
+构建器、类型系统、`codelinter` 都不会红（`docs/parity-matrix.md:104` 与 `:154` 记录过实测：
 往 `appstate` 里填 `return a +;`，`codelinter` **一条都不报**，真编译器立刻 `BUILD FAILED`）。
 所以本项目把"能自动化的判据"一律固化成 `tools/` 下的脚本，并给它接进必跑链。
 
@@ -4189,7 +4333,7 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 
 ### 2.2 全量清单（`tools/assert-*.mjs` / `check-*.mjs` / `check-*.cjs`）
 
-下表覆盖 `tools/` 下全部 `assert-*.mjs`（7 个）、`check-*.mjs`（18 个）、`check-*.cjs`（3 个），
+下表覆盖 `tools/` 下全部 `assert-*.mjs`（7 个）、`check-*.mjs`（19 个）、`check-*.cjs`（5 个），
 以及与之同族的 `arch-check.mjs` / `compat-drift.mjs` / `neg-test-piai.mjs`。
 **"是否必须绿"一列**取三值：**必须**（改动后即须为 0）、**条件**（只在特定改动面或特定设备上必须绿）、**否**（是审计/工具，不是门禁）。
 
@@ -4205,9 +4349,11 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 | `assert-python-bridge.mjs` | 内嵌 Python 桥（`entry/src/main/cpp/python_runner.cpp` + el1 `libpython` + `main.js` 自检 + 垫片文案）的结构锁，含 `pipMode` 不再生成 `-V\|--version` 分支 | 改 Python 桥或垫片 | `python3` / `pip3` 在端侧整条链不可用（长链中任一环被平台拒绝的表现都是"工具失败"） | **必须** |
 | `assert-fs-search-fallback.mjs` | fs-search 降级 patch（rg 被拒 ⇒ 切 `find`/`grep`）的**三层防线**：结构（五个注入函数 + 两段替换 + 旧段已消失）、语法（`vm.SourceTextModule` 全文 ESM 解析）、行为（从注入块提纯函数跑参数转换 / 花括号展开 / NDJSON 转换） | 改 `pack-core.mjs` 的 `patchFsSearchFallback` 之后（须在 pack 之后跑） | `glob`/`grep` 工具恒 `SEARCH_FAILED`（曾是长期症状），而"Host 起来了、模型能回话"完全掩盖这条路径 | **必须** |
 
-> `AGENTS.md:69` 另列 `.\tools\device-acceptance.ps1`（真机端侧验收）。它**不做**通过/失败判断，
-> 只采集证据并生成报告骨架（`tools/device-acceptance.ps1:13-15`），判定由人按
-> `docs/50-端侧核心运行架构.md` §12.9 / §14 做。**因此它是"条件"而非"必须"**：没设备时它跑不了。
+> `AGENTS.md:69` 另列 `.\tools\device-acceptance.ps1`（真机端侧验收）。它采集设备侧持久日志、各页面布局
+> dump 与截图，生成报告骨架，并**自动判定 5 项可脚本化的读数**（设备在线 / 核心已启动并读出运行核心版本 /
+> 客户端已接入 / 平台标识 = ohos / 本次启动后无异常退出，`tools/device-acceptance.ps1:237-244`）；
+> **界面行为类项不做判定**，留给人按 `docs/50-端侧核心运行架构.md` §12.9 / §14 勾选。
+> **因此它是"条件"而非"必须"**：没设备时它跑不了。用法与首跑踩到的坑见 §2.4。
 
 #### 2.2.2 结构性守卫（按改动面选跑；全部 exit 0）
 
@@ -4246,18 +4392,28 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 | `check-dead-code.mjs` | **批次三十四收紧判据**（`docs/device-validation.md:4458-4470`） | 修掉"把 import 块里的 `//` 注释当成符号名"的假阳性 |
 | `check-dead-handlers.mjs` | **批次三十四收紧判据**（`docs/device-validation.md:4472-4515`） | 180 → 2 → 0；并补了两处自身缺陷（跨行声明形态漏判、只看"声明行之后"） |
 | `assert-cli-shim.mjs` | **本轮修掉 5 条历史红断言**（`docs/70-鸿蒙移植踩坑与修复总览.md:802-814`、`tools/assert-cli-shim.mjs:17-23,51,65-73,83-87`） | 判据从"总数恰好是 N"改成"**每个**实体都满足" |
+| `check-skill-sync.cjs` | **2026-09-28 新增**（P0-1；`hostcore/app/dshm-skills.js`） | 内置技能同步原先按**文件字节数**判等，`hdsh-*`→`dshm-*` 是**等长替换** ⇒ 大小完全不变 ⇒ 永远判成"同一份"，设备端停在旧端点。现按**内容 sha256** 判等，门禁含 A–H 八组，其中 C/D 组专测**等长改动**必被复制 / 必以源为准恢复 |
+| `check-compat-exemption.cjs` | **2026-09-28 新增**（P1-3；`hostcore/app/dshm-compat.js`） | 兼容性豁免通道的失败模式**极其安静**（写错 profile 目录 / 文件名或 schema 偏离 / 版本写成 range / 假确认风险 ⇒ 上游**静默跳过**，界面只看到"授予成功"）。⇒ 判据不能是"文件写了没"，臂 B 直接用**上游自己的** `evaluatePluginCompatibility` 对比 `exempted` 是否真的翻转 |
+| `check-doc-refs.mjs` | **2026-09-28 新增**（文档引用门禁） | `docs/` 内的「文件:行号」引用要落在它声称的那一节上。首版判据把**任何两位数字 + 冒号**当引用目标 ⇒ 395 条里 188 处报错几乎全是时间戳（`` `14:11:07.000` ``）、IP 片段（`192.168.1.50:3111`）、代码行号（`main.js:1139`）；收紧为**短式必须带 `docs/` 前缀**后 ⇒ 真问题 **0 处**；此后长期读数**恒为 0 问题**，引用总数随文档增改漂移（2026-09-28 首版为 **188 条 / 19 个文档**；**2026-09-30 为 247 条 / 21 个文档**）。判据以当场实跑为准 |
 | `audit-unused-exports.mjs` / `neg-test-piai.mjs` | **审计/负测试，不是门禁** | 前者报"实现了但没接"的候选清单；后者是**一次性的负测试脚本**（见 §5.3 的"用完即删"讨论） |
-| **（本章新增记录）** `check-layout-fixtures.mjs` 的"环境受限"**已解除** | **本章实测** | 不是缺 CLT，而是 `findTsc()`（`tools/check-layout-fixtures.mjs:92-101`）只认 Linux 布局；用 junction 暴露 Windows 上的 `typescript` 后 **exit 0 / 768 条断言**。⇒ 它**从来不是盲区**（见 §2.4） |
+| **（本章新增记录）** `check-layout-fixtures.mjs` 的"环境受限"**已解除** | **本章实测 + 2026-09-30 根治** | 不是缺 CLT，而是 `findTsc()` 只认 Linux 布局；当时用 junction 暴露 Windows 上的 `typescript` 后 **exit 0 / 768 条断言**。**2026-09-30 已把 Windows 回退写进脚本本身**（候选列表照抄 `tools/check-arkts-entry.mjs:49-59`：env → Linux 既定位置 → `<IDE>\tools\hvigor\{hvigor,hvigor-ohos-plugin}\...\typescript` → `<IDE>\tools\ohpm\...\typescript` → 仓库 `node_modules`），**不再需要外部 junction**。⇒ 它**从来不是盲区**（见 §2.4） |
 
 ### 2.3 分类小结
 
 - **AGENTS.md 明文必跑：7 条**（`AGENTS.md:62-68`）+ 真机 `device-acceptance.ps1`（`:69`）。
-- **本轮新增：2 条**（`check-icon-assets`、`check-toolchain-sign`）；
-  **本轮收紧判据：2 条**（`check-dead-code`、`check-dead-handlers`）。
-- **环境受限（exit 3）：2 条**——`check-arkts-entry.mjs`、`check-layout-fixtures.mjs`（§2.4）。
-  其中 **`check-layout-fixtures.mjs` 的受限已在本章解除**（768 条断言 / 0 失败），
-  **`check-arkts-entry.mjs` 的受限是真实的脚本缺陷**（Windows 布局未支持）。
-- **既有红项：6 条**，其中 `neg-test-piai.mjs` 随 `check-layout-fixtures` 解除后**已转绿**（§2.5）。
+- **本轮新增：5 条**——`check-icon-assets`、`check-toolchain-sign`（更早批次），以及 2026-09-28 收尾批的
+  `check-skill-sync.cjs`（P0-1）、`check-compat-exemption.cjs`（P1-3）、`check-doc-refs.mjs`（文档引用）；
+  **本轮收紧判据：3 条**（`check-dead-code`、`check-dead-handlers`，以及 `check-dshm-installer.cjs` 的两处陈旧断言重写）。
+- **环境受限（exit 3）：0 条**——**已清零**。`check-layout-fixtures.mjs` 的 exit 3 与
+  `check-arkts-entry.mjs` 的 exit 3 **同属一类脚本缺陷（Windows 布局未支持）**：
+  前者已于 **2026-09-30** 修掉（`findTsc()` 补上 Windows IDE 自带 `typescript` 的候选路径，写法照抄
+  `tools/check-arkts-entry.mjs:49-59`）⇒ **现 exit 0 / 768 条断言**，且**不再需要外部 junction**（§2.4）。
+- **既有红项：1 条**——`check-model-roundtrip.mjs`（本机缺 koffi / 需真 Host）。
+  `neg-test-piai.mjs` 原为**级联红**（依赖 `check-layout-fixtures` 的 exit 3），随之上绿。
+  `check-dshm-installer.cjs`、`check-arkts-entry.mjs`、`check-fetch-shim.cjs`、
+  `check-web-fetch-jitless.mjs` 四条**已修至绿**（§2.5）。
+- **本机全量实跑退出码分布（2026-09-30 重测，23 条）：`22×0 / 1×1`**（旧记的
+  `20×0 / 1×3 / 2×1`、`23×0 / 2×3 / 7×1` 均已过期）。
 
 ### 2.4 环境受限：`exit 3` = **没跑成，不是通过**
 
@@ -4270,7 +4426,7 @@ grep -n "exit code\|退出码" tools/check-arkts-entry.mjs tools/check-layout-fi
 
 | 脚本 | 本机读数 | 缺什么 | 脚本自己怎么说 |
 |---|---|---|---|
-| `check-arkts-entry.mjs` | **exit 3** | 找不到 DevEco Command Line Tools（需含 `hvigor/bin/hvigorw.js`） | 退出码语义写在头注释 `tools/check-arkts-entry.mjs:7`（"3 = **环境受阻**（找不到 CLT / SDK / JDK）…**不把'没跑成'说成'通过'**"），运行期提示在 `:108` |
+| `check-arkts-entry.mjs` | ~~**exit 3**~~ ⇒ **exit 0（2026-09-28 已修）** | 当时"缺 CLT"只是**表象**：CLT 本机就在 `<IDE>\tools`，真正的阻断是脚本里**四处 Linux 布局写死**（见本节下方实测） | 退出码语义写在头注释 `tools/check-arkts-entry.mjs:7`（"3 = **环境受阻**（找不到 CLT / SDK / JDK）…**不把'没跑成'说成'通过'**"），运行期提示在 `:108` |
 | `check-layout-fixtures.mjs` | **exit 3** | 找不到 CLT 自带的 `tsc` | 头注释 `tools/check-layout-fixtures.mjs:11`；运行期提示 `:108-109`（"⚠️ 这是'没跑成'，不是'通过'——退出码 3。"） |
 
 **实测（本章新增，重要）**：exit 3 的**直接原因**不是"本机没有 DevEco"，
@@ -4294,7 +4450,7 @@ C:\Program Files\Huawei\DevEco Studio\tools\ohpm\node_modules\typescript\bin\tsc
 ```
 
 而脚本只找 `<CLT>/codelinter/node_modules/typescript/bin/tsc`
-（`tools/check-layout-fixtures.mjs:95`）与一个 Linux 绝对路径（`:96`）。
+（`tools/check-layout-fixtures.mjs` 的 `findTsc()`）与一个 Linux 绝对路径。
 用**目录联接（junction）**把前者指向实际的 `typescript` 之后，**门禁完整跑通**：
 
 ```
@@ -4302,6 +4458,14 @@ C:\Program Files\Huawei\DevEco Studio\tools\ohpm\node_modules\typescript\bin\tsc
 ✅ 四形态 fixture 与边界全部符合预期。
 exit=0
 ```
+
+> **⚠️ 2026-09-30 根治**：下面的 junction 只是**当时的绕过手段**，它把"脚本缺陷"留在了脚本里
+> （要求每个新机器先手工建联接，否则永远 exit 3）。现已把候选列表写进 `findTsc()` 本身
+> （env → Linux 既定位置 → `<IDE>\tools\hvigor\{hvigor,hvigor-ohos-plugin}\...\typescript`
+> → `<IDE>\tools\ohpm\...\typescript` → 仓库 `node_modules`），**写法照抄同族的
+> `tools/check-arkts-entry.mjs:49-59`**；找不到仍 exit 3，不静默回退。
+> ⇒ **现在直接 `node tools/check-layout-fixtures.mjs` 即 exit 0 / 768 条断言，无需任何 shim。**
+> 下面的复现块保留作**历史取证**（它是"这条从来不是环境限制"的证据）。
 
 ```powershell
 # 复现（shim 落在 dist/ 下，随 dist/ 一起被忽略；用完即删）
@@ -4323,15 +4487,22 @@ Remove-Item -Recurse -Force $shim                         # 用完即删（AGENT
 | `check-layout-fixtures.mjs --self-test` | exit 3 | **exit 0**（769 条，注入的失败被如实报出） |
 | `neg-test-piai.mjs` | exit 1（四个变异全 `(no summary)`） | **exit 0**（"负测试总体：全部按预期（新断言确实会红）"） |
 
-⇒ **`docs/parity-matrix.md:148` 把这两个门禁记为"盲区"这件事，本身是可以消除的**；
+⇒ **`docs/parity-matrix.md` 曾把这两个门禁记为"盲区"这件事，本身是可以消除的**；
 它不是"本机能力不足"，而是**脚本的 CLT 路径解析只认 Linux 布局**。
 这是一条值得记的教训：**"环境受限"这四个字要先验证**，
 否则它会把"可修的脚本缺陷"永久正当化成"客观限制"。
+（2026-09-30 复核：这条教训当时**只落实了一半** —— 绕过手段进了文档，缺陷留在脚本里，
+直到本节补上候选列表才算真的修完。**"文档能跑通"与"脚本自己能跑通"是两件事。**）
 
-**`check-arkts-entry.mjs` 仍跑不起来，且原因不同**——它是**两处 Windows 不兼容**叠加：
+**`check-arkts-entry.mjs` 的门禁（同样只认 Linux 布局）——2026-09-28 已修，本机实跑通过。**
+
+> 下面保留修前的取证与判断（它们是"为什么这条建议可信"的依据），
+> 修法写在取证之后，**实测读数也一并落在这里**，不另开一节。
+
+它是**多处 Windows 不兼容**叠加（修前形态）：
 
 1. `join(clt,'tool','node','bin','node')`（`tools/check-arkts-entry.mjs:119`）——Linux 布局；
-   Windows 上是 `<CLT>\node\node.exe`，且**必须带 `.exe`**：
+   Windows 上是 `<IDE>\tools\node\node.exe`，且**必须带 `.exe`**：
    `execFileSync` 在 Windows 上不会为无扩展名的路径补 `.exe`
    （本章实测：`spawnSync <shim>/tool/node/bin/node ENOENT`，
    换成显式 `node.exe` 立刻成功）。
@@ -4348,21 +4519,56 @@ Remove-Item -Recurse -Force $shim                         # 用完即删（AGENT
    （`classify()` 对"输出里什么都没有"显式返回 `inconclusive`，
    `--self-test` 的 9 个样例里就有这一条，见 §4.3 的样例表）。
 
-⇒ **`check-arkts-entry.mjs` 的 Windows 支持是一处真实的、可修的脚本缺陷**，
-建议的修法（**未在本章改动**，留给对应负责人）：
-`nodeBin` 与 `javaHome` 都改为**按平台/候选列表解析**并**在找不到时仍 exit 3**
-（不要静默回退）——与 `place-toolchain.mjs` 的 `findHostPython()`
+⇒ **`check-arkts-entry.mjs` 的 Windows 支持是一处真实的、可修的脚本缺陷**。
+修法（**2026-09-28 已落**）：
+`nodeBin` 与 `javaHome`（以及另外两处同族写死）都改为**按平台/候选列表解析**，
+并**在找不到时仍 exit 3**（不要静默回退）——与 `place-toolchain.mjs` 的 `findHostPython()`
 （`DSHM_HOST_PYTHON` → 项目自带 → PATH）是同一套写法。
+
+**修的时候另外发现两处本章未记载的写死**，它们叠在一起才是"设了 JAVA_HOME 也起不来"的完整原因：
+
+3. `DEVECO_SDK_HOME = join(clt,'sdk')`（`:194`）——同样是 Linux 布局；
+   Windows 上是 `<IDE>\sdk`（`<CLT>` 已经是 `<IDE>\tools`，所以是 `join(clt,'..','sdk')`）。
+4. `PATH: \`${join(javaHome,'bin')}:${process.env.PATH||''}\``（`:196`）——分隔符写死 `:`。
+   Windows 的 PATH 分隔符是 `;`，拼出来的整段会被当成**一个**目录名 ⇒ `java` 找不到，
+   报的是 `spawn java ENOENT`（**与本机跑基线构建时未设 JAVA_HOME 踩的
+   `Error Code: 00308018 / spawn java ENOENT` 是同一个坑**），
+   与"这台机器没有 JDK"完全无关，极易误判。改用 `node:path` 的 `delimiter`。
 
 **为什么这条纪律重要**：`check-arkts-entry.mjs` 的判定器本身**已经过注入验证**
 （`--self-test` 9 个样例全过，含"hvigor 失败却退出码 0"的真实形态）。
 它的**判定逻辑是可信的**，不可信的只是"本机没有可用的编译器路径"。
 把 exit 3 写成"通过"，等于宣称 entry 层 ArkTS 编译正确——**这一层在本机从未被验证过**。
 
+**这条门禁恰好守的是本次改动所在的目录**（`entry/src/main/ets`，即 `Index.ets` 与全部 Pane）。
+它长期 exit 3，意味着 P1~P3 的 UI 改动在本机**从未被真编译器验证过**，而
+"exit 3 环境受限"这句话很容易被读成"客观限制、没办法"——正是 §2.4 开头那条教训
+（**"环境受限"这四个字要先验证**）的同一个形态，只不过第一次记的是
+`check-layout-fixtures.mjs`，第二次才是它。
+
+**修后实测（本机 Windows / Node v24.19.0）**：
+
+```
+# node tools/check-arkts-entry.mjs
+模块 entry · CLT C:\Program Files\Huawei\DevEco Studio\tools
+✅ entry 的 ArkTS 编译通过（0 error）。
+   完整日志：dist/arkts-entry/compile.log
+exit=0
+
+# dist/arkts-entry/compile.log 里有两行真证据（不再是 0 字节）
+Finished :entry:default@CompileArkTS... after 4 s 801 ms
+BUILD SUCCESSFUL in 8 s 77 ms
+
+# 判定器自检未被动到
+# node tools/check-arkts-entry.mjs --self-test  ⇒ 9 个样例全过，exit=0
+```
+
+⇒ **`docs/parity-matrix.md` 里"entry 应用模块的 ArkTS 编译要看环境"这条，在 Windows 上不再成立**。
+
 ```bash
-# 复现：本机两条 exit 3
-node tools/check-arkts-entry.mjs;    echo "exit=$?"   # 3
-node tools/check-layout-fixtures.mjs; echo "exit=$?"   # 3
+# 复现：本机两条 exit 3（修前形态）
+node tools/check-arkts-entry.mjs;    echo "exit=$?"   # 修前 3；**修后 0**
+node tools/check-layout-fixtures.mjs; echo "exit=$?"   # 修前 3；**2026-09-30 修后 0（不需要 shim）**
 
 # 判定器自检仍可跑（证明"红"不是因为检测器坏了）
 node tools/check-arkts-entry.mjs --self-test; echo "exit=$?"   # 0，9 个样例
@@ -4383,45 +4589,51 @@ node tools/check-layout-fixtures.mjs --self-test; echo "exit=$?"   # 0，769 条
 node tools/neg-test-piai.mjs;                     echo "exit=$?"   # 0，四个变异全红后还原回绿
 Remove-Item -Recurse -Force $shim                                    # 用完即删（AGENTS.md:81）
 
-# ── check-arkts-entry 仍不行，且原因与上面不同 ────────────────────────
-$env:JAVA_HOME = "C:\Program Files\Huawei\DevEco Studio\jbr"
-node tools/check-arkts-entry.mjs; echo "exit=$?"     # 1（注意：不再是 3！）
-#   ❌ 没拿到结论行（hvigor 可能没跑起来）。**不得当作通过**。
-Get-Item dist\arkts-entry\compile.log | Select-Object Length
-#   Length = 0 ⇒ 子进程根本没起来（不是"起来了没说结论"）
-#   根因：脚本按 Linux 布局找 node（<CLT>/tool/node/bin/node），且 Windows 上
-#   execFileSync 不会为无扩展名路径补 .exe
+# ── check-arkts-entry：修前 exit 3 / 设了 JAVA_HOME 后 exit 1，2026-09-28 已修 ──
+# 修前形态（留证）：
+#   $env:JAVA_HOME = "C:\Program Files\Huawei\DevEco Studio\jbr"
+#   node tools/check-arkts-entry.mjs; echo "exit=$?"     # 1（注意：不再是 3！）
+#   #   ❌ 没拿到结论行（hvigor 可能没跑起来）。**不得当作通过**。
+#   Get-Item dist\arkts-entry\compile.log | Select-Object Length
+#   #   Length = 0 ⇒ 子进程根本没起来（不是"起来了没说结论"）
+#   #   根因：脚本按 Linux 布局找 node（<CLT>/tool/node/bin/node），且 Windows 上
+#   #   execFileSync 不会为无扩展名路径补 .exe；另有两处：DEVECO_SDK_HOME 与 PATH 分隔符
+# 修后形态（同一条命令，不需要任何环境变量）：
+node tools/check-arkts-entry.mjs; echo "exit=$?"     # 0（真实编译：CompileArkTS + BUILD SUCCESSFUL）
 ```
 
 ### 2.5 既有红项（如实登记，不许改写成通过）
 
-本机（Windows / Node **v24.19.0**）全量实跑读数（2026-09-27）：
+本机（Windows / Node **v24.19.0**）全量实跑读数（2026-09-27 首测；其中 `check-arkts-entry.mjs`、`check-web-fetch-jitless.mjs`、`check-fetch-shim.cjs` 三条已于 **2026-09-28** 查明并修掉，见 §2.4 / §2.5 下方坑表 / §3.6）：
 
 | 脚本 | exit | 实测原因 | 属"环境"还是"真回归" |
 |---|---|---|---|
-| `check-arkts-entry.mjs` | **3** | 缺 DevEco CLT —— **实测真实原因是两处 Linux 布局假定**（`tool/node/bin/node` 与 `JAVA_HOME` 默认值），见 §2.4 | 环境（**可修的脚本缺陷**） |
-| `check-layout-fixtures.mjs` | **3** | 缺 CLT 自带 tsc —— **实测用 junction 暴露 `<IDE>\tools\hvigor\hvigor\node_modules\typescript` 后可跑通（768 条断言 / 0 失败）**，见 §2.4 | 环境（**已在本章解除**） |
-| `check-fetch-shim.cjs` | **1** | 需 `node --jitless --no-experimental-fetch`，而该 flag **在 Node 22+ 已被移除**。本机实测：`node --no-experimental-fetch -e ""` → exit 9，`--no-experimental-fetch is an invalid negation because it is not a boolean option`。不带 flag 直跑则第一句断言就失败：`AssertionError: 原生 fetch 竟然可用：本检查需要在 --no-experimental-fetch 下运行`（`tools/check-fetch-shim.cjs:4-9,32-34`） | **环境**（需 Node < 22） |
-| `check-web-fetch-jitless.mjs` | **1** | 同源问题：它用 `process.execPath` 起子进程并传 `FLAGS = ['--jitless','--no-experimental-fetch']`（`tools/check-web-fetch-jitless.mjs:308`）⇒ 子进程启动即失败，两臂都"没有产出断言汇总"。**脚本自己的注释说 exit 3 = 环境不具备**（`:45`），但这条情形被判成 **FAIL** | **环境**，但**脚本归类有缺陷**（见 §3.6） |
-| `check-dshm-installer.cjs` | **1** | 两处叠加：① `[FAIL] package.json top-level row only -- {"debug":"4.3.4"}`，而断言期望 `^4.3.4`（`tools/check-dshm-installer.cjs:102`）⇒ **语义前缀期望已漂移**；② 随后 `ENOENT: ...profiles/ondevice/.dshm-plugin-rows.yml`（`:104`）——该门禁仍在断言 `appendUserRow` 写用户行，**而该函数已于 2026-09-25 有意删除**（`tools/assert-cli-shim.mjs:110-111` 正是在锁"不再写用户行"） | **门禁设计失配**（两条门禁对同一件事的方向相反） |
+| `check-arkts-entry.mjs` | **3 → 0（2026-09-28 已修）** | 原因**不是**"缺 DevEco CLT"：CLT 本机就在 `<IDE>\tools`。**实测真实原因是四处 Linux 布局假定**（`tool/node/bin/node` 缺 `.exe`、`JAVA_HOME` 默认值、`DEVECO_SDK_HOME=join(clt,'sdk')`、`PATH` 用 `:` 而非 `delimiter`），见 §2.4。修后 exit 0，日志里有 `CompileArkTS` + `BUILD SUCCESSFUL` | 环境（**可修的脚本缺陷，已修**） |
+| `check-layout-fixtures.mjs` | **3 → 0（2026-09-30 已修）** | 缺 CLT 自带 tsc —— 与 `check-arkts-entry.mjs` **同属一类脚本缺陷**（CLT 路径只认 Linux 布局）。当时用 junction 暴露 `<IDE>\tools\hvigor\hvigor\node_modules\typescript` 后可跑通（768 条断言 / 0 失败）；**2026-09-30 已把候选列表写进 `findTsc()`**（env → Linux 既定位置 → `<IDE>\tools\hvigor\{hvigor,hvigor-ohos-plugin}\...\typescript` → `<IDE>\tools\ohpm\...\typescript` → 仓库 `node_modules`，写法照抄 `tools/check-arkts-entry.mjs:49-59`）⇒ **不需任何 shim 即 exit 0**，见 §2.4 | 环境（**可修的脚本缺陷，已修**） |
+| `check-fetch-shim.cjs` | **1 → 0（2026-09-28 已修）** | 修前：需 `node --jitless --no-experimental-fetch`，而该 flag **在 Node 22+ 已被移除**。不带 flag 直跑则第一句断言就失败（`AssertionError: 原生 fetch 竟然可用…`）。**但真因不止于此**：① 前提建在错误的 flag 语义上；② 取证探针打在 `127.0.0.1:9`（**fetch 规范禁用端口，入口即返回 `bad port`**）⇒ 探不出 WASM 因果；③ 取证引用在装垫片**之后**才取 ⇒ 探的是自己。修后 exit 0，且**修的过程挖出一个产品真 bug**（原生 `FormData` 被编成字面量 `"[object FormData]"`，见 §3.6 末段） | **脚本缺陷（已修），且原先那个"环境"标签掩盖了产品真 bug** |
+| `check-web-fetch-jitless.mjs` | **1 → 0（2026-09-28 已修）** | 原先判成"环境"：它用 `process.execPath` 起子进程并传 `FLAGS = ['--jitless','--no-experimental-fetch']`（`tools/check-web-fetch-jitless.mjs:308`）⇒ 子进程启动即失败，两臂都"没有产出断言汇总"。**真因不是环境，是两处硬缺陷**：① 该 flag 的**否定形态**在 Node 24 无效 ⇒ **两臂同时哑火**；② loader 传**裸盘符路径** ⇒ 默认 ESM 加载器拒收（`ERR_UNSUPPORTED_ESM_URL_SCHEME`）⇒ **B 臂从未跑成过**。修后 A 臂 4/4 按预期失败、B 臂 8/8 全过（见 §3.6） | **脚本缺陷（已修）** |
+| `check-dshm-installer.cjs` | **1 → 0（2026-09-28 已修）** | 两处叠加：① `[FAIL] package.json top-level row only -- {"debug":"4.3.4"}`，而断言期望 `^4.3.4`（`tools/check-dshm-installer.cjs:102`）⇒ **语义前缀期望已漂移**；② 随后 `ENOENT: ...profiles/ondevice/.dshm-plugin-rows.yml`（`:104`）——该门禁仍在断言 `appendUserRow` 写用户行，**而该函数已于 2026-09-25 有意删除**（`tools/assert-cli-shim.mjs:110-111` 正是在锁"不再写用户行"）。两处已重写并补 P1-2 双向用例（5a/5b/5c），现 `RESULT: 43 passed, 0 failed`、exit 0（2026-09-28 修后为 24 passed；**2026-09-29 随 GitHub→npm 回退与 monorepo 子包判定用例新增 19 例**） | **门禁设计失配**（已修：两条门禁曾对同一件事的方向相反） |
 | `check-model-roundtrip.mjs` | **1** | 本机两次运行得到**两种不同**失败：① `FAIL: session/page -> 0 connect ECONNREFUSED 127.0.0.1:3252`；② `assistant (none after 150485ms)`，mux 帧里 `turn/end reason=error`：`Cannot find the native Koffi module; did you bundle it correctly?` | **环境 + 待查**：koffi 是 HAP 专属（自编 `libkoffi.so` 放 `entry/libs/arm64/`），本机 PC 侧离线跑必然缺它；但两种失败模式不同，说明结果还依赖时序 |
-| `neg-test-piai.mjs` | **1**（**已在 §2.4 解除 → 0**） | 依赖 `check-layout-fixtures.mjs`，后者 exit 3 ⇒ 四个变异全部 `[A]/[B]/[C]/[D] FAIL — (no summary)`。用 junction 暴露 `tsc` 后：**exit 0**，"负测试总体：全部按预期（新断言确实会红）" | 环境（**级联，已解除**） |
-| `scan-core-plugins.mjs` | **1** | `FATAL: no node_modules under dist\core\work\dsh-core-0.1.5-rc.2`——**默认 coreDir 写死旧版本**（`tools/scan-core-plugins.mjs:30`），而当前核心树是 `0.1.7-rc.2` | **脚本硬编码版本**（与 `check-fs-search-fallback` 曾经"写死旧版本路径"同型，见 `docs/70-鸿蒙移植踩坑与修复总览.md:719`） |
+| `neg-test-piai.mjs` | **1 → 0（2026-09-30 随上游解除）** | 依赖 `check-layout-fixtures.mjs`，后者 exit 3 ⇒ 四个变异全部 `[A]/[B]/[C]/[D] FAIL — (no summary)`。`findTsc()` 修好后：**exit 0**，"负测试总体：全部按预期（新断言确实会红）"——**现在不需要 junction 也不需要 `DEVECO_CLI_CLT_PATH`** | 环境（**级联，已随根因修掉**） |
+| `scan-core-plugins.mjs` | **1 → 修（2026-09-28）** | 原：`FATAL: no node_modules under dist\core\work\dsh-core-0.1.5-rc.2`——**默认 coreDir 写死旧版本**（`tools/scan-core-plugins.mjs:20`），而当前核心树是 `0.2.0-rc.1`。**已改为读 recipe**：`join(ROOT,'dist','core','work', \`dsh-core-${RECIPE.coreVersion}\`)` | **脚本硬编码版本**（与 `check-fs-search-fallback` 曾经"写死旧版本路径"同型，见 `docs/70-鸿蒙移植踩坑与修复总览.md:795`）。2026-09-28 收尾清理一并修掉（本章 §5.3） |
 
 > **读这张表的方式**：`exit 3` 与上表前四项，都已在 `docs/device-validation.md:4423-4435` 登记为
-> "环境不足 / 需特定 flag"。**`check-model-roundtrip` 的两种失败模式与
-> `check-dshm-installer` 的语义前缀漂移不在既有登记里**，本章如实登记为待查，
+> "环境不足 / 需特定 flag"。**`check-dshm-installer.cjs` 的两处陈旧断言已于 2026-09-28 重写**，
+> 其语义前缀漂移（期望 `^4.3.4` 而实现写 `4.3.4`）与"断言 `appendUserRow` 写用户行"都已成为历史；
+> 它此前**自首次提交起就一直是红的**（两条门禁曾对同一件事方向相反），现 exit 0。
+> **剩下的 `check-model-roundtrip.mjs` 两种失败模式不在既有登记里**，本章如实登记为待查，
 > **不写成通过，也不写成"代码坏了"**。
 
 ```bash
-# 一键复现本节的退出码分布（本机实测：23×0 / 2×3 / 7×1）
+# 一键复现本节的退出码分布（2026-09-30 重测，本机实测：22×0 / 1×1）
 foreach ($g in @('arch-check.mjs','assert-cli-shim.mjs','assert-resfile-sync.mjs','check-parity.mjs',
                  'compat-drift.mjs','assert-exec-fix.mjs','assert-python-bridge.mjs',
                  'assert-fs-search-fallback.mjs','check-dead-code.mjs','check-dead-handlers.mjs',
                  'check-icon-assets.mjs','check-toolchain-sign.mjs','check-arkts-entry.mjs',
                  'check-layout-fixtures.mjs','check-fetch-shim.cjs','check-model-roundtrip.mjs',
                  'check-dshm-installer.cjs','check-web-fetch-jitless.mjs','neg-test-piai.mjs',
-                 'scan-core-plugins.mjs')) {
+                 'scan-core-plugins.mjs','check-skill-sync.cjs','check-compat-exemption.cjs',
+                 'check-doc-refs.mjs')) {
   $null = & node "tools/$g" 2>&1; "  {0,-32} exit={1}" -f $g, $LASTEXITCODE
 }
 
@@ -4573,7 +4785,7 @@ node dist/gate-probe/inject-dead-handler.mjs
   entry/src/main/ets/pages/Index.ets:47  零使用 import：// pi-ai 路由（自定义模型 API）：…
 ```
 
-而当前版本报 `✅ 无死代码`（`扫描文件 99 个 · 判定声明 2224 处 · 门面字段 256 个`）。
+而当前版本报 `✅ 无死代码`（`扫描文件 99 个 · 判定声明 2237 处 · 门面字段 256 个`）。
 修法见 `tools/check-dead-code.mjs:170-186`：先按 `//` 截断，再要求是合法标识符（含 `A as B`）。
 
 ### 3.3 要求三："**只 print 不校验**"是假门禁
@@ -4660,22 +4872,25 @@ node tools/assert-python-bridge.mjs; echo "exit=$?"     # 期望 0（69 项断�
 > 「门禁全绿但实际漏检」（命名空间表缺事件前缀、之后又缺 `deliverables/` 等三项）。
 > **新增任何上游名词（端点、事件、命名空间）时，都要问一句「门禁认识它吗」**。
 
-`docs/parity-matrix.md:148` 把这条纪律落到了具体对象上：跑不动的门禁，
+`docs/parity-matrix.md:159` 把这条纪律落到了具体对象上：跑不动的门禁，
 **其覆盖面在本环境是盲区，不是通过**。
 
 **为什么这条比前四条更难**：前四条的失败会体现在"门禁红了/绿了"这个二元信号上；
-这一条的失败**信号本身就是绿的**。三处已知盲区：
+这一条的失败**信号本身就是绿的**。已知盲区（2026-09-28 复核后）：
 
 | 盲区 | 表现 | 现状 |
 |---|---|---|
-| `check-arkts-entry.mjs` | **entry（UI 层）在本机零编译验证** | exit 3；判定器可信（`--self-test` 9 样例全过），但**脚本的 CLT 路径只认 Linux 布局**（§2.4）⇒ 真实盲区 |
-| **`check-layout-fixtures.mjs`** | 曾被记为"本环境跑不了"（`docs/parity-matrix.md:148`） | **本章实测解除**：不是缺 CLT，是 `findTsc()` 只认 Linux 布局。暴露 Windows 的 `typescript` 后 **exit 0 / 768 条断言**（§2.4） |
+| `check-arkts-entry.mjs` | **entry（UI 层）在本机零编译验证** | 修前 exit 3；判定器可信（`--self-test` 9 样例全过），但**脚本的 CLT 路径只认 Linux 布局**（§2.4）。**2026-09-28 已修 ⇒ exit 0**，日志里有 `CompileArkTS` + `BUILD SUCCESSFUL` ⇒ **不再是盲区** |
+| **`check-layout-fixtures.mjs`** | 曾被记为"本环境跑不了"（`docs/parity-matrix.md` §3.1） | **本章实测解除 + 2026-09-30 根治**：不是缺 CLT，是 `findTsc()` 只认 Linux 布局。当时暴露 Windows 的 `typescript` 后 **exit 0 / 768 条断言**（§2.4）；**现已把 Windows 回退写进脚本**，直接跑即 exit 0，**无需 shim** |
 | `compat-drift.mjs` | 依赖 `.research/protocol/contracts.json` 与上游 `node_modules` | 本机可跑（**见下**），但它守的是"**当前环境的上游**"，不是"上游的所有版本" |
 | `check-model-roundtrip.mjs` | 端侧 `--expose-internals` 垫片是**设备专属**；本机还缺 koffi（HAP 内的自编 `libkoffi.so`） | 真实盲区（PC 侧测不了设备专属垫片） |
 
-> **⚠️ 一处口径澄清（本章实测发现，很关键）**：
-> `docs/parity-matrix.md` §3.1（`:119-145`）把 `check-layout-fixtures.mjs` 记为
-> **"✅ 533 条断言通过"**、把 `check-arkts-entry.mjs` 记为 **"✅ BUILD SUCCESSFUL（0 error / 32 warn）"**,
+> **⚠️ 一处口径澄清（本章实测发现，很关键；2026-09-28 补注）**：
+> 这个"分不清是哪台机器"的问题**已经修掉**：`docs/parity-matrix.md` §3.1 已按**本机 2026-09-28 的重测读数**整体重写
+> （`check-layout-fixtures.mjs` 记为 **768 条断言**、`arch-check` 131 文件、`check-dead-code` 99 文件 / 2237 处声明…）。
+> 但这条教训仍然成立，因为**它当初确实发生过**：改动前的 §3.1（`:119-145`）把
+> `check-layout-fixtures.mjs` 记为 **"✅ 533 条断言通过"**、把 `check-arkts-entry.mjs` 记为
+> **"✅ BUILD SUCCESSFUL（0 error / 32 warn）"**,
 > 并给出了可跑命令 `<CLT>/tool/node/bin/node <CLT>/hvigor/bin/hvigorw.js …`（`:102`）。
 > **那份读数是在另一台机器（Linux 开发机）上取得的** ——
 > 同文件 `:110` 提到 `/home/node/node22/bin/node`、`:96` 附近的 `/home/node/deveco-clt/command-line-tools`。
@@ -4683,33 +4898,38 @@ node tools/assert-python-bridge.mjs; echo "exit=$?"     # 期望 0（69 项断�
 > 本机（Windows）的两个 exit 3，根因是**脚本里的 Linux 布局硬编码**。
 > 写文档时若不分机器，"某台机器跑不了"会很轻易地被读成"这个门禁是盲区"。
 
-> **这一节最大的收获是一条方法论**：`docs/parity-matrix.md:148` 把"跑不动的门禁"
+> **这一节最大的收获是一条方法论**：`docs/parity-matrix.md:159` 把"跑不动的门禁"
 > 计入盲区时，用的是**结果**（退出码 3）而不是**原因**。而这两条 exit 3 的原因**都不是环境，
 > 而是脚本没支持 Windows 布局**。⇒ **"环境受限"必须先验证再记**；
 > 把它当结论写进文档，会把"一行路径解析的脚本缺陷"永久正当化成"客观限制"，
 > 下一批人也就不再去查了。这正是 `docs/README.md` 纪律第 9 条
 > （"门禁通过 ≠ 覆盖到了"）的一个**反向**应用：**门禁没通过 ≠ 覆盖不到**。
+>
+> **这条方法论在 2026-09-28 得到了第二次验证**：`check-arkts-entry.mjs` 的
+> exit 3 被记了将近两周（`docs/parity-matrix.md` 记为"盲区"、§5.6 登记为"未在本章改动"），
+> 而实际原因只是**四处路径写死**；一旦照 §2.4 的修法改掉，它当场就绿了。
+> **"留给对应负责人"这句话的真实代价是：这一层在这两周里没有任何自动验证。**
 
 **本章实测（盲区收窄）**：`compat-drift.mjs` 在本机**可以**跑通，只要显式指向上游包目录：
 
 ```bash
-$env:DSH_NODE_MODULES="$PWD\dist\core\work\dsh-core-0.1.7-rc.2\node_modules"
-node tools/protocol-contract.mjs --json dist/contracts.json; echo "exit=$?"   # 0，135 个 endpoint
+$env:DSH_NODE_MODULES="$PWD\dist\core\work\dsh-core-0.2.0-rc.2\node_modules"
+node tools/protocol-contract.mjs --json dist/contracts.json; echo "exit=$?"   # 0，140 个 endpoint
 node tools/compat-drift.mjs; echo "exit=$?"
-#   期望：期望 135 / 基线 135，无漂移
+#   期望：期望 140 / 基线 140，无漂移（2026-09-30 实测）
 ```
 
-⇒ **`docs/parity-matrix.md:171` 记的"漂移门禁仍是盲区（唯一仍跑不动的门禁）"这条已经过时**：
+⇒ **`docs/parity-matrix.md:195` 记的"漂移门禁仍是盲区（唯一仍跑不动的门禁）"这条已经过时**：
 只要用环境变量指向仓库内自带的核心树（`dist/core/work/<ver>/node_modules`），它是可跑的。
-**但要注意**：`tools/protocol-enum.mjs:15-16`、`tools/protocol-enum2.mjs:17-18`、与
-`tools/compat-drift.mjs:34-35` 的**默认**路径里仍硬编码了**别人的用户名**
-（`C:\Users\aotian\…`）。`protocol-contract.mjs` 已经改成按当前用户推导并**在找不到时明确失败**
-（`tools/protocol-contract.mjs:33-57`，注释里写明了"门禁失效比门禁报错更糟"），
-但那三个脚本**尚未同步**——这是又一处"文档说已修、代码只修了一半"。
+
+**2026-09-30 补记（已收口）**：`tools/protocol-enum2.mjs` 与 `tools/compat-drift.mjs` 的**默认**路径
+此前仍硬编码**别人的用户名**（`C:\Users\aotian\…`）——现与 `tools/protocol-contract.mjs`（`:30` import `homedir`、
+`:40-42` 兜底）**同法改为按当前用户推导**（`protocol-enum2.mjs:16/:19-20`、`compat-drift.mjs:22/:36-37`）。
+⇒ 三个脚本口径一致，换机器不再静默失效；`DSH_NODE_MODULES` 仍可覆盖，找不到上游时**明确失败**。
 
 ```bash
-# 找剩下的硬编码用户名（期望：protocol-enum / protocol-enum2 / compat-drift）
-grep -n "aotian" tools/*.mjs
+# 找剩下的硬编码用户名（2026-09-30 实测：0 命中）
+grep -nE 'C:\\\\Users\\\\[A-Za-z]' tools/*.mjs
 ```
 
 ### 3.6 要求六（衍生）：门禁必须把"环境不足"与"真的失败"分开
@@ -4746,7 +4966,65 @@ ANCHOR FAILED
 但当**子进程因 Node 版本不兼容而根本没起来**时，它报的是 **1（FAIL）**，
 输出"B 臂没有产出断言汇总（可能崩在断言之前）"。
 ⇒ **"没跑成"被判成了"代码失败"**。与它同族的 `check-arkts-entry.mjs`
-就做对了（缺 CLT 时明确 exit 3）。**这是一处待修的门禁设计不一致。**
+就做对了（缺 CLT 时明确 exit 3）。
+
+**2026-09-28 已修，且实测证明它不只"归类不对"——这条门禁当时是整体失效的**（本机 Node v24.19.0）：
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `FLAGS = ['--jitless','--no-experimental-fetch']`（`:308`）写死 | Node 24 拒绝该**否定形态**（`invalid negation because it is not a boolean option`）⇒ 子进程在第一条断言前就退出，**两臂同时哑火**（A 臂"失败但给不出 WASM 因果证据"、B 臂"没有产出断言汇总"）⇒ **A/B 对照实验两个方向都失去意义** | 改为**运行时探测**：`CANDIDATE_FLAGS.filter(f => spawnSync(process.execPath,[f,'-e','0']).status === 0)`，并打印一行说明剔了哪个。依据：仓内 `check-origin-fence.mjs:119-121` 已写明"不带 `--no-experimental-fetch`（libnode v24 fetch 已转正）"，端侧 `RuntimePort.buildHostArgv` 也不带它 ⇒ 剔掉反而**更贴近端侧** |
+| 2 | `LOADER = join(ROOT,'entry','src','main','resources','resfile','resources','app','undici-loader.mjs')`（`:191`）把裸盘符路径传给 `--experimental-loader` | 默认 ESM 加载器报 `ERR_UNSUPPORTED_ESM_URL_SCHEME: …Received protocol 'd:'` ⇒ **B 臂从来没有跑成过**（崩在断言之前，与 Node 版本无关） | 改用 `pathToFileURL(LOADER_PATH).href`（该文件 `:50` 已导入），`existsSync` 判定仍用真实路径 |
+
+修后实测：A 臂 `WASM=undefined` + `[probe] 真 undici 失败原因: WebAssembly is not defined`、4/4 断言按预期失败；
+B 臂 **8/8 全过**（含跨源跳转仍被拒为 `WEB_REDIRECT_BLOCKED`）⇒ `PASS：对照实验成立`、**exit=0**。
+
+⇒ **教训**：这个门禁的红被登记成"环境（需特定 flag）"之后，**没有人再去看它内部**——
+而它内部同时藏着"两臂哑火"与"B 臂从未跑成"两处硬缺陷。**"环境问题"这个标签会掩盖它内部的 bug**，
+与 §2.4 那条是同一个形态（"环境受限"必须先验证，否则会永固化）。
+
+**同一天（2026-09-28）在 `check-fetch-shim.cjs` 上重演了同一个形态，而且这次挖到了产品代码**：
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | 前提断言建在 `--no-experimental-fetch` 的**语义**上（"原生 fetch 必须不可用"） | Node 24 已移除该 flag ⇒ **不带 flag 时 ① 直接 FAIL、带上 flag 时进程死在 CLI 解析**，两条路都红 | 前提改为 **`WebAssembly === undefined`**——这才是垫片与 `installFetchShim()` 共用的真判据（`hostcore/app/fetch-shim.js:600`）；并新增**未带 flag 时自动用 `--jitless` 重新拉起自己**（`DSHM_FETCH_SHIM_RERUN` 防死循环），免得"忘了加 flag"长得像"代码失败" |
+| 2 | 取证探针打在 `http://127.0.0.1:9/never` | **9 是 fetch 规范里的禁用端口**，原生 fetch 在**入口**就返回 `bad port`，**根本没走到 undici 的解析器** ⇒ "reason 里没有 WebAssembly 字样"被误读成"本机没关 WASM"，把下面那条真 bug 挡在了后面 | 改用**真的活着**的本地 server（提到取证之前 `listen(0)` 取 `port`）；判据从 `/WebAssembly\|not defined\|fetch failed/i` **收紧**为 `/WebAssembly\|not defined/i`（原先那个 `fetch failed` 太宽，任何网络错误都能满足，等于没判） |
+| 3 | 取证用的 `fetch` 引用**是在装完垫片之后取的** | 探的是垫片自己 ⇒ 得出"原生 fetch 没炸"这个**假结论**，而它恰好把真 bug 挡住了 | `const nativeFetch = globalThis.fetch;` 必须在 `installFetchShim()` **之前**抓 |
+
+**顺带挖出的产品真 bug（`hostcore/app/fetch-shim.js`）**：`installFetchShim()` 的全局是"缺哪个补哪个"
+（`:587-592`），而 Node 24 **启动就自带** `FormData`/`Blob`/`Headers`，且它们来自内部实现、**不碰 WASM**
+（实测 `[JS]` 而非 `[native code]`）⇒ 当前端侧**一个都不补**，`globalThis.FormData` 保持原生。
+而 `encodeRequestBody` 原先**只认 `instanceof DshmFormData`**（`:248`）⇒ 原生 FormData 落到最后一行
+`Buffer.from(String(body))` ⇒ **请求体变成字面量 `"[object FormData]"`（17 字节）**。
+受害路径是 dsh 的**附件上传**（`dsh-llm-deepseek/lib/index.js:686`、
+`dsh-client-connection/lib/index.js:747` 的 `new FormData()`），症状是"上传静默失败 / 服务端收到乱码"。
+**这条与 jitless 无关**——本机同结构同代码照样踩；它之所以一直被记成"环境问题"，纯粹是因为那个门禁
+从来没跑到过 FormData 那一条。
+
+修法是**在编码侧按能力识别**（新增 `isForeignFormData()` / `encodeForeignFormData()`，
+`encodeRequestBody` 增加一支），而不是去替换全局：调用方拿的是哪个实现都能编对，
+且这一层比"改写全局类"更稳（同 `isBlobLike()` 早已写明的取舍）。
+`isForeignFormData` 用 `Object.prototype.toString.call(value) === '[object FormData]'` 精确匹配——
+**只判能力会误收 `URLSearchParams`**（它同样有 `append`/`entries`/`forEach`）。
+
+**这条断言做了故障注入**（按 §3.7 的纪律）：把 `if (isForeignFormData(body))` 短路成 `if (false && …)`
+⇒ 门禁 exit=1，且**只有 FormData 那一条红**，报的是
+`请求体没被当成 FormData 编码（服务端读到的 content-type=undefined，body="[object FormData]"）`；
+还原后 sha256 与注入前一致。首次注入时那句报的是
+`Cannot read properties of undefined (reading 'startsWith')`——**症状在下一跳**，
+读的人看不出是"FormData 没被编码"，故断言改为先分别判 `contentType === undefined`
+与 `body.includes('[object FormData]')`，最后才判 multipart，让失败信息直接点名缺陷。
+
+**远端两条断言的归类也一并修正**：本机实测 `https://example.com/` **裸 `https.get` 就超时**
+（`ERR timeout 5029ms`），而 `https://nodejs.org/dist/index.json` 是 `200 / 331923B / 1379ms`
+⇒ 原 ③ 的红**是网络，不是垫片**。现改为：链路层错误码（`ENOTFOUND`/`ETIMEDOUT`/…）**降级为 skip**，
+但**两条全链路层失败时仍报 FAIL**（那时无法区分"本机不通外网"与"垫片的 TLS 路径坏了"），
+并给出 `DSHM_FETCH_SHIM_SKIP_REMOTE=1` 供离线环境显式跳过。
+**这里我自己又犯了同一形态的错**：`withTimeout` 触发的 abort 抛出的 error **`code` 是空的**，
+特征在 `name === 'AbortError'` ⇒ 只看 `code` 会把"本机主机连不上、被我们自己的 8s 超时掐掉"
+记成**代码失败**，正是同一段注释刚说要避免的事。已加 `error.name === 'AbortError'` 判据。
+
+修后读数（本机 Node v24.19.0）：`node --jitless tools/check-fetch-shim.cjs` → 6 条 ok / `exit=0`
+（`example.com` 显示 skip 而非 FAIL）；不带 `--jitless` 自动重拉后同样 `exit=0`。
 
 ### 3.7 本节验证方式
 
@@ -4762,6 +5040,7 @@ node tools/check-builder-recursion.mjs --self-test
 node tools/check-design-tokens.mjs --self-test
 node tools/check-arkts-entry.mjs --self-test
 node tools/check-web-fetch-jitless.mjs --self-test
+node tools/check-layout-fixtures.mjs --self-test   # 需 tsc；缺则 exit 3（"没跑成"，不是通过）
 
 # ③ 归真：坏版本必须还在（这一步是 §3.1 的前提检查）
 $env:GIT_DIR="$PWD\.codegenie\.git"; $env:GIT_WORK_TREE="$PWD"
@@ -4931,18 +5210,21 @@ grep -n "isPropDefault" tools/check-dead-handlers.mjs            # E-DH1
 
 **AGENTS.md 原文**：`| 一次性排查脚本 | 用完即删 | 不要把临时诊断脚本留在 tools/ |`（`AGENTS.md:81`）。
 
-**现状核查（2026-09-27，`tools/` 共 89 个文件）**——以下脚本按此条纪律属于"用完即删"或"来源存疑"：
+**现状核查（2026-09-27）**——以下脚本按此条纪律属于"用完即删"或"来源存疑"：
+（计数口径：`tools/` **顶层文件 64 个**；递归含 `lib/`、`electron-runtime/`、`node-runtime/` 三个子目录共 **92 条** git 跟踪文件。2026-09-27 那次记的"89"未注明口径、事后不可复核，已按 `git ls-tree -r --name-only HEAD tools` 的数替换。）
 
-| 文件 | 性质 | 引用情况 | 处置状态 |
+| 文件 | 性质 | 引用情况 | 处置状态（2026-09-28 已清） |
 |---|---|---|---|
-| `tools/repro_all.py` / `repro_local.py` / `repro_report9.py` | 复现报告 9 四个缺陷的**一次性**脚本 | 仓库内**零引用**（grep 命中 0） | **未清** |
-| `tools/close_picker2.py` | "按坐标关闭系统选择器（收尾用）" | 仅 `docs/functional-test-report.md:143` 提到 | **未清** |
-| `tools/verify_t1_clean.py` | 修复项的**单项干净复验** | 仅 `docs/functional-test-report.md:15,141` | **未清** |
-| `tools/func_test_final.py` + `tools/dshtest.py` | 真机功能测试套件（A/B 级自动化 + 支撑库） | **有活引用**：`docs/80:123`、`docs/90-staging/E:172`、`tools/update-device.ps1:208` | **保留**（属验收资产，`docs/functional-test-report.md:135-143` 有登记） |
-| `tools/protocol-enum.mjs` | 已被 `protocol-enum2.mjs` 取代的迭代产物 | `docs/50-端侧核心运行架构.md:2410-2413` 明确登记"标记为待确认无引用后删除——**本轮不动**" | **未清**（有书面理由） |
-| `tools/dump-piai-schema-full.mjs` / `tools/neg-test-piai.mjs` | 排障/负测试用 | 各 1 处引用 | **未清** |
-| `tools/check-layout-fixtures.mjs.bak`（09-25，124824 B） | 来源存疑、无引用 | `docs/device-validation.md:4177,4536` 两次登记"**是否删由项目方定**" | **未清**（待决策） |
-| `tools/show_ui.py` | 被 `docs/functional-test-report.md:142` 登记为可复用测试资产 | **文件不存在** | **文档与实物不符**（同 §1.2 例③） |
+| `tools/repro_all.py` / `repro_local.py` / `repro_report9.py` | 复现报告 9 四个缺陷的**一次性**脚本 | 仓库内**零引用**（grep 命中 0） | **已删**（`git rm`，2026-09-28） |
+| `tools/close_picker2.py` | "按坐标关闭系统选择器（收尾用）" | 仅 `docs/functional-test-report.md:143` 提到 | **已删**（同上；该处登记已同步移除） |
+| `tools/verify_t1_clean.py` | 修复项的**单项干净复验** | 仅 `docs/functional-test-report.md:15,141` | **已删**（同上；结论数值已留在该报告正文，脚本本身是一次性的） |
+| `tools/func_test_final.py` + `tools/dshtest.py` | 真机功能测试套件（A/B 级自动化 + 支撑库） | **有活引用**：`docs/80:123`、`docs/90:3544`（第五章 §1.7「装完之后的三步验收」；原 `docs/90-staging/E:172`，该目录从未入库，见 §7 历史说明）、`tools/update-device.ps1:208` | **保留**（属验收资产，`docs/functional-test-report.md:135-143` 有登记）。2026-09-28 顺手修掉两处硬编码：`func_test_final.py` 的核心版本读 recipe、`dshtest.py` 的 hdc 路径按 `DSHM_HDC`→PATH→DevEco 工具链解析（原先写死 `%USERPROFILE%\…\<版本>\…` 占位符与仓库绝对路径） |
+| `tools/protocol-enum.mjs` | 已被 `protocol-enum2.mjs` 取代的迭代产物 | `docs/50-端侧核心运行架构.md:2421-2425` 曾登记"标记为待确认无引用后删除——**本轮不动**" | **已删**（2026-09-28 确认全仓无代码调用，仅文档里的采集记录；`docs/50` §15.4 已同步） |
+| `tools/dump-piai-schema-full.mjs` / `tools/neg-test-piai.mjs` | 排障/负测试用 | 各 1 处引用 | **保留**（`neg-test-piai.mjs` 属负测试族，`docs/90:4222` 有登记） |
+| `tools/check-layout-fixtures.mjs.bak`（09-25，124824 B） | 来源存疑、无引用 | `docs/device-validation.md:4177,4536` 两次登记"**是否删由项目方定**" | **已删**（2026-09-28 项目方以"全清"拍板；§6.3 待决策项随之关闭） |
+| `tools/show_ui.py` | 被 `docs/functional-test-report.md:142` 登记为可复用测试资产 | **文件不存在** | **文档与实物不符**（同 §1.2 例③）⇒ 2026-09-28 已从该报告的可复用资产表中移除 |
+
+**清理结果**：`git rm` 一次删 7 个文件（上表 6 行 + `.bak`）。计数口径（均为 `git ls-tree -r --name-only HEAD tools` 实测）：顶层 **64 → 57**，递归（含 `lib/`、`electron-runtime/`、`node-runtime/`）**92 → 85**。全仓剩余的引用全部在文档里，已逐处同步（见 §5.6 表格）。
 
 **顺便记一条正例**：`tools/make-brand-assets.mjs` 走的是"**拒绝执行 + 指向新脚本**"而不是静默跳过
 （`tools/make-brand-assets.mjs:20-25`，`process.exit(1)`），并把原实现保留在文件下半部供参考。
@@ -5017,21 +5299,25 @@ grep -n "includes('HDSH_.*')" tools/pack-core.mjs      # 期望：每处新名�
 **处置原则（写进了 `.gitignore` 的头部注释，``.gitignore:7-11`）：
 「**修配置，不修文档措辞。**」**
 
-**本章实测的三处"文档与实物不一致"**（如实登记，未在本章修改）：
+**本章实测的若干处"文档与实物不一致"**（如实登记）：
 
-| # | 文档说 | 实物 | 影响 |
-|---|---|---|---|
-| ① | `docs/parity-matrix.md:171`："协议契约…❌ 缺 ⇒ 漂移门禁**仍是盲区**（唯一仍跑不动的门禁）" | 实测**可跑**（指向仓库内核心树即可，135/135 无漂移，见 §3.5） | 让人放弃一条本可用的门禁 |
-| ② | `docs/50-端侧核心运行架构.md:2078`（E344）：`git show HEAD:…MainShell.ets` → 命中 1 处 | 实测 **0 处**（HEAD 已含修复，见 §3.1） | 让人误判"门禁失效"或"修复被回滚" |
-| ③ | `docs/functional-test-report.md:142` 登记 `tools/show_ui.py` 为可复用资产 | 文件**不存在**（`Test-Path tools\show_ui.py` → False） | 照文档去跑会找不到脚本 |
-| ④ | `docs/parity-matrix.md:148` 把 4 个门禁记为"覆盖面在本环境是盲区" | 其中 `check-layout-fixtures.mjs` **本章实测在 Windows 上可跑通**（768 条断言）；另见 `:119-145` 的读数其实取自**另一台 Linux 机器** | 把"某台机器的限制"读成"项目盲区"，从此不再去查 |
-| ⑤ | `docs/parity-matrix.md:126`："`check-dead-handlers` 78 处（**不追求归零**）" | 当前门禁报 **0 处**（`未发现空实现`），且 78 处那批是**旧判据的误报**（§3.2） | 旧读数会让人以为门禁"故意留红" |
+| # | 文档说 | 实物 | 影响 | 现状（2026-09-28） |
+|---|---|---|---|---|
+| ① | `docs/parity-matrix.md:195`："协议契约…❌ 缺 ⇒ 漂移门禁**仍是盲区**（唯一仍跑不动的门禁）" | 实测**可跑**（指向仓库内核心树即可，138/138 无漂移，见 §3.5） | 让人放弃一条本可用的门禁 | **已改**（`parity-matrix.md` §3.3 该行 + §3.2 盲区表） |
+| ② | `docs/50-端侧核心运行架构.md:2089`（E344）：`git show HEAD:…MainShell.ets` → 命中 1 处 | 实测 **0 处**（HEAD 已含修复，见本章 §3.1） | 让人误判"门禁失效"或"修复被回滚" | 待该文档负责人处置 |
+| ③ | `docs/functional-test-report.md:142` 登记 `tools/show_ui.py` 为可复用资产 | 文件**不存在**（`Test-Path tools\show_ui.py` → False） | 照文档去跑会找不到脚本 | **已改**（2026-09-28 随一次性脚本清理，从该报告的"可复用测试资产"表中移除；同表另外两行 `verify_t1_clean.py` / `close_picker2.py` 的脚本本体已 `git rm`，登记一并去掉） |
+| ④ | `docs/parity-matrix.md:159` 把 4 个门禁记为"覆盖面在本环境是盲区" | 实测**没有一条**是"本机能力不足"：`check-layout-fixtures`（768 断言）、`check-arkts-entry`（exit 0）、`compat-drift`（138/138）、`check-web-fetch-jitless`（exit 0）**全部可跑**；另见 `:119-145` 的旧读数其实取自**另一台 Linux 机器**（该块已于 2026-09-28 按本机重测重写） | 把"某台机器的限制"读成"项目盲区"，从此不再去查 | **已改**（`parity-matrix.md` §3 两处 + §3.1 命令块） |
+| ⑤ | `docs/parity-matrix.md:126`："`check-dead-handlers` 78 处（**不追求归零**）" | 当前门禁报 **0 处**（`未发现空实现`），且 78 处那批是**旧判据的误报**（§3.2） | 旧读数会让人以为门禁"故意留红" | 待该文档负责人处置 |
 
-**为什么必须逐条登记而不是顺手改**：这几处都在**其它文档**里，
+**为什么这几处要逐条登记而不是一律顺手改**：②③⑤ 都在**其它文档**里，
 按纪律第 4 条"实施期与设计的偏差写进 `specs/`（as-built 记录），**不改写历史文档**"
 （`docs/README.md:60`），本章只负责**记录**，改动应由对应文档的负责人做。
-本章的**唯一例外**是把自己验证出来的东西落成脚本与命令（`dist/gate-probe/`），
-以及**主张**把该修的门禁缺陷修掉（§2.4 的 `check-arkts-entry`）。
+
+**但 ①④ 本章已经改了**，理由与 §2.4 同一条：它们指向的是**脚本缺陷**，而
+"记成盲区"的代价已经实测过了——`check-arkts-entry.mjs` 被记成盲区之后，
+`entry`（UI 层）**将近两周没有任何自动验证**，而本次 m00001 的修复恰好改在这个目录里。
+**"留给对应负责人"在无人接手的项目里等于"永久留红"。**
+本章的做法是把验证结论落成可复现的命令（§2.4），再同步掉那两处会误导人的表述。
 
 ### 5.7 本节验证方式
 
@@ -5047,11 +5333,13 @@ grep -n "dist/" docs/README.md                # 纪律条款
 grep -rn "已修\|已修复\|已改为" tools/*.mjs | Measure-Object      # 每条都应能在同一文件里找到实现
 
 # ④ 一次性脚本现状（§5.3 的表）
+#    已删的 7 个应当 exists=False；保留的 4 个应当 exists=True。
 foreach ($f in @('repro_all.py','repro_local.py','repro_report9.py','close_picker2.py',
                  'verify_t1_clean.py','protocol-enum.mjs','check-layout-fixtures.mjs.bak',
-                 'func_test_final.py','dshtest.py','show_ui.py')) {
+                 'func_test_final.py','dshtest.py','scan-core-plugins.mjs','show_ui.py')) {
   "  tools/$f  exists=$(Test-Path "tools/$f")"
 }
+# 期望：前 7 个 False，func_test_final/dshtest/scan-core-plugins True，show_ui.py False（从未存在）
 
 # ⑤ 幂等标记新旧都认（E-SV22）
 grep -c "DSHM_ORIGIN_LIST\|HDSH_ORIGIN_LIST" tools/pack-core.mjs
@@ -5066,7 +5354,7 @@ grep -c "DSHM_ORIGIN_LIST\|HDSH_ORIGIN_LIST" tools/pack-core.mjs
 | 项 | 状态 | 复核方式 |
 |---|---|---|
 | `tmp/`（仓库根） | **检查时点为空** | `Get-ChildItem tmp -Force -Recurse \| Measure-Object` ⇒ 0 |
-| `workspace/`（仓库根） | **不存在**（从未在根下建过；端侧工作区在**设备沙箱**里，见 `docs/90-staging/C-端侧运行时.md` §7） | `Test-Path workspace` ⇒ False |
+| `workspace/`（仓库根） | **不存在**（从未在根下建过；端侧工作区在**设备沙箱**里，见第三章 §7「沙箱布局」= `docs/90:2477`） | `Test-Path workspace` ⇒ False |
 | 本轮门禁探针产物 | 全部落在 **`dist/gate-probe/`**（退出码读数、旧版检测器、注入脚本） | 符合"临时过程产物一律只落 `dist/`"（`docs/README.md:29`） |
 | `dist/clt-shim/`（§2.4 的 junction shim） | **已删**（用完即删，`AGENTS.md:81`） | `Test-Path dist/clt-shim` ⇒ False |
 | `dist/localtest/*` 脚手架 | 各门禁自己的 scratch HOME/sandbox（`model-sandbox` 等 13 个） | 属**可再生**产物，随 `dist/` 一起被 `.gitignore` 忽略 |
@@ -5123,14 +5411,18 @@ grep -c "DSHM_ORIGIN_LIST\|HDSH_ORIGIN_LIST" tools/pack-core.mjs
 **决策前的安全边界**：在得到明确指示前**不删**。
 它已被 `.gitignore:20` 忽略，不会误入版本库；对构建与门禁**零影响**（全仓零引用）。
 
-### 6.3 另一处待决策项：`tools/check-layout-fixtures.mjs.bak`
+### 6.3 已关闭的待决策项：`tools/check-layout-fixtures.mjs.bak`（2026-09-28 删）
 
-`tools/check-layout-fixtures.mjs.bak`（2026-09-25，124824 B）在
-`docs/device-validation.md:4177` 与 `:4536` **两次**被登记为"来源存疑、无引用、是否删由项目方定"，
-至今仍在。按 `AGENTS.md:81`（"一次性排查脚本用完即删，不要把临时诊断脚本留在 `tools/`"），
-它**不该**在 `tools/` 里；但它又不是一次性排查脚本，而是**被取代的检测器快照**。
-⇒ 与 §6.2 同类：**要么给它一个正式的家（如 `dist/` 或明确标注的归档目录），要么删**；
-留在 `tools/` 里最差——它会被后来者当成"门禁"。
+`tools/check-layout-fixtures.mjs.bak`（2026-09-25，124824 B）曾在
+`docs/device-validation.md:4289` 与 `:4545` **两次**被登记为"来源存疑、无引用、是否删由项目方定"。
+它不属于一次性排查脚本，而是**被取代的检测器快照**；按 `AGENTS.md:81`
+（"一次性排查脚本用完即删，不要把临时诊断脚本留在 `tools/`"）它**不该**留在 `tools/` 里——
+留在那里的最差后果是**被后来者当成"门禁"**。
+
+**处置（2026-09-28，项目方以"全清"拍板）**：`git rm` 删除。
+判据是它**零代码引用**（`dump-piai-schema-full.mjs` 与 `check-layout-fixtures.mjs` 里的注释提及供参考，
+不构成依赖），且现役检测器 `tools/check-layout-fixtures.mjs`（768 断言）在位、可跑（exit 0）。
+`docs/device-validation.md` 的三处登记（`:4289`、`:4545`、`:4648`）已随之改为"已删（2026-09-28）"。
 
 ### 6.4 本节验证方式
 
@@ -5156,6 +5448,7 @@ Select-String -Path $files.FullName -Pattern "codegenie"          # 期望：0 �
 Select-String -Path .gitignore -Pattern "codegenie"               # 期望：/.codegenie/
 
 # ⑤ 待决策的残留
+#    2026-09-28：.bak 已按项目方"全清"决定删除（§6.3），此处期望 False
 "check-layout-fixtures.mjs.bak exists = " + (Test-Path tools\check-layout-fixtures.mjs.bak)
 ```
 

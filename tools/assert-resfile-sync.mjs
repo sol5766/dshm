@@ -23,6 +23,8 @@ const FILES = [
   'require-builtin-shim.cjs',
   'dshm-installer.js',
   'dshm-user-rows.js',
+  'dshm-skills.js',
+  'dshm-compat.js',
 ];
 const SRC_DIR = join(ROOT, 'hostcore', 'app');
 const DST_DIR = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resources', 'app');

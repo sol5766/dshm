@@ -530,6 +530,7 @@
 - 位置：`tools/device-acceptance.ps1:13-15`（实现 `:148-182`）
 - `:13-15` 写「它不做什么：· **不做通过/失败判断**」，而 `:148-182` 有 `Add-Verdict` 六项自动判定（设备在线 / 核心已启动 / 客户端已接入 / 平台标识 = ohos / 文件变更流已开 / 无崩溃记录）并写 PASS/FAIL 表；`docs/50:1364` 也记「**自动判定 6 项**…报告分"自动判定"与"需人眼看"两栏」⇒ 头部是旧残留，方向是"注释弱于实现"，非功能缺陷。
 - 建议：`:13-15` 改为「自动判定 6 项可脚本化的读数；行为与呈现类项留作人眼勾选」。
+- **2026-09-30 已修**（本轮改动，非审核动作）：脚本重写为 307 行，头部注释如实写明判据与坑（`tools/device-acceptance.ps1:13-25`），自动判定由 6 项改为 **5 项**（`tools/device-acceptance.ps1:240-244`）——`DSHM-AUTH connect` 与 `files changes opened` 两条因产出点结构性不可达/无稳定信号而**撤销或降级为人工项**；`docs/50` 对应表行同步（§15.3）。本报告其余条目仍按"只审不改"保留。
 
 **6-L2 功能接线计数的三处互斥数字（`docs/50` 17、README 16→17，实测 18）**
 - 位置：`docs/50-端侧核心运行架构.md:1338`；`README.md:208`、`:216`、`:228`
@@ -694,3 +695,163 @@ grep `runReplayProbe|runTruncateProbe|runMicProbe|runHmsProbe|runTtsProbe|selfTe
 - `host-stop-request` 残留是否**确实**是「启动约 40 秒后自杀」的原因（需设备复现 + 两侧日志确认，本次未连机）。
 - 哪些真实插件会用 `spawn(process.execPath, ['-e', ...])` 而被误判为重启用例（仓库内 grep 为 0，助手来自仓库外的 `dshmarket/lib/restart.js`，无法静态枚举第三方插件）。
 - 把 agent preset 切成 `minimal` 后，ondevice 的 `terminal-bash`/`terminal-pwsh` 两行是否真能命中（本次只做静态比对，未切换实跑）。
+
+---
+
+## 10. 第二轮审核（2026-09-30）：按「官方对照面」重新组织
+
+> 日期：2026-09-30　基线：端侧 core `0.2.0-rc.2`（真机 `BOOT_10_ENV_READY` 确证）
+> 执行方式：16 个 agent（6 路取证 + 对抗复核），**只读取证、禁改文件**
+> 与第 1~7 路的关系：那一轮按**工作分层**切（协议 / Host / 插件 / 连接 / 桥 / 纪律 / UI），
+> 本轮按**官方对照面**切（官方能力面 / 官方桌面壳层 / 核心树补丁面 / Host 适配层 / 持久化 / 门禁）。
+> **两轮条目集合不同，不是重跑**：第 1 路逐条比对 140 端点得 0 差异这件事，本轮没有再查一遍。
+> **只审不改**：与第一轮同口径，本轮未做任何修复。
+
+### 10.1 总量与分布（含本轮的缺口，如实记）
+
+| 路 | 主题 | 声称条数 | 落盘条数 | 高 | 中 |
+|---|---|---|---|---|---|
+| A | 官方能力面（逐个 id）对齐 | — | **0** | — | — |
+| B | 官方桌面壳层行为对齐 | 9 | 9 | 3 | 6 |
+| C | 端侧核心树完整性与补丁面 | 10 | 10 | 1 | 9 |
+| D | Host 运行期适配层 | 13 | 13 | 4 | 9 |
+| E | 持久化与状态对齐 | — | **0** | — | — |
+| F | 门禁与文档可信度 | 12 | **1（被截断）** | 1 | — |
+| **合计** | | **44** | **33** | **9** | **24** |
+
+- **低严重度本轮 0 条** —— 不是没有，而是 A/E 两路无产出、F 路只剩首条。
+- 落盘位置：`%TEMP%\dsh-spill-*\…-job_output.txt`（72,152 B / 50,135 chars），
+  在 F 路首条中途 `[truncated: 73833 more characters]` ⇒ **对抗复核（verdicts）与 A/E 两路结果均不在任何文件里**，
+  无法指认的条目**不追认**（同 §1 撤回阻断的做法）。
+- A/E/F 三路未补跑：用户已指示收尾（"都审核好几次了"）。
+  **A 路的「官方能力面逐个 id」与 E 路的「持久化」是目前唯一没有第二双眼睛看过的两面**，
+  F 路的 `check-parity.mjs` 清单过期（见 10.2.9）是已确证的尾巴。
+- 本轮的 44/33 **不写成新的头条口径**：`docs/README.md` 的 R1 行仍以第一轮的 85 / 63 为准，
+  本节是**增补**，不当替换。
+
+### 10.2 高（9 条）
+
+**10.2.1 官方桌面壳注册并处理 `dsh://` 深链，端侧完全没有任何深链注册**
+- 位置：`entry/src/main/module.json5:183-192`（EntryAbility 的 `skills` 只有 `entities:["entity.system.home"]` + `actions:["ohos.want.action.home"]`，无 `uris`/scheme）
+- 证据：全仓 grep `dsh://|setAsDefaultProtocolClient` 共 72 命中，**无一处是深链**（命中全是 `color-scheme`（`entry/src/main/ets/pages/WebApp.ets:334-403`）与 URL scheme 解析：`connection/src/main/ets/protocol/HostAddress.ets:59-64`、`platform/src/main/ets/system/OpenLink.ets:23` 只放行 http/https）；端侧核心树 grep `dsh://open` **零命中** ⇒ 代偿路径也不存在；`entry/src/main/ets/pages/WebApp.ets:205-221` 注释自述登录只能在系统浏览器完成、`loginSource=desktop` 时 loopback callback 只回 HTTP 204
+- 官方对照：`apps/desktop/src/main.ts:1228` `if (app.isPackaged || DSH_DESKTOP_DEV_APP==='1') app.setAsDefaultProtocolClient('dsh')`、`:1229-1232` `app.on('open-url')` 仅在 `url === 'dsh://open' || 'dsh://open/'` 时 `focusPrimaryWindow()`；官方 README（`README.md:473` / `README.zh.md:475`）明写完成页的 `dsh://open` 负责把客户端置前
+- 为什么算问题：登录闭环少最后一环（回调后把应用置前）。鸿蒙并非无对应 API（`skills.uris` + `want.uri` 即可实现）⇒ **是能力缺口，不是平台边界**
+- confidence：confirmed
+- 验证方法：`module.json5` 的 `EntryAbility.skills` 加 `uris`（scheme=`dsh`），`onNewWant`/`onCreate` 读 `want.uri === 'dsh://open'` 复用已有 `ensureWindowShown()`/`restoreMainWindow()`；先验鸿蒙 2in1 是否允许注册自定义 scheme、浏览器侧能否唤起
+
+**10.2.2 官方退出前有「活动任务探测 + 退出确认对话框」，端侧既无探测也无确认**
+- 位置：`entry/src/main/ets/entryability/EntryAbility.ets:541-547`（注释明确真退出走系统托盘自带项，真机实测**不经过** `onPrepareToTerminate`）
+- 证据：`entry/src/main/ets` 全目录 grep `inspectQuit|quit-inspection|活动任务|scheduledTasks|退出确认` **零命中**；`grep showAlertDialog|AlertDialog|showDialog` 仅 3 处（`WebApp.ets:1057` 外链确认、`:1087` 外链失败、`:2009` 关于版本），无退出确认类；端侧核心树 grep `inspectQuit|quitInspection|scheduledTasks` 零命中（核心包清单不含 `dsh-desktop*`/`desktop-host`）
+- 官方对照：`apps/desktop/src/quit-confirmation.ts:15-21 resolveDesktopQuitPrompt()`（activeTasks / scheduledTasks / 两者都有 → 三种文案）、`:81-91 dialog.showMessageBox`（`buttons:[quit,cancel]`、`defaultId:0`、`cancelId:1`、`noLink:true`）；`apps/desktop/src/main.ts:996-1007` 构造 `DesktopQuitConfirmation`、`:1259-1280 app.on('before-quit')` → `preventDefault()` + `confirm()`；`apps/desktop/src/host-process.ts:254 inspectQuit()`
+- 为什么算问题：任务运行时用户点系统托盘「退出」会直接终止主进程与 BackGroundAbility，Host 与进行中的任务无提示消失。端侧**连拦截点都不存在**（系统项不走 `onPrepareToTerminate`）
+- confidence：likely（官方对照确证，端侧"确实无确认"确证；"系统退出项真的会杀 Host"来自历史真机实测，本轮未复测）
+- 验证方法：真机确认系统托盘自带「退出」是否触发 `EntryAbility.onDestroy` 或 Host 侧任何回调；若都不触发，改由自建退出项走 `exitApp` 以取得拦截点，或至少在 Host 侧补一次任务态检查
+
+**10.2.3 端侧编辑菜单的撤销/重做走 Chromium 原生 undo 栈，与官方 `sendInputEvent` 不同源**
+- 位置：`entry/src/main/ets/pages/WebApp.ets:2056-2065 runEditCommand(cmd)` = `this.controller.runJavaScript(\`document.execCommand('${cmd}')\`)`；`editMenu` 传的就是 `'undo'/'redo'`（`:2166-2191`）；`:2046-2055` 注释自述「与桌面行为一致」
+- 证据：端侧核心编辑器（Lexical）的撤销只由真实键盘事件或 `beforeinput` 驱动 —— `dist/core/work/dsh-core-0.2.0-rc.2/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js:5749-5751`（keydown z + 平台修饰键 → `preventDefault` + UNDO）、`:5752-5761`（redo）、`:5566-5569`（`beforeinput` historyUndo/historyRedo）；全文件**无 `execCommand` 路径**
+- 官方对照：`apps/desktop/src/main.ts:1018` 注释「Editor-owned history listens to key events rather than Chromium's native undo stack.」、`:1019-1025 editItem()` 的 click → `shortcuts.sendEditingKey(keyCode, modifiers)`；`apps/desktop/src/keyboard.ts:225-241 sendEditingKey` 用 `contents.focus()` + `contents.sendInputEvent({type:'keyDown',keyCode,modifiers})` + keyUp 合成真实按键
+- 为什么算问题：`execCommand('undo')` 不产生 keydown/beforeinput，进不了上面两条路径 ⇒ 菜单「撤销」对编辑器里的输入**不生效或与 Ctrl+Z 表现不一致**（同一次编辑，菜单与快捷键各走一套历史）。`:2046-2055` 的自述与官方判据相反
+- confidence：likely
+- 验证方法：真机在输入框输入文字 → 点顶栏「编辑→撤销」，再按 Ctrl+Z 比较；若菜单无效，改为注入合成 KeyboardEvent 到编辑器而非 `execCommand`
+
+**10.2.4 `permission` 的 config 整块替换抹掉 read-only 档：官方三档 → 端侧两档**
+- 位置：`hostcore/profile/ondevice/cordis.patch.yml:161-164`（`- id: permission` / `disabled: false` / `config:` 只给 `defaultPreset: danger-full-access`，**未给 `presets`**）；`:151-160` 自陈默认预设表只有「workspace-write+ask / danger-full-access+never」两档
+- 证据：`@deepseek-ai/dsh-app-boot/lib/index.js:104-107` `for (const [key, value] of Object.entries(overrides)) { if (key === 'id') continue; target[key] = value; }` ⇒ **`config` 是整体赋值替换、非深合并**（与 `cordis.patch.yml:8` 自陈一致）；`@deepseek-ai/dsh-permission-presets/lib/index.js:138-159` schema 默认 presets 本就只有两档、`:245-251 catalog()` 只吐 `Object.keys(this.presets)` ⇒ 只有表里有的档才进 options；客户端 `@deepseek-ai/dsh-client-ui-permission-presets/lib/client.js:232-236 PRESET_LABEL_KEYS` 含 `read-only`、`:287 PermissionIconReadOnlyRegular`，但 options 由宿主 catalog 动态提供（`:748-751`）⇒ read-only 的标签/图标成为**永不显示的兜底分支**
+- 官方对照：`packages/bundle/base/cordis.patch.yml:245-262` 显式三档 —— `read-only{sandbox: read-only, approval: ask}` / `workspace-write{workspace-write, ask}` / `danger-full-access{danger-full-access, never}`，且不设 `defaultPreset`
+- 为什么算问题：官方「仅可查看」是一档真实能力（`@deepseek-ai/dsh-sandbox-policy` 的 `SANDBOX_MODES` 支持）。端侧为绕开「workspace-write 在鸿蒙无 confinement 后端」（`cordis.patch.yml:71-80` 注释）整块替换 config，把 read-only 一并抹掉 ⇒ 用户失去只读档，且客户端为此档准备的标签与图标仍在位，界面与宿主能力不一致
+- confidence：confirmed
+- 验证方法：对照官方 base bundle patch 的三档与树内 `permission-presets` 的 schema/catalog，确认 `applyEntryPatches` 的 config 非深合并语义后判定（已做）
+
+**10.2.5 致命错误在端侧不产生任何机器可读失败信号，Host 以退出码 0 继续存活**
+- 位置：`hostcore/app/main.js:153-155`（`process.on('uncaughtException', (err) => { diag(...) })`，不重抛、不设 `process.exitCode`、不写启动失败标记）、`:3842-3848`（缺配置时 `return`，纯返回、不 throw 不 exit）
+- 证据：`:899` 是 `.dshm-boot-failed` 的唯一写入点（在 `fail()` 内）⇒ 上面两条早退路径都不落该标记；`:895` 写的 `globalThis.__dshmHostError` 全仓无读取者（已记 2-L1）；`entry/src/main/ets/runtime/NodeRuntime.ets:218-252` 以 `isHostRunning()` 判存活、干净退出码 0 判成功 ⇒ **进程不退 = 视为正常**
+- 官方对照：`apps/desktop-host/src/index.ts:107-119` 致命路径 `process.send({type:'fatal', message, diagnostic})` + `process.exitCode = 1` + `process.disconnect()`；`@deepseek-ai/dsh-app-boot/lib/index.js:3799-3820` `report` 先写 stderr 再 `proc.exit(1)`
+- 为什么算问题：端侧把"致命"降级为一行文件日志，用户看到的是一个**永不就绪也不报错**的宿主；且与已登记的 2-H1（`process.exit` 被拦截）叠加后，任何 fail-loud 收尾都无法落地
+- confidence：confirmed
+- 验证方法：真机 Host 内注入 `setTimeout(() => { throw new Error('dshm-probe') }, 3000)` 后启动，检查进程是否仍存活、`dshm-host.log` 是否只有一行 uncaughtException、`.dshm-boot-failed` 是否出现、`isHostRunning()` 返回值
+
+**10.2.6 官方 desktop-host 的四个装置与 IPC 就绪/致命通道在端侧零对应，退出链不做任何活动任务查询**
+- 位置：端侧全仓（除核心树）grep `quit-inspection|quitInspection|update-tasks|updateTasks|platform-session|platformSession|hasDesktopActiveTasks|office-engine|officeEngine|collectIndexInjections` ⇒ **No matches**（连 `docs/` 都没写这个缺口）；`hostcore/app/main.js` 内 grep `process.send|process.disconnect|on('message'` ⇒ **No matches**；就绪改由 `:832-855` 写 `<HOME_DIR>/host-ready.json`（**含明文 token**）；退出链 `entry/src/main/ets/entryability/EntryAbility.ets:558-601`（`onPrepareToTerminate` 只判 `dshQuitRequested`/托盘就绪后 minimize）、`:806-850`（`exitApp` → `stopHostThenExit` → `terminateSelf`）内无 `activeTask|runningTask|inbox|quitInspection|updateTasks|session-activity` 任一命中
+- 官方对照：`apps/desktop-host/src/index.ts:59-104`（`process.on('message')` 三类 IPC + `process.once('disconnect')` + `control.updateTasks` + `control.quitInspection` + `ctx.plugin(desktopOffice, …)` + `installPlatformSessionPublisher` + `process.send({type:'ready', url, injections})`）；`apps/desktop-host/src/update-tasks.ts:16-21 hasDesktopActiveTasks`、`:28-61` `connection/request` 的 inspect/lock/unlock（locked ⇒ 503）；`apps/desktop/src/main.ts:591-628` 更新前先 inspect 再 lock（失败码 `tasks-unavailable`/`tasks-changed`）；`apps/desktop-host/src/quit-inspection.ts:23-39`（取 agents/jobs + `workspace/session-activity` 水位，缺服务即 `throw new Error('desktop quit: task services are unavailable')`）；`apps/desktop/src/main.ts:453-454` 还把 `injections` 作为就绪必填项校验
+- 为什么算问题：端侧不仅缺通道，还用落盘文件（明文 token）代替 IPC 就绪；退出/更新**完全不感知运行中的任务**——官方用 `updateTasks('inspect')` 保证"有任务时不更新"、用 `quitInspection` 保证"有计划任务时不静默退出"，端侧两条语义都不存在（仅剩长时任务保活的降级警告，`EntryAbility.ets:643-660` 失败只 `hilog.warn`）
+- confidence：confirmed
+- 验证方法：让一个 agent 处于 running（或 `inbox.nextTurn` 非空）时执行 `exitApp`，观察 Host 是否被直接杀死、会话是否留中断痕迹
+
+**10.2.7 `probeExec` 完全不消费子进程退出码 —— 而它是部署门禁的唯一判据**
+- 位置：`hostcore/app/main.js:3134-3144` `c.on('exit', () => { if (/Error loading shared librar|error while loading shared librar/.test(errTail)) { done('so-fail'); return; } if (errTail.length > 0) { diag(...) } done('ok'); })` —— **回调不接 `(code, signal)`**，退出码被彻底丢弃；stderr 为空即无附加证据
+- 证据：`:3177-3178` 自述 `"fail(134)" / "fail(null)"` 两种形态，但 `fail(...)` 只可能来自 `:3131-3133` 的 `c.on('error')` 或 `:3106` 的 uv_spawn 同步抛错（Node 的 errno 里**不存在 134**）⇒ 该分支永远拿不到 134；`tools/update-device.ps1:193-208`（Step 8）唯一读点是 `grep -E 'exec 探测：' $filesDir/dshm-host.log | tail -1` 再 `-notmatch '=ok$'` 逐项判红 ⇒ probeExec 判 ok 即门禁判全通；`tools/assert-exec-fix.mjs:9-13` 只断言 probeExec 存在、EACCES→denied 映射、so-fail 正则、超时 SIGKILL，**无一条涉及退出码被使用**；`:3120-3123` 注释自认判据是"超时还活着 = execve 必然成功"
+- 官方对照：官方无对应探测（端侧自建验收）；其等价事实面是真实执行 `git ls-remote` 并以其退出状态为准
+- 为什么算问题：该探测是端侧多条文档与门禁里的 PASS 锚点。忽略退出码后，正是它要证伪的失败模式（rc=134 SIGABRT）会被判为 ok ⇒ 核心页读数、诊断日志、部署门禁**三者同时给出错误的"全通"结论**。这是会让整条 exec 验收链失效的**测量缺陷**，不是文案问题
+- confidence：confirmed
+- 验证方法：把 `probeExec` 抽出来探一个必定非零退出的目标（如 `sh -c 'kill -ABRT $$'`），观察是否返回 `'ok'`；再在真机把 `libdshm-gitcompat.so` 移走后启动，看 `git-ls-remote` 是否仍报 `=ok`
+
+**10.2.8 fetch 垫片把流式请求体静默置 `null` —— 端侧文件上传路径必然丢体且不报错**
+- 位置：`hostcore/app/fetch-shim.js:544-550`（只接受 Buffer/string/ArrayBuffer/ArrayBufferView，`else this._body = null; // 流式 body 不支持：dsh 的 /api 走 buffered 模式，用不到`）、`:457-478`（Request 形态展开读不到体就丢弃）、`:566-574`（`text()/json()/arrayBuffer()` 在 `_body === null` 时**静默返回空，不抛错**）
+- 证据（反证该注释）：端侧核心树 grep `duplex:|body: Readable|toWeb\(` 命中 8 处，含 `@deepseek-ai/dsh-client-connection/lib/index.js:75-81` `new Request(url,{...,body:Readable.toWeb(req),signal:abort.signal,duplex:'half'})`、`@deepseek-ai/dsh-client-file-upload/lib/index.js:174 requestBody: 'streaming'`（`FILE_UPLOAD_PATH=/api/session/uploadFileBinary`）、`lib/client.js:138/:205 duplex:'half'`；同链 buffered 分支（`dsh-client-connection/lib/index.js:48-74 body: Buffer.concat(chunks)`）才是垫片支持的形态
+- 官方对照：官方跑真实 Node/undici，`Request` 支持 ReadableStream 请求体（`duplex:'half'`），上传路径依赖该能力
+- 为什么算问题：注释给的豁免理由（"dsh 的 /api 走 buffered 模式，用不到"）与核心树中的真实调用方**矛盾**；后果是上传类请求体被静默替换为空体，UI 只看到一次"成功"的空上传 ⇒ 属"语义被改成空壳且无充分理由"
+- confidence：likely
+- 验证方法：端侧触发一次文件上传，日志里看 `DSHM-REQDIAG body kind=object:ReadableStream … bodyNull=true`；本地可先 `node --jitless -e` 复现 `new DshmRequest(url,{body:Readable.toWeb(...),duplex:'half'}).text() === ''`
+
+**10.2.9 `check-parity.mjs` 的官方能力面清单停在 `0.1.2-alpha.1`（落后基线 `0.2.0-rc.2`）**
+- 位置：`tools/check-parity.mjs:37`（来源版本 `0.1.2-alpha.1`）
+- 问题：官方能力面清单的来源版本落后当前基线两个大版本，**15 个官方已有能力面未被裁定**（本轮 F 路仅此一条落盘，标题后在工具截断处断掉；F 路声称的另 11 条未能落盘）
+- 已在别处交叉印证：`docs/parity-matrix.md` §7.2 的来源与版本表已标 ⚠️ 过期，并写入复核结论（核心树 53 个 `dsh-client-ui-*` 比清单多 15 个；`dsh-web-app/package.json` 127 条依赖里 51 条为 ui/locale，差集恰好同样 15 个）
+- 为什么算问题：门禁是"还差什么"的唯一机器判据；清单过期 ⇒ 门禁 exit 0 不代表官方能力面已被覆盖（与 `docs/README.md` 纪律 9「门禁通过 ≠ 覆盖到了」同一类）
+- confidence：confirmed（清单版本号已亲读；"15 个未裁定"来自 `docs/parity-matrix.md` §7.2 的复核记录）
+- 验证方法：`node tools/check-parity.mjs` 读其打印的来源版本；与 `docs/parity-matrix.md` §7.2 表对照
+
+### 10.3 中（24 条）
+
+| # | 位置 | 问题 | 官方对照 |
+|---|---|---|---|
+| B4 | `entry/src/main/ets/pages/WebApp.ets:2068-2088` | 「粘贴」只读 `getPrimaryText()` 后发 `document.execCommand('insertText', …)`；空剪贴板直接 `return`（静默）。粘贴图片/文件/富文本**静默丢失**，且无提示。另 `docs/parity-matrix.md` 已记剪贴板读权限缺口 | 官方「粘贴」= `CommandOrControl+V` → `keyboard.ts:225-241 sendEditingKey` 合成真实 Ctrl+V，交编辑器 `PASTE_COMMAND`（`client.js:5521-5524`） |
+| B5 | `entry/src/main/ets/system/StatusBarTray.ets:166-176` | 托盘右键自建项**只有「打开应用」一项**（`groupMenu()` 单组单项）；`:20-28` 与 `EntryAbility.ets:541-547` 给出理由（系统自带项已有「退出」且真机实测有效，不经过 `onPrepareToTerminate`） | `apps/desktop/lib/types/tray.js:22-26` = `[openApplication, 分隔, quitApplication]` **三项**；`apps/desktop/src/main.ts:984-991` 托盘 `quit: () => app.quit()`。判定：**可接受**（退出能力未缺，挂两个退出项更差），真问题是未登记 |
+| B6 | `entry/src/main/ets/entryability/EntryAbility.ets:593-600` | 首次点关闭（切后台）前无任何提示，直接 `win.minimize()` 后 `return true`；全目录 grep `backgroundNotice|隐藏到后台|首次关闭` 只命中实现与注释，无一次性提示与 marker 逻辑 | `apps/desktop/src/background-notice.ts:30-55 close(hide)`（marker 或内存标记，否则弹 `type:'info'` 单按钮通知，确认后写 marker 再 hide）；`apps/desktop/src/main.ts:992-995 markerPath`（**仅 win32**） |
+| B7 | `entry/src/main/ets/entryability/EntryAbility.ets:603-616` | `onNewWant` 只 `applyLaunchParams` + `relabelWindow`，**不聚焦、不恢复**；而托盘唤回 `:786-790 restoreMainWindow()` 只 `showAbility()`，`onForeground` 走 `:725-740 ensureWindowShown()`（优先 `restore()`）⇒ **同类语义两条不同源实现**，窗口最小化时复用实例不会把界面带回来（与 `:604` 注释承诺不符） | `apps/desktop/src/single-instance.ts:16-26` + `apps/desktop/src/main.ts:1212-1226 focusPrimaryWindow()`（`isMinimized() && restore()` + `show()` + `focus()`），托盘 open 也复用它（`main.ts:988-989`） |
+| B8 | `entry/src/main/ets/pages/WebApp.ets:2091-2101` | 顶栏「应用」= 主页 / 刷新 / 关于版本。缺「检查更新」（可接受：无更新通道）与**「命令行」**（后者连审核报告也没记），多一项「刷新」（官方 reload 仅 development 可见）。三处差异均未进矩阵 §6 | `apps/desktop/src/main.ts:947-971 applicationItems()` = 关于 + sep + 检查更新 + (`darwin‖win32`) 命令行 `commandManager.show()` + (`development`) sep/重新加载页面/重启应用宿主 + sep + quit；`main.ts:1009-1046` win32 经 `DESKTOP_IPC.windowsMenu` 弹同一集合 |
+| B9 | 本文 §7 的 `7-L1`（「完全同构」那句）与其后的「通过项」段 | 「与官方 `tray.js` 的 `[openApplication, 分隔, quitApplication]` **完全同构**」—— 引文正确但结论方向错了（把**一项**说成与**三项**同构）；同节稍后又承认「端侧只补系统没有的『打开应用』」⇒ **同一文档两处结论互相矛盾**，且掩盖了 B5 的真实差异。**本节即该条的更正** | `apps/desktop/lib/types/tray.js:22-26` 确为三项（亲自读全文 35 行） |
+| C2 | `hostcore/profile/ondevice/cordis.patch.yml:81-83` | `sandbox-policy` 的 `config` 只有 `mode: danger-full-access`，**丢 `workspaceRoot`** ⇒ 构造期 `config.workspaceRoot ?? process.cwd()` 静默回落宿主启动目录。当前 mode 掩盖了它，一旦按同文件 `:71-80` 的回退条件恢复 `workspace-write`，「工作区边界」就变成与产品语义无关的值，而 `renderPolicyContext` 还会把它当工作区语义播报给模型 | 官方 `packages/bundle/base/cordis.patch.yml:229-233` 给 `mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'` + `workspaceRoot: !!js process.cwd()` |
+| C3 | `hostcore/profile/ondevice/package.json:14` | `"patchReload": "startup"` 是端侧自造、**全仓无读者的 key**（唯一"实现"是 `hostcore/app/main.js:3742` 把种子值抄进设备侧 profile；核心树 / `tools/` / `hostruntime/` / `resfile/` / 官方全仓 `patchReload` **0 命中**；`@deepseek-ai/dsh-app-boot/lib/index.js:827-838` 的 `readProfileManifest` 不校验未知键）却被三处文档当作**生效机制**：`docs/50-端侧核心运行架构.md:196`「HMR 用 patchReload + DSH_DISABLE_HMR 声明式关掉即可」、`:260`（把它当作"待确认"列成因）、`:916`「重启核心后生效」；`hostcore/README.md:11` 同 | 官方无该键；`packages/boot/app-boot/src/profile.ts:39` 只有一句英文注释（散文，**无键无实现**） |
+| C4 | `hostcore/app/main.js:3731`/`:3738` | `removeBundles` 的「已移除」日志**在清单为空时永不打印**（`removedNow` 过滤后 `length > 0` 才打印），而 `hostcore/profile/ondevice/package.json:13` 是 `[]` ⇒ 该行当前**不可能产生**。但三处文档把它当真机读数与验收判据：`docs/50-端侧核心运行架构.md:977`（12.10 的 ☐PASS ☐FAIL 判据）、`docs/70-鸿蒙移植踩坑与修复总览.md:463`/`:467`（逐字「**真机读数**」带 `voice-input-bundle`）、`docs/device-validation.md:1664`；`docs/90-DSH鸿蒙原生实现全流程.md:4133` 还把它列入「已完成修复」并给**错行号**（声称在 `docs/70-鸿蒙移植踩坑与修复总览.md` 的 759-762，实际在 `:463`/`:467`，该区间是 §8.13/§8.14） | 官方全无 `removeBundles`（官方全仓 0 命中）；`packages/boot/app-boot/src/profile.ts:582` 只读 `manifest.dsh?.profile?.bundles` |
+| C5 | `hostcore/core-recipe.json:58-62` | `optionalNativeGlobs: ["@ohos-ports/**/*.node","@ohos-ports/**/*.so*"]` 是**零代码引用的死配置**（全仓 3 命中全在 recipe 自身：`hostcore/core-recipe.json:59`、`hostcore/core-recipe-rc3.json:59`、`hostcore/core-recipe-alpha.json:60`）；`tools/pack-core.mjs:324-360` 的 `verify()` 只读 `recipe.requiredNative`（`:328`/`:330`/`:340`）⇒ 维护者会以为 @ohos-ports 的 .so 已被登记校验 | 官方无 `core-recipe.json`（端侧自造清单）；官方对原生依赖的声明面是各包自己的 `optionalDependencies` |
+| C6 | `dist/core/dsh-core-0.2.0-rc.2.manifest.json` | 自签名清单**无法按文件定位被签的 rg**（`native.signed` 47 项 / `unsigned` 1 项 `koffi.node`，`ripgrep|rg$` 正则 0 命中）；且注释与文档承诺的 `selfSignSkipped` 字段**实际不存在** —— `tools/pack-core.mjs:245` 注释声称、`docs/90-DSH鸿蒙原生实现全流程.md:1058` 也这么写（并给行号 `:2274`），实际写入的是 `native.selfSign = extra.selfSign ?? null`（`{attempted,signed,skipped}`，`:2268-2275`）；`selfSignNatives()`（`:247-305`）只对 `@vscode/ripgrep-linux-arm64/bin/rg` 一个目标（`:266`）。而 `docs/90-DSH鸿蒙原生实现全流程.md:1046` 自定口径「不看计数、要看清单内容」，rg 恰恰只能看计数 | 官方无 `selfSign` 概念（端侧自造） |
+| C7 | `dist/core/work/dsh-core-0.2.0-rc.2/node_modules/.package-lock.json` | `wrapSharp()` 改名后锁文件**未同步**：`node_modules/sharp` 仍记 `@ohos-ports/sharp@0.34.5-beta.12`，而磁盘实际是 `sharp`（`{"name":"sharp","version":"0.0.0-dshm-dispatch","main":"index.js"}`）+ `sharp.impl`（`@ohos-ports/sharp 0.34.5-beta.12`）双层（`tools/pack-core.mjs:1254 wrapSharp()`）。锁文件是"这棵树装了什么"的第一入口，会把排查者引向错误的包身份 | 官方 sharp 为单一包；`sharp`/`sharp.impl` 双层是端侧自造 |
+| C8 | `tools/pack-core.mjs:568-579` | 语音降噪/AEC 两个补丁的标记名 `DSHM_ECHO_CANCELLATION_OFF`（`:577`）/ `DSHM_NOISE_SUPPRESSION_OFF`（`:578`）在**全部文档零登记**（`docs/` 仅 1 命中且是中文散文，不含标记名），而其余 9 个标记均 ≥1 处（`DSHM_NATIVE_CAPTURE` 8 / `DSHM_ORIGIN_LIST` 5 / `DSHM_HMS_PROVIDER` 5 / `DSHM_WORKFLOW_DISABLED` 2 …）。违反端侧自建的"每个补丁留可检索标记并登记"约定 | 官方 `packages/experimental/client-ui-voice-input/src/client/audio.ts:63` `getUserMedia({audio:{echoCancellation:true,noiseSuppression:true},video:false})` ⇒ 端侧把 true 改成 false 是**实质行为改动** |
+| C9 | `hostcore/profile/ondevice/cordis.patch.yml`（全 20 条覆盖） | **没有任何门禁或验收断言 patch 覆盖的命中率**：`@deepseek-ai/dsh-app-boot/lib/index.js:95-99` 找不到 id 时只 `warn("patch: entry %C not found")` 后 continue；`tools/` 里 `cordis.patch.yml` 仅 7 处读者，无命中率断言；`tools/pack-core.mjs:1666-1667` 注释**自陈已知该静默形态**却未变成断言；同仓实例死行：`hostcore/profile/ondevice/cordis.patch.yml:189-193` 的 `agent-presets / default: ondevice`（`tools/pack-core.mjs:828-855` 注释自陈端侧从无 `ondevice` preset） | 官方无此门禁（官方 profile 由 `PROFILE_TEMPLATES` 生成，`packages/boot/app-boot/src/profile.ts:179-195`，无 ondevice 模板）⇒ 属"端侧本地改法未永久化" |
+| C10 | `docs/10-协议兼容事实基线.md:537`、`docs/50-端侧核心运行架构.md:232`/`:1051` | 把权限写成**三档**（`read-only`/`workspace-write`/`danger-full-access`，默认 `workspace-write`）作为端侧契约，与端侧实际**两档**（默认 `danger-full-access`）矛盾；`docs/11-请求载荷契约.md:769` 的 `sandbox/mode` 三值枚举同属官方语义。同一事实在 `hostcore/profile/ondevice/cordis.patch.yml:159-160` 注释里**已写对**（两档），只是没回写文档。验收者会按不存在的档位判 PASS | 官方 `packages/bundle/base/cordis.patch.yml:250-262` 确为三档 —— 文档抄的是官方值，未随端侧裁剪更新 |
+| D5 | `hostcore/app/main.js:3213-3216` | `ensureExecutables` 在 `!pythonReady() \|\| !gitReady()` 时**静默 `return`，一行诊断都不留**（`diag('exec 探测：…')` 在 `:3234-3243`，是门禁唯一读点）⇒ 半成品核心下用户与排障者读不到"为什么没有任何 exec 探测"，门禁只报"日志里没有探测行"。而 `tools/assert-exec-fix.mjs:28` 反把该早退**锁成正向锚点** | 官方无此设施 |
+| D6 | `hostcore/app/main.js:3163-3168` | bash 探测目标在 PATH 为空时**实际探的是 `/system/bin/sh`**（`p: process.env.PATH ? (PATH.split(':')[0] + '/bash') : '/system/bin/sh'`），却仍以 `bash` 名义进验收汇总（`tools/update-device.ps1:201-204` 按 label 匹配 `=ok$`）。PATH 为空恰是沙箱子进程环境异常时的典型状态 ⇒ 锚点与真身脱钩。真 bash 垫片在 `ensureBashShim`（`main.js:1104-1169`） | 官方无此探测 |
+| D7 | `hostcore/app/main.js:3050-3059` | git-core 真身补齐的 `catch` **为空**（无 `diag`、无 `console.error`、无计数），而注释承诺「缺哪个子命令的报错会如实出现在 stderr」—— 本分支**不产生任何 stderr**。hmfs 上 exec 许可与文件创建者绑定是已知硬约束（`main.js:3038` 附近根因注释），这处复制失败正是最需要证据的分支，却被静默吞掉并把失败转移到下游 | 官方运行时为完整解包目录，无此步骤 |
+| D8 | `hostcore/app/main.js:1727-1730` | dsh 假壳 `--version` 返回写死的 `dsh 0.1.7-rc.1 (dshm install-queue shim)`，而端侧核心树与 `dshcompat/src/main/ets/CompatIndex.ets:94-102 SUPPORTED_VERSIONS` 首项都是 `0.2.0-rc.2`；`tools/assert-cli-shim.mjs:42-44`/`:75-77` 只锁 pnpm/npx 假壳，**无一条校验 dsh 假壳**；仓库内 `0.1.7-rc.1` 共 43 处（`main.js:1515`/`:1728`、`dshcompat/src/main/ets/CompatIndex.ets:57`/`:98`、`hostruntime/src/main/ets/core/Naming.ets:74`/`:117`/`:120`、`hostcore/app/dshm-installer.js:642`） | 官方 `@deepseek-ai/dsh/lib/bin.js:105 program.name("dsh").version(version, "-V, --version", …)`、`:208 const version = getDshRuntimeVersion()` ⇒ 永远与实装核心一致 |
+| D9 | `hostcore/app/fetch-shim.js:551-564` | 对**每个 POST 无条件**打印一行 `DSHM-REQDIAG body kind=… url=${this.url} preview=${…substring(0,120)}`（含完整 URL 与 body 前 120 字符明文），**无 env 开关**（全仓 `DSHM-REQDIAG` 仅此 1 处）。与同项目已确立的"诊断开关默认关"纪律冲突（`main.js:192-197`/`:225` `if (process.env.DSHM_IN_LOG !== '1') return;`，理由是"曾把真正要看的日志挤出窗口"）；该行落入可导出回传的 `node-output.log`（`hostcore/app/dshm-user-rows.js:15`/`:476`）。端侧 URL 带 token 时即凭据泄漏 | 官方 `dsh-client-connection/lib/index.js:34-99` 的 bridge 不打印请求体内容，无此类全量 POST 转储 |
+| D10 | `hostcore/app/main.js:923-927` | `process.env.DSH_DISABLE_HMR = '1'` 在**核心树零消费者**（核心树 `DSH_DISABLE_HMR` 0 命中、`@deepseek-ai/dsh-hmr` 内 `process.env` 0 命中；真正的开关是 `@deepseek-ai/dsh-base/cordis.patch.yml:27-32` 的 `- id: hmr` → `disabled: !!js "!ctx.get('profileContext')"` + `config: {root: []}`），但两处文档把它当作**已生效的关闭手段**：`docs/50-端侧核心运行架构.md:196`、`docs/90-DSH鸿蒙原生实现全流程.md:2313`（后者引行号 `:916-920`，与 `main.js:926` 实际位置也不符）⇒ 真实约束（沙箱里 chokidar 监听不可靠）在代码层无人承接 | 官方不设该变量，HMR 由 profile 的 patch 配置控制 |
+| D11 | `hostcore/app/main.js:3517` | `process.pkg = process.pkg \|\| {}` 伪装的**第二处副作用未登记**：`@deepseek-ai/dsh-app-boot/lib/index.js:449-451 isPackagedExecutable()`、`:457-459 realModuleDirectory(path)` 在有 `process.pkg` 时改用 `realpathSync(path)`（而非 `realpathSync.native`），调用点 `:635`/`:640`/`:645`/`:682`/`:703`/`:781`/`:804`；而 `docs/50-端侧核心运行架构.md:372-400` 只记"模块 fallback（symlink 路径被拒）"一类风险，**全篇无 `realpathSync`/`realModuleDirectory`**。在 symlink 被全局禁止、路径语义与常规 Linux 不同的 hmfs 上，这正是最需要预先声明的风险 | 官方以真实 pkg 运行，`process.pkg !== void 0` 为真，走 `realpathSync` 是官方既定路径 |
+| D12 | `tools/assert-exec-fix.mjs:9-13`/`:28`/`:29` | 断言层把 exec 探测的缺陷**锁成「语义锁」**：只锁 probeExec 存在、EACCES→denied、so-fail 正则、超时 SIGKILL（**不检查退出码被消费**），并把静默早退锁成正向锚点（`:28`）、把"只记录不修复"固定为契约（`:29`）⇒ 任何修复反而让门禁变红。该脚本被 `docs/90-DSH鸿蒙原生实现全流程.md:3636`/`:4264` 称作 exec 探测链的「语义锁」。同类：`tools/assert-cli-shim.mjs:65-73` 注释自承"断言没跟着改 ⇒ 一直在红" | 官方无对应工具链（端侧自建门禁） |
+| D13 | `hostcore/app/main.js:86-96` | `diag()` **只写文件**（`fs.createWriteStream(DIAG_LOG,{flags:'a'})`，写失败把 `diagStream` 置 null 的空 catch），全段**无 `process.stdout.write`、无 `process.stderr.write`**；而文档有三种互斥说法：`docs/90-DSH鸿蒙原生实现全流程.md:2916`/`:2161`（走 stderr + 镜像 stdout）、`docs/70-鸿蒙移植踩坑与修复总览.md:549-550`/`docs/90-DSH鸿蒙原生实现全流程.md:3839`（走 stderr）。真实读点是 `tools/update-device.ps1:194`/`:211` 与 `tools/dshtest.py:10`/`:234` 读的 `<filesDir>/dshm-host.log` ⇒ 按文档去 hilog/stderr 找证据会一无所获 | 官方 Host 诊断走 stderr（`apps/desktop-host` 的 `proc.stderr.write`、`dsh-app-boot/lib/index.js:3799-3820`），由父进程收集 |
+
+> 表中 B4~B9 属 B 路（官方桌面壳层），C2~C10 属 C 路（核心树补丁面），D5~D13 属 D 路（Host 适配层）。
+> 编号沿各路自己的序号（与 10.2 同一规则）；两路各自的 `A1` 等编号在落盘文件里是重复的，引用时须带路号。
+
+### 10.4 本轮与前一轮的重叠与差异
+
+- **重叠**：C10（权限三档）与第 1 轮的 `1-H3`（36 条 UI 在用端点无能力引用）同属"文档/矩阵声明与实物不符"这一类；D8（假壳版本）与第 6 轮的版本口径条同源。重叠处**不重复计入**本节 44 条。
+- **本轮新增的主要对照面**：官方桌面壳层（B 路 9 条**全是新的**，第 1 轮完全没查桌面壳行为对齐）、核心树补丁面（C 路 10 条新的）、Host 适配层（D 路 13 条新的）。⇒ **33 条里绝大多数是第 1 轮没覆盖到的面**，这是一轮不重复的增量。
+- **与前一轮相反的一点**：第 7 路结论「壳干净、与官方托盘同构」在本轮被 **B9** 直接推翻（`tray.js` 是三项、端侧一项，"完全同构"是引错结论）。§7 的 `7-L1` 也因 **B8** 扩到三项（缺检查更新 + 缺命令行 + 多刷新）。
+
+### 10.5 关于本轮的方法学备注（补 §8）
+
+5. **workflow 的 `agent(opts.schema)` 只支持 JSON Schema 子集**：**裸 `enum` 必须同时带 `type`**
+   （`{type:'string', enum:[…]}`），否则整个 workflow `status: failed`，报错形如
+   `unsupported JSON schema: …severity.enum requires type or oneOf`。本轮第一次尝试即因此失败重跑。
+6. **workflow 脚本里不能用反引号模板串**（经网关传输会被破坏 ⇒ `SyntaxError: Unexpected identifier`），
+   改用 `['…','…'].join('\n')` 单引号数组拼接。
+7. **§8 第 1 条的教训本轮仍未落实到位**：脚本要求"写文件 + 只回传指针"，
+   但落盘的 `%TEMP%\dsh-spill-*\…-job_output.txt` 仍在 F 路首条被截断 ⇒
+   **截断发生在返回值序列化处，而不是在 agent 的产出处**；如果 agent 确实写了文件，
+   就应该在返回值里**只放路径与计数**（本轮 D/B/C 三路的返回值形状已经做到了，A/E 两路则没有产出）。
+   下一轮若还要跑，应把「A/E 两路为何无产出」本身当成要查的问题。
+8. **本轮审核的产出文件目录 `dist/review/` 只有 `p6-discipline.md`**（29,232 B / 01:11:35，
+   来自第一轮的路6 重跑）。第二轮三路都没有在 `dist/review/` 留下文件 ⇒
+   33 条结论的**唯一**载体是本报告 §10 与那份被截断的 spill 文件。

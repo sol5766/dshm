@@ -28,7 +28,11 @@ $ErrorActionPreference = 'Stop'
 # ── 路径 ─────────────────────────────────────────────────────────────────
 $root = Split-Path -Parent $PSScriptRoot
 $clt = 'C:\Program Files\Huawei\DevEco Studio\tools'
-$hdc = '%USERPROFILE%\AppData\Local\OpenHarmony\Sdk\<版本>\toolchains\hdc.exe'
+# 从已安装的 SDK 版本目录里找 hdc：版本号会随 SDK 升级而变，写死就得改脚本
+$sdkRoot = Join-Path $env:USERPROFILE 'AppData\Local\OpenHarmony\Sdk'
+$hdc = (Get-ChildItem -Path (Join-Path $sdkRoot '*\toolchains\hdc.exe') -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1).FullName
+if (-not $hdc) { $hdc = '' }
 $bundle = 'com.dshm.dshclient'
 $filesDir = "/data/app/el2/100/base/$bundle/haps/entry/files"
 
@@ -165,22 +169,43 @@ if ([int]$beforeHome -eq 0) {
         Ok "home 条目保留（$beforeHome → $afterHome）"
     }
 }
-if ($afterCores -notmatch '0\.1\.7-rc\.2') {
-    Bad '核心树里没看到 rc.2'
+# 【2026-09-28 升级 0.2.0-rc.1】此处的版本判据从 core-recipe.json 读取，不再写死：
+# 写死的那一版在升级后会报 FAIL 并把结论置为"更新未完全通过"（:203-204 exit 1），
+# 见 docs/90 §8.1 的"两处版本硬编码"表。核心树按版本各存一份、且旧树并存是**预期**
+# （docs/50:45），所以这里只要求"新版在"，不要求"旧版不在"。
+$recipePath = Join-Path $PSScriptRoot '..\hostcore\core-recipe.json'
+# 必须显式指定 UTF-8：core-recipe.json 里有中文注释，而 PS 5.1 的 -Raw 默认按
+# ANSI 解码，中文变乱码后 ConvertFrom-Json 直接抛「传入的对象无效」。
+$recipeText = [System.IO.File]::ReadAllText($recipePath, [System.Text.Encoding]::UTF8)
+$wantCore = ($recipeText | ConvertFrom-Json).coreVersion
+if ($afterCores -notmatch [regex]::Escape($wantCore)) {
+    Bad "核心树里没看到 $wantCore（core-recipe.json 的 coreVersion）"
     $dataOk = $false
 } else {
-    Ok '核心树 rc.2 在'
+    Ok "核心树 $wantCore 在"
 }
 
 # ── 8) 验证：端侧就绪 ────────────────────────────────────────────────────
-Step 8 '验证端侧就绪（exec 七项 + HTTP）'
+# 【2026-09-28 升级 0.2.0-rc.1】原先这里写死 `$okCount -ge 7`（7 = exec 探测项数）。
+# 写死总数会**在新增探测目标后失效**：8 项里只 ok 了 7 项（新的那项失败）依然是"通过"。
+# 改为"逐项都必须 =ok、且至少有一项"——探测项数由 hostcore/app/main.js 的
+# execProbeTargets() 决定，这里不再持有总数。见 docs/90 §8.1。
+Step 8 '验证端侧就绪（exec 探测逐项 + HTTP）'
 $log = Shell "grep -E 'exec 探测：' $filesDir/dshm-host.log 2>/dev/null | tail -1"
 Info $log
-$okCount = ([regex]::Matches($log, '=ok')).Count
-if ($okCount -ge 7) {
-    Ok "exec 探测 $okCount/7 全通"
+$probe = [regex]::Match($log, 'exec 探测：(.*)')
+$execOk = $false
+if (-not $probe.Success) {
+    Bad '宿主日志里没有 exec 探测行'
 } else {
-    Bad "exec 探测只有 $okCount 项 ok（期望 7）"
+    $items = @($probe.Groups[1].Value -split '[，,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    $bad = @($items | Where-Object { $_ -notmatch '=ok$' })
+    if ($items.Count -gt 0 -and $bad.Count -eq 0) {
+        Ok "exec 探测 $($items.Count)/$($items.Count) 全通"
+        $execOk = $true
+    } else {
+        Bad "exec 探测未全通（共 $($items.Count) 项）：$($bad -join '，')"
+    }
 }
 
 $http = Shell "grep -c 'IN-UPGRADE GET /api/remote.mux' $filesDir/dshm-host.log 2>/dev/null"
@@ -192,7 +217,7 @@ if ($http -match '^\d+$' -and [int]$http -gt 0) {
 
 # ── 9) 结论 ──────────────────────────────────────────────────────────────
 Write-Host ''
-if ($dataOk -and $okCount -ge 7) {
+if ($dataOk -and $execOk) {
     if ($dataChecked) {
         Write-Host '更新完成：代码已换、用户数据已确认保留、端侧就绪。' -ForegroundColor Green
     } else {

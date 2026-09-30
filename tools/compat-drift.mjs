@@ -19,6 +19,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 const ROOT = process.cwd();
 /**
@@ -31,8 +32,10 @@ const ROOT = process.cwd();
 const CONTRACTS = process.env.DSH_CONTRACTS
   ?? join(ROOT, '.research', 'protocol', 'contracts.json');
 const COMMITTED = join(ROOT, 'dshcompat', 'src', 'main', 'ets', 'Endpoints.ets');
+// 按**当前用户**推导，不要写死用户名（换台机器就必然找不到，门禁会静默失效）。同 tools/protocol-contract.mjs。
 const DSH_NM = process.env.DSH_NODE_MODULES
-  ?? 'C:\\Users\\aotian\\AppData\\Roaming\\io.github.hairyf.deepseek-harness-desktop\\dependencies\\dsh\\node_modules';
+  ?? join(homedir(), 'AppData', 'Roaming', 'io.github.hairyf.deepseek-harness-desktop',
+    'dependencies', 'dsh', 'node_modules');
 
 if (!existsSync(CONTRACTS)) {
   console.error(`缺少契约数据：${CONTRACTS}`);

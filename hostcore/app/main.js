@@ -23,6 +23,13 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 // 用户插件行守卫（D27 死锁修复，2026-09-23）：预检 + 启动失败自愈。见 dshm-user-rows.js 头注释。
 const userRows = require('./dshm-user-rows.js');
+// 内置技能同步（P0-1 修复，2026-09-28）：内容 sha256 判等，避免等长改动推不下去。
+// 单列文件是为了让 tools/check-skill-sync.cjs 能直接 require（main.js 不可 require）。
+const skillsSync = require('./dshm-skills.js');
+// 兼容性豁免通道（P1-3 修复，2026-09-28）：把上游 app-boot 的
+// `setProfileVersionExemption` 接到端侧可达的入口（队列 + dsh 假壳 + 设置页）。
+// 同样单列文件，理由同上（main.js 不可 require）。
+const compatModule = require('./dshm-compat.js');
 
 /**
  * 路径从哪来（**这一环不能靠环境变量**）
@@ -1254,6 +1261,11 @@ function ensureBusybox(resRoot) {
  * 内置 skills：resfile/ohos-skills/*.md → $DSH_HOME/skills/。
  * dsh-skill-filesystem 的 user-dsh root 就是 join($DSH_HOME, 'skills')，
  * 平铺 Markdown 会被当作 flat skill 收录（端侧 Shell/Python/PC/工作区知识）。
+ *
+ * 【P0-1 修复 2026-09-28】判等从"字节数"改为"内容 sha256"，判定与复制都在
+ * dshm-skills.js（可单测）里。旧的 `statSize(dst) === statSize(src)` 会让任何
+ * **等长改动**永远推不下去：真机上 skill 已含 dshm-* 端点，而设备侧副本仍是
+ * 等长的 hdsh-* 旧端点，日志"本次复制 0 个"，模型照文档手调全 404。
  */
 function ensureBundledSkills(resRoot) {
   const srcDir = path.join(resRoot, 'ohos-skills');
@@ -1262,25 +1274,13 @@ function ensureBundledSkills(resRoot) {
     return;
   }
   const dstDir = path.join(HOME_DIR, 'skills');
-  try {
-    ensureDir(dstDir);
-    let copied = 0;
-    for (const name of fs.readdirSync(srcDir)) {
-      if (!name.endsWith('.md')) {
-        continue;
-      }
-      const src = path.join(srcDir, name);
-      const dst = path.join(dstDir, name);
-      if (statSize(dst) === statSize(src)) {
-        continue; // 大小指纹一致：已是同一份
-      }
-      fs.copyFileSync(src, dst);
-      copied += 1;
-    }
-    diag(`skills：内置技能已同步（本次复制 ${copied} 个）到 ${dstDir}`);
-  } catch (e) {
-    diag(`skills：同步失败（不阻塞启动）：${String(e)}`);
+  const r = skillsSync.syncSkills(srcDir, dstDir);
+  for (const f of r.failed) {
+    diag(`skills：${f.name || '(目录)'} 同步失败（不阻塞启动）：${f.error}`);
   }
+  diag(`skills：内置技能已同步（本次复制 ${r.copied.length} 个`
+    + `${r.copied.length > 0 ? '：' + r.copied.join('、') : ''}；`
+    + `内容未变 ${r.unchanged.length} 个）到 ${dstDir}`);
 }
 
 /**
@@ -1734,15 +1734,30 @@ const DSH_SHIM_LINES = [
   'cmd=""',
   'spec=""',
   'prev=""',
+  //  【P1-3】allow-version 的两个专属参数。RUNTIME_OPT 留空 ⇒ Host 用当前运行时
+  //  （上游 setProfileVersionExemption 会拒绝"批准一个没在跑的版本"，所以留空比瞎填安全）。
+  'RUNTIME_OPT=""',
+  'want_risk=0',
   'for a in "$@"; do',
   '  case "$a" in',
   '    plugin) prev="plugin"; continue ;;',
   '    --profile) prev="--profile"; continue ;;',
+  '    --dsh-version) prev="--dsh-version"; continue ;;',
+  '    --dsh-version=*) RUNTIME_OPT="${a#--dsh-version=}"; prev=""; continue ;;',
+  '    --accept-risk) want_risk=1; prev=""; continue ;;',
   '    install|add) cmd="$a"; prev=""; continue ;;',
   '    remove|rm|uninstall) cmd="remove"; prev=""; continue ;;',
+  //  上游 core 的子命令名逐字（plugin-DkYIj96-.js：allow-version / revoke-version /
+  //  version-exemptions）；接受它才是"端侧可达"，否则用户只能看到那句英文引导却无从执行。
+  '    allow-version|revoke-version) cmd="$a"; prev=""; continue ;;',
+  '    version-exemptions) cmd="exemptions"; prev=""; continue ;;',
   '    -*) prev=""; continue ;;',
   '    *)',
   '      if [ "$prev" = "--profile" ]; then prev=""; continue; fi',
+  //  必须消费 --dsh-version 的**值**：不消费的话它会掉进下面的 spec 判定，
+  //  变成"包名 = 0.2.0-rc.1"（于是 `allow-version --dsh-version 0.2.0-rc.1` 缺包名时
+  //  不报错，反而拿版本号当包名去申请豁免）。
+  '      if [ "$prev" = "--dsh-version" ]; then RUNTIME_OPT="$a"; prev=""; continue; fi',
   '      if [ -n "$cmd" ] && [ -z "$spec" ]; then spec="$a"; fi',
   '      prev=""',
   '      ;;',
@@ -1837,7 +1852,63 @@ const DSH_SHIM_LINES = [
   '  fi',
   '  exit 0',
   'fi',
-  'echo "dsh(shim): 端侧支持 plugin install <包名|GitHub地址> 或 plugin remove <包名>（收到：$*）" >&2',
+  //  【P1-3 兼容性豁免】0.2.0-rc.1 对 peer 锁 0.1.x 的插件会拒绝挂载，并提示
+  //  「grant the exact-version exemption … with `dsh plugin allow-version`」。
+  //  端侧此前没有这个子命令 ⇒ 用户面对"插件被跳过"毫无自助手段（且插件管理器
+  //  恰好就是被跳过的那一个，鸡生蛋）。此处把它接到与安装同一条队列通道。
+  'if [ "$cmd" = "allow-version" ] || [ "$cmd" = "revoke-version" ] || [ "$cmd" = "exemptions" ]; then',
+  '  if [ "$cmd" = "exemptions" ]; then',
+  '    payload=\'{"action":"list"}\'',
+  '  else',
+  '    if [ -z "$spec" ]; then',
+  `      echo "dsh(shim): $cmd 需要 <包名>@<精确版本>（如 dshmarket@1.66.2）" >&2`,
+  '      exit 1',
+  '    fi',
+  //  白名单校验：JSON 是把参数拼进文本里的，含引号/反斜杠/空白就会写出非法 JSON，
+  //  而 Host 只能回一句"不是合法 JSON"——用户看不出是自己参数里的哪个字符。
+  //  包名与精确版本的合法字符集就是这些，其余一律在这里挡掉并说明原因。
+  '    case "$spec" in',
+  '      *[!A-Za-z0-9._@/+-]*)',
+  '        echo "dsh(shim): 包名/版本含非法字符（只允许字母数字与 . _ @ / + -）：$spec" >&2',
+  '        exit 1',
+  '        ;;',
+  '    esac',
+  '    if [ "$cmd" = "revoke-version" ]; then enabled=false; else enabled=true; fi',
+  '    if [ $want_risk -eq 1 ]; then risk=true; else risk=false; fi',
+  `    payload=$(printf '{"action":"set","packageVersion":"%s","runtimeVersion":"%s","enabled":%s,"acceptRisk":%s}' "$spec" "$RUNTIME_OPT" "$enabled" "$risk")`,
+  '  fi',
+  '  base="cmp-$(date +%s)-$$"',
+  '  while [ -f "$QDIR/$base.compat-req" ] || [ -f "$QDIR/$base.done" ] || [ -f "$QDIR/$base.fail" ]; do',
+  '    sleep 1',
+  '    base="cmp-$(date +%s)-$$"',
+  '  done',
+  '  echo "$payload" > "$QDIR/$base.compat-req" || { echo "dsh(shim): 队列写入失败：$payload" >&2; exit 1; }',
+  '  printf "%s" "$DIR_OPT" > "$QDIR/$base.dir" 2>/dev/null',
+  '  echo "dsh(shim): 已投递兼容性豁免请求（等待 Host 结果…）"',
+  '  i=0',
+  '  max_loop="$SHIM_WAIT_MAX"',
+  '  if [ -z "$max_loop" ]; then',
+  '    max_loop=240',
+  '  fi',
+  '  while [ $i -lt $max_loop ]; do',
+  '    if [ -f "$QDIR/$base.done" ]; then',
+  '      cat "$QDIR/$base.done"',
+  '      rm -f "$QDIR/$base.done" 2>/dev/null',
+  '      exit 0',
+  '    fi',
+  '    if [ -f "$QDIR/$base.fail" ]; then',
+  '      echo "dsh(shim): 兼容性豁免请求失败" >&2',
+  '      cat "$QDIR/$base.fail" >&2',
+  '      rm -f "$QDIR/$base.fail" 2>/dev/null',
+  '      exit 1',
+  '    fi',
+  '    sleep 0.5',
+  '    i=$((i+1))',
+  '  done',
+  '  echo "dsh(shim): 兼容性豁免请求仍在处理中（本次等待已达上限）" >&2',
+  '  exit 1',
+  'fi',
+  'echo "dsh(shim): 端侧支持 plugin install <包名|GitHub地址> / plugin remove <包名> / plugin allow-version <包名>@<精确版本> --accept-risk / plugin version-exemptions（收到：$*）" >&2',
   'exit 1',
 ];
 
@@ -3982,6 +4053,10 @@ async function start() {
         return; // 一次只装一个：下载/解包互斥，避免并发踩 node_modules
       }
       let reqFile = '';
+      //  本次取走的请求的 base 与后缀（含 `.compat-req`）：catch 分支回写 `.fail`
+      //  必须沿用，不能按 `.req` 猜（见下方 reqSuffix 赋值处的注释）。
+      let reqBase = '';
+      let reqSuffix = '';
       try {
         const names = fs.readdirSync(installQueueDir);
         // 陈旧结果清理：写入方（假壳/bash 子进程）退出后 .done/.fail 永远无人读——
@@ -4002,15 +4077,26 @@ async function start() {
             // 单个结果文件 stat 失败不碍事，下轮再看
           }
         }
-        const reqs = names.filter((n) => n.endsWith('.req') || n.endsWith('.rem')).sort();
+        //  【P1-3】多一类 `.compat-req`（兼容性豁免）。**必须显式列出**：`.compat-req`
+        //  的末四字符是 `-req` 而非 `.req`，旧的 `endsWith('.req')` 匹配不到 ⇒ 面板点
+        //  「忽略兼容性警告」后请求会静默滞留到 1h 过期清理，用户以为授权成功、
+        //  实际 compatibility.json 从未写入（P1-3 的原症状换了个地方复发）。
+        const reqs = names
+          .filter((n) => n.endsWith('.req') || n.endsWith('.rem') || n.endsWith('.compat-req'))
+          .sort();
         if (reqs.length === 0) {
           return;
         }
         reqFile = reqs[0];
-        const isRemove = reqFile.endsWith('.rem');
-        const suffix = isRemove ? '.rem' : '.req';
+        const isCompat = reqFile.endsWith('.compat-req');
+        const isRemove = !isCompat && reqFile.endsWith('.rem');
+        const suffix = isCompat ? '.compat-req' : (isRemove ? '.rem' : '.req');
         const base = reqFile.slice(0, -suffix.length);
         const spec = fs.readFileSync(path.join(installQueueDir, reqFile), 'utf8').trim();
+        //  供 catch 分支回写 `.fail` 用（见下）：异常时重算后缀会把 `.compat-req`
+        //  当成 `.req`，base 就错位成 `xxx.compat` ⇒ 写入方永远看不到失败原因。
+        reqBase = base;
+        reqSuffix = suffix;
         // 请求方 cwd（市场以目标 profile 目录为 cwd 起 spawn pnpm add）。据此确定该装到
         // 哪个 profile（skin-market 的 profile 是 web，非宿主 ondevice——写错目录市场就
         // 读不到已装 manifest → "installed package manifest missing"）。文件缺失时回退宿主 profile。
@@ -4026,6 +4112,35 @@ async function start() {
           }
         } catch (eDir) { /* 读不到不碍事，用默认 profile */ }
         fs.rmSync(path.join(installQueueDir, reqFile), { force: true }); // 取走即删：结果走 .done/.fail，不重入
+        //  【P1-3】兼容性豁免请求（`.compat-req`，载荷是 JSON 而非 spec）：先于空 spec
+        //  判定处理——这里的"空"只对包名有意义，JSON 空串应报"不是合法 JSON"而不是
+        //  "空 spec"（后者会让用户以为该填包名）。
+        if (isCompat) {
+          installBusy = true;
+          const compatOpts = { log: (m) => log(`  [compat] ${m}`) };
+          //  profileDir 决定写进哪个 compatibility.json。缺 `.dir` 时回退宿主 profile
+          //  目录（与 ensureProfile 的落点同源）；**不能**静默跳过——那会让"授予成功"
+          //  变成空操作。
+          compatOpts.profileDir = reqProfileDir.length > 0
+            ? reqProfileDir
+            : path.join(HOME_DIR, 'profiles', PROFILE);
+          let compatReq = null;
+          let compatErr = '';
+          try {
+            compatReq = JSON.parse(spec);
+          } catch (eJson) {
+            compatErr = `compat 请求不是合法 JSON：${eJson && eJson.message ? eJson.message : eJson}（原文：${spec.slice(0, 120)}）`;
+          }
+          log(`兼容性豁免请求：${reqFile} → ${compatOpts.profileDir}`);
+          const compatResult = compatErr.length > 0
+            ? { ok: false, error: compatErr }
+            : await compatModule.applyRequest(compatReq, compatOpts);
+          fs.writeFileSync(path.join(installQueueDir, base + (compatResult.ok ? '.done' : '.fail')),
+            JSON.stringify(compatResult, null, 2));
+          log(`兼容性豁免${compatResult.ok ? '完成' : '失败'}：${spec.slice(0, 120)}`
+            + `${compatResult.ok ? `（${compatResult.note}）` : `：${compatResult.error}`}`);
+          return; // finally 复位 installBusy
+        }
         if (spec.length === 0) {
           fs.writeFileSync(path.join(installQueueDir, base + '.fail'),
             JSON.stringify({ ok: false, error: '空 spec' }, null, 2));
@@ -4054,7 +4169,12 @@ async function start() {
       } catch (e) {
         // 队列轮询永不因单次异常断线；req 已删，异常尽力写 .fail 通知写入方
         try {
-          if (reqFile.length > 0) {
+          if (reqBase.length > 0) {
+            //  后缀沿用**本次实际取走**的那个（可能是 `.compat-req`）：按 `.req` 猜会把
+            //  base 截错位成 `xxx.compat`，写入方等一个永远不会出现的 `xxx.done`。
+            fs.writeFileSync(path.join(installQueueDir, reqBase + '.fail'),
+              JSON.stringify({ ok: false, error: String(e && e.message ? e.message : e) }, null, 2));
+          } else if (reqFile.length > 0) {
             const egSuffix = reqFile.endsWith('.rem') ? '.rem' : '.req';
             fs.writeFileSync(path.join(installQueueDir, reqFile.slice(0, -egSuffix.length) + '.fail'),
               JSON.stringify({ ok: false, error: String(e && e.message ? e.message : e) }, null, 2));
