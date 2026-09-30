@@ -54,11 +54,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# ── 本地签名配置（含真实口令，**绝不入库**；模板见 build-profile.json5）──────
-# 【为什么单独一条】build-profile.json5 是**必须入库**的工程配置，但它里面的
-# 签名材料（密钥库口令 / 证书路径）是**机器绑定**的。因此：
-#   · 仓库里那份 = 模板（占位符）
-#   · 你本机那份 = build-profile.local.json5（本条忽略）
+# ── 本地签名配置（含真实口令，**绝不入库**）──────────────────────────────
+# 【为什么单独一条】bundle 根 build-profile.json5 的 signingConfigs
+# （密钥库口令 / 证书路径）是**机器绑定**的，不能入库。因此：
+#   · 仓库里那份 = `tools/build-profile.template.json5`（占位符，**已入库**）
+#   · 你本机那份 = 这个 `build-profile.json5`（本条忽略）
+# ⚠️ `entry/build-profile.json5` 是**另一个文件**（模块级配置，不含口令），它入库。
 /build-profile.json5
 /build-profile.local.json5
 

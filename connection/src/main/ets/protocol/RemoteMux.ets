@@ -87,8 +87,34 @@ export enum MuxState {
  * 时间参数依据服务端 2 s Ping 的节奏取，给它 3 个周期多一点。
  */
 const PROBE_INTERVAL_MS: number = 6000;
-/** 探活发出后等待回帧的上限；超时即判连接失效 */
-const PROBE_TIMEOUT_MS: number = 8000;
+/**
+ * 探活发出后等待回帧的上限。
+ *
+ * 【为什么从 8000 放宽到 20000】动因是用户反馈"跑任务时经常看到正在连接"，
+ * 且 Windows 端同样出现 ⇒ 与平台无关、由**负载**触发。
+ * ⚠️ 当时把"探活超时计时器与收帧回调同一 JS 线程"记为**根因**，**该判断已被推翻**
+ * （见 docs/device-validation.md 批次三十七：用户看的是 WebView 里的 host web UI，
+ * 而本类所属的 ArkTS 自绘 UI 不可达）。这组参数是"高负载下探活容错"的合理加固，**但不是**该现象的因。
+ *
+ * 20 秒的依据：服务端每 2s 发一次协议级 Ping，20s = 10 个周期。
+ * 放宽不会拖慢真实断线的发现 —— 真实断线由「连续 N 次无回帧」判定
+ * （见 `PROBE_FAIL_THRESHOLD`），不靠单次超时；而 socket 真死通常由
+ * `close` 事件**立即**上报。
+ */
+const PROBE_TIMEOUT_MS: number = 20000;
+/**
+ * 连续多少次探活失败才判连接失效。
+ *
+ * 【为什么必须 > 1】单次探活超时**不是**断线的充分证据：它可能只是这一轮
+ * 恰好被负载推迟、或对端在忙。由此判死会引发"健康的连接被反复重连"，
+ * 用户看到的就是"跑任务时一直在重新连接"。
+ *
+ * 【为什么是 3】服务端 2s 一个 Ping 周期 ⇒ 3 次失败约需 3 个探活周期
+ * （≈18s 起）+ 单次 20s 超时 ≈ 最坏约 1 分钟才判死。这一延迟只影响
+ * 「`close` 不来且探活也无回帧」的静默失效场景 —— 那种场景下晚一点判死
+ * 是可接受的代价，远优于把所有健康连接在负载下反复误杀。
+ */
+const PROBE_FAIL_THRESHOLD: number = 3;
 
 export class RemoteMux {
   private baseUrl: string;
@@ -118,6 +144,14 @@ export class RemoteMux {
   private probePending: boolean = false;
   /** 探活专用的应答等待者：收到**任何**帧都视为链路活着 */
   private probeWaiter?: () => void;
+  /**
+   * 连续探活失败次数（收到任何帧即清零）。
+   *
+   * 【为什么需要它】单次探活超时不是断线的充分证据 —— 跑任务时负载会推迟回帧，
+   * 单次超时据此判死，会让**健康连接被反复重连**（用户看到"跑任务时经常显示
+   * 正在连接"，Windows 端同样出现）。只有**连续**失败才构成判死依据。
+   */
+  private probeFailCount: number = 0;
 
   constructor(baseUrl: string, cookieProvider: () => string | undefined,
     surface: ProtocolSurface = FALLBACK_SURFACE) {
@@ -350,8 +384,10 @@ export class RemoteMux {
    *   - 收到帧 → 链路双向可用，桥接等待者让它立刻返回；
    *   - `PROBE_TIMEOUT_MS` 内没有帧 → 判为静默失效，主动收尾并让重连介入。
    *
-   * 为什么带一个唯一 `cursor`：让这次应答在旁路日志里**可辨认**，
-   * 排查时能一眼看出「探针发了、应答来没来」，而不是混在普通列表刷新里。
+   * 【探活帧不带任何额外字段】这一点是踩坑换来的，详见 `probeOnce` 内注释：
+   * 曾给探针加过唯一 `cursor` 以便在旁路日志里辨认，而 `settings/describe`
+   * 不接受任何实参 ⇒ 服务端回 `type:"error"`，被当作**该流终结**处理，
+   * 反而把**健康连接判死**。故探活帧只用空实参。
    */
   private startLivenessProbe(): void {
     this.stopLivenessProbe();
@@ -365,6 +401,9 @@ export class RemoteMux {
       // 「没探活」只能由诊断页的探活计数反映——那也正是它该被记的地方。
       return;
     }
+    // 新的一轮探活 = 新的连接 ⇒ 连续失败计数必须从零开始，
+    // 否则上一轮（或上一次连接）的失败会累积进来，让新连接很快被判死。
+    this.probeFailCount = 0;
     this.probeTimer = setInterval(() => {
       this.probeOnce();
     }, PROBE_INTERVAL_MS);
@@ -377,6 +416,7 @@ export class RemoteMux {
     }
     this.probePending = false;
     this.probeWaiter = undefined;
+    this.probeFailCount = 0;
   }
 
   /** 发一次探活并设超时 */
@@ -419,23 +459,47 @@ export class RemoteMux {
       this.probeWaiter = resolve;
     });
     socket.send(text).catch((error: BusinessError) => {
-      this.probePending = false;
-      this.onSocketClosed(`探活发送失败 code=${error.code}`);
-    });
-    const timer: number = setTimeout(() => {
-      // 超时仍无任何回帧 → 静默失效（`close` 不会来，所以必须**主动**收尾）
+      // 发送失败也**不是立即判死**的充分证据（负载下可能瞬时失败），
+      // 与超时同样计入连续失败；真断线仍由 `close` 事件或连续 N 次失败兜住。
       this.probeWaiter = undefined;
       this.probePending = false;
-      this.onSocketClosed('探活超时（连接级）：在阈值内未收到任何回帧');
+      this.noteProbeFailure(`探活发送失败 code=${error.code}`);
+    });
+    const timer: number = setTimeout(() => {
+      // 超时未收到任何回帧 ⇒ **记一次失败**，而不是立刻判死。
+      // 早期实现在这里直接 `onSocketClosed(...)`，于是跑任务时（回帧被负载推迟）
+      // 健康的连接被反复误判为断线 → 触发重连 → 界面闪「正在连接」。
+      this.probeWaiter = undefined;
+      this.probePending = false;
+      this.noteProbeFailure('探活超时（连接级）：在阈值内未收到任何回帧');
     }, PROBE_TIMEOUT_MS);
     settled.then(() => {
       clearTimeout(timer);
     });
   }
 
+  /**
+   * 记一次探活失败；只有**连续**失败达到阈值才判连接失效。
+   *
+   * 【为什么必须计数而不是单次判死】见 `PROBE_FAIL_THRESHOLD` 的说明：
+   * 探活计时器与收帧回调跑在同一个 JS 线程上，跑任务时回帧被推迟，
+   * 单次超时不足以证明断线 —— 据此判死会让健康连接被反复重连。
+   */
+  private noteProbeFailure(reason: string): void {
+    this.probeFailCount += 1;
+    if (this.probeFailCount < PROBE_FAIL_THRESHOLD) {
+      // 未达阈值：只记数、不断开。连接语义仍是「活着但有疑问」，
+      // 下一轮探活会再试一次；期间若有任何帧到达会清零（见 `settleProbe`）。
+      return;
+    }
+    this.onSocketClosed(`${reason}（连续 ${this.probeFailCount} 次探活无回帧）`);
+  }
+
   /** 收到任何帧：探活成功 */
   private settleProbe(): void {
     this.probePending = false;
+    // 收到任何帧即证明链路双向可用 ⇒ 连续失败计数清零（这是"负载延迟"与"真断线"的分界）
+    this.probeFailCount = 0;
     const waiter: (() => void) | undefined = this.probeWaiter;
     this.probeWaiter = undefined;
     if (waiter !== undefined) {
