@@ -1,0 +1,75 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索已有的 [Issues](https://github.com/sol5766/dshm/issues)，避免重复。
+
+        **安全漏洞不要走这里** —— 见 [SECURITY.md](https://github.com/sol5766/dshm/blob/main/SECURITY.md)。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 你期望发生什么，实际发生了什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量写成「一、二、三」的确定性步骤；能稳定复现的才算有效报告。
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 观察到……
+    validations:
+      required: true
+
+  - type: input
+    id: hap-version
+    attributes:
+      label: 安装包版本
+      description: Release 的 tag，或 HAP 文件名（如 `DSHM-1.0.0-arm64-signed.hap`）。
+    validations:
+      required: true
+
+  - type: input
+    id: core-version
+    attributes:
+      label: 核心版本
+      description: 应用内「核心」页显示的版本号（如 `0.2.0-rc.2`）。
+    validations:
+      required: false
+
+  - type: input
+    id: device
+    attributes:
+      label: 设备与系统
+      description: 设备型号 + HarmonyOS 版本（如 `MateBook 14 / OpenHarmony-7.0.0.105 API 26`）。
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: |
+        相关日志。可以贴应用内的错误信息，或用 `hdc hilog` 抓取的片段。
+        **贴之前请先删掉 API 密钥、令牌、对话内容等隐私信息。**
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过已有 Issue，确认这是新问题
+          required: true
+        - label: 我没有在报告中包含任何 API 密钥、令牌或私人对话内容
+          required: true
