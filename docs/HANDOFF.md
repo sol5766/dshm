@@ -8,7 +8,7 @@
 
 ## 1. 一句话现状
 
-鸿蒙 arm64 客户端（`com.dshm.dshclient`，DSHM）已能在 MateBook 14（2in1，OpenHarmony-7.0.0.105 / API 26）上自足跑起端侧 dsh core 0.2.0-rc.1，界面走 WebView 加载 Host web UI，语音输入、托盘常驻、长时保活均已真机验证。
+鸿蒙 arm64 客户端（`com.dshm.dshclient`，DSHM）已能在 MateBook 14（2in1，OpenHarmony-7.0.0.105 / API 26）上自足跑起端侧 dsh core 0.2.0-rc.2，界面走 WebView 加载 Host web UI，语音输入、托盘常驻、长时保活均已真机验证。
 **两个未修完的缺陷**：①托盘/应用启动约 40 秒后自杀；②"正在连接"抖动（Windows 端同源，已定位机制、修法未落盘）。见 §4。
 
 ---
