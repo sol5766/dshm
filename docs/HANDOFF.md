@@ -2,7 +2,7 @@
 
 > 本文给**接手的人**：现在到哪一步、哪些是真结论、哪些还没做、下一步怎么动手。
 > 契约类文档（D1/D2/D2b/D3/D3b/D4/D5）不动，见 [`README.md`](README.md) 的索引；本文只讲**状态**。
-> 最近一次更新：2026-09-30（§7 官方桌面端更新逻辑；README 改为官方口径；清理机器专有路径）。
+> 最近一次更新：2026-09-30（§4④ 开源推送完成：GitCode + GitHub 覆盖、GitHub Release 重发）。
 
 ---
 
@@ -211,15 +211,35 @@ sha256 `e8ef8be567f9a2b9c40d17c6a0dd2e3664c626b98069a1eb2afcd9644c4d8060`）。
 核心切换/回滚、**文件变更流**——该项因无稳定信号已从自动判定降级）；文档走查
 `docs/device-validation.md` 批次三十六/三十七/三十八。
 
-### ④ 开源推送（**被 token 阻塞**）
+### ④ 开源推送（**已完成**：GitCode + GitHub，两边都已覆盖为新血统）
 
-本地提交已就绪（`e7b5ed7` 初始公开版本 → `32e1710` 开源前加固 → `33e9631` 签名配置移出跟踪
-→ `826dc09` 补齐构建必需源码 → `33662bd` 文档修正），远端仍是**无关的旧项目**。
-推送需要**有写权限的 token**（`http.extraheader=PRIVATE-TOKEN: <tok>`，不要放进 URL；
-禁用 GCM：`credential.helper=""`、`GCM_INTERACTIVE=never`、`GIT_CREDENTIAL_MANAGER=0`，清代理）。
-**注意**：`git ls-remote` 返回 0 **不能**证明 token 有效（匿名读也能成功），必须实际 push 才算。
-顺序：**先 GitCode**（`tools/publish-gitcode.sh <token>`，远端 `https://gitcode.com/u010189254/dshm.git`），
-**再 GitHub**；之后打 tag `v1.0.0` + Release 上传上面那个 HAP。
+本地提交链（7 个）：`e7b5ed7` 初始公开版本 → `32e1710` 开源前加固 → `33e9631` 签名配置移出跟踪
+→ `826dc09` 补齐构建必需源码 → `33662bd` 文档修正 → `07f97c5` 面向新读者整理 → `4995f3a` 文档索引对齐。
+
+**GitCode**：`git@gitcode.com:u010189254/dshm.git`，本机 `~/.ssh/id_ed25519_gitcode` 已在账号注册。
+远端原有 master 是**无关的旧项目**（`a6bfe14`，另一套 `deepseek-harness.rb` 补丁集），
+覆盖前已留本地备份 ref `refs/backup/gitcode-old-master`，再 `--force` 覆盖；tag `v1.0.0` 已推。
+**SSH 足够，不需要 token**（`tools/publish-gitcode.sh` 那条 HTTPS + PRIVATE-TOKEN 的路没用上）。
+
+**GitHub**：`sol5766/dshm`，同样先备份再覆盖（远端原 `main` `4989ce5` 存为
+`refs/heads/backup/pre-dshm-import`）。⚠️ **本网络 `github.com:443` 不可达**（`api.github.com` 可用），
+且令牌无权管理 SSH 密钥（`/repos/.../keys` 与 `POST /user/keys` 均 403）⇒ **git 传输走不通**，
+改用 **Git Data API** 导入（blob → tree → commit → ref），脚本 `dist/_gh-import.mjs`。
+
+⚠️ **两端的 commit id 不同**：远端 `main` = `ea4b5608`（本地 `4995f3a`），7 条一一对应但 id 全不同。
+原因 **不在内容**：根 tree sha 完全一致（`416690fd`）、477 个 blob 与 173 个 tree 的 sha 逐个相同、
+author/committer 时刻相同。差异只在 commit 对象的元数据，且用 GitHub 返回的字段**重建不出它给的 id**
+（见 `dist/_diag-commit2.mjs`）⇒ 属 GitHub 内部改写。**描述口径**：文件树与本地完全一致，
+提交 id 因 GitHub 重写提交元数据而不同 —— 不要说「与本地逐字节相同」。
+（副产物：`826dc09` / `33662bd` 的标题行本地就带 BOM，一并带了过去。）
+
+**Release**：GitHub `v1.0.0` 已重发（原 release 挂的是旧血统的 2 MB `entry-default-signed.hap`，
+已删）—— 现挂 `DSHM-1.0.0-arm64-signed.hap` 314,166,762 B + `SHA256SUMS.txt`，
+上传后 API 返回的 `digest` 与本地 sha256 **逐字符一致**。**GitCode 侧尚未建 Release**（需个人访问令牌）。
+
+**待用户处置**：GitHub 上另有一条旧血统的 `feat/embedded-runtime` 分支与 4 个旧 release
+（`v1.1.0` / `v2.0.0-debug` / 一个 draft `v1.0.0`）**仍在**，本次只覆盖了 `main` 与 `v1.0.0`；
+仓库描述有一处笔误（`deepseek harnes`）与一个无关 topic（`sentation`），**令牌权限不足，改不了**。
 
 ### ⑤ `.codegenie\`（已定：留本地，不入库）
 
