@@ -40,7 +40,7 @@
   > `Test-Path .git` 为 True，`git rev-list --count HEAD` = 3（本仓已是 git 仓库且有历史）。
   > 因此 `.gitignore` 不是"为将来入库准备"，而是**当下就生效**的边界。
 - **文档只标"历史/已取代"，不删契约**：契约类文档（D1/D2/D2b/D3/D3b/D4/D5）是排除歧义的依据，删除等于丢失判据；过时的是**结论**，因此在上表里就地标注并指向权威更正处（D6 的证据表 E1…）。
-- **仓库根部只保留构建与许可文件**：`v37.2.3-*.zip`（使用者提供的对照包）**不得删除**；`.research/` 是文档引用的社区对标材料，保留。
+- **仓库根部只保留构建与许可文件**：源码、构建配置（含 `build-profile.template.json5`）、`LICENSE`、`README.md`、`AGENTS.md`、`.gitignore`。使用者提供的对照包（如 `v37.2.3-*.zip`）与 `.research/`、`.codegenie/`、`dist/` 一律不入库（见 `.gitignore`）。
 
 ## 阅读顺序（按角色）
 
@@ -78,9 +78,11 @@
 
 ## 调研副本（`.research/`，未纳入版本库）
 
+`.research/` 是本地调研目录，**已被 `.gitignore` 忽略**（开源不需要，但开发时要用）。
+
 | 路径 | 内容 |
 |---|---|
-| `.research/dsh-desktop-README.zh.md` | 官方 Electron 桌面端 README（中文） |
-| `.research/dsh-docs/*.README.zh.md` | 上游协议包文档副本：`dsh-client-connection`、`dsh-host-webserver`、`dsh-api-gateway`、`dsh-web-app`、`dsh-host-frontend-static`、`dsh-authorization`、`dsh-sdk-protocol` |
-| `.research/ref-harmony/` | 社区工程 `fellow99/deepseek-harness-harmony` 的浅克隆（含 `docs/工程规划.md`、`specs/`、构建脚本与 patch） |
-| `.research/OHSidian-README.md` | 相关参考：把桌面应用跑在鸿蒙上的另一种做法（Electron 兼容层 + ArkTS 适配层） |
+| `.research/protocol/contracts-*.json` | 各上游版本的协议契约快照（`rc1` / `0.2.0-rc.1` / `0.2.0-rc.2`，各带 `.meta.json`），由 `tools/gen-compat-endpoints.mjs` 产出，供漂移比对 |
+| `.research/protocol/drift-rc1-to-rc2.txt` | rc.1 → rc.2 的端点漂移清单（升级手册 §4.1 的依据） |
+
+其它调研材料（官方桌面端 README、上游协议包文档副本、社区工程浅克隆等）按需放在同一目录即可，不入库。
