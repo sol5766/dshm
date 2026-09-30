@@ -15,12 +15,28 @@ DSHM 端侧功能测试（定稿版）。
   侧栏「插件」 → 插件列表页（含「添加和管理插件」「添加插件」「已安装」「刷新」）
   插件详情页    → 「返回插件列表」可回
 """
+import json
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import dshtest as T
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def want_core():
+    """期望的端侧核心版本：读 hostcore/core-recipe.json（唯一事实来源）。
+
+    原先这里写死 '0.1.7-rc.2'：升级核心后 T0.3 会 FAIL，而现场看起来像
+    "核心没升上去"；同形态的坑在 docs/90 §8.1 有登记。
+    """
+    try:
+        return json.loads((ROOT / 'hostcore' / 'core-recipe.json').read_text('utf-8'))['coreVersion']
+    except Exception as e:
+        return f'<读配方失败：{e}>'
+
 
 R = T.Result()
 MANUAL = []
@@ -73,9 +89,22 @@ def t0():
     R.check('T0.1', '宿主写入启动段', 'boot pid=' in log)
     m = re.search(r'exec 探测：(.*)', log)
     detail = m.group(1) if m else ''
-    R.check('T0.2', f'exec 探测全通（{detail.count("=ok")}/7）', detail.count('=ok') >= 7, detail[:100])
-    R.check('T0.3', '运行核心 rc.2', '0.1.7-rc.2' in T.sh(f'ls {T.FILES}/dsh/cores/'))
-    T.sh('fport tcp:13120 tcp:3120')
+    # 【2026-09-28 清理】原先写死 `detail.count('=ok') >= 7`（7 = exec 探测项数）。
+    # 写死总数会在新增探测目标后失效：8 项里只 ok 了 7 项（新的那项失败）依然算过。
+    # 改为逐项判定，项数由 hostcore/app/main.js 的 execProbeTargets() 决定。
+    items = [x.strip() for x in re.split(r'[，,]', detail) if x.strip()]
+    bad = [x for x in items if not x.endswith('=ok')]
+    R.check('T0.2', f'exec 探测全通（{len(items)}/{len(items)}）', bool(items) and not bad,
+            '，'.join(bad)[:100] if bad else detail[:100])
+    want = want_core()
+    R.check('T0.3', f'运行核心 {want}', want in T.sh(f'ls {T.FILES}/dsh/cores/'))
+    # 【2026-09-30 修正】原写作 T.sh('fport tcp:13120 tcp:3120') —— `fport` 是**宿主侧**
+    # hdc 子命令，经 sh() 变成 `hdc shell "fport …"`，设备上 `/bin/sh: fport: inaccessible
+    # or not found`，而 hdc 把设备侧 127 当成功返回（exit 0）⇒ **转发从未建立**。
+    # 改用 T.fport()（真在宿主侧建映射，并以 `fport ls` 为唯一判据）。
+    # 另：T0.4 必须把 fok 计入断言 —— 首轮曾出现"fport 报未建立、HTTP 却拿到 401"
+    # （蹭到上一轮遗留映射）而 PASS 的假阴性，故 fok 为假时直接判失败。
+    fok, fout = T.fport(13120, 3120)
     import urllib.request
     import urllib.error
     try:
@@ -85,7 +114,8 @@ def t0():
         code = e.code
     except Exception:
         code = 'ERR'
-    R.check('T0.4', 'Host HTTP 有响应', code in (200, 401), f'HTTP {code}')
+    R.check('T0.4', 'Host HTTP 有响应', fok and code in (200, 401),
+            f'HTTP {code}｜{fout[:70]}')
 
 
 # ══ T1 目录选择链路（本次修复项，端到端硬证据）═══════════════════════════
@@ -117,10 +147,16 @@ def t1():
     R.check('T1.2', '点击触发同步桥（新记录）', fresh, m.group(1) if m else '无记录')
 
     nodes2 = front(check=False)
-    R.check('T1.3', '弹出系统目录选择器', len(nodes2) != len(nodes),
-            f'{len(nodes)} → {len(nodes2)} 节点')
+    # 【2026-09-30 修正】原断言用 `len(nodes2) != len(nodes)`（节点数变了即通过）——
+    # ArkUI dump 的节点数本身会小幅抖动，故"变了"不足以证明选择器弹出（假阳性）。
+    # 改为结构性判据：出现选择器特有的「取消」，或出现真实用户目录名。
+    b2 = ''.join(txts(nodes2))
+    picker_new = bool(T.find(nodes2, '取消'))
+    dir_marks = [k for k in ['内部存储', '我的手机', '文件夹', '下载'] if k in b2]
+    R.check('T1.3', '弹出系统目录选择器', picker_new or bool(dir_marks),
+            f'{len(nodes)} → {len(nodes2)} 节点｜取消={picker_new}｜目录标记={dir_marks}')
     R.check('T1.3b', '选择器列出真实用户目录',
-            any(k in ''.join(txts(nodes2)) for k in ['内部存储', '我的手机', '文件夹']))
+            any(k in b2 for k in ['内部存储', '我的手机', '文件夹']))
 
     hits = [h for h in T.find(nodes2, '取消') if T.center(h['bounds'])]
     if hits:
@@ -128,9 +164,17 @@ def t1():
     else:
         T.sh('uitest uiInput keyEvent Back')
     pause(3)
-    nodes3 = front()
-    R.check('T1.4', '取消后回到主界面', len(nodes3) == len(nodes),
-            f'{len(nodes2)} → {len(nodes3)} 节点')
+    # 【2026-09-30 修正】原断言用 `len(nodes3) == len(nodes)`（节点数精确相等）——
+    # 实测回退后是 824 → 394 而"未弹出时"的基线是 397：**节点数本来就会有小幅抖动**
+    # （ArkUI dump 的 id/包裹层数量不稳定），拿精确相等当判据必然误报。
+    # 改为结构性判据：主界面标记回来了，且选择器独有的「取消」已消失。
+    nodes3 = front(check=False)
+    b3 = ''.join(txts(nodes3))
+    back_marks = [k for k in APP_MARK if k in b3]
+    R.check('T1.4', '取消后回到主界面',
+            not T.find(nodes3, '取消') and len(back_marks) >= 2,
+            f'{len(nodes2)} → {len(nodes3)} 节点｜主界面标记 {len(back_marks)}/{len(APP_MARK)}'
+            f'｜残留「取消」={bool(T.find(nodes3, "取消"))}')
 
 
 # ══ T2 工作区与会话（ArkUI 层）══════════════════════════════════════════
@@ -141,8 +185,33 @@ def t2():
     R.check('T2.1', '侧栏渲染工作区', '工作区' in blob)
     R.check('T2.2', '工作区列表有条目', 'harness' in blob or 'test' in blob)
     R.check('T2.3', '存在「新建会话」', bool(T.find(nodes, '新建会话')))
-    R.check('T2.4', '会话列表渲染历史会话',
-            any(k in blob for k in ['Simple Math', 'Run echo', 'Bash echo', '列出当前目录']))
+    # 【2026-09-30 修正】原断言写死四个会话名（'Simple Math' / 'Run echo' / 'Bash echo' /
+    # '列出当前目录'）—— 那是早期测试轮次的残留，设备上早已不存在，于是**列表明明渲染了**
+    # 也恒 FAIL（真机实测：会话区里有 `harness` 工作区下的 5 条历史会话）。
+    # 与 want_core() 是同一类坑：把"当时的事实"写死进断言 ⇒ 断言随事实腐坏。
+    # 改为**结构性判据**：在「会话」面板区域内数真实条目，不依赖任何具体会话名。
+    import re as _re
+    panel = None
+    for n in nodes:
+        if (n['text'] or '').strip() == '会话':
+            panel = T.bounds_of(n['bounds'])
+            break
+    entries = []
+    if panel:
+        px1, py1, px2, py2 = panel
+        for n in nodes:
+            t = (n['text'] or '').strip()
+            if not t or t == '会话':
+                continue
+            bb = T.bounds_of(n['bounds'])
+            if not bb:
+                continue
+            x1, y1, x2, y2 = bb
+            # 落在面板纵向范围内、且**不在**面板顶边（排除表头自身）
+            if y1 > py1 and y2 <= py2 and x1 >= px1 and x2 <= px2:
+                entries.append(t)
+    R.check('T2.4', '会话列表渲染历史会话', len(entries) >= 1,
+            f'{len(entries)} 条：' + ' / '.join(entries[:3]))
     R.check('T2.5', '会话分组结构可见', '未分组' in blob or '会话' in blob)
 
     import re

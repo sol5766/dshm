@@ -19,7 +19,10 @@
 set -euo pipefail
 
 SRC="${1:-$HOME/ohos/node-v22.23.2}"
-DEST="/mnt/d/Develop/deepseek-harness-desktop-HarmonyOS/entry/src/main/cpp/node-headers"
+# DEST 默认按脚本位置推导（本脚本在 tools/node-runtime/ 下，仓库根 = 上两级）。
+# 不要写死某一台机器的检出名 —— 换台机器/换个目录名就会把文件铺到别处。
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+DEST="${2:-$REPO/entry/src/main/cpp/node-headers}"
 
 if [ ! -d "$SRC" ]; then
   echo "ERROR: no Node source at $SRC" >&2

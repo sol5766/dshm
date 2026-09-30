@@ -20,6 +20,21 @@
  *   3. hosted repo URL（github.com/o/r，#branch 可选）
  * 其它 git host 不支持（如实报错，不猜）。
  *
+ * 【GitHub 仓库不一定装得上（2026-09-30 用户报"插件入口给 github 地址装不上"）】
+ * GitHub 源形态有两类失败，**都不是网络问题**（实测 codeload 直连可用，设备侧
+ * `wget` 也能把 32MB 的 tar.gz 完整拉下来）：
+ *   ① **monorepo**：根目录只有子目录，每个子包各有一份 package.json（如
+ *      `Small-tailqwq/dsh-deep-whale/{maid-atelier,orca-link,skin-manager}/`）。
+ *      这类必须由 spec 指明子目录——`&path:/<子目录>`、`?path=<子目录>`、
+ *      `#path:/<子目录>` 三种写法都认（最后一种是各仓库自带 INSTALL.md 的写法）；
+ *      没指明就如实报错，并告诉用户该往地址后面补什么。
+ *   ② **源码树缺构建产物**：根目录有 package.json，但 `main`/`exports` 指向的文件
+ *      是由 `npm run build` 生成的、**只随 npm 发布物**存在（如 `dsh-market/dsh-market`
+ *      的 `lib/`，`files` 里列着 `lib` 而仓库里没有）。端侧没有 pnpm/tsc（见上），
+ *      源码树装下来也起不来 ⇒ 落位校验必然失败。处置见 `repositoryMatchesRequest`
+ *      ＋ installSpecInner 里的 githubFallback 一段（改用 registry 上的同名 npm 包）。
+ * 判据写在这里，免得下一个人重新发明。
+ *
  * 【为什么纯 JS 解 tar 而不 spawn busybox tar】busybox 副本虽有 tar 能力，
  * 但 spawn 在端侧始终带平台级不确定性（执行位/权限策略），而 tgz =
  * gzip(ustar)，node:zlib.gunzipSync + 512 字节头解析是零依赖的确定性路径。
@@ -46,6 +61,12 @@ const DEFAULT_REGISTRY = 'https://registry.npmmirror.com';
 const MAX_DEPTH = 3;
 /** 单包下载超时（ms）。 */
 const FETCH_TIMEOUT_MS = 30000;
+/**
+ * monorepo 自动下探的最大层数（相对仓库根、不含根自身）。
+ * 2 层是实测覆盖：`dsh-deep-whale/{maid-atelier,orca-link,skin-manager}/` 都在第 1 层；
+ * 再深（packages/foo/bar）属于"要用户明说"的那一类，不猜。
+ */
+const MONOREPO_SCAN_DEPTH = 2;
 
 // ── 皮肤市场「展示名 → 真实安装 spec」映射 ───────────────────────────────
 // 真机实证 2026-09-24：dsh-skin-market 的目录里用 `@dsh-external/dsh-client-ui-skin-*`
@@ -306,11 +327,19 @@ function parseGitHub(spec) {
   let branch = '';
   let subpath = '';
   /*
-   * 先摘 path（两种拼法都认）。
+   * 先摘 path（三种拼法都认）。
    * `[^#&?\s]*` 而不是 `.*`：值到下一个分隔符为止——这样 `#commit&path:/x` 与
    * `&path:/x#commit` 两种顺序都能正确切出。
+   *
+   * 【`#path:` 也必须认（2026-09-30）】上游仓库自带的 INSTALL.md 写的是
+   * `github:o/r#path:/sub`（pnpm github 简写的子目录形态，如
+   * `Small-tailqwq/dsh-deep-whale` 的 INSTALL.md）。旧正则只认 `&path:` / `?path=`，
+   * 于是 `#path:/sub` 整段被当成 **ref** ⇒ codeload URL 变成 `…/tar.gz/path:/sub`
+   * ⇒ **HTTP 404**：用户照着仓库文档抄也装不上，且报错与"仓库不存在"无从区分。
+   * 之所以敢收 `#path:`：git ref 名不含 `:`（`refs` 的禁字符集），
+   * 故 `#path[:=]` 不会误吞真分支/真 tag 名。
    */
-  const pathMatch = /[&?]path[:=]([^#&?\s]*)/.exec(s);
+  const pathMatch = /[&?#]path[:=]([^#&?\s]*)/.exec(s);
   if (pathMatch !== null) {
     subpath = pathMatch[1].trim();
     s = s.slice(0, pathMatch.index) + s.slice(pathMatch.index + pathMatch[0].length);
@@ -439,6 +468,169 @@ function readJsonSafe(p) {
 
 function ensureProfileDirs(profileDir) {
   fs.mkdirSync(path.join(profileDir, 'node_modules'), { recursive: true });
+}
+
+/**
+ * 【monorepo 自动下探（2026-09-30）】在一个解包出来的仓库树里找"子包目录"。
+ *
+ * 返回**相对 baseDir 的 POSIX 路径**数组（如 `['maid-atelier','orca-link']`），已排序。
+ * 判据刻意保守——**只认"目录里有 package.json"**，且遇到第一个包就停止往下：
+ *   · 顶层（depth 0）不算候选：调用方只在"根目录读不到 package.json"时才来问；
+ *   · `node_modules/` 与 `.` 开头的目录跳过（`.github/`、`.agents/` 里没有包，
+ *     但 `node_modules` 里可能有几百份 package.json，扫进去毫无意义）；
+ *   · 一个目录本身是包就不再往下找它的子目录（嵌套 workspace 属于"要用户明说"）。
+ *
+ * 【为什么必须"恰好一个才用"】`Small-tailqwq/dsh-deep-whale` 的 maid-atelier /
+ * orca-link / skin-manager **三个子包都声明了 `dsh.bundle`**，任何"挑那个像插件的"
+ * 启发式在这类仓库上都没有区分度 ⇒ 多候选时如实列给用户，不猜。
+ */
+function findPackageRoots(baseDir, maxDepth) {
+  const out = [];
+  const walk = (dir, rel, depth) => {
+    if (depth > maxDepth) {
+      return;
+    }
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (e) {
+      return;
+    }
+    if (depth > 0 && entries.some((e) => e.isFile() && e.name === 'package.json')) {
+      out.push(rel);
+      return;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name === 'node_modules' || e.name.startsWith('.')) {
+        continue;
+      }
+      walk(path.join(dir, e.name), rel.length > 0 ? rel + '/' + e.name : e.name, depth + 1);
+    }
+  };
+  walk(baseDir, '', 0);
+  return out.sort();
+}
+
+/**
+ * 【同一性守卫（2026-09-30）】"回退到 npm 同名包"必须是**同一个仓库**，否则退回就是
+ * 装了个无关的包——比失败更糟（用户以为装上了）。
+ *
+ * 判据：请求 spec 能解析出 `owner/repo`，且包 manifest 的 `repository` 指向同一个
+ * `owner/repo`（大小写不敏感）。`repository` 缺失、是别的 host、或指向别的仓库
+ * ⇒ 守卫失败，**不回退**、照原样报错。
+ *
+ * @param pkgMeta 包 manifest 的解析结果
+ * @param spec 用户请求的原始 spec
+ */
+function repositoryMatchesRequest(pkgMeta, spec) {
+  const gh = parseGitHub(spec);
+  if (gh === null) {
+    return false;
+  }
+  if (pkgMeta === null || typeof pkgMeta !== 'object' || Array.isArray(pkgMeta)) {
+    return false;
+  }
+  let url = '';
+  const repo = pkgMeta.repository;
+  if (typeof repo === 'string') {
+    url = repo;
+  } else if (repo !== null && typeof repo === 'object' && typeof repo.url === 'string') {
+    url = repo.url;
+  }
+  if (url.trim().length === 0) {
+    return false;
+  }
+  const m = /github\.com[/:]([^/\s]+)\/([^/\s#?]+?)(?:\.git)?\/?$/i.exec(url.trim());
+  if (m === null) {
+    return false;
+  }
+  return m[1].toLowerCase() === gh.owner.toLowerCase()
+    && m[2].toLowerCase() === gh.repo.toLowerCase();
+}
+
+/**
+ * 【幂等分支按仓库找已落位的包（2026-09-30）】GitHub spec 推不出真实包名：占位名是
+ * `owner--repo`（如 `dsh-market--dsh-market`），而落位用的是 tarball/manifest 里的
+ * `name`（如 `dshmarket`）。于是"用 GitHub 地址装第二次"时 `existsSync(占位名)` 落空，
+ * 结果被说成 `包已存在（幂等，无需重装）`——名字还是错的（真机实证：dsh-market 回退
+ * 装成 dshmarket 后，再贴一次 GitHub 地址就走到这条）。
+ *
+ * 判据：`node_modules/<name>/package.json` 的 `repository` 指向请求的 owner/repo
+ * （与回退守卫 `repositoryMatchesRequest` 同一把尺子）。只在幂等分支调用——那里本来
+ * 就没有别的办法知道包名，扫一遍目录是可接受的代价。
+ *
+ * @returns 找到的包名，找不到返回 `''`
+ */
+function findInstalledByRepository(profileDir, spec) {
+  const nm = path.join(profileDir, 'node_modules');
+  let entries = [];
+  try {
+    entries = fs.readdirSync(nm, { withFileTypes: true });
+  } catch (e) {
+    return '';
+  }
+  const scoped = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) {
+      continue;
+    }
+    if (e.name.startsWith('@')) {
+      let inner = [];
+      try {
+        inner = fs.readdirSync(path.join(nm, e.name), { withFileTypes: true });
+      } catch (err) {
+        inner = [];
+      }
+      for (const i of inner) {
+        if (i.isDirectory()) {
+          scoped.push(e.name + '/' + i.name);
+        }
+      }
+    } else {
+      scoped.push(e.name);
+    }
+  }
+  scoped.sort();
+  for (const name of scoped) {
+    const meta = readJsonSafe(path.join(nm, name, 'package.json'));
+    if (meta !== null && repositoryMatchesRequest(meta, spec)) {
+      return name;
+    }
+  }
+  return '';
+}
+
+/** 读已落位包的 manifest 版本；读不到/无 version 字段 ⇒ `''`（调用方据此不判漂移）。 */
+function readInstalledVersion(destDir) {
+  const meta = readJsonSafe(path.join(destDir, 'package.json'));
+  return meta && typeof meta.version === 'string' ? meta.version : '';
+}
+
+/**
+ * 【P1-2（2026-09-28）】磁盘版本 vs 本次解析出的目标版本，是否漂移。
+ *
+ * 这条判据守的是"清单声明 ≠ 磁盘实际"的静默不一致：profile/package.json 写
+ * `dshmarket: 1.66.2`、node_modules 里还是 1.65.1（真机现场）。旧实现只判"入口
+ * 可加载"就幂等跳过，于是 `pnpm add <pkg>@<目标>` 永远"成功"却永不收敛；0.2.0
+ * 的兼容检查按**磁盘**版本判定 ⇒ 该插件被静默跳过，市场 UI 与实际运行版本长期不符。
+ *
+ * 判据刻意保守，宁可不判也不误判（误判 = 每次安装都无谓重下整棵依赖树）：
+ *   · 两侧都要有可读版本号——任一侧为空（半残包、manifest 无 version）不判漂移，
+ *     交回"入口可加载即幂等"的旧语义，由残留自愈那条路径处理；
+ *   · 只对 npm 形态比对：GitHub 形态的 `resolved.version` 是 **ref**（`HEAD` /
+ *     `dev` / `<commit>`），与 manifest 里的 semver 不同维度，比了就必然误报；
+ *   · 必须是"同一个 name"下的比较——调用方用 `resolved.name` 取磁盘版本，同名才进来。
+ */
+function versionDrifted(resolved, haveVersion) {
+  if (!resolved || resolved.kind !== 'npm') {
+    return false;
+  }
+  const want = typeof resolved.version === 'string' ? resolved.version.trim() : '';
+  const have = typeof haveVersion === 'string' ? haveVersion.trim() : '';
+  if (want.length === 0 || have.length === 0) {
+    return false;
+  }
+  return want !== have;
 }
 
 /**
@@ -648,11 +840,21 @@ async function installSpecInner(spec, opts) {
   const seen = new Set();
   let topName = '';
   let topVersion = '';
+  // 【P1-2（2026-09-28）】被"版本漂移重装"顶掉的旧版本号：resolved.name → 磁盘上原版本。
+  // 结果里带 beforeVersion → afterVersion，让"清单声明 ≠ 磁盘实际"这种静默不一致
+  // 在 .done JSON 里可见（真机表现：市场 UI 显示 1.66.2、实际跑 1.65.1）。
+  const beforeVersions = new Map();
+  let topBeforeVersion = '';
   // 【登记门控（2026-09-25 报告）】顶层包的 manifest 本体，供循环后判定"登记到哪"。
   // 判据与落点见 topPackageDisposition 的注释（声明 dsh.bundle ⇒ 进 dsh.profile.bundles；
   // 否则什么都不登记）。旧写法用一个 `topHasBundle` 布尔并去写**用户行**，方向是反的。
   let topPkgForRow = null;
   let note = '重启应用后生效（bundle 型插件已登记，启动时随 profile 挂载）';
+  /* 【GitHub 回退的记账】见落位校验失败那段：回退到 npm 同名包后，把"改用了谁"记下来
+   * 进 note（.done JSON 自证），并把 npm 名留给幂等分支用作 id——GitHub spec 推出来的
+   * 占位名是 `owner--repo`，与 tarball 内真名（如 `dshmarket`）不同，不记就会在"第二次
+   * 安装"时找不到已落位目录、把结果说成"包已存在（幂等，无需重装）"（名字还是错的）。 */
+  let githubFallbackNote = '';
   const queue = [{ spec: spec.trim(), depth: 0 }];
   while (queue.length > 0) {
     const job = queue.shift();
@@ -676,11 +878,25 @@ async function installSpecInner(spec, opts) {
       // 既有逻辑见目录在就直接 seen+跳过 ⇒ topName 空、installed=[] ⇒ 返回"没有
       // 新装任何包"。这里改为：已存在但**可加载**才跳过（幂等）；存在但判坏（半残
       // 残留）→ 视为未装，走下方重新下载落位（清掉旧目录，装新的）。
-      if (userRowLoadable(profileDir, resolved.name).length === 0) {
+      // 【P1-2（2026-09-28）】但"可加载"只证明入口在、**不证明版本对**。真机现场：
+      // profile/package.json 声明 dshmarket@1.66.2、磁盘还是 1.65.1（等长改写之外
+      // 的另一类静默不一致）。旧写法永远走幂等分支 continue ⇒ 之后任何
+      // `pnpm add <pkg>@1.66.2` 都"成功"却永不收敛；而 0.2.0 的兼容检查按**磁盘**
+      // 版本判定 ⇒ 该插件被静默跳过、市场 UI 与实际运行版本长期不符。故补一维判据：
+      // 磁盘 manifest 的 version 与本次解析出的目标版本不一致 ⇒ 视为未装、重落位。
+      const haveVersion = readInstalledVersion(dest);
+      const drifted = versionDrifted(resolved, haveVersion);
+      if (userRowLoadable(profileDir, resolved.name).length === 0 && !drifted) {
         seen.add(resolved.name);
-        continue; // 已装且完整（幂等）
+        continue; // 已装、完整、且版本一致（真幂等）
       }
-      log('已装目录不完整（' + resolved.name + '），清除残留并重新安装…');
+      if (drifted) {
+        log('已装版本漂移（' + resolved.name + '：磁盘 ' + haveVersion + ' ≠ 目标 '
+          + resolved.version + '），清除旧目录并重新落位…');
+      } else {
+        log('已装目录不完整（' + resolved.name + '），清除残留并重新安装…');
+      }
+      beforeVersions.set(resolved.name, haveVersion);
       fs.rmSync(dest, { recursive: true, force: true });
     }
     log('下载 ' + resolved.name + '@' + resolved.version + ' …');
@@ -734,10 +950,42 @@ async function installSpecInner(spec, opts) {
           + `（tarball 根=${tmp}，试过 ${sub}）`);
       }
     }
+    /*
+     * 【monorepo 自动下探（2026-09-30 用户报"给 github 地址装不上"）】没给 `&path:`
+     * 且根目录读不到 package.json 时，先自己找一层，别直接报"没有可识别的
+     * package.json"——那句话对用户毫无可操作性（他不知道该往地址后面补什么）。
+     *
+     * 只认两种结果：**恰好一个包 ⇒ 用它**（等价于自动补 `&path:`）；**多个包 ⇒ 报错
+     * 并把候选列出来**。为什么不挑"那个声明了 dsh.bundle 的"：实测
+     * `Small-tailqwq/dsh-deep-whale` 的三个子包**全部**声明 dsh.bundle，该启发式在这里
+     * 无区分度，瞎猜等于装错包。
+     *
+     * 基准用 soleDir（codeload 的 `<repo>-<ref>/` 外壳），理由同上面那段注释。
+     * 只在 GitHub 形态下探：npm tarball 的包根是约定的 `package/`，缺 manifest 就是坏包。
+     */
+    if (resolved.kind === 'github' && subpath.length === 0) {
+      const probe = readJsonSafe(path.join(realRoot, 'package.json'));
+      if (probe === null || typeof probe.name !== 'string') {
+        const scanBase = soleDir.length > 0 ? soleDir : realRoot;
+        const roots = findPackageRoots(scanBase, MONOREPO_SCAN_DEPTH);
+        if (roots.length === 1) {
+          realRoot = path.join(scanBase, ...roots[0].split('/'));
+          log(`仓库根目录没有 package.json，自动进入唯一的子包目录：${roots[0]}`);
+        } else if (roots.length > 1) {
+          fs.rmSync(tmp, { recursive: true, force: true });
+          throw new Error('该仓库根目录没有 package.json（可能是 monorepo），'
+            + '找到多个子包，请在地址后指定其中一个（&path:/<子目录>）：'
+            + roots.map((r) => '&path:/' + r).join(' 或 '));
+        }
+        // roots.length === 0：交给下面原有的"没有可识别的 package.json"报错，文案更准。
+      }
+    }
     const pkgMeta = readJsonSafe(path.join(realRoot, 'package.json'));
     if (pkgMeta === null || typeof pkgMeta.name !== 'string') {
       fs.rmSync(tmp, { recursive: true, force: true });
-      throw new Error('tarball 里没有可识别的 package.json：' + job.spec);
+      throw new Error('tarball 里没有可识别的 package.json：' + job.spec
+        + '（该仓库根目录没有 package.json，且未找到子包目录；'
+        + '若它是 monorepo，请在地址后加 &path:/<子目录>）');
     }
     // GitHub spec 的包名以 tarball 内声明为准（修正占位名）
     const finalName = pkgMeta.name;
@@ -760,6 +1008,50 @@ async function installSpecInner(spec, opts) {
     const loadableReason = userRowLoadable(profileDir, finalName);
     if (loadableReason.length > 0) {
       fs.rmSync(finalDest, { recursive: true, force: true });
+      fs.rmSync(tmp, { recursive: true, force: true });
+      /*
+       * 【GitHub 源码树缺构建产物 ⇒ 回退 registry 上的同名包（2026-09-30）】
+       *
+       * 现场：用户在插件入口填 `https://github.com/dsh-market/dsh-market`，装完必失败——
+       * `package.json` 的 `main` 指向 `lib/index.js`、`files` 里也列着 `lib`，但 `lib/`
+       * 是 `npm run build`（tsc + tsdown）生成的，**只随 npm 发布物存在**，GitHub
+       * 源码 tarball 里没有（实测：codeload 4,445,445B / 279 条目，`lib/` 0 条；
+       * npm tarball 177 条目里 47 个 `lib/*.js`）。端侧没有 pnpm/tsc（见文件头），
+       * 源码树装下来必然起不来 ⇒ 落位校验必然拒绝。
+       *
+       * 处置：改用 registry 上**同名**的 npm 包。四条纪律：
+       *   ① **必须同一性守卫** —— 包 manifest 的 `repository` 要指向请求的
+       *      owner/repo（`repositoryMatchesRequest`）。否则"回退"就是装了个无关的
+       *      包，比失败更糟（用户以为装上了）。守卫失败照旧报错。
+       *   ② **只回退一次** —— 回退后的 job 带 `noFallback`，npm 形态再失败直接报错，
+       *      不递归互回退（否则可能来回弹）。
+       *   ③ **只在未给 `&path:` 时回退** —— 用户明确指了子目录，说明他要的就是源码树
+       *      里那个包，替他换成 npm 包是违背意图的。
+       *   ④ 版本取 registry 上的最新（`resolveSpec` 走 `latest`），与上游
+       *      `dsh plugin add <name>` 行为一致；profile 里记的依赖值仍是**用户原始
+       *      GitHub spec**（见 mergeDependencies 注释：市场按这个字符串做来源比对）。
+       */
+      if (resolved.kind === 'github' && subpath.length === 0 && job.noFallback !== true
+        && repositoryMatchesRequest(pkgMeta, job.spec)) {
+        let npmResolved = null;
+        try {
+          npmResolved = await resolveSpec(pkgMeta.name, registry);
+        } catch (e) {
+          npmResolved = null;
+        }
+        if (npmResolved !== null && npmResolved.kind === 'npm' && npmResolved.name === pkgMeta.name) {
+          log('GitHub 源码树缺构建产物（' + loadableReason + '），改用 registry 上的同名包 '
+            + npmResolved.name + '@' + npmResolved.version + ' …');
+          githubFallbackNote = '（GitHub 仓库的源码树不含构建产物，已改用 npm 上的同名包 '
+            + npmResolved.name + '@' + npmResolved.version + '）';
+          queue.unshift({
+            spec: npmResolved.name + '@' + npmResolved.version,
+            depth: job.depth,
+            noFallback: true,
+          });
+          continue;
+        }
+      }
       fs.rmSync(tmpRoot, { recursive: true, force: true });
       throw new Error('落位校验失败（已回滚，不留半残包）：' + loadableReason
         + '；tgz=' + tgz.length + 'B，解包写入 ' + ext.written + ' 文件'
@@ -776,6 +1068,8 @@ async function installSpecInner(spec, opts) {
     if (topName.length === 0) {
       topName = finalName;
       topVersion = String(pkgMeta.version || resolved.version);
+      // 【P1-2】顶层包若是"被版本漂移顶掉"的那个，把旧版本记下来（首次安装时 map 里没有 ⇒ 空串）。
+      topBeforeVersion = beforeVersions.has(finalName) ? beforeVersions.get(finalName) : '';
       // 【为什么要留下 manifest 本体】登记落点（bundles 还是 plain）由**顶层包的
       // manifest** 决定，而判定发生在循环之后 ⇒ 这里把解析结果存下来，
       // 不要在循环末再读一次文件（那会多一次 I/O，也容易读到别的东西）。
@@ -801,6 +1095,15 @@ async function installSpecInner(spec, opts) {
       topIdRaw = np.name;
     } else if (gh !== null) {
       topIdRaw = gh.owner + '--' + gh.repo; // 与 resolveSpec 的 GitHub 占位名一致（落位后会按 tarball 内名修正，此处仅尽力）
+    }
+    // 【GitHub 形态补一步】占位名匹配不到时，按 manifest 的 repository 反查真实包名
+    // （见 findInstalledByRepository 注释：回退装成 npm 名之后，再贴 GitHub 地址就是
+    // 走到这里）。找到就用它——否则下面的幂等返回会把名字说错。
+    if (gh !== null && !fs.existsSync(path.join(profileDir, 'node_modules', topIdRaw, 'package.json'))) {
+      const byRepo = findInstalledByRepository(profileDir, spec.trim());
+      if (byRepo.length > 0) {
+        topIdRaw = byRepo;
+      }
     }
     if (topIdRaw.length > 0
       && fs.existsSync(path.join(profileDir, 'node_modules', topIdRaw, 'package.json'))) {
@@ -856,9 +1159,13 @@ async function installSpecInner(spec, opts) {
     ok: true,
     name: topName,
     version: topVersion,
+    // 【P1-2】漂移重装时把旧版本带出来：`beforeVersion` 仅在"因版本不一致被顶掉"时存在，
+    // 让 .done JSON 自证"这次为什么重装"（否则只有 installed 非空，看不出是漂移还是首次装）。
+    beforeVersion: topBeforeVersion || (beforeVersions.has(topName) ? beforeVersions.get(topName) : ''),
+    afterVersion: topVersion,
     installed: installed,
     registry: registry,
-    note: note,
+    note: note + githubFallbackNote,
   };
 }
 
@@ -1219,4 +1526,19 @@ async function removeSpecInner(spec, opts) {
   };
 }
 
-module.exports = { installSpec, removeSpec, extractTar, resolveSpec, readRegistry, DEFAULT_REGISTRY, dshmSkinAlias };
+module.exports = {
+  installSpec,
+  removeSpec,
+  extractTar,
+  resolveSpec,
+  readRegistry,
+  DEFAULT_REGISTRY,
+  dshmSkinAlias,
+  readInstalledVersion,
+  versionDrifted,
+  // 【为什么导出这两个纯函数】它们的判据是"猜测"性质的（下探哪个目录、回退到哪个包），
+  // 靠集成测试只能覆盖到手上恰好有的那几个仓库。导出后可在门禁里用临时目录把边界
+  // （多候选、node_modules 干扰、不同仓库、repository 缺失）逐条钉住，零网络。
+  findPackageRoots,
+  repositoryMatchesRequest,
+};

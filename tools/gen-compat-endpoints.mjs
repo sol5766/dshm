@@ -13,6 +13,7 @@
  */
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 const ROOT = process.cwd();
 /**
@@ -25,7 +26,8 @@ const CONTRACTS = process.env.DSH_CONTRACTS
   ?? join(ROOT, '.research', 'protocol', 'contracts.json');
 const OUT = join(ROOT, 'dshcompat', 'src', 'main', 'ets', 'Endpoints.ets');
 const DSH_NM = process.env.DSH_NODE_MODULES
-  ?? 'C:\\Users\\aotian\\AppData\\Roaming\\io.github.hairyf.deepseek-harness-desktop\\dependencies\\dsh\\node_modules';
+  ?? join(homedir(), 'AppData', 'Roaming', 'io.github.hairyf.deepseek-harness-desktop',
+    'dependencies', 'dsh', 'node_modules');
 
 /**
  * 生成物所标注的核心包版本与采集时间。

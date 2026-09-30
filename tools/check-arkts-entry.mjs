@@ -20,20 +20,90 @@
  *   node tools/check-arkts-entry.mjs --self-test  # 判定器自检（注入式正/负样例）
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const ROOT = process.cwd();
 const MODULE = 'entry';
 const LOG_DIR = join(ROOT, 'dist', 'arkts-entry');
 
-/** CLT 根目录：环境变量优先，其次本机既定安装位置 */
+/* ───────────────────────── 路径解析（Linux CLT 与 Windows IDE 两套布局） ─────────────────────────
+ *
+ * 【为什么要有这一段】本脚本最初只认 Linux CLT 布局（`/home/node/deveco-clt/command-line-tools`
+ * + `<CLT>/tool/node/bin/node` + `JAVA_HOME=/home/node/jdk/...`），于是在 Windows 上恒 exit 3。
+ * `docs/90-DSH鸿蒙原生实现全流程.md` §2.4（:4336-4360）把这件事查清并写明：
+ *   · `join(clt,'tool','node','bin','node')` —— Linux 布局；Windows 上是 `<IDE>\tools\node\node.exe`，
+ *     且**必须带 `.exe`**：`execFileSync` 在 Windows 上不会为无扩展名的路径补 `.exe`
+ *     （该章实测 `spawnSync <shim>/tool/node/bin/node ENOENT`，换显式 `node.exe` 立刻成功）。
+ *   · `JAVA_HOME` 默认值写死 Linux 路径 ⇒ 不设环境变量就 exit 3。
+ *   · 之后 `DEVECO_SDK_HOME=join(clt,'sdk')` 同样是 Linux 布局（Windows 上是 `<IDE>\sdk`）。
+ *
+ * 后果不只是"跑不起来"：本脚本守的是 `entry/src/main/ets`（`Index.ets` 与全部 Pane，
+ * 也就是 P1~P3 与本次外链外开改动的主要落点），它长期 exit 3
+ * ⇒ **这一层的 ArkTS 编译在本机等于从未被验证过**，而"exit 3"很容易被读成"环境限制，没办法"。
+ * 写法照抄 `tools/place-toolchain.mjs` 的 `findHostPython()`：**候选列表 + 逐个验证存在性**，
+ * 找不到仍 **exit 3**（不把"没跑成"说成"通过"）。
+ *
+ * 教训（该章原话）：**"环境受限"这四个字要先验证**，否则会把"可修的脚本缺陷"永久正当化。 */
+
+/** CLT 根目录候选：环境变量 → Linux 既定安装位置 → Windows IDE 自带布局 */
+function cltCandidates() {
+  const list = [];
+  if (process.env.DEVECO_CLI_CLT_PATH) list.push(process.env.DEVECO_CLI_CLT_PATH);
+  list.push('/home/node/deveco-clt/command-line-tools');
+  const programFiles = process.env.ProgramFiles ?? process.env.PROGRAMFILES;
+  if (programFiles !== undefined && programFiles.length > 0) {
+    list.push(join(programFiles, 'Huawei', 'DevEco Studio', 'tools'));
+  }
+  return list;
+}
+
 function resolveClt() {
-  const candidates = [];
-  if (process.env.DEVECO_CLI_CLT_PATH) candidates.push(process.env.DEVECO_CLI_CLT_PATH);
-  candidates.push('/home/node/deveco-clt/command-line-tools');
-  for (const c of candidates) {
+  for (const c of cltCandidates()) {
     if (existsSync(join(c, 'hvigor', 'bin', 'hvigorw.js'))) return c;
+  }
+  return null;
+}
+
+/** 跑 hvigor 的 node：CLT 自带优先，最后回落到"正在跑本脚本的 node"（打印说明，不静默） */
+function resolveNodeBin(clt) {
+  const exe = process.platform === 'win32' ? '.exe' : '';
+  const candidates = [
+    join(clt, 'tool', 'node', 'bin', 'node' + exe),  // Linux CLT 布局（原有）
+    join(clt, 'node', 'node' + exe),                 // Windows IDE 布局：<IDE>\tools\node\node.exe
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  // 回落并不削弱判定：容器换了布局时门禁仍能跑，而"通过"依旧要求真的看到 BUILD SUCCESSFUL；
+  // 用错 node 只会造成**诚实的失败**（exit 1），不会造成假的通过。
+  console.log(`注：CLT 里没找到自带 node（试过 ${candidates.join(' / ')}），改用运行本脚本的 ${process.execPath}`);
+  return process.execPath;
+}
+
+/** JDK 候选：环境变量 → Linux 既定安装位置 → IDE 自带 jbr（`<IDE>\jbr`） */
+function resolveJavaHome(clt) {
+  const candidates = [];
+  if (process.env.JAVA_HOME) candidates.push(process.env.JAVA_HOME);
+  candidates.push('/home/node/jdk/jdk-17.0.20.1+1');
+  candidates.push(join(clt, 'jbr'));
+  candidates.push(join(clt, '..', 'jbr'));
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+/** SDK 根：环境变量 → Windows IDE 布局（`<IDE>\sdk`）→ Linux CLT 布局（`<CLT>/sdk`） */
+function resolveSdkHome(clt) {
+  const candidates = [];
+  for (const v of [process.env.DEVECO_SDK_HOME, process.env.OHOS_SDK_HOME]) {
+    if (v !== undefined && v.length > 0) candidates.push(v);
+  }
+  candidates.push(join(clt, '..', 'sdk'));
+  candidates.push(join(clt, 'sdk'));
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
   }
   return null;
 }
@@ -108,22 +178,33 @@ if (!clt) {
   console.error('  设置 DEVECO_CLI_CLT_PATH 后重跑。⚠️ 退出码 3 = 没跑成，不是通过。');
   process.exit(3);
 }
-const javaHome = process.env.JAVA_HOME || '/home/node/jdk/jdk-17.0.20.1+1';
-if (!existsSync(javaHome)) {
-  console.error(`环境受阻：找不到 JDK（JAVA_HOME=${javaHome}）。⚠️ 退出码 3 = 没跑成，不是通过。`);
+const javaHome = resolveJavaHome(clt);
+if (javaHome === null) {
+  console.error('环境受阻：找不到 JDK（试过 JAVA_HOME、/home/node/jdk/jdk-17.0.20.1+1、<IDE>/jbr）。');
+  console.error('  ⚠️ 退出码 3 = 没跑成，不是通过。');
+  process.exit(3);
+}
+const sdkHome = resolveSdkHome(clt);
+if (sdkHome === null) {
+  console.error('环境受阻：找不到 SDK（试过 DEVECO_SDK_HOME、OHOS_SDK_HOME、<IDE>/sdk、<CLT>/sdk）。');
+  console.error('  ⚠️ 退出码 3 = 没跑成，不是通过。');
   process.exit(3);
 }
 
 mkdirSync(LOG_DIR, { recursive: true });
 const logFile = join(LOG_DIR, 'compile.log');
-const nodeBin = join(clt, 'tool', 'node', 'bin', 'node');
+const nodeBin = resolveNodeBin(clt);
 const hvigorw = join(clt, 'hvigor', 'bin', 'hvigorw.js');
 const childEnv = {
   ...process.env,
   DEVECO_CLI_CLT_PATH: clt,
-  DEVECO_SDK_HOME: join(clt, 'sdk'),
+  DEVECO_SDK_HOME: sdkHome,
+  OHOS_SDK_HOME: sdkHome,
   JAVA_HOME: javaHome,
-  PATH: `${join(javaHome, 'bin')}:${process.env.PATH || ''}`
+  // 【必须是平台分隔符】原来写死 `:`：Windows 的 PATH 分隔符是 `;`，
+  // 拼出来的值会被整段当成**一个**目录 ⇒ java 找不到，报的是 `spawn java ENOENT`
+  // （与本机基线构建时踩过的坑同一个），与"没有 JDK"完全无关，极易误判。
+  PATH: `${join(javaHome, 'bin')}${delimiter}${process.env.PATH || ''}`
 };
 
 const args = [

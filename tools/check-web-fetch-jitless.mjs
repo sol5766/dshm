@@ -188,7 +188,13 @@ if (found === null) {
 
 /* ───────────────────── 子进程本尊：真正跑两臂 ───────────────────── */
 
-const LOADER = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resources', 'app', 'undici-loader.mjs');
+/* 【为什么必须是 file:// URL】`--experimental-loader` 吃的是 **ESM 说明符**，不是文件路径：
+ * Windows 上传 `D:\...\undici-loader.mjs` 会被默认 ESM 加载器当成协议 `d:` 而拒绝——
+ *   `ERR_UNSUPPORTED_ESM_URL_SCHEME: ... Received protocol 'd:'`
+ * 崩在第一条断言之前 ⇒ B 臂永远"没有产出断言汇总"，门禁在 Windows 上整体失效（假红）。
+ * `existsSync` 仍要用真实路径，所以两者分开存。 */
+const LOADER_PATH = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resources', 'app', 'undici-loader.mjs');
+const LOADER = pathToFileURL(LOADER_PATH).href;
 
 if (process.env.DSHM_WEBFETCH_ARM !== undefined) {
   const arm = process.env.DSHM_WEBFETCH_ARM;
@@ -300,12 +306,26 @@ if (process.env.DSHM_WEBFETCH_ARM !== undefined) {
 
 /* ───────────────────────── 父进程：跑两臂并判定 ───────────────────────── */
 
-if (!existsSync(LOADER)) {
-  console.log(`SKIP: 解析钩子不在应用资源里（${LOADER}）—— 先跑 node tools/place-host-app.mjs`);
+if (!existsSync(LOADER_PATH)) {
+  console.log(`SKIP: 解析钩子不在应用资源里（${LOADER_PATH}）—— 先跑 node tools/place-host-app.mjs`);
   process.exit(3);
 }
 
-const FLAGS = ['--jitless', '--no-experimental-fetch'];
+/* 【为什么要在运行时探测，而不是写死】
+ * `--no-experimental-fetch` 是**否定形态**，而 Node v24 的 fetch 已转正 ⇒ CLI 解析阶段
+ * 直接拒绝：`--no-experimental-fetch is an invalid negation because it is not a boolean
+ * option`，进程在跑到任何断言之前就退出。实测后果是**两臂同时哑火**：
+ * A 臂"失败了但没有 WASM 因果证据"、B 臂"没有产出断言汇总"，门禁整体失效（假红）。
+ * 端侧 `RuntimePort.buildHostArgv` 本就不带这个 flag（同一课已写在
+ * `check-origin-fence.mjs:119-121`），所以在新 Node 上剔掉它反而**更贴近端侧**；
+ * 旧 Node 上仍接受则原样保留。探测失败一律按"不接受"处理。 */
+const CANDIDATE_FLAGS = ['--jitless', '--no-experimental-fetch'];
+const FLAGS = CANDIDATE_FLAGS.filter((f) =>
+  spawnSync(process.execPath, [f, '-e', '0'], { encoding: 'utf8' }).status === 0);
+const droppedFlags = CANDIDATE_FLAGS.filter((f) => !FLAGS.includes(f));
+if (droppedFlags.length > 0) {
+  console.log(`注：本机 Node ${process.version} 不接受 ${droppedFlags.join(' ')}，已剔除（不影响本门禁的对照实验）`);
+}
 
 function runArm(id, label, extraFlags) {
   console.log(`\n──── ${label} ────`);

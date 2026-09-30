@@ -62,7 +62,9 @@ const STATE = join(ROOT, '.research', 'dev-host.json');
 const BUNDLE = arg('--bundle', 'com.dshm.dshclient');
 const ABILITY = arg('--ability', 'EntryAbility');
 const NO_LAUNCH = args.includes('--no-launch');
-const HDC = arg('--hdc', 'C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe');
+const HDC = arg('--hdc', process.env.DSHM_HDC
+  ?? join(process.env.LOCALAPPDATA ?? homedir(), 'OpenHarmony', 'Sdk', '26.0.0', 'toolchains',
+    process.platform === 'win32' ? 'hdc.exe' : 'hdc'));
 
 /** 找一个可用的 dsh 入口：优先隔离副本（不碰用户已装的那份），其次本机安装。 */
 function findDsh() {
@@ -73,7 +75,7 @@ function findDsh() {
   const candidates = [
     join(ROOT, '.research', 'upstream-0.1.5rc2', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     join(ROOT, '.research', 'upstream-0.1.5', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
-    'C:\\Users\\aotian\\AppData\\Roaming\\io.github.hairyf.deepseek-harness-desktop\\dependencies\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
+    join(homedir(), 'AppData', 'Roaming', 'io.github.hairyf.deepseek-harness-desktop', 'dependencies', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   ];
   for (const c of candidates) {
     if (existsSync(c)) {

@@ -88,13 +88,36 @@ declare function $r(value: string): Resource;
 declare type Resource = object;
 `;
 
-/** 找 tsc：CLT 自带 typescript，其次看 PATH */
-function findTsc() {
-  const candidates = [];
+/**
+ * 找 tsc。
+ *
+ * 历史：这里**只认 Linux 布局**（env 指到的 `<clt>/codelinter/…` + 写死的
+ * `/home/node/deveco-clt/…`），本机不设 `DEVECO_CLI_CLT_PATH` 就 exit 3。
+ * 而 DevEco Studio 的 Windows 安装里 `<IDE>\tools\hvigor\…` **自带 typescript**，
+ * 只是路径长得不一样 ⇒ 这不是"环境受限"，是**脚本缺陷**（同一个坑
+ * `tools/check-arkts-entry.mjs:49-59` 已用候选列表修过，这里照抄同一写法）。
+ *
+ * 候选顺序：显式 env → Linux 既定位置 → Windows IDE 自带布局 → 仓库/全局 node_modules。
+ * 找不到仍 **exit 3**（"没跑成"不写成"通过"）。
+ */
+function findTscCandidates() {
+  const list = [];
   const clt = process.env.DEVECO_CLI_CLT_PATH;
-  if (clt) candidates.push(join(clt, 'codelinter', 'node_modules', 'typescript', 'bin', 'tsc'));
-  candidates.push('/home/node/deveco-clt/command-line-tools/codelinter/node_modules/typescript/bin/tsc');
-  for (const c of candidates) {
+  if (clt) list.push(join(clt, 'codelinter', 'node_modules', 'typescript', 'bin', 'tsc'));
+  list.push('/home/node/deveco-clt/command-line-tools/codelinter/node_modules/typescript/bin/tsc');
+  const programFiles = process.env.ProgramFiles ?? process.env.PROGRAMFILES;
+  if (programFiles !== undefined && programFiles.length > 0) {
+    const tools = join(programFiles, 'Huawei', 'DevEco Studio', 'tools');
+    list.push(join(tools, 'hvigor', 'hvigor', 'node_modules', 'typescript', 'bin', 'tsc'));
+    list.push(join(tools, 'hvigor', 'hvigor-ohos-plugin', 'node_modules', 'typescript', 'bin', 'tsc'));
+    list.push(join(tools, 'ohpm', 'node_modules', 'typescript', 'bin', 'tsc'));
+  }
+  list.push(join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'));
+  return list;
+}
+
+function findTsc() {
+  for (const c of findTscCandidates()) {
     if (existsSync(c)) return c;
   }
   return null;

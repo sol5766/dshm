@@ -39,7 +39,12 @@ const DEST = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resourc
 //       被 main.js 安装队列段 `require('./dshm-installer.js')`（D26 插件安装器）。
 //       【2026-09-23 缺口教训】它曾靠 9/21 手工拷贝进 resfile、不在本清单——
 //       源头修改后 build 仍打旧文件，**全程零报错**，装机后表现为"修复不生效"。
-const FILES = ['main.js', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'dshm-installer.js', 'dshm-user-rows.js'];
+//   · dshm-skills.js
+//       被 main.js 的 ensureBundledSkills `require('./dshm-skills.js')`（P0-1 修复：
+//       skill 同步按内容 sha256 判等）。漏掉它 ⇒ 端侧 require 抛 MODULE_NOT_FOUND，
+//       被那个 try/catch 吞成一行 diag ⇒ **内置技能再也不更新**，与 P0-1 原来的
+//       症状（改了推不下去）一模一样，等于修复白做。同样必须进清单。
+const FILES = ['main.js', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'dshm-installer.js', 'dshm-user-rows.js', 'dshm-skills.js', 'dshm-compat.js'];
 
 mkdirSync(DEST, { recursive: true });
 

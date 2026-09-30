@@ -6,15 +6,15 @@
  *   node tools/gen-compat-endpoints.mjs
  * 漂移检测：node tools/compat-drift.mjs（对当前安装/checkout 的上游重新提取并比对）
  *
- * 采集对象：@deepseek-ai/dsh 0.1.7-rc.2 · 135 个 endpoint
+ * 采集对象：@deepseek-ai/dsh 0.2.0-rc.2 · 140 个 endpoint
  */
 
 import { ArgsShape, DshCapability, DshEndpoint, UpstreamIdentity } from './CompatTypes';
 
 export const UPSTREAM_IDENTITY: UpstreamIdentity = {
-  corePackage: '0.1.7-rc.2',
-  capturedAt: '2026-09-25T01:39:09.200Z',
-  endpointCount: 135
+  corePackage: '0.2.0-rc.2',
+  capturedAt: '2026-09-29T13:59:55.459Z',
+  endpointCount: 140
 };
 
 /** 全部 endpoint 调用契约（按 endpoint 名排序） */
@@ -848,6 +848,42 @@ export const DSH_ENDPOINTS: DshEndpoint[] = [
     capabilities: []
   },
   {
+    id: '@deepseek-ai/dsh-client-product-analytics#productAnalytics/enabled',
+    ns: 'productAnalytics',
+    method: 'enabled',
+    shape: ArgsShape.NONE,
+    params: [],
+    stream: false,
+    cancellable: false,
+    source: '',
+    capability: '',
+    capabilities: []
+  },
+  {
+    id: '@deepseek-ai/dsh-client-product-analytics#productAnalytics/report',
+    ns: 'productAnalytics',
+    method: 'report',
+    shape: ArgsShape.NAMED,
+    params: ['event'],
+    stream: false,
+    cancellable: false,
+    source: '',
+    capability: '',
+    capabilities: []
+  },
+  {
+    id: '@deepseek-ai/dsh-client-product-analytics#productAnalytics/watchPolicy',
+    ns: 'productAnalytics',
+    method: 'watchPolicy',
+    shape: ArgsShape.NONE,
+    params: [],
+    stream: true,
+    cancellable: true,
+    source: '',
+    capability: '',
+    capabilities: []
+  },
+  {
     id: '@deepseek-ai/dsh-schedule#schedule/catalog',
     ns: 'schedule',
     method: 'catalog',
@@ -1443,6 +1479,30 @@ export const DSH_ENDPOINTS: DshEndpoint[] = [
     params: ['agentId', 'id', 'attachmentId', 'data'],
     stream: false,
     cancellable: false,
+    source: '',
+    capability: '',
+    capabilities: []
+  },
+  {
+    id: '@deepseek-ai/dsh-user-questions#userQuestions/answer',
+    ns: 'userQuestions',
+    method: 'answer',
+    shape: ArgsShape.NAMED,
+    params: ['agentId', 'callId', 'answer'],
+    stream: false,
+    cancellable: false,
+    source: '',
+    capability: '',
+    capabilities: []
+  },
+  {
+    id: '@deepseek-ai/dsh-user-questions#userQuestions/attachWait',
+    ns: 'userQuestions',
+    method: 'attachWait',
+    shape: ArgsShape.NAMED,
+    params: ['agentId', 'callId'],
+    stream: true,
+    cancellable: true,
     source: '',
     capability: '',
     capabilities: []

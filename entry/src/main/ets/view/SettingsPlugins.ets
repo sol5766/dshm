@@ -20,6 +20,25 @@
  * 的 ArkUI 入口：把 spec 写进 `$DSH_HOME/install-queue/<id>.req`，轮询读
  * `<id>.done` / `<id>.fail`，安装完成后随应用重启生效（composeUserRows 把
  * 用户行拼进 cordis.patch.yml）。模型侧的同款入口见 skill `ohos-plugin-install`。
+ *
+ * ## 兼容性豁免开关（P1-3，2026-09-28）
+ *
+ * 核心 0.2.0-rc.1 起，peerDependencies 锁 `@deepseek-ai/dsh` 0.1.x 的插件会被
+ * **拒绝挂载**，上游给的唯一出路是 `dsh plugin allow-version` 或插件管理器。
+ * 端侧两条路原先都是死的：`dsh` 假壳没有 allow-version；插件管理器恰好就是那个
+ * 被跳过的插件（鸡生蛋）。现在补上了两条：假壳子命令（命令行）与本页开关（UI）。
+ *
+ * 【为什么这里必须能"撤销"而不只是个开关】豁免记录是 `包名@精确版本 → 运行时版本[]`，
+ * 粒度是**一对精确版本**，不是"这个包以后都放过"。所以本页的输入是
+ * `<包名>@<精确版本>`（不是包名），并要求显式勾选风险确认——上游
+ * `setProfileVersionExemption` 在 `acceptRisk !== true` 时会直接抛错，
+ * 这不是端侧加的装饰性确认。
+ *
+ * 【为什么写 `.compat-req` 而不是自己写 compatibility.json】豁免文件的 schema
+ * （精确版本校验、坏记录跳过但保留其余、`rewritable` 语义）由上游
+ * `@deepseek-ai/dsh-app-boot` 定义。自己按 schema 写文件一旦偏离，上游会**静默不认**
+ * ——用户以为授权成功、插件仍被跳过，比没有开关更难排查。所以这里只投一条请求，
+ * 由 Host 侧的 `dshm-compat.js` 转调上游那三个导出。
  */
 
 import { Fs, PluginItem, Radius, Sp, classifyPlugin, pluginSummary } from 'appstate';
@@ -50,8 +69,23 @@ export struct SettingsPlugins {
   /** 本次请求的基名（ui-<ts>），.done/.fail 与之配对 */
   private installReqBase: string = '';
 
+  // ── 兼容性豁免区块状态（P1-3）──────────────────────────────────────
+  /** `<包名>@<精确版本>` 草稿 */
+  @State compatPkgInput: string = '';
+  /** 风险确认勾选：**默认 false**，上游要求显式确认才允许授予 */
+  @State compatAcceptRisk: boolean = false;
+  /** idle=未提交；busy=等 Host 结果；done=成功；fail=失败 */
+  @State compatPhase: string = 'idle';
+  /** 豁免结果文案 */
+  @State compatMsg: string = '';
+  /** 轮询定时器句柄；-1 = 未启动 */
+  private compatTimerId: number = -1;
+  /** 本次请求的基名（uic-<ts>），与 .compat-req 同基名 */
+  private compatReqBase: string = '';
+
   aboutToDisappear(): void {
     this.stopInstallPolling();
+    this.stopCompatPolling();
   }
 
   build() {
@@ -139,6 +173,58 @@ export struct SettingsPlugins {
             .fontSize(Fs.CAPTION)
             .fontColor(this.installPhase === 'done' ? $r('sys.color.confirm')
               : this.installPhase === 'fail' ? $r('sys.color.warning')
+                : $r('sys.color.font_tertiary'))
+            .width('100%')
+        }
+      }
+      .width('100%')
+      .padding(Sp.M)
+      .borderRadius(Radius.M)
+      .backgroundColor($r('sys.color.background_secondary'))
+
+      // ── P1-3 兼容性豁免区块：文件队列（.compat-req → .done/.fail）──
+      Column({ space: Sp.S }) {
+        Text('兼容性豁免（风险自负）')
+          .fontSize(Fs.SECONDARY)
+          .width('100%')
+        Text('核心 0.2.0 起会拒绝挂载 peerDependencies 仍锁 0.1.x 的插件（如 dshmarket / dsh-better-sidebar）。'
+          + '豁免的粒度是**一对精确版本**：必须填 `<包名>@<精确版本>`（不接受 ^ 或 range），且只对当前运行的核心版本生效。')
+          .fontSize(Fs.CAPTION)
+          .fontColor($r('sys.color.font_tertiary'))
+          .width('100%')
+        Row({ space: Sp.S }) {
+          TextInput({ text: this.compatPkgInput, placeholder: '如 dshmarket@1.66.2' })
+            .layoutWeight(1)
+            .onChange((v: string) => {
+              this.compatPkgInput = v;
+            })
+          Button('授予')
+            .enabled(this.compatPhase !== 'busy' && this.compatAcceptRisk)
+            .onClick(() => this.startCompat(true))
+          Button('撤销')
+            .enabled(this.compatPhase !== 'busy')
+            .onClick(() => this.startCompat(false))
+        }
+        .width('100%')
+        // 风险确认必须由用户主动勾选：上游 setProfileVersionExemption 在
+        // acceptRisk !== true 时会直接抛错（不是端侧加的装饰性确认），所以这里
+        // 默认 false 且「授予」按钮在未勾选时禁用——避免点了才被上游拒绝。
+        Row({ space: Sp.S }) {
+          Toggle({ type: ToggleType.Switch, isOn: this.compatAcceptRisk })
+            .onChange((isOn: boolean) => {
+              this.compatAcceptRisk = isOn;
+            })
+          Text('我了解：不兼容的插件可能导致崩溃或数据丢失')
+            .fontSize(Fs.CAPTION)
+            .fontColor($r('sys.color.font_tertiary'))
+            .layoutWeight(1)
+        }
+        .width('100%')
+        if (this.compatMsg.length > 0) {
+          Text(this.compatMsg)
+            .fontSize(Fs.CAPTION)
+            .fontColor(this.compatPhase === 'done' ? $r('sys.color.confirm')
+              : this.compatPhase === 'fail' ? $r('sys.color.warning')
                 : $r('sys.color.font_tertiary'))
             .width('100%')
         }
@@ -255,6 +341,127 @@ export struct SettingsPlugins {
     if (this.installTimerId >= 0) {
       clearInterval(this.installTimerId);
       this.installTimerId = -1;
+    }
+  }
+
+  /**
+   * 提交兼容性豁免请求（P1-3）：写 `<id>.compat-req`（JSON 载荷）。
+   *
+   * 【为什么载荷是 JSON 而不是像安装那样一行 spec】豁免需要三个字段
+   * （`packageVersion` / `enabled` / `acceptRisk`），用分隔符拼串会让"包名里恰好
+   * 含分隔符"变成注入面；队列另一端本来就要 `JSON.parse`。
+   *
+   * 【为什么不写 `.dir`（与安装通道一致）】省略时 Host 回退到宿主 profile
+   * （`$DSH_HOME/profiles/<PROFILE>`，默认 ondevice）——正是兼容性检查读取的那个
+   * 目录。界面拿不到 profile 名，硬猜反而会写错。结果里带回 Host 实际写入的
+   * `profileDir` 并如实展示，避免"写到了别处却以为成功"。
+   *
+   * 【撤销也走同一通道】豁免是"一对精确版本"的集合，撤销只是从数组里去掉当前
+   * 运行时版本；空数组则删除该键。撤销不需要风险确认（是在收紧权限）。
+   */
+  private startCompat(enable: boolean): void {
+    const pkg: string = this.compatPkgInput.trim();
+    if (pkg.length === 0 || this.compatPhase === 'busy') {
+      return;
+    }
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const queueDir: string = `${ctx.filesDir}/dsh/home/install-queue`;
+    try {
+      fileIo.mkdirSync(queueDir, true);
+    } catch (e) {
+      this.compatPhase = 'fail';
+      this.compatMsg = `创建安装队列目录失败：${queueDir}`;
+      return;
+    }
+    const payload: Record<string, Object> = {};
+    payload['action'] = 'set';
+    payload['packageVersion'] = pkg;
+    payload['enabled'] = enable;
+    // 撤销不确认风险（收紧）；授予时必须由用户已勾选，服务端还会再拒一次
+    payload['acceptRisk'] = enable && this.compatAcceptRisk;
+    this.compatReqBase = `uic-${Date.now()}`;
+    const reqPath: string = `${queueDir}/${this.compatReqBase}.compat-req`;
+    try {
+      const file: fileIo.File = fileIo.openSync(reqPath,
+        fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
+      fileIo.writeSync(file.fd, JSON.stringify(payload));
+      fileIo.closeSync(file);
+    } catch (e) {
+      this.compatPhase = 'fail';
+      this.compatMsg = `写入豁免请求失败：${reqPath}`;
+      return;
+    }
+    this.compatPhase = 'busy';
+    this.compatMsg = enable
+      ? `已提交授予「${pkg}」，等待 Host 处理…`
+      : `已提交撤销「${pkg}」，等待 Host 处理…`;
+    const startedAt: number = Date.now();
+    this.stopCompatPolling();
+    this.compatTimerId = setInterval((): void => {
+      this.pollCompatResult(queueDir, pkg, enable, startedAt);
+    }, INSTALL_POLL_MS);
+  }
+
+  /** 轮询一轮：读 .done/.fail（读到即删结果文件并停表），超时则报错停表。 */
+  private pollCompatResult(queueDir: string, pkg: string, enable: boolean, startedAt: number): void {
+    const donePath: string = `${queueDir}/${this.compatReqBase}.done`;
+    const failPath: string = `${queueDir}/${this.compatReqBase}.fail`;
+    try {
+      const text: string = fileIo.readTextSync(donePath);
+      this.deleteQuietly(donePath);
+      this.stopCompatPolling();
+      this.compatPhase = 'done';
+      this.compatMsg = this.describeCompatDone(text, pkg, enable);
+      return;
+    } catch (e) {
+      // .done 不存在：继续看 .fail
+    }
+    try {
+      const text: string = fileIo.readTextSync(failPath);
+      this.deleteQuietly(failPath);
+      this.stopCompatPolling();
+      this.compatPhase = 'fail';
+      this.compatMsg = `豁免未生效：${this.describeError(text)}`;
+      return;
+    } catch (e) {
+      // .fail 也不存在：Host 还在处理，继续等
+    }
+    if (Date.now() - startedAt > INSTALL_TIMEOUT_MS) {
+      this.stopCompatPolling();
+      this.compatPhase = 'fail';
+      this.compatMsg = `等待超时（${INSTALL_TIMEOUT_MS / 1000}s）：Host 未回报「${pkg}」的豁免结果。请确认 Host 在运行（或查 dshm-host.log）后重试。`;
+    }
+  }
+
+  /**
+   * done JSON → 用户文案。
+   *
+   * 【为什么要显示 Host 实际写入的目录】界面不写 `.dir`（回退宿主 profile），
+   * 而"豁免写到了哪个 profile"恰好是这套机制最安静的失败点——写错目录时上游
+   * 读不到、插件仍被跳过，用户从提示里看不出任何异常。所以把 `profileDir`
+   * 原样呈现，让"授予成功"带上可核对的落点。
+   */
+  private describeCompatDone(text: string, pkg: string, enable: boolean): string {
+    try {
+      const r = JSON.parse(text) as Record<string, Object>;
+      const note = r['note'] as string;
+      const profileDir = r['profileDir'] as string;
+      const where: string = profileDir !== null && profileDir !== undefined && profileDir.length > 0
+        ? `（写入 ${profileDir}）` : '';
+      const base: string = enable ? `已授予「${pkg}」的精确版本豁免` : `已撤销「${pkg}」的豁免`;
+      if (note !== null && note !== undefined && note.length > 0) {
+        return `${base}。${note}${where}`;
+      }
+      return `${base}。重启应用后生效。${where}`;
+    } catch (e) {
+      return enable ? `已授予「${pkg}」。重启应用后生效。` : `已撤销「${pkg}」。`;
+    }
+  }
+
+  private stopCompatPolling(): void {
+    if (this.compatTimerId >= 0) {
+      clearInterval(this.compatTimerId);
+      this.compatTimerId = -1;
     }
   }
 

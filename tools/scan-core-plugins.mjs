@@ -11,13 +11,20 @@
  *   - <coreDir>/../plugin-scan.md  ：可直接抄进文档的证据表
  *
  * 用法：node tools/scan-core-plugins.mjs [coreDir]
- *   coreDir 默认 dist/core/work/dsh-core-0.1.5-rc.2
+ *   coreDir 默认跟着 hostcore/core-recipe.json 的 coreVersion 走：
+ *   dist/core/work/dsh-core-<coreVersion>
  */
-import { writeFileSync, existsSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { join, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { inventoryOf, pluginRowsOf } from './lib/core-inventory.mjs'
 
-const coreDir = process.argv[2] ?? join('dist', 'core', 'work', 'dsh-core-0.1.5-rc.2')
+// 默认核心树跟着配方走（core-recipe.json 是唯一事实来源）——原先写死
+// dsh-core-0.1.5-rc.2，升级后默认参数指向早已不存在的旧树，一跑就报
+// "no node_modules under …"（看起来像"核心树没物化"，其实是版本陈旧）。
+const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
+const RECIPE = JSON.parse(readFileSync(join(ROOT, 'hostcore', 'core-recipe.json'), 'utf8'))
+const coreDir = process.argv[2] ?? join(ROOT, 'dist', 'core', 'work', `dsh-core-${RECIPE.coreVersion}`)
 const nm = join(coreDir, 'node_modules')
 if (!existsSync(nm)) {
   console.error(`FATAL: no node_modules under ${coreDir}`)

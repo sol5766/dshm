@@ -198,7 +198,7 @@ function selfTest() {
     console.log(`  ${ok ? 'ok  ' : 'FAIL'}  期望 ${c.want} 实际 ${got}  ${c.why}`);
   }
   console.log(failed === 0
-    ? '\n✅ 自检通过：检测器在 8 个正/负样例上都符合预期。'
+    ? `\n✅ 自检通过：检测器在 ${cases.length} 个正/负样例上都符合预期。`
     : `\n❌ 自检失败 ${failed} 项——门禁不可信，不得据此判断架构是否合规。`);
   process.exit(failed === 0 ? 0 : 1);
 }

@@ -74,8 +74,32 @@ export interface VersionCheck {
  *                 ⇒ 这些端点**我方当前均未调用**（见下"影响面"），故本次升级只需
  *                 重生成上表 + 更新矩阵，不必改调用代码。
  *                 证据：`.research/protocol/drift-rc1-to-rc2.txt`。
+ *   0.2.0-rc.1 —— 端侧当前基线（138 端点）。相对 0.1.7-rc.2：**+3 / −0**、零契约变化：
+ *                 · 新增 `productAnalytics/{enabled,report,watchPolicy}`（后两者其一为
+ *                   一元 NAMED、其一为流式，命名空间整体为新包）。
+ *                 · 既有 135 个端点**逐条一致**（形状、参数、流式标记、可取消性均无变化）。
+ *                 ⇒ `productAnalytics/*` **我方当前未调用**（无对应能力项、无 UI 入口），
+ *                 故本次升级只需重生成上表 + 更新矩阵，**不必改调用代码**。
+ *                 证据：`.research/protocol/contracts-0.2.0-rc.1.json`（本地取证，
+ *                 `.research/` 已被 `.gitignore` 排除）+ `compat-drift` 实跑 exit=1（3 处新增）。
+ *   0.2.0-rc.2 —— 端侧当前基线（140 端点）。相对 0.2.0-rc.1：**+2 / −0**、零契约变化：
+ *                 · 新增 `userQuestions/{answer,attachWait}`（前者一元 NAMED、后者流式可取消，
+ *                   命名空间整体为新包）。
+ *                 · 既有 138 个端点**逐条一致**（形状、参数、流式标记、可取消性均无变化）。
+ *                 ⇒ `userQuestions/*` **我方当前未调用**（无对应能力项、无 UI 入口），
+ *                 故本次升级只需重生成上表 + 更新矩阵，**不必改调用代码**。
+ *                 证据：`.research/protocol/contracts-0.2.0-rc.2.json`（本地取证，
+ *                 `.research/` 已被 `.gitignore` 排除）+ `compat-drift` 实跑 exit=1（2 处新增）。
  */
-const SUPPORTED_VERSIONS: string[] = ['0.1.7-rc.2', '0.1.7-rc.1', '0.1.5-rc.2', '0.1.5-rc.1', '0.1.2-rc.1'];
+const SUPPORTED_VERSIONS: string[] = [
+  '0.2.0-rc.2',
+  '0.2.0-rc.1',
+  '0.1.7-rc.2',
+  '0.1.7-rc.1',
+  '0.1.5-rc.2',
+  '0.1.5-rc.1',
+  '0.1.2-rc.1'
+];
 
 /** 协议骨架端点：缺任一个即视为不兼容（连基本会话都做不了） */
 const PROTOCOL_SKELETON: string[] = ['session/list', 'session/create', 'session/prompt'];
