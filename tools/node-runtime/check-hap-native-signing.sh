@@ -14,7 +14,9 @@
 # ASCII only.
 set -uo pipefail
 
-REPO="/mnt/d/Develop/deepseek-harness-desktop-HarmonyOS"
+# REPO 默认按脚本位置推导（本脚本在 tools/node-runtime/ 下，仓库根 = 上两级）；
+# 需要时用 REPO=/path/to/repo 覆盖。不要写死某一台机器的检出名。
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # 优先已签名 HAP；没有就用未签名的那份。
 # 【为什么未签名也能回答一部分问题】HAP 签名是最后一步（往 HAP 追加签名块），
 # 而"打包时有没有动 .so"可以从"包里的 .so 与源树里的 .so 是否逐字节相同"看出来。

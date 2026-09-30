@@ -72,13 +72,15 @@ const SIGN_MARKER_PREFIX = 'dshm-signed-v1';
 const SIGN_MARKER_FILE = 'dshm-signed.txt';
 
 function findBinarySignTool() {
+  const sdkHome = process.env.DEVECO_SDK_HOME ?? process.env.OHOS_SDK_HOME ?? '';
   const java = [
     process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin', 'java.exe') : '',
     'C:\\Program Files\\Huawei\\DevEco Studio\\jbr\\bin\\java.exe',
   ].filter((p) => p.length > 0 && existsSync(p));
   const jar = [
+    sdkHome ? join(sdkHome, 'default', 'openharmony', 'toolchains', 'lib', 'binary-sign-tool.jar') : '',
     'C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\lib\\binary-sign-tool.jar',
-  ].filter((p) => existsSync(p));
+  ].filter((p) => p.length > 0 && existsSync(p));
   return java.length > 0 && jar.length > 0 ? { java: java[0], jar: jar[0] } : null;
 }
 
@@ -93,8 +95,10 @@ function bundledPythonCandidates() {
     /* `.dsh` runtime 里的 python（本机实测可用，带 tarfile） */
     join(home, '.dsh', 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies', 'python', 'python.exe'),
     /* DevEco 自带的（若存在） */
+    process.env.DEVECO_SDK_HOME
+      ? join(process.env.DEVECO_SDK_HOME, '..', 'tools', 'python', 'python.exe') : '',
     'C:\\Program Files\\Huawei\\DevEco Studio\\tools\\python\\python.exe',
-  ];
+  ].filter((p) => p.length > 0);
   for (const p of probes) {
     try {
       if (p.length > 0 && existsSync(p)) out.push(p);

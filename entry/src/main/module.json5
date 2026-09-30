@@ -45,6 +45,31 @@
         }
       },
       {
+        /*
+         * 【为什么需要它】2in1（PC/平板自由窗口）上，用户点右上角「关闭」时，
+         * 我们要把"关闭窗口"改成"切到后台继续跑"——正在执行的任务与那条
+         * Host 长连接不能因为关窗就断。`onPrepareToTerminate` 正是这个
+         * 时机的回调，而它**必须**声明本权限才会被系统调用
+         * （SDK：`@permission ohos.permission.PREPARE_APP_TERMINATE`）。
+         *
+         * 【为什么能申请】该权限在 SDK 权限表里是
+         * `availableLevel: "normal"` + `grantMode: "system_grant"`
+         * ⇒ 普通应用可声明，安装时自动授予，无运行时弹窗。
+         *
+         * 【不能与 windowStageClose 同时用】SDK 明确：
+         * 「若应用注册了 `windowStageClose` 监听，本回调**不会执行**」。
+         * 本工程刻意**不**注册那个监听，只走这一条路径。
+         */
+        "name": "ohos.permission.PREPARE_APP_TERMINATE",
+        "reason": "$string:perm_prepare_terminate_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
         "name": "ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE",
         "reason": "$string:perm_external_native_reason",
         "usedScene": {
@@ -131,6 +156,29 @@
         "label": "$string:EntryAbility_label",
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
+        /*
+         * 【长时任务类型声明 —— 这是 `startBackgroundRunning` 能成功的前提】
+         *
+         * 实测（2026-09-29，2in1 / MateBook 14）：不声明本字段时
+         * `backgroundTaskManager.startBackgroundRunning` 直接失败
+         * （`platform/keepalive: startBackgroundRunning failed`），
+         * 光有 `ohos.permission.KEEP_BACKGROUND_RUNNING` **不够**。
+         *
+         * 取值取自 SDK 的 module schema（`toolchains/modulecheck/module.json`）：
+         * `enum: [dataTransfer, audioPlayback, audioRecording, location,
+         *         bluetoothInteraction, multiDeviceConnection, wifiInteraction, ...]`
+         *
+         * 为什么选 `dataTransfer`：本应用在后台做的是维持与 Host 的长连接、
+         * 收发会话数据 —— 语义上就是数据传输。用 audioPlayback 之类去骗保活
+         * 属于滥用系统能力（通知栏会显示"正在播放"），会被审核拒绝。
+         *
+         * 为什么它是必须的：没有它，`onPrepareToTerminate` 的"关闭=切后台"
+         * 只是把窗口收起来 —— 进程随即被挂起，连接断、任务停，
+         * 与"关掉别停任务"的诉求相反。
+         */
+        "backgroundModes": [
+          "dataTransfer"
+        ],
         "exported": true,
         "skills": [
           {
@@ -142,6 +190,35 @@
             ]
           }
         ]
+      },
+      {
+        /*
+         * 托盘常驻后台 Ability（无窗口、无界面）。
+         *
+         * 【它是什么】由 EntryAbility 用
+         *   processMode        = NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM
+         *   startupVisibility  = STARTUP_HIDE
+         * 拉起的独立进程，唯一职责是把本进程挂到系统托盘的图标上 —— 这是
+         * HarmonyOS PC 允许应用在窗口隐藏后继续后台运行的官方做法
+         * （官方《PC应用通过系统托盘后台保活》第 2 步）。
+         *
+         * 【不写 launchType】保持默认 singleton：本 Ability 只该有一个实例，
+         * 每多一个就多一个挂在托盘上的进程。specified 会按 key 造实例，正相反。
+         *
+         * 【不写 skills】它不能出现在桌面图标/启动器里 —— 那是 EntryAbility 的角色。
+         * STARTUP_HIDE 只管「启动时不显示窗口、不进 Dock」，管不住启动器条目。
+         *
+         * 【不写 backgroundModes】它的保活方式就是「贴住托盘图标」本身，
+         * 不申请长时任务（长时任务由 EntryAbility 侧统一申请，见 KeepAlive）。
+         */
+        "name": "BackGroundAbility",
+        "srcEntry": "./ets/backgroundability/BackGroundAbility.ets",
+        "description": "$string:BackgroundAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:BackgroundAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true
       }
     ],
     "extensionAbilities": [

@@ -31,17 +31,19 @@
  *   4. 窗口生命周期里**只清理本实例自己的东西**——关任一窗口不得影响其他窗口。
  */
 
-import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, common, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { appRecovery } from '@kit.AbilityKit';
 import fs from '@ohos.file.fs';
 import dshhost from 'libdshhost.so';
 import probe from 'libentryprobe.so';
-import { DshHost } from 'hostruntime';
+import { DshHost, OpResult } from 'hostruntime';
 import { NodeRuntime } from '../runtime/NodeRuntime';
 // HMS 语音识别桥（ArkTS 侧）：轮询 Host 写的请求文件并调 speechRecognizer
 import { startHmsSpeechBridge } from '../speech/HmsSpeechBridge';
+// 系统托盘（PC 顶栏状态区）：关闭=切后台之后的**回程入口**，也是真正的退出路径
+import { StatusBarTray } from '../system/StatusBarTray';
 import { emitter } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
 import {
@@ -50,6 +52,7 @@ import {
   EVENT_KEY_HOST_TOKEN,
   EVENT_KEY_HOST_URL,
   HostStore,
+  KeepAlive,
   KEY_THEME_MODE,
   LocalPrefs,
   NotificationCenter,
@@ -166,6 +169,36 @@ export default class EntryAbility extends UIAbility {
   private memory: WindowMemory = new WindowMemory();
   /** Host 连接记忆（地址走 preferences、token 走加密存储），onWindowStageCreate 时 attach */
   private hostStore: HostStore = new HostStore();
+  /**
+   * 长时任务（后台保活）。
+   *
+   * 【为什么能力层必须持有并真正调用它】`platform/notify/KeepAlive.ets` 早就写好了
+   * 申请/释放的完整实现，但**全仓无人调用**（只有 `platform/Index.ets` 的 re-export）。
+   * 后果：应用退到后台后会被系统挂起，与 Host 的长连接随之中断 ——
+   * 而「关闭窗口 = 切后台继续跑任务」这条诉求正建立在"后台仍活着"之上。
+   * 没有它，`onPrepareToTerminate` 的最小化只是把窗口收起来，任务照样停。
+   *
+   * 申请时机：主窗窗口就绪后（此时 context 可用、且确认是主窗）。
+   * 释放时机：`onDestroy`。申请失败只降级（日志警告），不阻断任何功能。
+   */
+  private keepAlive: KeepAlive = new KeepAlive();
+  /**
+   * 本次启动**自起**的本地核心（`autoStartHostForDiagnosis` 里创建）。
+   *
+   * 【为什么必须是字段而不是局部 const】退出时要先把核心停掉再结束应用：
+   * 直接 `terminateSelf` 不保证回收应用自己起的 Node 线程，残留会占着回环端口，
+   * 下次启动可能撞上「端口已占用」。停止入口是 `DshHost.stop()`（协作式：
+   * 写 host-stop-request → 等 Node 线程退出），只有持有实例才调得到。
+   */
+  private host: DshHost | undefined = undefined;
+  /**
+   * 用户已请求「真正退出应用」。
+   *
+   * 【为什么两个标记都要】`dshQuitRequested` 走 AppStorage，是**页面 → 能力层**的通道；
+   * 本字段是**能力层内部**的一次性闩：`exitApp` 会被多处触发（托盘后台进程被系统结束等），
+   * 没有它就会并发走两遍「停核心 → 摘图标 → terminateSelf」。
+   */
+  private exiting: boolean = false;
   /**
    * 本次启动是否由启动参数直接提供了 Host。
    *
@@ -385,6 +418,8 @@ export default class EntryAbility extends UIAbility {
     // 沙箱 HOME 用 filesDir：hdc 对 cacheDir 无读权限，而诊断日志要能被取回（见 NodeRuntime 注释）
     const runtime = new NodeRuntime(`${ctx.resourceDir}/resources/app/main.js`, ctx.filesDir);
     const host = new DshHost(ctx.filesDir, runtime);
+    // 存成字段：退出流程要调 `host.stop()` 干净地停掉宿主（见 host 字段的说明）
+    this.host = host;
     hilog.info(DOMAIN, TAG, 'DSHM-AUTO 开始：入口=%{public}s', `${ctx.resourceDir}/resources/app/main.js`);
     // 把三个目录的**真实字符串**打出来：入口脚本的诊断日志要落在一个我们能用 hdc 取回的
     // 目录里，而 `filesDir` / `cacheDir` 在设备上到底映射到哪条路径，靠猜已经错过一次。
@@ -458,6 +493,111 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
+    /*
+     * 释放长时任务。
+     *
+     * 【为什么必须在这里释放】长时任务若泄漏（申请了不释放），系统会一直认为
+     * 本应用在做后台数据传输，既耗电、也可能被系统/审核侧判定为滥用。
+     * `forceRelease` 而非 `release`：销毁是终局，不必再走引用计数——计数若因
+     * 某条异常路径偏高，用 release 会留下一个永不释放的任务。
+     *
+     * 只在主窗释放：申请也只在主窗做（见 onWindowStageCreate），两者对称。
+     */
+    if (this.launchParams.kind === WindowKind.MAIN) {
+      this.keepAlive.forceRelease().catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, '释放后台保活失败（任务可能残留）：%{public}s', err.message);
+      });
+    }
+  }
+
+  /**
+   * 自由窗口（PC / 平板）上点右上角「关闭」时的拦截点。
+   *
+   * ## 为什么需要它
+   *
+   * 默认行为是**终止应用**：正在跑的任务与那条 Host 长连接会一起断掉。
+   * 用户诉求（2026-09-27 实测反馈）：「关闭 = 切到后台继续跑，任务别丢；
+   * 点任务栏图标能直接回来」。所以这里把「关闭」改成「最小化到后台」。
+   *
+   * ## 返回值语义（SDK 原文）
+   *
+   * `true` = **取消**终止；`false` = 继续终止。
+   * 因此返回 `true`，并主动把主窗最小化 —— 顺序不能反：
+   * 若先最小化再返回，系统仍会走完终止流程。
+   *
+   * ## 为什么必须声明 PREPARE_APP_TERMINATE 权限
+   *
+   * SDK：`@permission ohos.permission.PREPARE_APP_TERMINATE`。
+   * 没有它这个回调**不会被调用**，而失败形态是「关闭照旧杀掉应用」——
+   * 看起来像「这个功能没做」，而不像「权限没声明」。该权限在 SDK 权限表里是
+   * `availableLevel: normal` + `grantMode: system_grant` ⇒ 安装即授予，无弹窗。
+   *
+   * ## 为什么不用 windowStageClose
+   *
+   * SDK 明确：**注册了 `windowStageClose` 监听时本回调不会执行**。
+   * 两条路只能选一条，这里选本回调（有明确权限约束、返回值语义清楚）。
+   * 本工程因此**刻意不注册**那个监听。
+   *
+   * ## 怎么真正退出（重要）
+   *
+   * 本回调让「关闭」永不终止应用 ⇒ 必须另有一条退出路径，否则用户被关在里面。
+   * 那条路径是**系统托盘图标右键菜单里自带的「退出」**——真机实测（2026-09-29）它
+   * **不经过本回调**，点下去主进程与 BackGroundAbility 进程一起消失，是可靠且用户熟悉的入口。
+   * 我们因此**不再自建**「退出应用」菜单项（那会得到两个退出项），托盘右键只提供
+   * 「打开应用」；应用内顶栏「DSHM」菜单也不再放退出项（见 pages/WebApp.ets 的 appMenu）。
+   *
+   * `exitApp` 仍保留，但只由**托盘后台进程被系统结束**这一异常路径触发：那时图标已随进程
+   * 消失、主窗又没有回程入口，留着才真的成了"关不掉也回不去"。
+   *
+   * ## 为什么托盘没就绪就必须放行
+   *
+   * 拦截关闭的前提是「用户还有回程入口」。托盘图标没挂上时若仍拦截，用户会遇到
+   * 「窗口收进后台、托盘里找不到、只能去系统设置强停」——比直接关掉糟得多。
+   * 所以这里先问 `StatusBarTray.isReady()`，拿不到回程入口就放行。
+   */
+  onPrepareToTerminate(): boolean {
+    // 用户显式要求退出（exitApp 置的标记）⇒ 放行，不拦截。
+    //
+    // 【为什么需要这道判断】本回调返回 true 就永不终止应用。若用户想真退出，
+    // 必须有办法绕过去。SDK 说 `terminateSelf` 是"手动关闭"的正当路径，
+    // 但为**不把能否退出押在对 SDK 的理解上**，这里再查一次显式标记：
+    // 「退不出去」是比「多退一步」严重得多的失败形态。
+    if (AppStorage.get<boolean>('dshQuitRequested') === true) {
+      hilog.info(DOMAIN, TAG, '收到显式退出请求：放行终止');
+      return false;
+    }
+    // 只拦主窗：会话窗（specified 实例）关闭**不应**牵动整个应用。
+    // 复用同一实例的多窗场景下，关一个会话窗把整个应用最小化会很突兀。
+    if (this.launchParams.kind !== WindowKind.MAIN) {
+      return false;
+    }
+    /*
+     * 托盘图标没挂上 ⇒ 放行，不拦截（理由见文档注释「为什么托盘没就绪就必须放行」）。
+     *
+     * 这条判断不是防御性代码，而是**这条功能的必要条件**：拦截关闭把窗口收进后台之后，
+     * 用户唯一的回程入口就是托盘图标。图标没挂上（系统不支持
+     * SystemCapability.PCService.StatusBarManager、图标资源缺失、接口限流…）时若仍拦截，
+     * 用户会得到「窗口不见了、托盘里没有、只能去系统设置强停」——比直接关掉糟得多。
+     */
+    if (!StatusBarTray.isReady()) {
+      hilog.warn(DOMAIN, TAG, '托盘图标未就绪，放行关闭以免窗口收起后无入口唤回');
+      return false;
+    }
+    const win: window.Window | undefined = this.mainWindow;
+    if (win === undefined) {
+      // 拿不到窗口对象（时序异常）⇒ 不拦截，把决定权交回系统。
+      // 这里刻意不"兜底成取消"：那时既没最小化、也没关闭，用户点关闭会毫无反应。
+      hilog.warn(DOMAIN, TAG, '关闭请求到达时主窗不可用，按系统默认继续终止');
+      return false;
+    }
+    hilog.info(DOMAIN, TAG, '收到关闭请求：改为最小化到后台（不终止应用，任务与连接保留）');
+    win.minimize().catch((err: BusinessError) => {
+      // 最小化失败（设备不支持自由窗口等）时**不装作成功**：
+      // 此时已返回 true ⇒ 应用不会终止，窗口仍在屏上。
+      // 用户可再点一次关闭，或用托盘图标右键菜单里系统自带的「退出」真正退出。
+      hilog.warn(DOMAIN, TAG, '最小化到后台失败（应用未终止，窗口仍在）：%{public}s', err.message);
+    });
+    return true;
   }
 
   /**
@@ -498,6 +638,32 @@ export default class EntryAbility extends UIAbility {
       // 通知也只在主窗注册：`SessionHub` 的钩子只有一个槽位，
       // 若每个窗口都注册，多窗口下会出现"发 N 条同样的通知"。
       this.setupNotifications();
+
+      /*
+       * 申请长时任务（后台保活）——这是「关闭窗口 = 切后台继续跑」能成立的**前提**。
+       *
+       * 不申请的话，应用退到后台会被系统挂起：与 Host 的那条长连接断掉、
+       * 正在执行的任务也随之停摆。那样 `onPrepareToTerminate` 的最小化
+       * 就只是"把窗口收起来"，任务照样丢 —— 与用户诉求相反。
+       *
+       * 只在主窗申请：与会话窗共享同一进程，一个长时任务就够；
+       * 每个实例各申请一次会让引用计数虚高、且系统侧重复登记。
+       */
+      this.keepAlive.attach(this.context);
+      this.keepAlive.acquire().then((active: boolean) => {
+        if (active) {
+          hilog.info(DOMAIN, TAG, '后台保活已就绪：关闭窗口后任务与连接继续');
+        } else {
+          // 申请失败属**降级**而非错误：回到前台时仍会补拉状态。
+          // 如实记日志，不假装成功（用户若发现关窗后任务停了，这条日志是判据）。
+          hilog.warn(DOMAIN, TAG, '后台保活未授予，关闭窗口可能中断任务（降级运行）');
+        }
+      }).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, '后台保活申请异常（降级运行）：%{public}s', err.message);
+      });
+
+      // 托盘常驻图标：关闭切后台之后的**回程入口**，也是真正的退出路径（见 setupTray）
+      this.setupTray();
     }
 
     // 主界面 = Web 壳页：官方 apps/desktop 的鸿蒙等价物（loadURL → Host web UI）。
@@ -536,11 +702,151 @@ export default class EntryAbility extends UIAbility {
   onForeground(): void {
     // Ability has brought to foreground
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
+
+    // 回到前台时确保主窗真的在屏上。
+    //
+    // 【为什么需要在 onForeground 里做】从托盘图标/Dock 唤回本应用时，系统只是把任务切到前台，
+    // 并不一定撤销窗口的**最小化**状态：`onPrepareToTerminate` 那条路径把窗口 minimize 了，
+    // 仅"回到前台"可能仍然是一个最小化窗口。这里补一次恢复，用户点图标才能真正看到界面。
+    if (this.launchParams.kind === WindowKind.MAIN) {
+      this.ensureWindowShown();
+    }
   }
 
-  onBackground(): void {
-    // Ability has back to background
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
+  /**
+   * 确保主窗在前台可见（从托盘/Dock 唤回时调用）。
+   *
+   * 优先 `restore()`：SDK 明确它"把主窗从最小化恢复到前台，回到最小化前的位置与尺寸"，
+   * 且**仅对主窗有效**——正好是本函数的场景。`showWindow()` 只保证窗口可见，
+   * 对已被最小化（WindowStatusType.MINIMIZE）的窗口不必然恢复。
+   *
+   * 两者都失败时只记日志：此时窗口仍是用户自己的状态，不会比"唤不回来"更糟。
+   */
+  private ensureWindowShown(): void {
+    const win: window.Window | undefined = this.mainWindow;
+    if (win === undefined) {
+      return;
+    }
+    // 取一个非空别名给异步回调用：ArkTS 不做跨回调的非空收窄
+    const target: window.Window = win;
+    target.restore().then(() => {
+      hilog.info(DOMAIN, TAG, '主窗已恢复到前台');
+    }).catch((restoreErr: BusinessError) => {
+      hilog.debug(DOMAIN, TAG, 'restore 未生效（可能本就未最小化）：%{public}s', restoreErr.message);
+      target.showWindow().catch((showErr: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, '唤回主窗失败：%{public}s', showErr.message);
+      });
+    });
+  }
+
+  /**
+   * 挂托盘常驻图标并接线三条交互（仅主窗调用）。
+   *
+   * 失败必须**降级而不抛**：托盘是「关闭=切后台」的回程入口，挂不上只是回到旧行为
+   * （点关闭照旧退出应用），不该连带影响启动。所以这里把失败收敛成
+   * 「托盘未就绪」这一个可判定状态——`onPrepareToTerminate` 会读它并放行关闭。
+   */
+  private setupTray(): void {
+    const ctx: common.UIAbilityContext = this.context;
+    StatusBarTray.install(ctx).then(() => {
+      hilog.info(DOMAIN, TAG, '托盘图标已就绪，关闭窗口后可从托盘唤回');
+      // 顺序不能反：`NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM` 的前提是"应用已有状态栏图标"
+      setTimeout(() => {
+        StatusBarTray.hold(ctx);
+      }, 300);
+    }).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, '托盘图标初始化失败（降级：关闭仍会退出应用）：%{public}s', err.message);
+    });
+
+    // 左键唤回主窗：系统把任务切到前台 + onForeground 里补一次 restore
+    StatusBarTray.onIconClick((clickType: string) => {
+      if (clickType !== 'leftClick') {
+        return;
+      }
+      hilog.info(DOMAIN, TAG, '托盘图标左键：唤回主窗');
+      this.restoreMainWindow();
+    });
+
+    // 右键菜单「打开应用」：与左键同一条唤回路径
+    // （真正的「退出」用系统自带的那一项，见 StatusBarTray 文件头）
+    StatusBarTray.onRightMenuClick(() => {
+      hilog.info(DOMAIN, TAG, '托盘右键「打开应用」：唤回主窗');
+      this.restoreMainWindow();
+    });
+
+    // 托盘后台 Ability 被系统结束 ⇒ 图标很可能已随之消失，先让关闭不再被拦截（否则
+    // 用户会关在门外），再走退出收尾，避免「主 Ability 已死、图标还在」的半死状态。
+    StatusBarTray.subscribeBgTerminating(() => {
+      StatusBarTray.markUnavailable();
+      this.exitApp('托盘后台进程被系统结束');
+    });
+  }
+
+  /** 把应用（连同最小化的主窗）唤到前台。托盘左键、托盘右键「打开应用」共用。 */
+  private restoreMainWindow(): void {
+    this.context.showAbility().catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'showAbility 唤回失败：%{public}s', err.message);
+    });
+  }
+
+  /**
+   * 真正退出应用：停核心 → 摘托盘图标 → 结束 Ability。
+   *
+   * 【为什么要先停核心】官方不保证 `terminateSelf()` 会清理应用自己拉起的 Node 线程。
+   * 宿主是同进程线程（见 runtime/NodeRuntime.ets 文件头），进程真死时它自然一起死，
+   * 但只要存在"进程没立刻死"的时序，残留的宿主就会占着回环端口，下次启动撞"端口已占用"。
+   * 停一次是协作式且幂等的（`DshHost.stop()`），成本一个文件写入，收益是确定的下次启动。
+   *
+   * 【为什么先置 `dshQuitRequested`】`terminateSelf()` 若仍走 `onPrepareToTerminate`，
+   * 回调见到标记会放行；若不走，标记也无害（进程即将结束）。两种 SDK 行为下都能退出。
+   *
+   * 【顺序】摘图标要在**还有前台窗口**时做（SDK：无前台窗口时 removeFromStatusBar 报
+   * 1010710004）。本方法由托盘右键/后台事件触发时窗口恰好还在，所以先 remove 再 terminate。
+   */
+  private exitApp(reason: string): void {
+    if (this.exiting) {
+      return;
+    }
+    this.exiting = true;
+    AppStorage.setOrCreate<boolean>('dshQuitRequested', true);
+    hilog.info(DOMAIN, TAG, '开始退出应用：%{public}s', reason);
+
+    this.stopHostThenExit().then(() => {
+      StatusBarTray.remove(this.context);
+      // 托盘后台 Ability 是**另一个进程**，terminateSelf 只结束本实例，不会连它一起收掉。
+      // 不通知它自行退出，就会留下一个"图标已摘、进程还在"的孤儿。
+      StatusBarTray.publishExitRequest();
+      return StatusBarTray.delayBeforeTerminate();
+    }).then(() => {
+      this.context.terminateSelf().then(() => {
+        hilog.info(DOMAIN, TAG, '已退出应用：%{public}s', reason);
+      }).catch((err: BusinessError) => {
+        // 退不出去比多退一步严重得多：如实报错，并允许用户再试一次
+        this.exiting = false;
+        hilog.error(DOMAIN, TAG, 'terminateSelf 失败：%{public}s', err.message);
+      });
+    }).catch((err: BusinessError) => {
+      // 走到这里意味着 stopHostThenExit 自己抛了（理论上不该，它内部已兜底）
+      this.exiting = false;
+      hilog.error(DOMAIN, TAG, '退出流程异常：%{public}s', err.message);
+    });
+  }
+
+  /** 停明确宿主；超时或失败都**继续**退出（否则用户点了退出却出不去）。 */
+  private stopHostThenExit(): Promise<void> {
+    const host: DshHost | undefined = this.host;
+    if (host === undefined) {
+      return Promise.resolve();
+    }
+    return host.stop().then((res: OpResult) => {
+      if (res.ok) {
+        hilog.info(DOMAIN, TAG, '核心已停止：%{public}s', res.message);
+      } else {
+        hilog.warn(DOMAIN, TAG, '停止核心失败（仍继续退出）：%{public}s', res.message);
+      }
+    }).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, '停止核心异常（仍继续退出）：%{public}s', err.message);
+    });
   }
 
   /**

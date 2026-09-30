@@ -25,6 +25,10 @@
       "value": "在后台维持与 Host 的长连接并接收审批/提问事件，避免待决事项被错过"
     },
     {
+      "name": "perm_prepare_terminate_reason",
+      "value": "在自由窗口（PC/平板）上点关闭时改为退到后台继续运行正在执行的任务；需要该权限才能接到系统的关闭回调"
+    },
+    {
       "name": "perm_external_native_reason",
       "value": "本应用为开发工具（AI 编程助手宿主），其内置的核心运行时随包携带原生扩展模块与辅助可执行文件，需要在本应用数据目录内加载和运行它们"
     },
@@ -219,6 +223,22 @@
     {
       "name": "note_contract_missing",
       "value": "兼容面缺少该端点的参数契约（属于本客户端的缺陷，请提交诊断报告）："
+    },
+    {
+      "name": "BackgroundAbility_desc",
+      "value": "托盘常驻后台进程（无界面）"
+    },
+    {
+      "name": "BackgroundAbility_label",
+      "value": "DSHM"
+    },
+    {
+      "name": "tray_hover_tips",
+      "value": "DSHM 正在运行（左键打开窗口）"
+    },
+    {
+      "name": "tray_menu_open",
+      "value": "打开应用"
     }
   ]
 }

@@ -52,6 +52,9 @@ import { audio } from '@kit.AudioKit';
 import { util } from '@kit.ArkTS';
 // 听写→剪贴板：把识别文本写进系统剪贴板，供用户长按黏贴
 import { copyText } from 'platform';
+// 外链外开（2026-09-28，修「设置→登录」点不动）：见 OPEN_LINK_SHIM_JS。
+// isOpenableUrl 做 http/https 白名单；openExternalUrl 内部走 context.openLink。
+import { isOpenableUrl, openExternalUrl } from 'platform';
 // 方案 B：在 WebView 请求麦克风的时刻同步启动 ArkTS 侧环形采集。
 // 依据：真机实测官方那路（getUserMedia→MediaRecorder→重采样）音频识别不准，
 // 而同设备 AudioCapturer 直采总是正确 ⇒ provider 优先用这一路。
@@ -185,7 +188,9 @@ const INSERT_TEXT_JS: string =
  * 注册门在 `globalThis.dshDesktop` 上（官方桌面 App 的 Electron 壳注入）。本应用
  * 是 ArkUI Web 壳，天然没有这个全局——后果是三处功能静默缺席（用户验收实测）：
  *   ① `dsh-client-ui-settings-account` 的 apply 首行 `if (!("dshDesktop" in
- *      globalThis)) return;`（lib/client.js:2217）——不注入则左下角账号菜单
+ *      globalThis)) return;`（lib/client.js:4109；原文误记为 :2217，2026-09-28 以
+ *      具体文件复核更正——core 树内检索必须 `Select-String -Path <具体文件>`，
+ *      `Get-ChildItem -Include` 会漏检）——不注入则左下角账号菜单
  *      （settings.launcher → AccountMenu，含登录入口）、设置面板账号 section、
  *      登录对话框（SignInDialog）全部不注册，即"左下角设置少了登录界面"；
  *   ② `dsh-client-ui-settings-general` 的 DesktopUpdateSource 按
@@ -195,9 +200,25 @@ const INSERT_TEXT_JS: string =
  * 安全降级（无更新指示、Web 内置 iframe 浏览器，均为官方 Web 形态）；另
  * `dsh-client-ui-settings-models` 的 API-key credentialOnboarding 以
  * `!("dshDesktop" in globalThis)` 为显示条件，注入后关闭——这正是官方桌面口径
- * （桌面版引导账号登录，不引导 API key）。登录链路端侧可达：OAuth 回调监听在
- * webServer（dsh-deepseek-account-platform 依赖 credentials+authorization，host
- * 均有），回调地址 127.0.0.1:3120 为设备本机，系统浏览器可及。
+ * （桌面版引导账号登录，不引导 API key）。
+ *
+ * 【登录只能在系统浏览器里完成，本文件必须自己实现"外开"（2026-09-28）】
+ * 此前这里写过「登录链路端侧可达：…系统浏览器可及」——那句话只证明了 OAuth 回调
+ * 地址（127.0.0.1:3120）在设备本机可达，**完全没有证明"有人会去拉起浏览器"**，
+ * 属误导，已删。实际链路：
+ *   ① H5 点「登录」→ 一元 `account/startSignIn(client, callbackOrigin,"desktop")`
+ *      → host 建 attempt（`dsh-deepseek-account-platform/lib/index.js:797-856`）；
+ *   ② authorizeUrl 只在 `account/watch` 流里出现：`update()`（`:933-940`）每次
+ *      都会剥掉 authorizeUrl，只有 `:1012 update(attempt,{phase:"waiting-browser",
+ *      authorizeUrl,…})` 那一次带上，经 `changed()`（`:890-912`）推给 watch 订阅者；
+ *   ③ 该 URL 是**公开 https**（`https://platform.deepseek.com/dsh/authorize?...`），
+ *      授权完成走 loopback 回调；且 `loginSource="desktop"` 时 callback 只回
+ *      **HTTP 204**（`:834-840`，仅 `login_source=web` 才回关页 HTML）⇒ **绝不能在
+ *      本 WebView 内打开**，否则应用页面被 204 空页替换。
+ * 官方 Electron 壳靠主进程 `setWindowOpenHandler` + `shell.openExternal` 外开，
+ * 但那是**壳外代码**：全 core 树 grep `setWindowOpenHandler|shell.openExternal`
+ * 零命中，`dshDesktop` 契约里也只有 shortcuts/keyboard/updates/browser 四类能力，
+ * **没有任何外开 API**。故 ArkUI 壳必须自己接：见下方 OPEN_LINK_SHIM_JS。
  */
 const DESKTOP_CARRIER_JS: string =
   'if(typeof globalThis.dshDesktop==="undefined"){' +
@@ -383,6 +404,237 @@ const THEME_SHIM_JS: string = `(function () {
   setTimeout(function () { report(); }, 60);
   setTimeout(function () { report(); }, 1200);
   document.addEventListener('DOMContentLoaded', function () { report(); });
+})();`;
+
+/**
+ * 外链外开垫片（2026-09-28，修 m00001「设置→登录点不动」）。
+ *
+ * 【问题】鸿蒙端「设置 → 登录」点下去什么都没发生：不弹浏览器、不弹框、无报错。
+ * 根因不在 ArkTS 侧 —— 全 core 树 grep `setWindowOpenHandler|shell.openExternal`
+ * 零命中，`dshDesktop` 契约（shortcuts/keyboard/updates/browser）里也没有任何外开
+ * API，官方 Electron 壳的外开是**主进程代码**，本壳必须自己接。而 ArkWeb 默认
+ * `multiWindowAccess=false`，`window.open` / `target="_blank"` 一律被丢弃。
+ *
+ * 【为什么不能只拦 target="_blank"】登录态下确实有唯一一处授权页锚点
+ * （`dsh-client-ui-settings-account/lib/client.js:2435-2451` 的 AccountSection
+ * `<a target="_blank">`），但 AccountSection 只在 `settings.section` 注册
+ * （`:4397-4419`，条件 `snapshot.view?.status === "credential-stored"`）——**未登录
+ * 时它根本不存在**。登录路径上能点的只有 SignInDialog（`:989-1107`），而那个弹窗
+ * 里**没有任何 href、也没有 window.open**，只有「复制链接」。所以还必须主动把
+ * authorizeUrl 送到系统浏览器，故本垫片有两条独立路径：
+ *
+ * 【路径 1：account/watch 流（自动外开，无确认）】authorizeUrl 只出现在 watch 流里
+ * ——host `dsh-deepseek-account-platform/lib/index.js:933-940` 的 `update()` 每次都会
+ * 剥掉 authorizeUrl，只有 `:1012 update(attempt,{phase:"waiting-browser",
+ * authorizeUrl,…})` 那一次带上，经 `changed()`（`:890-912`）推给订阅者。
+ * 该流是 `new WebSocket(...)`（`dsh-api-gateway/lib/client.js:507`，帧格式
+ * `{type:'item',streamId,value}`，`value` 即整份 AccountView）⇒ 包一层构造器读
+ * message 帧即可。与官方 Electron 壳「主进程订阅 account 流后开系统浏览器」同构。
+ *
+ * 【路径 2：用户点击的外链（二次确认）】`a[target="_blank"]`（用量/充值等）与
+ * `window.open`（`dsh-client-ui-settings-account/lib/client.js:4265` 的
+ * 「联系我们」）。这些不是壳职责，按规范先弹确认再开。
+ *
+ * 【判据】`/dsh/authorize`、`/oauth/authorize` 视为授权页 → 自动外开；其余 http(s)
+ * 一律确认。登录用 204 收尾（host `:834-840`，仅 `login_source=web` 才回关页 HTML）
+ * ⇒ 授权页**绝不能**在本 WebView 内打开，否则应用页面被 204 空页替换。
+ *
+ * 【也 tap 一元 account/* 响应】`dsh-client-connection/lib/client.js:1210` 的
+ * `send = doFetch ?? globalThis.fetch`，account 端点走 `globalThis.fetch`；响应体是
+ * `{type:"server-response",rpcId,result}`，`result` 同样是 AccountView。作为路径 1
+ * 的兜底（若 startSignIn 的一元响应已带 authorizeUrl，就不用等 watch 帧）。
+ * 必须 `response.clone()`：原 body 要原样交回调用方。
+ *
+ * 【同步桥契约】本垫片调 `__DSHM_BRIDGES__.openExternal(url, mode)`，
+ * mode='auto' 直接开、mode='confirm' 交 ArkTS 弹确认框。桥是同步的（javaScriptProxy
+ * 只支持同步），所以垫片拿不到「浏览器有没有真的起来」——那由 ArkTS 侧兜底
+ * （失败弹提示，见 WebApp.launchExternal）。但**投递本身**返回布尔值：桥还没就位
+ * 时投不出去，调用方据此决定「排队重试」还是「放行本次点击」。
+ */
+const OPEN_LINK_SHIM_JS: string = `(function () {
+  if (globalThis.__DSHM_OPEN_LINK_SHIM__) { return; }
+  globalThis.__DSHM_OPEN_LINK_SHIM__ = true;
+
+  /* 已自动外开过的 URL：watch 流会重复推送同一 attempt，只开一次 */
+  var opened = {};
+
+  function bridges() {
+    var b = globalThis.__DSHM_BRIDGES__;
+    return b && typeof b.openExternal === 'function' ? b : null;
+  }
+
+  function isHttpUrl(url) {
+    return typeof url === 'string' &&
+      (url.slice(0, 8) === 'https://' || url.slice(0, 7) === 'http://');
+  }
+
+  function isAuthorizeUrl(url) {
+    return url.indexOf('/dsh/authorize') >= 0 || url.indexOf('/oauth/authorize') >= 0;
+  }
+
+  /* 桥没就位时**不能丢掉这次外开**：桥的注册与文档开始垫片的先后关系在真机上
+     有过反复（见 .javaScriptProxy 处注释），而授权页只在 waiting-browser 那一刻
+     推一次，错过就得让用户手动复制链接。故对自动外开加一道 15s 有界重试。 */
+  var pendingAuto = [];
+  var pumpTimer = 0;
+  var pumpUntil = 0;
+
+  /* 同步投递一次外开请求。返回 false = 桥还没就位（调用方决定要不要排队重试）。 */
+  function out(url, auto) {
+    if (!isHttpUrl(url)) { return false; }
+    var u = url.trim();
+    var b = bridges();
+    if (!b) { return false; }
+    if (!auto) {
+      try { b.openExternal(u, 'confirm'); } catch (e) { /* 桥异常：忽略 */ }
+      return true;
+    }
+    if (opened[u]) { return true; }
+    /* 只有投递成功才记账：桥抛异常说明这次没送出去，必须留给重试 */
+    try { b.openExternal(u, 'auto'); } catch (e) { return false; }
+    opened[u] = true;
+    return true;
+  }
+
+  function armPump() {
+    if (pumpTimer !== 0 || Date.now() > pumpUntil) { return; }
+    pumpTimer = setTimeout(function () {
+      pumpTimer = 0;
+      var rest = [];
+      for (var i = 0; i < pendingAuto.length; i++) {
+        if (!out(pendingAuto[i], true)) { rest.push(pendingAuto[i]); }
+      }
+      pendingAuto = rest;
+      if (pendingAuto.length > 0) { armPump(); }
+    }, 250);
+  }
+
+  function autoOpen(url) {
+    if (!isHttpUrl(url)) { return; }
+    var u = url.trim();
+    if (out(u, true)) { return; }
+    /* watch 流会重复推送同一份 AccountView，去重，别把队列撑成一串重复项 */
+    if (pendingAuto.indexOf(u) >= 0) { return; }
+    /* 重试窗口从第一次投递失败起算；窗口内每次失败都续上，超时才放手 */
+    if (Date.now() > pumpUntil) { pumpUntil = Date.now() + 15000; }
+    pendingAuto.push(u);
+    armPump();
+  }
+
+  function scanAccount(view) {
+    try {
+      if (!view || typeof view !== 'object') { return; }
+      var attempt = view.attempt;
+      if (!attempt || typeof attempt !== 'object') { return; }
+      if (attempt.phase !== 'waiting-browser') { return; }
+      if (typeof attempt.authorizeUrl === 'string') { autoOpen(attempt.authorizeUrl); }
+    } catch (e) { /* 形状不符：忽略 */ }
+  }
+
+  /* ---- 路径 1：account/watch（WebSocket message 帧）---- */
+  try {
+    var NativeWS = globalThis.WebSocket;
+    if (typeof NativeWS === 'function') {
+      var WrappedWS = function (url, protocols) {
+        var socket = protocols === undefined ? new NativeWS(url) : new NativeWS(url, protocols);
+        try {
+          socket.addEventListener('message', function (event) {
+            try {
+              if (typeof event.data !== 'string') { return; }
+              var frame = JSON.parse(event.data);
+              if (frame && frame.type === 'item') { scanAccount(frame.value); }
+            } catch (e) { /* 非 JSON 帧：忽略 */ }
+          });
+        } catch (e) { /* 不支持 addEventListener：退化为不监听这条流 */ }
+        return socket;
+      };
+      WrappedWS.prototype = NativeWS.prototype;
+      try {
+        var names = Object.getOwnPropertyNames(NativeWS);
+        for (var i = 0; i < names.length; i++) {
+          var key = names[i];
+          if (key === 'prototype' || key === 'length' || key === 'name' ||
+              key === 'caller' || key === 'arguments') { continue; }
+          WrappedWS[key] = NativeWS[key];
+        }
+      } catch (e) { /* 静态量拷贝失败：下面用规范常量兜底 */ }
+      /* CONNECTING/OPEN/CLOSING/CLOSED 是 WebSocket 规范固定值，不依赖宿主实现，
+         显式补上即可。gateway 用裸 WebSocket.OPEN 比较 readyState（client.js:555），
+         缺了它整条连接都建不起来。 */
+      if (typeof WrappedWS.CONNECTING !== 'number') { WrappedWS.CONNECTING = 0; }
+      if (typeof WrappedWS.OPEN !== 'number') { WrappedWS.OPEN = 1; }
+      if (typeof WrappedWS.CLOSING !== 'number') { WrappedWS.CLOSING = 2; }
+      if (typeof WrappedWS.CLOSED !== 'number') { WrappedWS.CLOSED = 3; }
+      globalThis.WebSocket = WrappedWS;
+      /* 连常量都补不上（构造器被冻结之类）就宁可退回原构造器：宁可丢自动外开，
+         也不能把整条 account/events 流弄坏 */
+      if (typeof WrappedWS.OPEN !== 'number') { globalThis.WebSocket = NativeWS; }
+    }
+  } catch (e) { /* WebSocket 不可写：只剩下面两条路径 */ }
+
+  /* ---- 路径 1b：一元 account/* 响应（fetch 兜底）---- */
+  try {
+    var nativeFetch = globalThis.fetch;
+    if (typeof nativeFetch === 'function') {
+      globalThis.fetch = function (input, init) {
+        var url = '';
+        try {
+          url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+        } catch (e) { /* 取不到 URL：按非 account 处理 */ }
+        var pending = nativeFetch.call(globalThis, input, init);
+        if (url.indexOf('account/') < 0) { return pending; }
+        return pending.then(function (response) {
+          try {
+            if (response && typeof response.clone === 'function') {
+              response.clone().json().then(function (body) {
+                scanAccount(body && body.result ? body.result : body);
+              }, function () { /* 非 JSON 响应：忽略 */ });
+            }
+          } catch (e) { /* clone 失败：忽略，原响应照常返回 */ }
+          return response;
+        });
+      };
+    }
+  } catch (e) { /* fetch 不可写：只剩路径 2 */ }
+
+  /* ---- 路径 2：用户点击的外链 ---- */
+  try {
+    document.addEventListener('click', function (ev) {
+      try {
+        var node = ev.target;
+        var anchor = null;
+        while (node && node !== document) {
+          if (node.tagName && String(node.tagName).toLowerCase() === 'a') { anchor = node; break; }
+          node = node.parentNode;
+        }
+        if (!anchor) { return; }
+        if (anchor.getAttribute('target') !== '_blank') { return; }
+        var href = anchor.href;
+        if (!isHttpUrl(href)) { return; }
+        /* 只有真正投出去了才 preventDefault：桥未就位时放行，交由 WebView 默认行为
+           （仍是丢弃，与改动前一致），绝不制造新的「点了没反应」。
+           不 stopPropagation —— 页面前端自己挂在 <a> 上的回调照旧该跑，我们在捕获
+           阶段只做「顺带把 URL 交给系统」，不该改变页面的行为。 */
+        if (out(href, isAuthorizeUrl(href))) {
+          ev.preventDefault();
+        }
+      } catch (e) { /* 拦截失败：交给 WebView 默认行为（仍是丢弃，不劣化） */ }
+    }, true);
+  } catch (e) { /* 无 document：忽略 */ }
+
+  /* window.open（官方的「联系我们」；授权页若用这条也一并接住） */
+  try {
+    var nativeOpen = globalThis.open;
+    if (typeof nativeOpen === 'function') {
+      globalThis.open = function (url) {
+        if (isHttpUrl(url)) {
+          out(url, isAuthorizeUrl(url));
+          return null;
+        }
+        return nativeOpen.apply(globalThis, arguments);
+      };
+    }
+  } catch (e) { /* open 不可写：忽略 */ }
 })();`;
 
 /**
@@ -761,7 +1013,94 @@ struct WebApp {
     ,'startNativeCapture': (): string => this.startNativeCapture()
     ,'nativeCaptureState': (): string => this.nativeCaptureState()
     ,'takeNativeCapture': (): string => this.takeNativeCapture()
+    ,'openExternal': (url: string, mode: string): void => this.openExternal(url, mode)
   };
+
+  /**
+   * 外开入口（OPEN_LINK_SHIM_JS 的同步桥目标，2026-09-28）。
+   *
+   * 【为什么是同步返回 void】javaScriptProxy 只支持同步调用；外开本身是异步的
+   * （`context.openLink` 返回 Promise），但调用方（垫片）不需要结果，故这里
+   * fire-and-forget，与 startPick 的既有范式一致。
+   *
+   * 【两种模式】
+   *   · mode='auto'    —— 登录授权页专用：垫片已判定是 `/dsh/authorize`，直接开，
+   *                       不打扰用户（这是壳职责，与官方 Electron 壳行为一致）。
+   *   · mode='confirm' —— 其余外链：先弹确认框，用户点「打开」才开。规范要求
+   *                       外链必须二次确认，避免页面悄悄把用户带去第三方。
+   *
+   * 【为什么 URL 还要再校验一次】垫片里的 isHttpUrl 只是字符串前缀判断，是
+   * 不可信输入（页面脚本可伪造桥调用）。这里用 platform 的 isOpenableUrl 复校，
+   * 非 http(s) 一律拒绝 —— 绝不把 file:// 之类交给 openLink。
+   */
+  private openExternal(url: string, mode: string): void {
+    const target: string = typeof url === 'string' ? url.trim() : '';
+    if (target.length === 0) {
+      return;
+    }
+    this.dirPickerBridge.writeDiagMarkerPublic('diag-openlink',
+      `${mode === 'confirm' ? 'confirm' : 'auto'} ${target}`);
+    hilog.info(DOMAIN, TAG, '外开请求 mode=%{public}s url=%{public}s', mode, target);
+    if (!isOpenableUrl(target)) {
+      hilog.warn(DOMAIN, TAG, '外开被拒（非 http/https）：%{public}s', target);
+      return;
+    }
+    if (mode === 'confirm') {
+      this.confirmOpenExternal(target);
+      return;
+    }
+    this.launchExternal(target);
+  }
+
+  /** 弹二次确认框；确认后才 openLink。取消则什么都不做。 */
+  private confirmOpenExternal(url: string): void {
+    this.getUIContext().showAlertDialog({
+      title: '打开外部浏览器？',
+      message: url,
+      autoCancel: true,
+      primaryButton: {
+        value: '取消',
+        action: (): void => {
+          // 空实现即全部行为：取消按钮点击后自动关闭弹窗
+        }
+      },
+      secondaryButton: {
+        value: '打开',
+        action: (): void => {
+          this.launchExternal(url);
+        }
+      }
+    });
+  }
+
+  /**
+   * 真正把 URL 交给系统（`context.openLink`，见 platform/system/OpenLink.ets）。
+   *
+   * 【失败必须让用户看见】真机上 openLink 可能因为没有可用浏览器/应用而 reject。
+   * 静默失败的后果就是本次要修的那个 bug 的翻版（点了没反应），故失败弹提示；
+   * 成功只记日志（不打扰）。
+   */
+  private launchExternal(url: string): void {
+    openExternalUrl(url).then((ok: boolean): void => {
+      if (!ok) {
+        this.dirPickerBridge.writeDiagMarkerPublic('diag-openlink', `failed ${url}`);
+        this.getUIContext().showAlertDialog({
+          title: '无法打开外部浏览器',
+          message: `系统未受理该链接，请确认已安装浏览器。\n\n${url}`,
+          confirm: {
+            value: '知道了',
+            action: (): void => {
+              // 空实现即全部行为：确认后自动关闭弹窗
+            }
+          }
+        });
+      }
+    }, (e: Error): void => {
+      // openExternalUrl 内部已 catch，走到这里说明是意料外的异常：同样留痕
+      this.dirPickerBridge.writeDiagMarkerPublic('diag-openlink', `error ${e.message}`);
+      hilog.warn(DOMAIN, TAG, '外开异常：%{public}s', e.message);
+    });
+  }
 
   /**
    * 主动申请麦克风权限（不依赖 Web 侧的 getUserMedia 触发）。
@@ -1008,11 +1347,12 @@ struct WebApp {
     hilog.info(DOMAIN, TAG, '原生听写：取走 %{public}d 字节（base64 %{public}d）', wav.length, b64.length);
     return b64;
   }
-  /** javaScriptOnDocumentStart 注入清单：目录选择垫片 + 桌面载体 + 外观跟随（见各自注释） */
+  /** javaScriptOnDocumentStart 注入清单：目录选择垫片 + 桌面载体 + 外观跟随 + 外链外开（见各自注释） */
   private pickerShimScripts: Array<ScriptItem> = [
     { script: PICKER_SHIM_JS, scriptRules: ['*'] },
     { script: DESKTOP_CARRIER_JS, scriptRules: ['*'] },
-    { script: THEME_SHIM_JS, scriptRules: ['*'] }
+    { script: THEME_SHIM_JS, scriptRules: ['*'] },
+    { script: OPEN_LINK_SHIM_JS, scriptRules: ['*'] }
   ];
 
   /**
@@ -1760,6 +2100,17 @@ struct WebApp {
         this.aboutVersions();
       } },
       /*
+       * 这里**刻意不提供「退出应用」**。
+       *
+       * `EntryAbility.onPrepareToTerminate` 已把系统「关闭窗口」改成「最小化到后台」（用户诉求：
+       * 关掉别停任务、点图标能回来），因此必须另有一条真退出路径 —— 那条路径是**系统托盘图标
+       * 右键菜单里自带的「退出」**（真机实测它不经过上述回调，点下去进程真的结束）。
+       *
+       * 【为什么不放在这个菜单里】顶栏「DSHM」菜单紧邻窗口右上角的三键，而三键里的「关闭」
+       * 已经是"切后台"；把"真正退出"放在同一视觉区域，用户极易点错。托盘右键菜单是系统级
+       * 常驻位置（微信等 PC 应用同款），语义上就该是"对整个应用动手"，不会与窗口操作混淆。
+       */
+      /*
        * 语音可行性最小验证的入口（2026-09-26）。
        * 【为什么放菜单而不是自动跑】自检会弹系统麦克风授权框；语音默认关闭，
        * 不该让没用语音的人被打扰。放菜单 = 用户明确点才跑一次。
@@ -2013,7 +2364,7 @@ struct WebApp {
           .javaScriptProxy({
             object: this.bridges,
             name: '__DSHM_BRIDGES__',
-            methodList: ['startPick', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture'],
+            methodList: ['startPick', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture', 'openExternal'],
             controller: this.controller
           })          // 官方 web UI 自己按 prefers-color-scheme 适配暗色：跟随系统、不强制反色
           .darkMode(WebDarkMode.Auto)

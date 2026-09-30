@@ -25,6 +25,10 @@
       "value": "Keep the long-lived connection to the host while in the background so approval and question events are not missed"
     },
     {
+      "name": "perm_prepare_terminate_reason",
+      "value": "Keep running the current task in the background when you click Close on a free-form window"
+    },
+    {
       "name": "tab_workspaces",
       "value": "Workspaces"
     },
@@ -191,6 +195,22 @@
     {
       "name": "note_contract_missing",
       "value": "The compatibility surface has no parameter contract for this endpoint (a client defect — please attach a diagnostics report): "
+    },
+    {
+      "name": "BackgroundAbility_desc",
+      "value": "Background process attached to the status bar tray (no UI)"
+    },
+    {
+      "name": "BackgroundAbility_label",
+      "value": "DSHM"
+    },
+    {
+      "name": "tray_hover_tips",
+      "value": "DSHM is running (left-click to open the window)"
+    },
+    {
+      "name": "tray_menu_open",
+      "value": "Open DSHM"
     }
   ]
 }

@@ -2,7 +2,7 @@
 
 > 本文给**接手的人**：现在到哪一步、哪些是真结论、哪些还没做、下一步怎么动手。
 > 契约类文档（D1/D2/D2b/D3/D3b/D4/D5）不动，见 [`README.md`](README.md) 的索引；本文只讲**状态**。
-> 最近一次更新：2026-09-29。
+> 最近一次更新：2026-09-30（§7 官方桌面端更新逻辑；README 改为官方口径；清理机器专有路径）。
 
 ---
 
@@ -15,49 +15,36 @@
 
 ## 2. Windows 端 dsh desktop 重装（用户当前最要紧的事）
 
-### 2.1 为什么不能直接覆盖安装 —— 以及新版包在哪
+### 2.1 为什么不能直接覆盖安装
 
-**已装的是 `0.1.7-rc.2`**（注册表 `DisplayName = DeepSeek Harness 0.1.7-rc.2`）。
-而 `%LOCALAPPDATA%\@deepseek-aidsh-desktop-updater\installer.exe`
-（286,837,333 B，`FileVersion = 0.1.7-rc.2`，mtime **2026-09-26 08:24:56**）
-**就是当前已装的那个版本的包，不是新版本** —— 指望它做升级是错的。
+**官方安装器对"覆盖安装"不做版本回退保护**：直接双击新版安装包通常也能装，但旧版把 Host 与
+`%USERPROFILE%\.dsh\host-ready.json` 留在原位，版本错配时最容易出现"界面连不上 Host"而误判成
+网络问题。所以**先卸载再装**，按 §2.4 的七步走。
 
-**真正的新版包已在本机**（实测）：
-
-```
-C:\Users\Sol\Downloads\deepseek-harness-0.2.0-rc.1-win-x64.exe
-  288,472,536 B   FileVersion/ProductVersion = 0.2.0-rc.1
-  mtime 2026-09-29 12:39:14
-  sha256 9DD8538E554D3139998A8458E21C64A6F99470915CBF6CFD22BB71F356C7F399
-```
-
-它比已装版本高一个 minor（`0.1.7-rc.2` → `0.2.0-rc.1`）。**Electron 侧安装器对"覆盖安装"
-不做版本回退保护**，直接双击通常也能装，但本项目**要求先卸载再装**：旧版把 Host 与
-`~/.dsh/host-ready.json` 留在原位，版本错配时最容易出现"界面连不上 Host"而误判成网络问题。
-按 §2.4 的七步走。
+另一个反复踩的误判：更新器缓存里的
+`%LOCALAPPDATA%\@deepseek-ai\dsh-desktop-updater\installer.exe`
+**往往就是当前已装的那个版本**，不是新版本 —— 指望它做升级是错的。新版包从官方发布渠道取。
 
 ### 2.2 现状事实（实测，勿再猜）
 
 | 项 | 值 |
 |---|---|
-| 注册表 DisplayName | `DeepSeek Harness 0.1.7-rc.2` |
-| DisplayVersion | `0.1.7-rc.2` |
-| InstallLocation | `D:\Program Files\dsh` |
-| UninstallString | `"D:\Program Files\dsh\Uninstall DeepSeek Harness.exe" /currentuser` |
-| 主程序 | `D:\Program Files\dsh\DeepSeek Harness.exe`（244,468,224 B，`ProductVersion 0.1.7.0`） |
-| Electron 版本 | `D:\Program Files\dsh\version` = `44.0.0` |
-| 随包 Node/pnpm | `resources\runtime\versions.json` = `{"node":"24.18.1","pnpm":"11.7.0"}` |
-| 快捷方式 | `D:\desktop\DeepSeek Harness.lnk` |
-| `@deepseek-ai` 已在 `%LOCALAPPDATA%\Programs` 下 | 无（只有 `Common`）⇒ 是**非 per-user 安装**，装在 `D:\` |
+| 注册表 DisplayName / DisplayVersion | `HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*` 里 `DisplayName -match 'DeepSeek'` |
+| InstallLocation | **非 per-user 安装**（`%LOCALAPPDATA%\Programs` 下没有 `@deepseek-ai`）⇒ 可装在任意盘 |
+| UninstallString | 同上注册表项，形如 `"<install>\Uninstall DeepSeek Harness.exe" /currentuser` |
+| Electron 版本 | `<install>\version` |
+| 随包 Node/pnpm | `resources\runtime\versions.json` |
+
+> 本节不记录任何一台机器的用户名与绝对路径；装在哪、装的哪个版本，用上表两条命令现取。
 
 ### 2.3 必须保住的数据（删了不可恢复）
 
-| 路径 | 大小 | 内容 |
-|---|---|---|
-| `C:\Users\Sol\.dsh` | **975.06 MiB** | `sessions\`、`storages\`、`profiles\{desktop,ondevice}`、`dsh-runtimes\`、**`.credentials.yaml`**(665 B)、`host-ready.json` |
-| `%APPDATA%\@deepseek-ai` | 46.4 MiB | Electron userData（`dsh-desktop\`：Local Storage / Session Storage / Preferences / logs） |
+| 路径 | 内容 |
+|---|---|
+| `%USERPROFILE%\.dsh` | `sessions\`、`storages\`、`profiles\{desktop,ondevice}`、`dsh-runtimes\`、**`.credentials.yaml`**、`host-ready.json`（实测约 1 GB 量级） |
+| `%APPDATA%\@deepseek-ai` | Electron userData（`dsh-desktop\`：Local Storage / Session Storage / Preferences / logs） |
 
-⇒ 卸载/重装**只动安装目录 `D:\Program Files\dsh`**，上面两处不要碰。
+⇒ 卸载/重装**只动安装目录**，上面两处不要碰。
 开工前先复制 `.credentials.yaml` 到安全位置（凭据丢了要重新登录，其余数据可重建）。
 
 ### 2.4 步骤
@@ -78,55 +65,52 @@ C:\Users\Sol\Downloads\deepseek-harness-0.2.0-rc.1-win-x64.exe
      ForEach-Object { Get-Process -Id $_.OwningProcess } | Select-Object Id,ProcessName,Path
    ```
    上一次观测到的 PID 供对照：主进程 `13056`、gpu `12352`、network service `1836`、
-   renderer `12084`、**dsh-desktop-host `2240`**、subprocess runner `13500`/`21292`、
-   `node.exe 4004`（`C:\Users\Sol\.dsh\profiles\desktop\node_modules\billion-context`）。
+   renderer `12084`、**dsh-desktop-host `2240`**、subprocess runner `13500`/`21292`，
+   另有 `node.exe` 跑在 `%USERPROFILE%\.dsh\profiles\desktop\node_modules\billion-context`。
    **PID 会变，按名字/端口杀，不要按上面这些数字杀。**
 3. **卸载旧版**（两个办法，任选）：
    ```powershell
    # A. 走注册表里的卸载串（推荐，会清理注册表项与快捷方式）
-   & "D:\Program Files\dsh\Uninstall DeepSeek Harness.exe" /currentuser
-   # B. 图形界面：设置 → 应用 → 已安装的应用 → "DeepSeek Harness 0.1.7-rc.2" → 卸载
+   $u = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" |
+     Where-Object DisplayName -match 'DeepSeek').UninstallString
+   & cmd /c "$u"
+   # B. 图形界面：设置 → 应用 → 已安装的应用 → "DeepSeek Harness …" → 卸载
    ```
-   卸载完确认 `D:\Program Files\dsh` 已消失、注册表项已消失；**若残留则手动删目录**（只删这个目录）。
+   卸载完确认安装目录已消失、注册表项已消失；**若残留则手动删目录**（只删这个目录）。
 4. **清掉过期更新器缓存**（否则新版本可能仍被旧包挡住）：
    ```powershell
-   Remove-Item "$env:LOCALAPPDATA\@deepseek-aidsh-desktop-updater" -Recurse -Force
+   Remove-Item "$env:LOCALAPPDATA\@deepseek-ai\dsh-desktop-updater" -Recurse -Force
    ```
-5. **删掉过期的 `host-ready.json`**：当前内容是**上一轮 PC 侧本地测试的残留**——
-   ```json
-   {"port":3156,"profile":"ondevice","pid":17560,"startedAt":"2026-09-28T15:10:52.882Z",
-    "workspace":"D:\\desktop\\temp\\desktop.ohos.arm64\\dist\\localtest\\model-sandbox\\workspace",
-    "runtime":{"nodeVersion":"v24.19.0","platform":"win32/x64","jitless":true,
-               "listenAddress":"127.0.0.1:3156","natives":{...}}}
-   ```
-   而桌面端 Host 实际监听的是 **19387**（owner = `dsh-desktop-host`）。这就是一份**撒谎的探针文件**，
-   留着会误导排查。新版启动会自己重写。
+5. **删掉过期的 `host-ready.json`**：它可能残留着**上一轮 PC 侧本地测试**的内容——
+   端口是 `3156` 而不是桌面端 Host 实际监听的 **19387**（owner = `dsh-desktop-host`），
+   `workspace` 指向一份临时沙箱目录。这就是一份**撒谎的探针文件**，留着会误导排查。
+   新版启动会自己重写。
    ```powershell
+   Get-Content "$env:USERPROFILE\.dsh\host-ready.json" -Raw   # 先看一眼
    Remove-Item "$env:USERPROFILE\.dsh\host-ready.json" -Force
    ```
-6. **装新版**：用 §2.1 给出的那个包（`C:\Users\Sol\Downloads\deepseek-harness-0.2.0-rc.1-win-x64.exe`）。
+6. **装新版**：从官方发布渠道取包（`deepseek-harness-<version>-win-x64.exe`），先验版本与哈希再装。
    ```powershell
-   $p = "$env:USERPROFILE\Downloads\deepseek-harness-0.2.0-rc.1-win-x64.exe"
-   (Get-Item $p).VersionInfo.FileVersion          # 应为 0.2.0-rc.1
-   (Get-FileHash $p -Algorithm SHA256).Hash       # 应为 9DD8538E...C7F399
+   $p = "$env:USERPROFILE\Downloads\deepseek-harness-<version>-win-x64.exe"
+   (Get-Item $p).VersionInfo.FileVersion          # 核对版本
+   (Get-FileHash $p -Algorithm SHA256).Hash       # 与该版本的发布哈希核对
    Start-Process $p                                 # 双击效果，走图形安装器
    ```
    装完核对：
    ```powershell
-   (Get-Item "D:\Program Files\dsh\DeepSeek Harness.exe").VersionInfo.FileVersion   # 应为 0.2.0-rc.1
    Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" |
-     Where-Object DisplayName -match 'DeepSeek' | Select-Object DisplayName,DisplayVersion
+     Where-Object DisplayName -match 'DeepSeek' | Select-Object DisplayName,DisplayVersion,InstallLocation
    ```
 7. **验证数据还在**：会话数 / profile 列表 / 能正常登录（`.credentials.yaml` 生效）。
 
-> ⚠️ 卸载前**不要**用 `Remove-Item -Recurse` 去"清干净"`C:\Users\Sol\.dsh` 或 `%APPDATA%\@deepseek-ai`——
+> ⚠️ 卸载前**不要**用 `Remove-Item -Recurse` 去"清干净"`%USERPROFILE%\.dsh` 或 `%APPDATA%\@deepseek-ai`——
 > 那 1 GB 里是用户的全部会话与凭据。
 
 ---
 
 ## 3. 鸿蒙侧工程结构（接手必读）
 
-- 仓库根：`D:\desktop\temp\desktop.ohos.arm64`。构建产物 `entry/build/default/outputs/default/entry-default-signed.hap`；
+- 仓库根：本仓库所在目录（下文相对路径均以仓库根为基准）。构建产物 `entry/build/default/outputs/default/entry-default-signed.hap`；
   交付件在 `dist/sideload/`。
 - **真机数据保全（AGENTS.md 最高优先级，必须先读）**：只允许 `hdc install -r <hap>`；
   禁止 `hdc uninstall` / `bm uninstall` / 任何对 `/data/app/el2/.../com.dshm.dshclient` 的删除。
@@ -174,7 +158,7 @@ C:\Users\Sol\Downloads\deepseek-harness-0.2.0-rc.1-win-x64.exe
 
 | 端 | 落到哪 | 生效代价 |
 |---|---|---|
-| Windows | `C:\Users\Sol\.dsh\profiles\desktop\cordis.patch.yml`（121 行，当前**没有** `typert-gateway` 覆盖 ⇒ 仍是默认 2000ms） | 改完重启 desktop 即可 |
+| Windows | `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`（当前**没有** `typert-gateway` 覆盖 ⇒ 仍是默认 2000ms） | 改完重启 desktop 即可 |
 | 鸿蒙 | `hostcore/profile/ondevice/cordis.patch.yml`（314 行，`PROFILE = process.env.DSHM_PROFILE \|\| 'ondevice'`，由 `hostcore/app/main.js:3654/3681` 装到 `$DSH_HOME/profiles/<PROFILE>`） | **必须 `node tools/pack-core.mjs` 重打 core → 重建 HAP → `hdc install -r`** |
 
 另有一个已实证的次要触发源：WebView 到 `ws://127.0.0.1:…`（`/api/remote.mux`）报
@@ -208,26 +192,46 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 
 ### ③ 交付前最终验收
 
-产物已就绪：`dist/sideload/DSHM-1.0.0-arm64-signed.hap`（299.5 MB，
-sha256 `4e776ecf6b573862…`）。剩最后一遍逐项走查（文档 `docs/device-validation.md` 批次三十六/三十七）。
+产物已就绪：`dist/sideload/DSHM-1.0.0-arm64-signed.hap`（**299.61 MiB / 314.17 MB / 314,166,762 B**，
+sha256 `e8ef8be567f9a2b9c40d17c6a0dd2e3664c626b98069a1eb2afcd9644c4d8060`）。
+**注意这里是 2026-09-30 按 `docs/90` §9.2 四步刷新过的那一份** —— 刷新前 `dist/sideload/` 里那份
+（299.5 MB / `4e776ecf6b573862…`）**落后一整个核心版本**（仍嵌 `dsh-core-0.2.0-rc.1`，且缺托盘图标、
+`dshm-compat.js`、`dshm-skills.js`）。
 
-### ④ GitCode 开源推送（**被 token 阻塞**）
+**2026-09-30 已做**（详见 `docs/device-validation.md` 批次三十八）：
 
-3 个本地提交（`e7b5ed7`、`32e1710`、`33e9631`，424 文件 / 5.84MB）已就绪，远端仍是**无关的旧项目**。
+- `tools/func_test_final.py` 真机复测 **PASS=38 / FAIL=0 / MANUAL=6** —— 上一轮两条失败断言
+  （`T0.4 Host HTTP 有响应`、`T2.4 会话列表渲染历史会话`）**均已转绿**；主进程连续存活约 4.7 h，
+  40 s 自杀未复现。
+- `tools/device-acceptance.ps1` 首跑报 4 项 FAIL，**全部是脚本自身缺陷**（hilog 当判据、导航路径写错、
+  两条判据结构性取不到）⇒ 已重写为 307 行并复跑 **5 项判定全 PASS**
+  （证据 `dist/acceptance/20260930-120131/`，含 `nav.md`：设置九个分区逐个点开全部 OK）。
+
+**仍剩**：`report.md` 里的人工清单需逐条勾选（命令面板、计划模式、轨迹、插件启停、工作区删除/归档、
+核心切换/回滚、**文件变更流**——该项因无稳定信号已从自动判定降级）；文档走查
+`docs/device-validation.md` 批次三十六/三十七/三十八。
+
+### ④ 开源推送（**被 token 阻塞**）
+
+本地提交已就绪（`e7b5ed7` 初始公开版本 → `32e1710` 开源前加固 → `33e9631` 签名配置移出跟踪
+→ `826dc09` 补齐构建必需源码 → `33662bd` 文档修正），远端仍是**无关的旧项目**。
 推送需要**有写权限的 token**（`http.extraheader=PRIVATE-TOKEN: <tok>`，不要放进 URL；
 禁用 GCM：`credential.helper=""`、`GCM_INTERACTIVE=never`、`GIT_CREDENTIAL_MANAGER=0`，清代理）。
 **注意**：`git ls-remote` 返回 0 **不能**证明 token 有效（匿名读也能成功），必须实际 push 才算。
-之后打 tag `v1.0.0` + Release 上传上面那个 HAP。
+顺序：**先 GitCode**（`tools/publish-gitcode.sh <token>`，远端 `https://gitcode.com/u010189254/dshm.git`），
+**再 GitHub**；之后打 tag `v1.0.0` + Release 上传上面那个 HAP。
 
-### ⑤ 待用户拍板
+### ⑤ `.codegenie\`（已定：留本地，不入库）
 
-`D:\desktop\temp\desktop.ohos.arm64\.codegenie\`（449 MB，内含嵌套 `.git`）——删还是留。
+仓库根下的 `.codegenie\`（449 MB，内含嵌套 `.git`）**已定保留在本地**：它是本地工具的工作目录，
+开源不需要，因此不进版本库（`.gitignore` 已忽略）。同类的还有 `dist/`、`.probe/`、`.research/`、
+`entry/build/`、`.hvigor/` —— 判据是**"开源要不要"**，不是"有没有用"。
 
 ---
 
 ## 5. 已完成的（不要再重做）
 
-- **端侧核心自足运行**：core 0.2.0-rc.1 打进 HAP，`libdshhost.so` 与应用同进程起 Node 线程；
+- **端侧核心自足运行**：core 0.2.0-rc.2 打进 HAP，`libdshhost.so` 与应用同进程起 Node 线程；
   exec 探测 7/7（`python3.12`、`git`、`git-core/git`、`git-remote-http`、`rg`、`bash`、`git-ls-remote`）。
 - **语音输入**：HMS `SpeechRecognizer` 桥接，已作为独立插件 `ohosSenseVoice` 开源在 GitCode。
 - **系统托盘常驻**（`statusBarManager`，来自 **HMS** 的 `@kit.DeskTopExtensionKit`，不是 OpenHarmony SDK）：
@@ -264,3 +268,68 @@ sha256 `4e776ecf6b573862…`）。剩最后一遍逐项走查（文档 `docs/dev
 9. **ArkTS 重载解析陷阱**：`commonEventManager.createSubscriber(info)` 会被解析成
    `Promise<CommonEventSubscriber>` 重载 ⇒ 用 `createSubscriberSync`。
 10. **门禁"通过"≠"覆盖到了"**（`docs/README.md` 纪律 9）。
+
+---
+
+## 7. 官方桌面端（Windows）的自更新逻辑 —— 与端侧的关系
+
+> 起因：用户观察到 Windows 端 dsh desktop「设置里会提示有新版本，下载后点击更新，重启后完成」。
+> 结论来自对上游 deepseek-harness 源码仓库（只读，`0.2.0-rc.2`，commit `639ed01`）的逐条追踪。
+
+### 7.1 一句话
+
+**它完全不是 dsh 协议，而是 Electron 主进程 + 第三方 `electron-updater@^6.8.9` 的组合**
+（`apps/desktop/package.json:44`）。端侧（ArkTS）**没有可照搬的实现层**——只有状态机与契约层可参考。
+全仓**不存在** `dsh-host-update*` / `dsh-update*` 包，**不存在** `app.relaunch()`，**不存在**
+`latest.yml` 或 GitHub Releases 通道。
+
+### 7.2 实现位置与接口面
+
+| 项 | 事实 |
+|---|---|
+| 实现 | 全在 `apps/desktop/`（Electron 主进程）；渲染侧只有 `packages/client/ui-settings-general` 的一个状态徽标 |
+| 接口 | **Electron IPC**，非 dsh：`dsh-desktop:updates-{status,open,presentation}`（`apps/desktop/src/ipc.ts:27-29`） |
+| 暴露 | preload → `globalThis.dshDesktop.updates.{status,open,subscribe}`（`apps/desktop/src/preload-app.ts:49-57`） |
+| 可见性 | 仅 `dsh-app://app` 主帧（`apps/desktop/src/preload-app.ts:100`） |
+
+### 7.3 状态机与重启
+
+- 主进程权威的 **8 阶段**：`idle → checking → available → downloading → verifying → installing → ready`（+ `error`）；
+  渲染侧只订阅**只读快照**，不参与决策。
+- 重启链：`autoUpdater.quitAndInstall(true, true)`（`apps/desktop/src/update-coordinator.ts:137`）
+  → 先置 `shellInstallerOwnsQuit = true`（`apps/desktop/src/main.ts:626`）让 `before-quit` 不拦截
+  （`apps/desktop/src/main.ts:1259-1281`）→ 由 **NSIS** 就地安装并以 `--updated` 重启
+  （`apps/desktop/installer/pages.nsh:224-237`）→ 重启后抬升聚焦一次（`apps/desktop/src/main.ts:1126-1130`）。
+
+### 7.4 ★四层平台门禁（端侧照搬会在第一层就短路）
+
+| # | 门禁 | 位置 |
+|---|---|---|
+| 1 | `app.isPackaged && existsSync(join(process.resourcesPath,'app-update.yml'))` | `apps/desktop/src/update-coordinator.ts:54` |
+| 2 | 无签名构建 `publish: null` ⇒ **不产出** `app-update.yml` | `apps/desktop/electron-builder-config.mjs:249` |
+| 3 | `UPDATE_TARGETS = {mac-arm64, mac-x64, win-x64}` —— **无 Linux** | `desktop-auto-update-environment.mjs:25` |
+| 4 | 强制更新策略另抛 `desktop policy: unsupported platform` | `apps/desktop/src/main.ts:1297` |
+
+> 含义：**门禁之后没有可移植的实现**。ArkTS 侧能用的只有下面 7.5 那四项。
+> Windows 专有点：`--updated` 抬升、Windows 专属确认文案、`installMandatoryUpdateOverlay`、NSIS 重启链。
+
+### 7.5 生产配置（版本来源）
+
+- 生产硬编码 `https://download.deepseek.com`（`desktop-auto-update-environment.mjs:18`）；test 用 `DOWNLOAD_TEST_ORIGIN`。
+- feed 固定 `nightly.yml`；**channel 恒为 `nightly`，用户无法 opt-in 或切换**。
+
+### 7.6 端侧可复用的面（仅此四类）
+
+1. 状态枚举与转移规则（7.3 那 8 阶段）；
+2. `status` / `open` / `subscribe` 三角色契约；
+3. 调度参数：**10 分钟**轮询 + **±20% 抖动** + **1 小时退避上限**；
+4. 强制更新策略的 HTTP 契约：`<origin>/api/v0/check_client_update`、`x-client-*` 头、`40005` 表示阻断。
+
+### 7.7 结论与不确定项
+
+- **结论**：这是 Electron 平台能力，不是 dsh 能力。端侧若要做"检查更新"，等于**从零实现一套**
+  （版本清单托管 + 下载 + 校验 + 覆盖安装），且**端侧更新路径必须先过 §4 的数据保全规则**
+  （只允许 `hdc install -r`，自动化更新会直接触碰"卸载删数据"的红线）。
+  当前**不建议**移植；真要做得先拍板"谁来托管 HAP 与版本清单"。
+- **不确定项（未读完，如实留白）**：未逐行读 `renderer/update-dialog.*` 与 `mandatory-update.*` 正文；
+  `locale.messages.later` 字面量未取；macOS 重启闭环未完整追踪；Linux 是机制推断（门禁 3）而非显式禁用断言。

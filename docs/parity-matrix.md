@@ -64,7 +64,7 @@
 | D | §5 统计表必须与矩阵**实算**逐项相等（含合计） | 口径不明导致数字对不上（本项目真实发生过） |
 | E | `DONE` 的行不得留在 §6 缺口登记里 | 陈旧登记：台账同时说"已完成"和"缺什么" |
 
-> 五条都有**注入式负测试**（`--self-test` 的 12 个正/负样例）证明会真的失败。
+> 五条都有**注入式负测试**（`--self-test`；`check-parity` 为 13 个正/负样例）证明会真的失败。
 > 另对**真实矩阵**做过一次端到端注入：把 `workflow-run` 从 `TODO` 谎报成 `DONE` 并顺手改对统计数字——
 > 门禁仍以「陈旧登记」点名并退出 1（不变式 E 存在的理由：只靠 D 会被"顺手改统计"掩盖）。
 
@@ -99,53 +99,78 @@
 |---|---|---|
 | Node 静态门禁（`tools/*.mjs`） | ✅ 可跑 | 已实测：架构门禁、接线回归、上架红线、对等门禁全绿；见 §3.1 |
 | **ArkTS 编译（HAR 模块）** | ✅ 可跑 | `devecocli build --modules appstate connection dshcompat hostruntime platform` → **BUILD SUCCESSFUL**（apiVersion 26 SDK，145 任务）。这是**真编译器**，不是解析器 |
-| **ArkTS 编译（entry 应用模块）** | ✅ **已可跑（2026-09-14 解锁）** | 两条路：① **只编 UI 层**（快，58s）：`<CLT>/tool/node/bin/node <CLT>/hvigor/bin/hvigorw.js default@CompileArkTS --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon`（需 `DEVECO_CLI_CLT_PATH` + `DEVECO_SDK_HOME=<CLT>/sdk` + `JAVA_HOME`）；② `devecocli build` 全量。**`Index.ets` 与全部 Pane 首次获得真编译验证**——P1~P3 改 UI 不再是盲改 |
+| **ArkTS 编译（entry 应用模块）** | ✅ **可跑（Windows 本机已解锁：2026-09-28）** | 两条路：① **只编 UI 层**：`node tools/check-arkts-entry.mjs`（**不需要任何环境变量**，脚本自己解析 DevEco 布局）；或直接 `<CLT>/hvigor/bin/hvigorw.js default@CompileArkTS --mode module -p module=entry@default -p product=default -p buildMode=debug --no-daemon`（Linux 布局需 `DEVECO_CLI_CLT_PATH` + `DEVECO_SDK_HOME=<CLT>/sdk` + `JAVA_HOME`）；② `devecocli build` 全量。**`Index.ets` 与全部 Pane 获得真编译验证**——P1~P3 改 UI 不再是盲改。⚠️ 2026-09-28 之前本行只有在 Linux 机器上成立：`tools/check-arkts-entry.mjs` 写死了四处 Linux 布局，在 Windows 上恒 exit 3（详见 `docs/90-…md` §2.4）|
 | **完整打包（HAP）** | ✅ 可跑，**只差签名** | `devecocli build` → `CompileArkTS` ✅ `PackageHap` ✅ `PackingCheck` ✅，最后 `SignHap` 失败：`build-profile.json5` 的 `signingConfigs` 指向 Windows 路径（`C:\Users\hnzy1\.ohos\config\*.p12`）。产出 **`entry/build/default/outputs/default/entry-default-unsigned.hap`（138MB）**，内含 `libs/{arm64-v8a,x86_64}/libdshhost.so`（原生模块真的编出来了）+ 两个核心 zip + 入口脚本。⇒ **签名是纯环境问题**（需要那台机器的证书），与代码无关 |
 | **ArkTS 语法错误的守护边界** | ⚠️ 只有真编译器能抓 | **实测**：codelinter **检不出语法错误**（往 `appstate` 注入 `return a +;` 后它一条都不报，而真编译器立刻 BUILD FAILED）⇒ 任何对 `.ets` 的改动都必须过 `default@CompileArkTS`/`devecocli build`，**不能用 lint 代替** |
-| **设计令牌棘轮（`check-design-tokens.mjs`）** | ✅ 可跑且**失败已注入验证** | 计划 §6 点名禁止的裸 `fontSize`/`lineHeight`/`borderRadius`/`borderWidth`/颜色字面量：基线 58 处 / 11 文件，**只许变少**。为什么是棘轮而非一刀切：存量里**图标尺寸的收敛会改变视觉、必须真机验收**，一刀切会立刻几百处红——**永远红的门禁等于没有门禁**。豁免须写明理由（`// token-exempt: …`）；判定器自检 11 个样例 |
-| **纯逻辑执行测试（layout fixtures）** | ✅ 可跑 | `tools/check-layout-fixtures.mjs`：把 `appstate/ui` 的三个**纯逻辑** `.ets` 按 `.ts` 编译后**在本机直接执行**（被测的是同一源文件，不是复制品），断言四形态 + 断点边界 + 让步链三分支，共 28 条 |
+| **设计令牌棘轮（`check-design-tokens.mjs`）** | ✅ 可跑且**失败已注入验证** | 计划 §6 点名禁止的裸 `fontSize`/`lineHeight`/`borderRadius`/`borderWidth`/颜色字面量：基线 **21 处 / 8 文件**（2026-09-28 重测；旧记"58 处 / 11 文件"是 2026-09-15 的读数），**只许变少**。为什么是棘轮而非一刀切：存量里**图标尺寸的收敛会改变视觉、必须真机验收**，一刀切会立刻几百处红——**永远红的门禁等于没有门禁**。豁免须写明理由（`// token-exempt: …`）；判定器自检 **13 个样例** |
+| **纯逻辑执行测试（layout fixtures）** | ✅ 可跑 | `tools/check-layout-fixtures.mjs`：把 `appstate/ui` 的三个**纯逻辑** `.ets` 按 `.ts` 编译后**在本机直接执行**（被测的是同一源文件，不是复制品），断言四形态 + 断点边界 + 让步链三分支，**共 768 条断言**（7 组 fixture；2026-09-28 实测，**2026-09-30 起不再需要外部 junction**——`findTsc()` 已按同族脚本的候选列表补上 Windows 回退，见 §3.2。旧记"共 28 条"是被测断言的早期规模） |
 | **ArkTS 静态检查（codelinter）** | ✅ 可跑且**覆盖面已证明** | 直接调用 CLT 的 `codelinter/bin/codelinter -c code-linter.json5 <模块目录>`：**16 条 warning / 0 error**（7 个文件）。覆盖用**注入测试**证明：往一个「无问题」文件注入已知违规，能被检出（见 §3.2） |
 | API 兼容扫描（`devecocli check compat`） | ❌ 平台不支持 | CLI 明文：`Unsupported platform: linux. compat only supports macOS and Windows.`——**与 CLT 是否安装无关**，Linux 上永远不可用 |
 | 模型/协议往返（`check-model-roundtrip.mjs`） | ✅ **可跑且通过** | `--no-prompt --wait-ms 180000`（Node 22）：真起 Host → 铸 cookie → 读模型目录 → 建会话 → 开 mux → `session/page` → 收到 `follow` 的 snapshot 帧（含 projections） |
-| 起真实 Host 的门禁（`check-origin-fence` / `check-plugin-toggle`） | ✅ **可跑且通过**（需 Node < 22，慢机器还要放宽就绪等待） | ① 这三个门禁用 `process.execPath` 起 Host 并传 `--no-experimental-fetch`，该 flag 在 **Node 22+ 已被移除**（fetch 转正）⇒ Node 24 下 Host 直接启动失败（`--no-experimental-fetch is an invalid negation`）。本机备了 **Node v22.23.2**（与端侧同版本）：`/home/node/node22/bin/node`。② **本机 Host 冷启动实测 62,951 ms**（`BOOT_60_HTTP_BIND …(+62951ms)`；Orange Pi 5B + 工作区在 NFS）⇒ `check-origin-fence` 原来的 60 秒就绪等待刚好不够（`check-plugin-toggle` 用 90 秒，所以它一直能过）。已把它改成可放宽（**默认值不变**）：`DSHM_CHECK_READY_MS=180000`。③ 结论：`check-origin-fence` **PASS**（clean/absent/duplicated → 101；foreign → 403；no-cookie → 401）；`check-plugin-toggle` **PASS**（155 条目 → 写用户行 → `ui-deliverables enabled=false`） |
-| 在设备上真跑（装机） | ❌ 只差签名材料 | 运行期产物已齐（`entry/libs/arm64-v8a/` 含 `libnode.so.127`，见 §3.3）；`devecocli build` 打通 `CompileArkTS`→`PackageHap`，仅 `SignHap` 因 `build-profile.json5` 指向 Windows 证书路径而失败 |
-| **完整 arm64 HAP（未签名）** | ✅ 已产出 | `entry/build/default/outputs/default/entry-default-unsigned.hap`（138 MB），内含 **`libnode.so.127`(114 MB) + `libkoffi.so`(1,600,496 B) + `libsystem.so`(10,496 B, flock) + `libdshhost.so` + 全套原生库**；三个原生附加件（koffi / flock / dshhost）都在这一台机器上**真的编出来了** |
+| 起真实 Host 的门禁（`check-origin-fence` / `check-plugin-toggle`） | ✅ **可跑且通过**（需 Node < 22，慢机器还要放宽就绪等待） | ① 这三个门禁用 `process.execPath` 起 Host 并传 `--no-experimental-fetch`，该 flag 在 **Node 22+ 已被移除**（fetch 转正）⇒ Node 24 下 Host 直接启动失败（`--no-experimental-fetch is an invalid negation`）。本机备了 **Node v22.23.2**（与端侧同版本）：`/home/node/node22/bin/node`。② **本机 Host 冷启动实测 62,951 ms**（`BOOT_60_HTTP_BIND …(+62951ms)`；Orange Pi 5B + 工作区在 NFS）⇒ `check-origin-fence` 原来的 60 秒就绪等待刚好不够（`check-plugin-toggle` 用 90 秒，所以它一直能过）。已把它改成可放宽（**默认值不变**）：`DSHM_CHECK_READY_MS=180000`。③ 结论：`check-origin-fence` **PASS**（clean/absent/duplicated → 101；foreign → 403；no-cookie → 401）；`check-plugin-toggle` **PASS**（186 条目 → 写用户行 → `ui-deliverables enabled=false`） |
+| 在设备上真跑（装机） | ✅ 已达成（本节的状态已过时） | 旧记"只差签名材料"——签名材料已备齐，**真机装机早已跑通**（见 §3.3 与 `docs/device-validation.md` §批次三十六/三十七）。运行期产物 `entry/libs/arm64-v8a/` 含 `libnode.so.137`（**实物是 `.137`，本节旧文字写的 `.127` 是 rc 之前的名字**） |
+| **完整 arm64 HAP（未签名）** | ✅ 已产出 | `entry/build/default/outputs/default/entry-default-unsigned.hap` = **312,150,304 B / 297.69 MiB**（110 条目；旧记"138 MB"是阶段一的读数），内含 **`libnode.so.137`(126,809,264 B) + `libkoffi.so`(1,600,112 B) + `libsystem.so`(10,464 B, flock) + `libdshhost.so` + 全套原生库**；三个原生附加件（koffi / flock / dshhost）都在这一台机器上**真的编出来了** |
 | 布局/形态真机验收 | ❌ 不可跑 | 无模拟器、无真机 |
 | 视觉像素、手势、键盘、触控笔、系统权限、文件选择器 | ❌ 不可跑 | 统一进 `docs/device-validation.md`（P4） |
 
-### 3.1 已实测的基线（本轮）
+### 3.1 已实测的基线（2026-09-30 重测）
 
 ```
-node tools/arch-check.mjs            ✅ 无违规（上游字面量只在 dshcompat，扫描 75 文件）
-node tools/check-feature-wiring.mjs  ✅ 17 个功能接线全在（扫描 111 文件）
-node tools/check-builder-recursion.mjs ✅ 99 个 @Builder 无自递归（E343）
-node tools/check-dead-code.mjs        ✅ 81 文件 / 1855 处声明 / 0 死代码（E350）
+node tools/arch-check.mjs            ✅ 无违规（上游字面量只在 dshcompat，扫描 131 文件）
+node tools/check-feature-wiring.mjs  ✅ 18 个功能接线全在（扫描 133 文件，1 条反面规则）
+node tools/check-builder-recursion.mjs ✅ 99 文件 / 102 个 @Builder 无自递归（E343）
+node tools/check-dead-code.mjs        ✅ 99 文件 / 判定声明 2237 处 / 门面字段 256 个 / 0 死代码（E350）
 node tools/check-store-readiness.mjs ✅ PASS
-node tools/check-parity.mjs          ✅ 通过（本矩阵：覆盖 / token / 形态 / 登记 / 统计）
-node tools/check-parity.mjs --self-test ✅ 12 个正负样例全符合预期（门禁自身可信）
-node tools/check-dead-handlers.mjs   78 处（逐条判断用途，**不追求归零**；这 78 处绝大多数是 ArkTS 声明可空回调 prop 的惯用写法 `onX: (…) => void = () => {}`——结构体成员必须有初值，所以空默认值是**声明**，不是"死按钮"；真正要判断的是调用方有没有接线）
-node tools/check-native-closure.mjs  ⚠️ 跳过（无 entry/build 原生库目录）
-node tools/check-origin-fence.mjs    ⚠️ 跑不了（缺 dist/core/ 核心树）
-node tools/check-plugin-toggle.mjs   ⚠️ 跑不了（同上）
-node tools/compat-drift.mjs          ⚠️ 跑不了（缺 .research/protocol/contracts.json）
+node tools/check-parity.mjs          ✅ 通过（50 行：官方 39 + 端侧 11；DONE 14 · PARTIAL 31 · BOUNDARY 3 · TODO 2；§6 登记 36 个 id）
+node tools/check-parity.mjs --self-test ✅ 13 个正负样例全符合预期（门禁自身可信）
+node tools/check-dead-handlers.mjs   ✅ 未发现空实现（2026-09-28 重测；旧记"78 处"是**声明**口径，非死按钮）
+node tools/check-native-closure.mjs  ✅ PASS（libpty.so / libsharp 两条 SONAME 告警按路径 dlopen 属可接受）
+node tools/check-origin-fence.mjs    ✅ PASS（clean/absent/duplicated ⇒ 101；foreign ⇒ 403；no-cookie ⇒ 401）
+node tools/check-plugin-toggle.mjs   ✅ PASS（target=ui-deliverables enabled=false）
+node tools/compat-drift.mjs          ✅ 无漂移（核心 0.2.0-rc.2；基线采集 2026-09-29T13:59:55.459Z；期望 140 / 基线 140）
+
+node tools/check-skill-sync.cjs        ✅ RESULT: 32 passed, 0 failed（A–H 八组；C/D 专测**等长改动**）
+node tools/check-compat-exemption.cjs  ✅ RESULT: 48 passed, 0 failed（臂 A 透传 + 臂 B 用**上游自己的** evaluatePluginCompatibility 验挂载决策翻转）
+node tools/check-dshm-installer.cjs    ✅ RESULT: 43 passed, 0 failed（含 5a 真幂等 / 5b 版本漂移必重装 / 5c 收敛；另有 GitHub 回退与 monorepo 子包判定 19 例 —— 2026-09-29 由 24 增至 43）
+node tools/check-doc-refs.mjs          ✅ 通过（21 个文档 / 247 条带行号引用 / 0 处问题；引用数随文档增改漂移）
 
 devecocli build --modules appstate connection dshcompat hostruntime platform   ✅ BUILD SUCCESSFUL（52s）
 codelinter -c code-linter.json5 <6 个模块目录>                                  ✅ 16 warn / 0 error
-node tools/check-layout-fixtures.mjs                                            ✅ 533 条断言通过（四形态 + 边界 + 让步链 + 模型/呈现/设置域）
+node tools/check-layout-fixtures.mjs                                            ✅ 768 条断言通过（四形态 + 边界 + 让步链 + 模型/呈现/设置域）
 node tools/check-layout-fixtures.mjs --self-test                                ✅ 注入的失败被如实报出
 
 hvigorw default@CompileArkTS -p module=entry@default …                          ✅ BUILD SUCCESSFUL（0 error / 32 warn）
 devecocli build（全量）                                                           ✅ CompileArkTS/PackageHap/PackingCheck 全过
                                                                                  ❌ SignHap（签名证书在 Windows 那台机器上）
                                                                                  ⇒ 产出 entry-default-unsigned.hap = 138 MB
+```
 
+**本机全量实跑退出码分布（2026-09-30 重测，23 条）：`22×0 / 1×1`**
+（2026-09-28 的 `20×0 / 1×3 / 2×1` 已过期：`check-layout-fixtures.mjs` **已修至 0** —— 参见 §3.2 的同族缺陷说明；
+`check-model-roundtrip.mjs` 带 prompt 时为 exit 1 是**本机缺 koffi**（HAP 专属），加 `--no-prompt` 后 exit 0。
+旧记的 `23×0 / 2×3 / 7×1` 更早，`check-arkts-entry.mjs`、`check-web-fetch-jitless.mjs`、`check-fetch-shim.cjs`、`check-dshm-installer.cjs` 均已修至 0。）
+
+```text
 # 三条"守护本身可信吗"的注入测试（门禁通过 ≠ 覆盖到了）
 注入 `return a +;` 到 appstate → 真编译器 ✅ BUILD FAILED；codelinter ❌ 一条不报（故 codelinter 不能当解析守卫）
 把 MAIN_MIN_VP 280→320 → check-layout-fixtures ✅ 立刻红（正好命中"840vp 详情栏被收窄"这条行为回归）
 把 workflow-run 谎报成 DONE（并同步改统计）→ check-parity ✅ 以"陈旧登记"点名并退出 1
 ```
 
-**门禁"通过"不等于"覆盖到了"**（docs/README 纪律 9）：上面 4 个跑不动的门禁，其覆盖面在本环境**是盲区**，不是通过。
+**门禁"通过"不等于"覆盖到了"**（docs/README 纪律 9）：在本环境跑不动的门禁，其覆盖面**是盲区**，不是通过。
+
+> **2026-09-28 复核：这条纪律的"反向"同样成立——"跑不动"必须先查原因，不要直接记成盲区。**
+> 原先记入盲区/环境的 5 个门禁里，有 2 个的真实原因是**脚本自己写死了 Linux 布局或传了裸盘符路径**，另有 2 个是**脚本自身的硬缺陷**，还有 1 个（`check-layout-fixtures.mjs`）是**工具链没暴露**（找不到 `tsc`，当时需先 junction 出 Windows 的 `typescript`；**2026-09-30 已把回退写进脚本**）——**五条里没有一条是设备能力不足**：
+>
+> | 门禁 | 原记录 | 复核结论（2026-09-28） |
+> |---|---|---|
+> | `check-arkts-entry.mjs` | 盲区（entry 层零编译验证） | **已修 ⇒ exit 0**，日志含 `CompileArkTS` + `BUILD SUCCESSFUL`（四处路径写死：`tool/node/bin/node` 缺 `.exe`、`JAVA_HOME` 默认值、`DEVECO_SDK_HOME`、`PATH` 分隔符用 `:`）|
+> | `check-layout-fixtures.mjs` | 盲区（找不到 tsc） | **已修 ⇒ exit 0 / 768 条断言**（2026-09-30：`findTsc()` 补上 Windows IDE 自带 `typescript` 的候选路径，与 `check-arkts-entry.mjs` 同写法 ⇒ **不再需要外部 junction**）|
+> | `check-web-fetch-jitless.mjs` | 环境（需特定 flag） | **已修 ⇒ exit 0**（两处硬缺陷：flag 写死的否定形态在 Node 24 无效致**两臂哑火**；loader 传裸盘符路径致 **B 臂从未跑成**）|
+> | `check-fetch-shim.cjs` | 环境（需特定 flag） | **已修 ⇒ exit 0**（三处缺陷：前提建在 `--no-experimental-fetch` 的语义上、探针打在**规范禁用端口** `127.0.0.1:9`、取证引用取在装垫片**之后**）。**这条的代价最重——"环境"标签掩盖了一个产品真 bug**：Node 24 自带原生 `FormData` 而 `encodeRequestBody` 只认 `instanceof` ⇒ 请求体被编成字面量 `"[object FormData]"`，直接砸 dsh 附件上传（见 `docs/90-…md` §3.6 末段）|
+> | `compat-drift.mjs` | 盲区（缺契约文件） | **可跑**：指向仓库内自带核心树即可（见 §3.1 下方命令）。初始 135/135 无漂移；2026-09-28 升到 `0.2.0-rc.1` 后为 **138/138 无漂移**；2026-09-29 升到 `0.2.0-rc.2` 后为 **140/140 无漂移**（+2：`userQuestions/{answer,attachWait}`，纯新增，见 `docs/40-上游升级手册.md` §4.4） |
+>
+> ⇒ 这五条里没有一条是"本机能力不足"。**把"某台机器的限制"读成"项目盲区"，代价是那一层从此没有自动验证。**
 
 ### 3.3 不入库产物清单（新机器上要能编译/装机，需要哪些东西）
 
@@ -165,10 +190,10 @@ devecocli build（全量）                                                     
 | Node 头文件 | `entry/src/main/cpp/node-headers/` | CMake 编 `libdshhost`（**只需要它**） | `tools/node-runtime/sync-node-headers.sh`（从 Node v22.23.2 源码树取 `src/*.h` + `deps/v8/include` + `deps/uv/include`） | ✅ 已生成（3.8 MB） |
 | koffi 源码 | `third_party/koffi/` | 编 `libkoffi.so`（`subprocess`/`sandbox` 两行插件依赖它） | `node tools/fetch-koffi.mjs` | ✅ 已就位（4.6 MB，随其余产物上传） |
 | Host 入口脚本 | `entry/src/main/resources/resfile/resources/app/` | 装机后由原生层跑起 dsh | `node tools/place-host-app.mjs`（源 `hostcore/app/` **在库里**） | ✅ 已就位 |
-| 核心包 | `entry/src/main/resources/resfile/*.zip` | 首启解包出端侧核心树 | `node tools/pack-core.mjs --skip-install --place-in-app` | ✅ 已就位（rc.2 / rc.3 各 69 MB） |
-| **libnode** | `entry/libs/{arm64-v8a,x86_64}/libnode.so.127` | **运行期**：自建 Node（OHOS）载体；同时是"编不编 koffi"的门 | `tools/node-runtime/build-node-ohos.sh`（本机亦可：容器与真机同为 arm64） | ✅ `arm64-v8a` 已就位（169 MB 原生库组，随其余产物上传）⇒ **koffi 从此会被真正编进 HAP**；**不参与链接**（`CMakeLists.txt` 故意不写进 `DT_NEEDED`，见其注释） |
+| 核心包 | `entry/src/main/resources/resfile/*.zip` | 首启解包出端侧核心树 | `node tools/pack-core.mjs --skip-install --place-in-app`；版本在 `hostcore/core-recipe.json` 的 `coreVersion` | ✅ 已就位（`0.2.0-rc.2`，78,081,448 B / 29351 条目；**resfile 内只留当前版本这一份**，去旧留新） |
+| **libnode** | `entry/libs/{arm64-v8a,x86_64}/libnode.so.137` | **运行期**：自建 Node（OHOS）载体；同时是"编不编 koffi"的门 | `tools/node-runtime/build-node-ohos.sh`（本机亦可：容器与真机同为 arm64） | ✅ `arm64-v8a` 已就位（`libnode.so.137` = 126,809,264 B，随其余产物上传）⇒ **koffi 从此会被真正编进 HAP**；**不参与链接**（`CMakeLists.txt` 故意不写进 `DT_NEEDED`，见其注释）。⚠️ 实物是 **`.137`**，本文多处历史行仍写 `.127`（见 D6 开篇「版本口径提示」） |
 | 核心树 | `dist/core/work/dsh-core-*` | `pack-core` 的输入；`check-origin-fence` / `check-plugin-toggle` / `check-model-roundtrip` 门禁的前提 | **不需要上传**：`entry/src/main/resources/resfile/dsh-core-*.zip` 本身就是完整树（29006 个文件），`unzip` 到 `dist/core/work/` 即物化 |
-| 协议契约 | `.research/protocol/contracts.json` | `compat-drift` 门禁的输入 | `node tools/protocol-contract.mjs` + 上游 checkout | ❌ 缺 ⇒ 漂移门禁仍是盲区（**唯一仍跑不动的门禁**） |
+| 协议契约 | `.research/protocol/contracts.json`（或仓库内自带核心树） | `compat-drift` 门禁的输入 | `node tools/protocol-contract.mjs` + 上游 checkout；**或** `$env:DSH_NODE_MODULES="$PWD\dist\core\work\dsh-core-0.2.0-rc.2\node_modules"` 直接用仓库内核心树（`dist/core/work/` 已 gitignore，需先由 resfile 里的 zip 解出） | ✅ **可跑**（2026-09-29 实测 **140/140 无漂移**，对应 `0.2.0-rc.2`）⇒ **不再是盲区**。**注意默认快照 `.research/protocol/contracts.json` 必须与新上表同版本**，否则新增端点会被读成"上游移除"（方向反，见 `docs/40-上游升级手册.md` §4.3/§4.4） |
 | 签名材料 | `.p12` / `.cer` / `.p7b` | `SignHap` 出可安装的 HAP | DevEco 自动签名（那个 Windows 机器上的 `C:\Users\hnzy1\.ohos\config\`） | ❌ 缺（路径写在 `build-profile.json5`，Linux 上无效） |
 | 工具链归档 | `entry/src/main/resources/resfile/toolchain/{python,git}/` | 首启解包出端侧 python3.12 与 git（真身 exec 需签名，见批次备注十二 ③） | `node tools/place-toolchain.mjs`（取 `third_party/python` 与 `third_party/git/apks`） | ✅ 已就位（python 26.4 MB + git 8.1 MB，**已自签名**） |
 | **宿主 python3（构建期新增依赖）** | PATH 上的 `python3` / `python` / `py` | `tools/sign-tar-elf.py` 用它改写归档：**只有 Python `tarfile` 能在 Windows 上保住归档内的 symlink**（`bsdtar` 会丢条目、`7z` 会物化） | 官方安装版或 Store 版均可 | ⚠️ 缺则 `place-toolchain` **告警跳过签名**（归档仍可用，只是 git/python 真身继续被 execve 拒） |
@@ -405,7 +430,7 @@ devecocli build（全量）                                                     
 | `workspace` / `directory-picker-browse` | 真实文件树受 `workspaceFileScopeId` 阻塞（D4 已登记的未决来源） | 先确认该 id 的来源（协议事实）再接线 |
 | `directory-picker-native` | 手机不支持系统文件夹选择器（`DocumentSelectMode` 仅 2in1） | 能力边界：手机走 `pickDocument` 回退路径；**不删功能、不假装可用** |
 | `settings-general` | ① **P4-1：设置分区已进注册表**（`PanelLocation.SETTINGS` + `settingsSections()`；官方四段在前、本仓特有四项标 `owner: 'dshm'` 在后）；分区状态回归 `NavigationState.settingsSection`（视图里的 `@State tab` 已删除）② 版本化欢迎通知未确认 | P2 剩余：欢迎通知；P4-2：设置页按域拆组件 |
-| `theme` | ⓪ **沉浸光感（API 26 空间化材质）暂不可用**：决策为 `targetSdkVersion` 保持 `6.1.1(24)`（2026-09-14），代价是材质只能用系统阴影表达；升级路径与「升级后只用在常驻外壳、不要全页滥用」的功耗提醒写在 `HarmonyMaterial` 注释里。① 无 `--dsw-*` 等价的**可声明令牌层**——现在是「token 常量 + 棘轮门禁」，不是可被主题切换的声明式变量；无 visual swatch ② **存量裸值 58 处**已被棘轮冻结，其中**图标字号 46 处**（12/14/16/18/20/22/28/32/36/40 共十档）、**圆角 5/9**、**颜色字面量 14 处**（`Color.Gray/Red/Green` 集中在 `Poc1.ets`，另有 `badge` 的 `Color.White`）需要一次设计收敛——**收敛会改变视觉，必须真机验收**，故不塞进机械替换 | P1 已做：token 补齐（`Border.HAIRLINE` / `Radius.XS` / `Fs.CAPTION_XS`）+ **机械替换 36 处**（数值不变 ⇒ 视觉无变化）+ 棘轮门禁。P2：图标档位与圆角的视觉收敛（真机）+ 声明式令牌层 |
+| `theme` | ⓪ **沉浸光感（API 26 空间化材质）暂不可用**：决策为 `targetSdkVersion` 保持 `6.1.1(24)`（2026-09-14），代价是材质只能用系统阴影表达；升级路径与「升级后只用在常驻外壳、不要全页滥用」的功耗提醒写在 `HarmonyMaterial` 注释里。① 无 `--dsw-*` 等价的**可声明令牌层**——现在是「token 常量 + 棘轮门禁」，不是可被主题切换的声明式变量；无 visual swatch ② **存量裸值 21 处 / 8 个文件**（2026-09-28 重测）已被棘轮冻结——旧记的"58 处 / 11 文件"及其分解（图标字号 46 / 圆角 5-9 / 颜色 14 处）是 2026-09-15 的读数，`tools/design-token-baseline.json` 的 `generatedAt` 仍为 `2026-09-15`、`total: 21`；剩下这些仍需一次设计收敛——**收敛会改变视觉，必须真机验收**，故不塞进机械替换 | P1 已做：token 补齐（`Border.HAIRLINE` / `Radius.XS` / `Fs.CAPTION_XS`）+ **机械替换 36 处**（数值不变 ⇒ 视觉无变化）+ 棘轮门禁。P2：图标档位与圆角的视觉收敛（真机）+ 声明式令牌层 |
 | `client-locale` | 语言目录可扩展性未确认（官方支持扩展目录） | P2 |
 | `dshm-diag` | 诊断页 `home=` 仍显示桩值 `D:/work`（D4 待收口第 2 项） | 核实 `runDiagnostics()` 与 `getHostHome()` 空值路径 |
 | `dshm-notify` | 逐条通知的渠道路由被 SDK 标称枚举不一致阻塞（D4「仍待真机」第 5 项） | 真机阶段验证 |
@@ -445,13 +470,20 @@ ls -d /opt/dsh/node_modules/@deepseek-ai/dsh-client-ui-* | sed 's#.*/dsh-client-
 
 | 事实 | 来源 | 版本 |
 |---|---|---|
-| 官方能力面清单与各包行为自述 | 本机安装的官方客户端包 `package.json`（`name` / `description` / `dsh.client`） | **0.1.2-alpha.1** |
+| 官方能力面清单与各包行为自述 | 本机安装的官方客户端包 `package.json`（`name` / `description` / `dsh.client`） | ⚠️ **0.1.2-alpha.1（落后于当前基线；2026-09-30 已复核，缺口见下方同一性提示）** |
 | 各 `Web 行为` 列文案 | 由上述 `description` 意译（不新增未经查证的断言） | 同上 |
-| Harmony 落点 | 本仓库源码（行级可核对，见各单元格文件路径） | HEAD `af00b0b` |
+| Harmony 落点 | 本仓库源码（行级可核对，见各单元格文件路径） | HEAD `33662bd`（2026-09-30 核对；此前标注的 `af00b0b` 已不在本仓历史中） |
 
-> ⚠️ **同一性提示**：本项目的协议基线是 **0.1.5-rc.1**（D2 §8.7），而本环境能拿到的官方客户端包是 **0.1.2-alpha.1**。
-> 因此 §7.1 的能力面清单**需要用 0.1.5-rc.1 复核一遍**（可能新增/改名若干 `dsh-client-ui-*` 包）。
-> 复核方法：在拿到 0.1.5-rc.1 的机器上跑 §7.1 的命令，与门禁内嵌清单比对——`node tools/check-parity.mjs` 会直接报出差集。
+> ⚠️ **同一性提示**：本项目的协议基线是 **0.2.0-rc.2**（D2 §0 / D5 §4.1），而 §7.1 的能力面清单来自 **0.1.2-alpha.1**。
+> 因此 §7.1 的能力面清单**需要用 0.2.0-rc.2 复核一遍**。**本轮复核已做，结论是清单确实落后**：当前核心树
+> `dist/core/work/dsh-core-0.2.0-rc.2/node_modules/@deepseek-ai/` 下有 **53 个** `dsh-client-ui-*`，
+> 比清单多 15 个（`open-in-app`、`plugin-manager`、`schedule`、`settings-account`、`settings-agent-loop`、
+> `settings-session-log`、`settings-shell`、`settings-subagent`、`settings-web-search`、`shortcuts`、
+> `sidebar-browser`、`sidebar-documentpreview`、`sidebar-files`、`sidebar-right`、`sidebar-terminal`）；
+> 更稳的基准是 `dsh-web-app/package.json` 的依赖表（127 条依赖里 51 条是 `dsh-client-ui-*` / `dsh-client-locale`，
+> 与清单的差集**恰好是上面 15 个**）。这 15 个是否各自建行、还是按既有惯例粗化进 `sidebar` / `settings` 行，
+> **尚未裁定**（详见 `review-report-2026-09-29.md` 的 6-M7）。
+> 复核方法：`node tools/check-parity.mjs` 会在清单与实际行集不等时报出差集。
 
 ### 7.3 门禁
 
@@ -462,11 +494,15 @@ node tools/check-parity.mjs --list       # 打印解析出的行与状态
 
 node tools/check-layout-fixtures.mjs              # 四形态 + 断点边界 + 让步链（纯逻辑，无需设备）
 node tools/check-layout-fixtures.mjs --self-test  # 证明断言器会失败
-                                                  # 退出码 3 = 环境受阻（找不到 tsc），**不是通过**
+                                                  # **2026-09-30 起 Windows 直接可跑，不需要任何 shim**：
+                                                  # findTsc() 内置了 IDE 自带 typescript 的候选路径
+                                                  # （旧法：junction 暴露 <IDE>\tools\hvigor\hvigor\node_modules\typescript，
+                                                  #  2026-09-28 曾靠它拿到 768 条断言 / 0 失败）
 
 node tools/check-arkts-entry.mjs              # 编 entry（UI 层）的 ArkTS：P1~P3 改 Index.ets/Pane 的守护
+                                              # Windows 本机可直接跑（2026-09-28 修掉四处 Linux 布局写死）
 node tools/check-arkts-entry.mjs --clean      # 强制真正重新编译（增量时 CompileArkTS 会被 UP-TO-DATE 跳过）
-node tools/check-arkts-entry.mjs --self-test  # 判定器自检（8 个样例，含"hvigor 失败却退出码 0"的真实形态）
+node tools/check-arkts-entry.mjs --self-test  # 判定器自检（9 个样例，含"hvigor 失败却退出码 0"的真实形态）
 ```
 
 ---
@@ -532,6 +568,13 @@ node tools/check-arkts-entry.mjs --self-test  # 判定器自检（8 个样例，
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v1.44 | 2026-09-30 | **文档回写轮（审核后清账，只改文档不动代码）**：① **§7.2 来源版本改正**：`0.1.2-alpha.1` 标为**已过期、复核未做**；`§7.1` 后的「同一性提示」由"基线是 0.1.5-rc.1"改为**当前基线 `0.2.0-rc.2`**，并把本轮**已做的复核结论**写进去——当前核心树有 **53 个** `dsh-client-ui-*`，比门禁内嵌清单多 **15 个**（`open-in-app`/`plugin-manager`/`schedule`/`settings-account`/`settings-agent-loop`/`settings-session-log`/`settings-shell`/`settings-subagent`/`settings-web-search`/`shortcuts`/`sidebar-browser`/`sidebar-documentpreview`/`sidebar-files`/`sidebar-right`/`sidebar-terminal`）；更稳的基准是 `dsh-web-app/package.json` 的依赖表（127 条依赖里 51 条为 `dsh-client-ui-*` / `dsh-client-locale`，与清单差集**恰好是这 15 个**）。这 15 个是各自建行还是按既有惯例粗化进 `sidebar`/`settings`，**尚未裁定**（详见 `docs/review-report-2026-09-29.md` 的 6-M7）。② **§3.3 libnode 行改正**：实物 `libnode.so.137`（126,809,264 B），原文写 `.127` 且"169 MB 原生库组"两个读数都不对；保留"本文多处历史行仍写 `.127`"的指引（D6 开篇已有版本口径提示）。③ 同轮其它文档：`docs/10-协议兼容事实基线.md`（§8.7.24 正文落笔，v1.2）、`docs/40-上游升级手册.md`（§4.1 表 + §4.4 逐条判定）、`docs/README.md`（R1 索引行区分 85/63 两个口径、更正"本仓不是 git 仓库"、阅读顺序加"决定接下来修什么"）、`.local-rules/{build-status,current-machine}.local.md`（基线重写到 rc.2）。**注**：§7.2 表格与 §4/§6 的既有行号未变动（改的是等长文本），`check-doc-refs` 与 `check-parity` 均 exit 0 |
+| v1.43 | 2026-09-29 | **端侧核心升到 `0.2.0-rc.2`（上游最新）＋ 插件入口 GitHub 安装修复 ＋ 首次 7 路对抗性审核**：① **核心升级**：契约漂移 **+2 / −0 / 零契约变化**（新增 `userQuestions/{answer,attachWait}`，全仓零调用 ⇒ 不改调用代码），`SUPPORTED_VERSIONS` 置 `0.2.0-rc.2` 为首、`Endpoints.ets` 重生成（140 端点 / 13 流式 / 15 能力）、`core-recipe.json` 的 `coreVersion` 同步；resfile 换包（去旧留新，**78,081,448 B / 29351 条目**，sha256 `45836D8A…FFF3B3`），重装后 `BOOT_10_ENV_READY core=…/dsh/cores/0.2.0-rc.2` 确证，新旧核心树并存、el2 用户数据零变化；`compat-drift` 由 138/138 变 **140/140 无漂移**（本文 §3.2/§3.3 三处读数已同步）。② **插件入口 GitHub 地址装不上（真机实测已修好）**：真因两层——（a）GitHub **源码树不含构建产物**（`main`/`exports` 指向只存在于 npm tarball 里的产物）；（b）monorepo 仓库**根目录没有 `package.json`**，且 `INSTALL.md` 官方写法用的是 `#path:/<sub>` 而旧 `parseGitHub` 只认 `&path:`（`#path:` 被当成 git ref ⇒ codeload 404）。修法：`parseGitHub` 路径正则放宽到 `[&?#]path[:=]`；新增 `findPackageRoots`（唯一子包自动进入 / 多候选列出 `&path:` 清单不再猜）；新增 `repositoryMatchesRequest` 守卫 + GitHub→npm **同名同源回退**（仅当无 `&path:`、只回退一次、身份守卫通过、版本取 registry latest 而 profile 仍记用户原始 spec）；卸载侧补幂等回收与路径校验。门禁 `tools/check-dshm-installer.cjs` **43 passed / 0 failed**。③ **7 路对抗性审核（只审不改）**：判据统一为「对齐官方 dsh」，出 **85 条**（阻断 2 / 高 25 / 中 38 / 低 20），报告见 `docs/review-report-2026-09-29.md`。**结论：契约表本身零偏差**，问题全在契约表之上（接线层）与之外（Host 包装、卸载路径、连接层）。最值得先看的三条：**心跳仍是官方默认 2000ms**（`typert-gateway` 无 `config` 覆盖 ⇒ 连接抖动根因，修法已写明未落盘，见路4）；**Host 启动期不清残留 `host-stop-request`**（40s 自杀强嫌疑，见路2）；**卸载在 5 类路径上不对称**（多为例「返回 `ok:true` 却没清干净」的静默假成功，见路3）。④ 本文 §3.2/§3.3 的 `compat-drift` 与核心包读数同步到 `0.2.0-rc.2`；`docs/40-上游升级手册.md` §4.1/§4.4、`docs/10-协议兼容事实基线.md` §8.7.24 同步落稿 |
+| v1.42 | 2026-09-28 | **端侧三项缺陷修复（P0-1 / P1-2 / P1-3，用户「端侧待修清单」；每项都配"真极端"可复现用例与故障注入验证）**：三项的共同形态都是**静默不一致**——不报错、界面看着正常、结果与意图相反，因此本轮的重点不在"改对"，而在**让它们在被改回去时立刻变红**。① **P0-1｜内置技能同步的判等指纹是「字节数」**（`main.js` `ensureBundledSkills` 原先逐字 `if (statSize(dst) === statSize(src)) continue;`）：`hdsh-*`→`dshm-*` 是**等长替换** ⇒ 两份 `ohos-python.md` 都是 6262 B ⇒ 设备端永远停在旧端点（`/hdsh-python/*` 已在 `0.2.0-rc.1` 下改成 `/dshm-python/*`）⇒ 模型照技能文档手调**必然 404**，而日志一直打印「本次复制 0 个」。修法：抽出 `hostcore/app/dshm-skills.js`（`crypto.createHash('sha256')` 比**内容**，`copyFileSync` 到同目录临时名 + `renameSync` 原子覆盖，单文件失败只记 `failed` 不抛错，另清扫崩溃残留的 `.dshm-skills-tmp-*`）；门禁 `tools/check-skill-sync.cjs`（新，**32 passed**，A–H 八组，C/D 组专测**等长改动**必须被复制、目标被等长篡改必须以源为准恢复，且不依赖网络）。② **P1-2｜安装器幂等分支从不比对版本**（`dshm-installer.js` 原「目录在 + 入口可加载」即 `continue`）：真机现场是 `profile/package.json` 声明 `dshmarket@1.66.2`、磁盘实为 `1.65.1`，而 `0.2.0-rc.1` 的兼容检查**按磁盘版本判定** ⇒ 插件被跳过未挂载；且此后任何 `pnpm add` 都走幂等分支"成功"，**永不收敛**。修法：新增纯函数 `readInstalledVersion(dest)` / `versionDrifted(resolved, have)`（**GitHub 形态的 `resolved.version` 是 ref，与 semver 不同维度，一律不判漂移**，否则必然误报），漂移时连同 `beforeVersions` 记下原版本、`fs.rmSync` 后重装，返回体带 `beforeVersion` → `afterVersion`；门禁 `tools/check-dshm-installer.cjs` 由 **exit 1 修至 24 passed**——它此前**自首次提交（`e7b5ed7`）起就一直是红的**，两处陈旧断言（期望 `^4.3.4` 而实现自 2026-09-26 起优先写**请求 spec**；断言 installer 写 `.dshm-plugin-rows.yml` 而 `appendUserRow` 已于 2026-09-25 有意删除 ⇒ ENOENT），并补 5a 真幂等 / 5b **版本漂移必重装** / 5c 收敛三向用例。③ **P1-3｜兼容性豁免通道在端侧不可达**：`0.2.0-rc.1` 的出路是 `dsh plugin allow-version` 或插件管理器，而端侧假壳只实现 `plugin install` / `plugin remove`（**鸡生蛋**：插件市场自己正是被跳过的那个），豁免机制（上游 `dsh-app-boot` 的 `compatibility.json`，先于任何插件加载读取）**存在但没有写入路径**。修法三层：假壳补 `allow-version` / `revoke-version` / `version-exemptions` 三子命令并把请求投进**既有队列通道**（新增 `*.compat-req`，Host 侧 2000 ms 轮询同一骨架，结果写 `.done` / `.fail`）；Host 侧新增 `hostcore/app/dshm-compat.js` **薄封装而非自实现**（直接 `import()` 上游 `getDshRuntimeVersion` / `readProfileCompatibility` / `setProfileVersionExemption`，继承上游三道闸：不传 `acceptRisk` 必须被拒、运行时版本不符必须被拒、`compatibility.json` 写坏时 `rewritable=false` 拒绝改写——自己写文件若 schema 偏移会被上游**静默不认**，比没有通道更难查），`applyRequest` **绝不抛错**且成功回传 `profileDir`（写错 profile 是整条通道最安静的失败点）；设置→插件页新增「兼容性豁免（风险自负）」开关（默认 `acceptRisk=false`，**绝不替用户确认风险**）；门禁 `tools/check-compat-exemption.cjs`（新，**48 passed**，两臂：臂 A 以假 appBoot 断言透传语义与 7 种坏载荷，臂 B 用**真实上游** `evaluatePluginCompatibility` 对比 `exempted` 是否**真的翻转**——判据不是"文件写了没"，因为四种失败模式在 UI 上都是"点了开关、提示成功、什么都没变"）。**故障注入（用户「落实真极端检测需求」）**：P0-1 做等长改动专项、P1-2 做版本降级专项、P1-3 做 `noop`（删掉上游写入调用，返回体照旧 `ok:true`）与 `wrongdir`（写到 `profileDir + '-elsewhere'`）两种注入 ⇒ 门禁分别以 **28 passed / 20 failed** 与 **40 passed / 8 failed** 干净点名（红项首位即 `B8 exemption flips the mount decision` 的 `exempted:false` 与 `A1 profileDir passed through`），**0 条 FATAL**，还原后逐字节相同（基线 sha256 `29A2D186…56223`）。**注入顺带暴露了门禁自身的缺陷**：`readRaw()` 原被**急切求值**在断言 detail 实参里，而"豁免文件不存在"正是要抓的失败模式 ⇒ 会以 `[FATAL]` 崩栈而不是红项列表，把"豁免没生效"误报成"文件读不到"⇒ 补 `readSoft` / `show` / `readJsonSoft` / `statSoft` 四处软读。④ 两处 `FILES` 清单（`tools/place-host-app.mjs:42` 与 `tools/assert-resfile-sync.mjs`）同步扩到 **9 项**，`assert-resfile-sync` 由「8 件」变 **「10 件快照全部同步」**；`main.js` 现 **208567 B / 4204 行**，源 ↔ resfile 快照 SHA256 逐一 IN-SYNC。⑤ 收尾时把 `tools/check-doc-refs.mjs` 从"188 处几乎全是假阳性"（首版判据把**任何两位数字 + 冒号**当引用目标，命中时间戳 / IP 片段 / 代码行号）收紧到 **exit 0 / 19 个文档 / 188 条引用 / 0 问题**，并清掉 `docs/90` 里三处指向**从未入库**的 `docs/90-staging/`（合并前的分章草稿 A/C/E = 现第一/三/五章，§7 已加历史说明）。⑥ 本机 22 条门禁重测 **`19×0 / 1×3 / 2×1`**（旧记 `23×0 / 2×3 / 7×1` 已过期）；`check-arkts-entry.mjs` exit 0 证明 `SettingsPlugins.ets` 的开关可编译 |
+| v1.41 | 2026-09-28 | **收尾清理：一次性脚本 + dist 临时产物 + 保留脚本硬编码（详见 `docs/90-…md` §5.3/§5.6/§5.7/§6.3、`device-validation.md` 批次三十六）**：用户指示「升级完成检测无误后就更新文档，清理环境」，就粒度提问后选定**全清**。① `git rm` **7 个一次性脚本**（`repro_all.py`／`repro_local.py`／`repro_report9.py`／`close_picker2.py`／`verify_t1_clean.py`／`protocol-enum.mjs`／`check-layout-fixtures.mjs.bak`〔124824 B，原登记"是否删由项目方定"，本轮拍板〕）——逐个 `Test-Path` 复核不存在，`tools/` 顶层 **64 → 57**、递归 **92 → 85**（口径见 `docs/90` §5.3）；② 删 `dist/` 本轮 6 个临时重定向产物（`_drift{,_2}.{out,err}`、`_build020.{out,err}`），`dist/sideload/` 交付物保留；③ **保留脚本的硬编码统一改为从 `hostcore/core-recipe.json` 读**（该文件是版本的唯一事实来源）：`scan-core-plugins.mjs` 默认 `coreDir`（原停在 `dsh-core-0.1.5-rc.2`，一跑就 `FATAL: no node_modules under …`）、`func_test_final.py` T0.3 核心版本（新增 `want_core()`）与 T0.2 的 `>= 7`、`update-device.ps1` Step 8 的 exec 探测判据（原 `$okCount -ge 7` ⇒ 改为按 `[，,]` 切分逐项要求 `=ok$`，结论段同步改用 `$execOk`）、`dshtest.py` 的 hdc 路径（原为 `%USERPROFILE%\…\<版本>\…` 占位符 ⇒ 改为 `DSHM_HDC` → PATH → DevEco 工具链目录）；④ 修 `dshtest.py` 的仓库绝对路径写死（`ART` 改为相对 `__file__`）；⑤ **同一个"写死总数/版本"的形态在本轮已清完**（`docs/70` §8.13 的 E381/E382 教训）：它的问题不是"改起来麻烦"，而是**新版失败也不会被发现**；⑥ 8 个文档的悬引用同步（`10`／`50`／`70`／`90`／`device-validation`／`functional-test-report`／本文），其中 `docs/functional-test-report.md` 的"可复用测试资产"表原登记 `show_ui.py`（**文件从来不存在**，属"文档与实物不符"）与两个已删脚本 ⇒ 一并移除；⑦ 仅剩 `tools/update-device.ps1` 的 hdc 占位符**有意保留**（模板形态，本机装机仍手敲 `hdc install -r`）；⑧ 验证：`py_compile` 两个 Python 工具 exit 0、`dshtest.py` 的 hdc 自动解析实测得 DevEco 自带那个、**15 条门禁全部 exit=0** |
+| v1.40 | 2026-09-28 | **m00001「设置 → 登录」拉起系统浏览器：真机复核通过（D28 四步全通；详见 `device-validation.md` D28 与 `docs/70-…md` §7.9）**：① 修复本体 = `WebApp.ets` 的文档开始垫片 `OPEN_LINK_SHIM_JS` + 同步桥 `__DSHM_BRIDGES__.openExternal(url, mode)` → `platform.openExternalUrl`（`context.openLink`），三条路径（`account/watch` 的 WS 帧自动外开 / 含 `account/` 的一元 `fetch` 兜底 / 捕获阶段拦 `target="_blank"` 与 `window.open` 二次确认后外开）；② 真机读数（设备 `86E0226429000417`，HAP 314,673,276 B / `updateTime` `2026-09-28 21:09:42 CST`）：`diag-openlink` 有 `auto https://platform.deepseek.com/dsh/authorize?authorize_id=…`（**无确认框**直接外开）；回跳后设置面板出现「账号与余额」section（**只在 `status === "credential-stored"` 时注册**，`dsh-client-ui-settings-account/lib/client.js:4397-4419`）⇒ 第 3 步判据成立；点「查询用量」⇒ `AlertDialog`「打开外部浏览器？」⇒ 点「打开」后 `ei.hmos.browser` 真被拉起并加载 `platform.deepseek.com/usage`；③ 第 4 步做了**阴/阳对照**（排除误击与设备侧自启）：`aa force-stop` 后三轮询均无浏览器 ⇒ 无自启/预热；点外链 ⇒ `diag-openlink` 408→477 B、`OnInvokeMethod: … openExternal` 3→4、**浏览器仍无**；点**取消** ⇒ **三者全不动**；再点「打开」⇒ 477→546 B / 4→5 / `23803 ei.hmos.browser` + 前台即用量页；④ 关键数值线：`diag-openlink` 累计 6 行（1×`auto` + 5×`confirm`），**无任何 `failed`/`error` 行**；`node-output.log` 里 `OnInvokeMethod: method name: openExternal` = 5，紧邻 `CheckIsInJsPermission …, method_name: openExternal, object_id: 1` 与两次 `ParseBaseValueTOCefValueHelper: STRING`（即 `url` 与 `mode` 两个字符串参数）；⑤ 两个**取证方法坑**（已写入 D28）：设置对话框**记住上次的 tab**，点账号区坐标前必须先点「账号与余额」（否则打在插件明细上，本项因此误判过一次）；**本项 hilog 抓不到**（`hilog -x -T DshWebApp` 与按关键字筛均为空，只剩 `:gpu/chromium` 噪声）⇒ 外开取证只能靠 `diag-openlink` 文件 + `uitest dumpLayout` 前后 diff；⑥ 一次**污染读数**留档（非缺陷）：首轮点「取消」后曾观察到浏览器在前台，干净复位后复跑不复现 |
+| v1.39 | 2026-09-28 | **端侧核心升到 `0.2.0-rc.1`（上游最新，2026-09-28 发布）**（详见 `docs/40-上游升级手册.md` §4.1/§4.3、`device-validation.md` 批次三十五）：① 漂移 **+3 / −0 / 零契约变化** —— 新增 `productAnalytics/{enabled,report,watchPolicy}`，端点 135 → 138；全仓检索该命名空间**零命中** ⇒ **不改任何调用代码**，只重生成上表 + 更新矩阵；② 改动面 4 处：`hostcore/core-recipe.json` 的 `coreVersion`、`CompatIndex.ets` 的 `SUPPORTED_VERSIONS`（置 `0.2.0-rc.1` 为首）+ 版本记录注释、`Endpoints.ets` 重生成、`tools/update-device.ps1` 的版本判据改为**读 recipe**（原先写死 `0.1.7-rc.2`，升级后会误报 FAIL）；③ 换 resfile 核心包（去旧留新，78,705,318 B / 29602 条目），重装后真机读数 `BOOT_10_ENV_READY core=…/dsh/cores/0.2.0-rc.1`，**新旧核心树并存**（`docs/50:45` 的"升级核心不得动用户数据"成立，el2 清单逐项未变）；④ 记一个与门禁可靠性直接相关的陷阱：**默认契约快照 `.research/protocol/contracts.json` 必须与新上表同步**，否则 `compat-drift.mjs` 把新增端点报成「上游移除端点（会返回 HTTP 404）」——**方向完全相反**（详见 `docs/40` §4.3 的判别法与本节 §3.3 的注记）；⑤ 上述四处改动后 15 条必跑门禁**全部 exit=0**（含修正默认快照后的 `compat-drift.mjs`），`assembleHap` BUILD SUCCESSFUL，`hdc install -r` 覆盖安装后 el2 用户数据零损伤 |
+| v1.38 | 2026-09-28 | **门禁"盲区"复核：四条里没有一条是本机能力不足（详见 `docs/90-…md` §2.4/§3.6）**：① `check-arkts-entry.mjs` 修掉**四处 Linux 布局写死**（`tool/node/bin/node` 缺 `.exe`、`JAVA_HOME` 默认值、`DEVECO_SDK_HOME=join(clt,'sdk')`、`PATH` 分隔符写死 `:`——最后两条此前未登记），**exit 3 → 0**，日志含 `CompileArkTS` + `BUILD SUCCESSFUL`；它守的正是 `entry/src/main/ets`（UI 改动的主要落点），长期 exit 3 意味着**这一层近两周没有自动验证**。② `check-web-fetch-jitless.mjs` 修掉两处硬缺陷：flag 写死的否定形态在 Node 24 无效致**两臂哑火**、loader 传裸盘符路径致 **B 臂从未跑成**；**exit 1 → 0**（A 臂 4/4 按预期失败 / B 臂 8/8 全过 / 跨源跳转仍被拒）。③ `compat-drift.mjs` 实测可跑（指向仓库内核心树即可，**当时** 135/135 无漂移；同日升到核心 `0.2.0-rc.1` 后为 138/138，见 §3.1）⇒ **不再是盲区**。④ 本文件 §3「验证手段」与 §3.2 盲区表已同步；`docs/50:1341`、`docs/90` §2.3/§2.4/§3.4/§3.6/§5.6 同步落稿。⑤ 本机 14 条必跑门禁**全部 exit=0**（含上述两条）|
 | v1.37 | 2026-09-26 | **官方语音按钮接入 HMOS 系统识别（HMS）**（详见 `device-validation.md` 批次二十三）：① 真机实测按钮从「打开语音输入引导」（usable=false）变为 **「开始录音」**，点击后进「正在录音…／停止并识别」，识别文字**落入输入框草稿**（`textField`，非已发送消息）；② **架构关键**：新增独立插件包会 `failed to import` —— loader 对裸包名走 `internal.import(specifier, bareModuleBaseUrl)`，可解析的包须属于某 bundle 的 dependencies 闭包（对照 `directory-picker-browse` ⊂ `dsh-web-app` 能解析），且 `profile-boot` 未传 `bareModuleBaseUrl`；故改走**替换 `sensevoice` 的 `apply`**（它已在 voice-input-bundle 闭包内 ⇒ 零新增接线），注入用相对 import 绕开包表；③ 数据流：WebView 录音→16k WAV base64→Host provider→**文件队列**（`$DSH_HOME/speech-to-text/hms-bridge`，照 `host-stop-request` 先例）→ArkTS `speechRecognizer`→文本回填；④ 修三个 bug：`does not support language: auto`（须 provider 声明 zh-CN **且** profile 钉 `language: zh-CN`；且 profile 覆盖是**整块替换** config，漏写会抹掉 `defaultProvider`）、队列被不完整 `.req` **永久堵死**（陈旧回收未覆盖 `.req`）、超时固定 25s 与"按实时节奏送音频"错配 ⇒ 长录音**必然**超时（改为按时长伸缩）；⑤ 纠正两处不实注释（"不能丢余数"与 `slicePcmChunks` 实际丢弃尾巴矛盾；实测量化：整数秒录音余数为 0，最多丢 639B≈20ms）；⑥ 门禁 **758→768 断言 0 失败**（新增两侧 WAV 常量一致性断言，负测试两条均变红）；⑦ 清理失败方案残留 `hostcore/speech-stub` 与 `injectSpeechStub`；⑧ 遗留：`build-profile.json5` 临时 `bundleName: com.dshm.micverify` **需还原**；数据安全：零卸载 |
 | v1.36 | 2026-09-26 | **路线 A（HMS 系统语音识别）端到端通过（详见 `device-validation.md` 批次二十二）**：① 真机两轮实测识别真实语音出文本（用户说「一二三四五」→ `12345。`；「一二三四五六七」→ `1234567。`），完整链路 `createEngine=OK` → `onStart` → `AudioCapturer` 16k 采音 → 流式 `onResult` → `isFinal` 定稿 → `onComplete` 全通；② 修掉**三个真机才暴露的坑**：**(a)** `startListening` 是**异步**的（签名 `void` 看不出），紧接 `writeAudio` 报 `1002200010` ⇒ 必须等 `onStart`；**(b)** `onResult` 给的是**累计文本**非增量，`+=` 会得到 `"一一二一二三…"` ⇒ 抽成 `mergeTranscript()` 信 `isFinal` 定稿；**(c)** 识别结束后仍送音频 ⇒ 加 `finished` 标志（`1002200010` 出现 1→0）；③ **纠正一个误判**：原想用 TTS 做自动往返自检，实测 `onComplete` 74ms 返回、`onData` 不触发（`speak` 是**播放**接口）⇒ 那两次空文本是**录到静音**（`peak=0`），**不能**据此说 ASR 不可用；为此加 `isNearSilence()` 在日志标注；④ **负测试发现断言漏洞**：变异"删掉 `isFinal` 分支"**仍全绿**（只验结果、未验依据；真机序列每条恰好更长故长度判据巧合相同），补"定稿更短"用例（`"一百二十三"` + `"123"` isFinal ⇒ 应得 `"123"`，退化则得 `"一百二十三123"`）后三种变异全红；⑤ 门禁 **740→758 断言 0 失败**；⑥ 数据安全：零卸载，既有 bundle 数据未变 |
 | v1.35 | 2026-09-26 | **路线 A（HMS 系统语音识别）可行性自检：引擎可用（详见 `device-validation.md` 批次二十一）**：① 新增「HMS 语音识别自检」入口，真机记录 `createEngine=OK` / `listLanguages=["zh-CN"]` / `onStart=startListening success` / `writeAudio=done` / `onResult isFinal=true` / `onComplete=recognize complete` / `shutdown=done`（喂合成音故 `text=""` 属预期）⇒ **排除最大未知风险**（`createEngine` 未抛 1002200001）；② 回 SDK 核实硬约束：HMS 只收 **16000 Hz / pcm / 单声道 / 16 位**、`writeAudio` 只收 **640 或 1280 字节**、上限 60000ms、离线仅 `zh-CN`；采集侧 `AudioSamplingRate.SAMPLE_RATE_16000` **系统直接支持**、`SOURCE_TYPE_VOICE_RECOGNITION=1` 专为 ASR、`read()` 自 API 11 废弃改用 `on('readData')`；③ 新增 `appstate/.../model/SpeechPcm.ets`（重采样/分块/时长/测试音纯函数）+ **40 条门禁断言**（含 ★符号位保真：±1000 方波重采样后必须有负值，写无符号会削顶失真），门禁 **705→740 断言 0 失败**；④ 记一个实现要点：`readData` 块大小不定而 `writeAudio` 只收定长 ⇒ 必须**累积切片且不丢余数**（丢余数会丢字）；⑤ 新增第三项入口「HMS 端到端自检（说话）」：真麦克风 → HMS → 真实文本，**待真人语音验证**；⑥ 数据安全：全程零卸载，既有 `com.dshm.dshclient` home/会话未变 |

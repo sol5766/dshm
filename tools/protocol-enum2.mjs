@@ -13,9 +13,12 @@
  */
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 
+// 按**当前用户**推导，不要写死用户名（换台机器就必然找不到）。同 tools/protocol-contract.mjs。
 const DSH_NM = process.env.DSH_NODE_MODULES
-  ?? 'C:\\Users\\aotian\\AppData\\Roaming\\io.github.hairyf.deepseek-harness-desktop\\dependencies\\dsh\\node_modules';
+  ?? join(homedir(), 'AppData', 'Roaming', 'io.github.hairyf.deepseek-harness-desktop',
+    'dependencies', 'dsh', 'node_modules');
 
 function walk(dir, acc) {
   let entries;

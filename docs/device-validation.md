@@ -407,7 +407,10 @@ contain exactly one plain-object args field`）。session/prompt 必填 `request
   每个副本 `chmod 0o755` + `X_OK` 读回验证；全部通过才把 `<HOME>/bin` 前插 `PATH`，
   任一失败**不注入**（保已验证链零影响）。幂等：本体大小指纹一致则跳过复制只补 chmod。
 - skills：`resfile/ohos-skills/*.md` → `$DSH_HOME/skills/`（skill-filesystem 的 user-dsh root
-  就是 `join($DSH_HOME, 'skills')`），逐文件大小指纹幂等同步。
+  就是 `join($DSH_HOME, 'skills')`），逐文件**内容 sha256** 幂等同步。
+  （2026-09-28 P0-1 修正：原判据是**字节数**，而 `hdsh-*` → `dshm-*` 是**等长替换** ——
+  两份 `ohos-python.md` 都是 6262 B ⇒ 判"已是同一份" ⇒ 设备端 skill 永远停在旧端点，
+  模型照文档手调必然 404。判据换成内容 sha256 后任何等长改动都会被复制，见 §「技能同步」条目。）
 
 **验收判据**：
 1. `<HOME>/dshm-host.log` 出现 `PATH 已注入 busybox bin：/…/files/bin:/usr/local/bin:…`；
@@ -523,15 +526,132 @@ execa 都无意义）。通道四件套（本轮已落地并装机 <设备序列
    轮询结果回显 → 重启生效提示；页面头部文案同步改写（旧"硬边界"说明作废）；
 4. skill `ohos-plugin-install.md`（模型入口，`model-<ts>.req`）：教模型弃 pnpm 走队列。
 
-**验证**：PC 侧全链路单测 16/16（tools/check-dshm-installer.cjs：tar-slip 拒绝、
-symlink 跳过、GitHub 三形态、debug@4.3.4 真实下载+递归 ms、merge、用户行、
-幂等、不存在包干净失败、semver 范围）；全量编译 BUILD SUCCESSFUL；
+**验证**：PC 侧全链路单测 **24 passed / 0 failed**（tools/check-dshm-installer.cjs：tar-slip 拒绝、
+symlink 跳过、GitHub 三形态、debug@4.3.4 真实下载+递归 ms、merge、**不再写用户行**、
+幂等、**版本漂移必重装**、不存在包干净失败、semver 范围）；全量编译 BUILD SUCCESSFUL；
 `hdc install -r` 成功，待用户手动启动测试。
+
+> **2026-09-28 更新**：该门禁原先一直是红的（两处陈旧断言，见 §五）；
+> 重写后补了 P1-2 的**双向极端用例**——5a 同版本真幂等（`installed.length === 0` 且文件不动）、
+> 5b **版本漂移必重装**（`beforeVersion`/`afterVersion` + 磁盘版本确实翻转）、
+> 5c 追平后回到幂等（不无限重下）。原先的"16/16"是**重写前**的读数，且当时它其实并未全过。
 
 **如实登记的语义边界**（不随通道落地而消失）：含原生模块（.node）的插件依旧
 装不了（沙箱禁 link，13900012）；`dsh.bundle` 声明的子插件组只装主包、不自动
 逐行注册（reconcile/bundle 激活语义未跟进，用户按其 README 手动追加用户行）；
 web 前端官方安装入口依旧必败（不改官方 UI）；安装的插件**重启后才挂载**。
+
+### D28. 「设置 → 登录」拉起系统浏览器（m00001，**2026-09-28 真机复核通过**）
+
+**现象（用户报告 m00001）**：鸿蒙端点「设置 → 登录」，**什么都不发生**——不弹浏览器、
+不弹框、无报错、界面无任何变化。（"本地默认调用华为浏览器"是当时的设备描述；
+目标是拉起**系统默认浏览器**，不指定哪一款。）
+
+**两层根因（缺一层都修不好）**：
+
+1. **引擎层**：ArkWeb 的 `multiWindowAccess` 默认为 `false`（`ets/component/web.d.ts:6816-6826`）
+   ⇒ `window.open` 与 `target="_blank"` 一律**静默丢弃**。本仓全树 grep
+   `onWindowNew|multiWindowAccess|allowWindowOpenMethod|onLoadIntercept|onOverrideUrlLoading`
+   **零命中** ⇒ 没有任何地方接过这个语义。
+2. **前端层**：登录路径上**根本没有可点的外链**。唯一带授权页锚点的是
+   `dsh-client-ui-settings-account/lib/client.js:2435-2451` 的 AccountSection
+   `<a target="_blank" href={authorizeUrl}>`，但它只在 `snapshot.view?.status === "credential-stored"`
+   时才注册（`:4397-4419`）⇒ **未登录时它不存在**；未登录能点的 SignInDialog（`:989-1107`）
+   没有任何 href、也没有 `window.open`，只有一个「复制链接」。
+   ⇒ **光接住 `target="_blank"` 是不够的**。
+
+**修法**：`WebApp.ets` 新增文档开始垫片 `OPEN_LINK_SHIM_JS`（与目录选择、外观跟随同范式）
++ 同步桥 `__DSHM_BRIDGES__.openExternal(url, mode)` → `platform` 的 `openExternalUrl`
+（`context.openLink`）。三条路径：① tap `account/watch` 的 WebSocket 帧，
+`attempt.phase === 'waiting-browser'` 且带 `authorizeUrl` ⇒ **自动外开**（无确认，壳职责）；
+② tap 含 `account/` 的一元 `fetch` 响应（`response.clone()`）作兜底；③ 捕获阶段拦
+`a[target="_blank"]` / `window.open` 的 http(s) 目标 ⇒ **二次确认后**外开。
+机制与取舍详见 `docs/70-鸿蒙移植踩坑与修复总览.md` §7.9。
+
+**本机已证**：`assembleHap` → `BUILD SUCCESSFUL`（exit 0），产物
+`entry/build/default/outputs/default/entry-default-signed.hap`。
+**这不能替代本项**——它只证代码编得过，不证桥在真机上被调到，更不证系统浏览器被拉起。
+
+**真机要看的（按序四步）**：
+
+1. 点「设置 → 登录」⇒ **系统默认浏览器自动打开**授权页，**无需再点任何东西**。
+   这是本 bug 的核心判据；若仍是"点了没反应"，本项直接判失败。
+2. 在浏览器里完成授权。
+3. 回到应用 ⇒ 账号状态变为 `credential-stored`（左侧账号菜单出现已登录态、
+   设置面板出现「账号」section）。**回调落在浏览器的空白页属预期**
+   （`loginSource="desktop"` ⇒ 回调收尾是 HTTP 204，只有 `login_source=web` 才返回关页 HTML），
+   不是失败。
+4. 顺带验非授权外链（登录后设置里的「用量」「充值」等）⇒ 应**先弹确认框**，
+   点「打开」才进浏览器（区分于第 1 步的自动外开）。
+
+**诊断读数**（用来定位"哪一段没通"）：
+
+- `hdc shell "cat /data/app/el2/100/base/com.dshm.dshclient/haps/entry/files/diag-openlink"`
+  —— 每次外开请求追加一行：`auto <url>`（授权页自动外开）/ `confirm <url>`（外链确认）/
+  `failed <url>`（`openLink` 未受理）/ `error <msg>`（异常）。
+- `hdc shell hilog` 里筛 `DshWebApp` —— 有 `外开请求 mode=… url=…`；
+  被白名单拒时是 `外开被拒（非 http/https）`。
+- **三种失败各自的样子**：没有 `diag-openlink` 行 ⇒ 桥没被调到（垫片未注入，
+  或垫片没截到帧）；有 `auto` 行但浏览器没起 ⇒ 桥通了，问题在 `openLink` 这一层
+  （配合看 `failed` / `error` 行）；有 `auto` 行且 `failed` ⇒ 设备上没有能受理
+  https 的浏览器应用。
+
+**失败时的行为（已实现，不是"应该会"）**：
+
+- 桥未就位时（`javaScriptProxy` 注册与文档开始垫片的先后在真机上反复过），
+  自动外开**入队有界重试**：250ms 轮询、窗口 15s、URL 去重、**投递成功才记账**
+  ⇒ 授权页只在 `waiting-browser` 那一刻推一次也不会丢。
+- 外链点击在桥未就位时**不** `preventDefault`（放行给 WebView 默认行为，仍是丢弃
+  = 与改动前一致），**不制造新的"点了没反应"**。
+- `openLink` 失败会**弹「无法打开外部浏览器」**并写 `diag-openlink failed`——
+  静默失败就是本次 bug 的翻版。
+
+**真机复核（2026-09-28，设备 `86E0226429000417`）**：四步全部有直接读数，**m00001 判为已修复**。
+
+| 步 | 判据 | 读数 | 结论 |
+|---|---|---|---|
+| 1 | 点「设置 → 登录」⇒ 无确认框、直接外开授权页 | `diag-openlink` 有 `auto https://platform.deepseek.com/dsh/authorize?authorize_id=KiqzHpwPMVYRtmp6MbUMD0ZKce41_YR_2UmHXiKSlfg` | ✅ `auto` 分支成立（区别于第 4 步的 `confirm`） |
+| 2 | 浏览器里完成授权 | 设备上为既有登录态（`Sol` / `130******58`），本轮只核「拉起」这一段 | — |
+| 3 | 回跳后状态 `credential-stored` | 设置面板出现完整「账号与余额」区（`region 账号与余额 [1111,374][2099,878]` + `充值余额 ¥4.49` + `查询用量`/`充值` 两个 link）——该 section **只在 `status === "credential-stored"` 时注册**（`dsh-client-ui-settings-account/lib/client.js:4397-4419`） | ✅ 间接证据成立 |
+| 4 | 非授权外链 ⇒ 先弹确认框，点「打开」才进浏览器 | 点 `查询用量` ⇒ `AlertDialog`「打开外部浏览器？」+ `https://platform.deepseek.com/usage` + `取消`/`打开`；点「打开」⇒ `ps` 出现 `ei.hmos.browser` 且其页面在前台（地址栏 `platform.deepseek.com/usage`、正文 `用量信息` / `累计消费金额 ¥555.53 CNY`） | ✅ |
+
+**第 4 步另做了阴/阳对照（同一 HAP、同一控件，排除误击与设备侧自启）**：
+
+| 动作 | `diag-openlink` | `OnInvokeMethod: … openExternal` | 浏览器进程 |
+|---|---|---|---|
+| 起点 | 408 B | 3 | 无（`aa force-stop` 后三轮询均无 ⇒ **无自启/预热**） |
+| 点 `查询用量` | 408→**477 B**（追加 `2026-09-28T13:33:38.913Z confirm …/usage`） | 3→**4** | **仍无** |
+| 点 **`取消`** | **仍 477 B** | **仍 4** | **仍无** ⇒ 取消不触发外开 |
+| 再点 `查询用量` + 点 `打开` | 477→**546 B** | 4→**5** | **`23803 ei.hmos.browser`**，前台即用量页 |
+
+⇒ 因果链确证：点外链 ⇒ 弹确认框 + 写 `confirm` 行 + 桥被调用（**不开**浏览器）；取消 ⇒ 无任何动作；打开 ⇒ 浏览器拉起并加载目标页。
+
+**桥层旁证**（`files/node-output.log`）：`grep -c 'OnInvokeMethod: method name: openExternal'` = 5，紧邻有
+`CheckIsInJsPermission …, method_name: openExternal, object_id: 1` 与两次 `ParseBaseValueTOCefValueHelper: STRING`
+（即 `url` 与 `mode` 两个字符串参数）。同帧另有 `native proxy object not found, name:__DSHM_BRIDGES__`
+（`:4388` 紧接 `:4380`）——属既有的 javaScriptProxy 注册时序现象（见下方"入队有界重试"），**未阻断外开**。
+
+**累计数值线**：`diag-openlink` 6 行 = 1×`auto` + 5×`confirm`；**无任何 `failed` / `error` 行**。
+
+**取证方法的两个坑（本项踩到，已复用）**：
+
+- **设置对话框有 tab 记忆**：上一轮停在 `内置插件` tab 时，点账号区坐标会落在插件明细上（`layoutB` 117 节点全是内置插件条目）⇒ 点账号控件前必须**先点 `账号与余额`**。
+- **hilog 在本项上不可用**：`hilog -x -T DshWebApp` 与
+  `grep -E '外开|openlink|openExternal|__DSHM_BRIDGES__'` **均为空**（缓冲只留了
+  `com.dshm.dshclient:gpu/chromium` 的 `vulkan switch config` / `NotifyFirstRealSwapBuffer` / `DVsyncController` 噪声）
+  ⇒ 凡涉及外开的真机取证**只能靠 `diag-openlink` 文件**，UI 变化用 `uitest dumpLayout` 前后 diff 判定。
+  这与 `WebApp.ets:680-683` 已登记的"hilog 有丢日志前科"一致。
+
+**一次污染读数（留档，非缺陷）**：第一轮点 `取消` 后曾观察到浏览器在前台（`21724 ei.hmos.browser`），
+与代码不符（取消按钮 action 是空实现）。干净复位（`aa force-stop` + 前置应用 + 复读 diag/bridge/browser）
+后复跑，阴性对照三轮读数均不动 ⇒ 判为**污染**（上一轮的浏览器实例或设备侧干扰），非本仓缺陷。
+
+**未取到的读数（如实登记）**：`hdc shell "cat …/dsh/home"` 与 `…/dsh/home/profiles` 均 `Permission denied`
+（应用私有子目录，既有现象）；授权页 `auto` 分支的**本轮实测**未复跑（`diag-openlink` 里那条 `auto` 是
+`12:54:16Z`，早于 `21:09` 那次装机，属上一版 HAP 运行——但仍证桥与 `openLink` 通）。要补"新版 HAP 上
+`auto` 分支也成立"的直接证据，需退出登录后重走「设置 → 登录」。
+
+关联：`docs/70-…md` §7.9、`WebApp.ets` 的 `OPEN_LINK_SHIM_JS`。
 
 ---
 
@@ -543,7 +663,9 @@ records 非空）；D22 判据 2–4 与 D21 turn 级验证都等 D25 解锁。
 **批次备注（2026-09-21 下午轮）**：DSHM 品牌改版（WebApp.ets 全文重写：自绘
 BrandMark + 双菜单 DSHM/编辑 + 七动作编辑菜单 + 启动画面换自绘标识，期间修复
 PowerShell GBK 事故造成的 FFFD 损坏）；D26 处置升级为运行时安装通道并落地
-（四件套 + PC 单测 16/16 + 编译装机，见 D26 处置更新）。**门禁甄别**：8 门禁
+（四件套 + PC 单测 16/16 + 编译装机，见 D26 处置更新）〔2026-09-28 补注：这个
+"16/16" 当时**并未全过**——该门禁自首次提交起就一直是红的，两条断言与实现方向相反；
+重写后为 **24 passed**，详见 D26 处置更新里的「2026-09-28 更新」与 §五〕。**门禁甄别**：8 门禁
 PASS；arkts-entry / plugin-toggle / origin-fence / web-fetch-jitless 为既有环境性
 失败（Linux 路径 / 旧 core 0.1.5-rc.2 / 本机原生 fetch），dead-handlers 为审计器
 既有报告（173 处回调默认值模式，无本轮新增）。**本轮新教训**：arkts_check 不查
@@ -1115,7 +1237,7 @@ isSafeVersion + isDirectory。
   （maxHeaderSize/globalAgent/WebSocket/CloseEvent/MessageEvent），globalThis
   级未封——疑 globalThis 级惰性 getter 在 0.1.7 装载期被触碰。api-gateway 用
   `ws` 包 WebSocketServer（服务端，不碰全局 WebSocket）。fetch-shim 已补
-  Response/Request/Headers/FormData/Blob/File（:452-457）。
+  Response/Request/Headers/FormData/Blob/File（:587-592）。
 - **决策**：暂不修。内置 undici 随 libnode 固定，与 dsh 版本无关；修法预案
   （E39 扩展至 globalThis 级 / 补 WebSocket 全局）留待它实际咬人时再动。
 
@@ -1954,8 +2076,8 @@ BOOT_10_ENV_READY core=…/dsh/cores/0.1.7-rc.2 …          ← 跑的是新版
 
 | 缺陷 | 落点 | 复核 |
 |---|---|---|
-| 1 原生 `Headers` 被当普通对象（请求头全丢 → 401） | `fetch-shim.js:43-69`（能力判据分支）+ `:407-428`（Request 展开） | ✅ 已修 |
-| 2 已知长度 body 不设 `Content-Length`（→ chunked → 412） | `fetch-shim.js:452-458` | ✅ 已修 |
+| 1 原生 `Headers` 被当普通对象（请求头全丢 → 401） | `fetch-shim.js:59-79`（能力判据分支）+ `:457-478`（Request 展开） | ✅ 已修 |
+| 2 已知长度 body 不设 `Content-Length`（→ chunked → 412） | `fetch-shim.js:485-508` | ✅ 已修 |
 | 3 `entryCandidates` 误杀纯类型包（`@types/*` → 整单回滚） | `dshm-user-rows.js:132-149` | ✅ 已修 |
 | 4 profile `cordis.patch.yml` 被种子重建（设置重启即丢） | `dshm-user-rows.js:380-421` + `main.js:3686-3701` | ✅ 已修 |
 
@@ -2264,7 +2386,7 @@ hdc install -r dist/sideload/DSHM-1.0.0-arm64-signed.hap
 **按魔数**（PKCS#12 的 `30 82 … 02 01 03`）全盘扫描 259103 个文件后：
 全机**只有 2 个 PKCS#12**，且都不是本项目的：
 
-- `D:\desktop\Codex4HMPC\.codeh-local\signing\codeh.p12`（**不同签名**：它的叶子证书是 `4727…`，本项目是 `8E08…`）
+- `<另一份检出>\.codeh-local\signing\codeh.p12`（**不同签名**：它的叶子证书是 `4727…`，本项目是 `8E08…`）
 - `<个人签名文件>.p12`（口令未知，无法读取）
 
 > 为什么必须按魔数扫：PKCS#12 是 DER 二进制，**开发者 ID 不以明文存在**，
@@ -4174,7 +4296,7 @@ Error Code:10106102  The device screen is locked during the application launch
 | `dist/sideload/` 交付包仍是改名前的旧构建 | 需重新出包 + 重算 SHA256SUMS；本轮未做（改动量大，且不影响功能验证）|
 | 宿主彻底起不来时无启动超时兜底 | 既有设计依赖宿主自行报错；加超时兜底会改变既有语义，未擅自改 |
 | `third_party/sherpa_onnx-1.13.3.har` 的 x86_64 裁剪步骤只在散文里 | 应在 README 登记为必补构建输入；本轮未做 |
-| `tools/check-layout-fixtures.mjs.bak`（09-25，非本轮产物）| 来源存疑、无引用；是否删由项目方定 |
+| ~~`tools/check-layout-fixtures.mjs.bak`（09-25，非本轮产物）~~ | ~~来源存疑、无引用；是否删由项目方定~~ ⇒ **2026-09-28 已删**（项目方以"全清"拍板；零代码引用，现役 `check-layout-fixtures.mjs` 在位可跑） |
 | `tools/check-dead-code.mjs` 当前为红（3 处 PIAI/View 零使用声明）| 与本轮无关，既有状态 |
 
 ---
@@ -4238,10 +4360,14 @@ Error Code:10106102  The device screen is locked during the application launch
 引入文件服务会**多一层间接**且改变上游（项目纪律是对上游零 patch），
 因此**不做**。若后续实测发现某形态（如纯手机）确不可读，再按报告方案实现。
 
-> **未验证项（如实登记）**：本机是**手机形态**，其 `/storage/Users/currentUser` **不存在**
-> （文档目录在 `/storage/media/100/local/files/Docs`），无法复现报告人的 2in1 路径形态。
-> 故"2in1 上宿主直读 Documents 是否可行"**未在本机实测**，
-> 依据是上述三条间接证据 + 既有真机直测记录。
+> **未验证项（如实登记）**：**2026-09-29 更正设备形态** —— 本机是 **2in1**
+> （`const.product.devicetype = 2in1`、`model = MNTXM-24B`、`name = HUAWEI MateBook 14`、
+> `OpenHarmony-7.0.0.105`），**此前误记为"手机形态"**。
+> 但**结论不变**：本机的 `/storage/Users/currentUser` **确实不存在**——
+> 实测 `ls -ld /storage/Users` 报 `No such file or directory`，
+> 用户可见目录在 `/storage/media/100/local/files/{Docs,Download,Images,…}`。
+> 也就是说，缺的是**该发行版的目录布局**，与"手机还是 PC"无关。
+> 故"报告的 `currentUser` 路径形态"在本机仍**无法复现**，该未验证项**维持**。
 
 ### 三 附加发现（级联拖挂）—— 属上游行为，未改
 
@@ -4426,12 +4552,12 @@ files/toolchain/python/dshm-signed.txt:     dshm-signed-v1+27720007
 |---|---|
 | `check-dead-code.mjs` 仍有 3 处零使用声明（PIAI/View）| **既有状态**，非本轮引入（Index.ets 的 `protocolLabel`、SettingsModels.ets 的 `piAiProtocols`）；属"搬迁未收尾"，需单独处理 |
 | `check-dead-handlers.mjs` 报 WorkspacePane/InputDevices 空箭头默认值 | 既有状态：那是 ArkTS `@Prop`/回调的**默认空实现**，属该门禁的已知误报模式 |
-| `check-dshm-installer.cjs` 失败 | **既有设计不匹配**（断言 installer 写 `.dshm-plugin-rows.yml`，而 `appendUserRow` 已于 2026-09-25 有意删除）|
-| `check-fetch-shim.cjs` / `check-web-fetch-jitless.mjs` | 需特定 node flag（`--no-experimental-fetch`）或环境，**"没跑成"而非代码坏** |
-| `check-arkts-entry.mjs` / `check-layout-fixtures.mjs` | exit 3：缺 DevEco CLT（tsc），**环境不足** |
+| `check-dshm-installer.cjs` 失败 | ~~**既有设计不匹配**（断言 installer 写 `.dshm-plugin-rows.yml`，而 `appendUserRow` 已于 2026-09-25 有意删除）~~ ⇒ **2026-09-28 已重写两处陈旧断言并补 P1-2 双向用例，exit 0 / 24 passed**（**2026-09-29 随 GitHub 安装修复增至 43 passed**，详见 §五）|
+| `check-fetch-shim.cjs` / `check-web-fetch-jitless.mjs` | 原记"需特定 node flag（`--no-experimental-fetch`），没跑成而非代码坏"。**2026-09-28 复核：两处都不是环境，是脚本自身缺陷**（flag 的否定形态在 Node 24 无效 / loader 传裸盘符路径 / 前提建在错误 flag 语义上 / 探针打在规范禁用端口 `127.0.0.1:9` / 取证引用取在装垫片之后），**两条均已修 ⇒ exit 0**。其中 `check-fetch-shim.cjs` 长期的红**还掩盖了一个产品真 bug**：原生 `FormData` 被编成字面量 `"[object FormData]"`（砸 dsh 附件上传）。详见 `docs/90-…md` §3.6、`docs/parity-matrix.md` §3.2 |
+| `check-arkts-entry.mjs` / `check-layout-fixtures.mjs` | 原记 exit 3：缺 DevEco CLT（tsc），**环境不足**。**2026-09-28 复核：`check-arkts-entry.mjs` 的 exit 3 是真实的脚本缺陷**（四处 Linux 布局写死：`tool/node/bin/node` 缺 `.exe`、`JAVA_HOME` 默认值、`DEVECO_SDK_HOME=join(clt,'sdk')`、`PATH` 用 `:` 而非 `delimiter`）⇒ **已修至 exit 0**（真编译：`CompileArkTS` + `BUILD SUCCESSFUL`）。`check-layout-fixtures.mjs` **同属一类脚本缺陷**（`findTsc()` 只认 Linux 布局）：当时须先用 junction 暴露 `tsc`（建好后 768 条断言 / 0 失败）；**2026-09-30 已把 Windows 候选路径写进 `findTsc()` 本身 ⇒ 不需任何 shim 即 exit 0**，级联的 `neg-test-piai.mjs` 随之转绿 |
 | `check-model-roundtrip.mjs` | 本机 PC 侧跑，端侧 `--expose-internals` 垫片是设备专属 ⇒ PC 测不了 |
-| `tools/check-layout-fixtures.mjs.bak`（09-25）| 来源存疑、无引用；删除与否由项目方定 |
-| 2in1 上宿主直读用户目录 | 本机是**手机形态**（`/storage/Users/currentUser` 不存在），无法复现报告人路径形态 |
+| ~~`tools/check-layout-fixtures.mjs.bak`（09-25）~~ | ~~来源存疑、无引用；删除与否由项目方定~~ ⇒ **2026-09-28 已删**（项目方"全清"拍板） |
+| 2in1 上宿主直读用户目录 | **2026-09-29 更正**：本机**就是 2in1**（此前误记为手机形态）。但 `/storage/Users/currentUser` 在本机上同样不存在（用户目录在 `/storage/media/100/local/files/`）⇒ 缺的是**该发行版的目录布局**，不是设备形态；报告的 `currentUser` 形态仍无法复现，未验证项维持 |
 
 ---
 
@@ -4519,21 +4645,21 @@ ArkTS 组件若回调 prop 无默认值，**父组件不传就编译失败**。�
 | 项 | 证据 |
 |---|---|
 | **回归门禁** | **22/22 通过**（含首次转绿的 check-dead-code、check-dead-handlers）|
-| check-dead-code | `扫描 99 文件 · 声明 2224 处 · 门面字段 256 个` → **无死代码** |
+| check-dead-code | `扫描 99 文件 · 声明 2237 处 · 门面字段 256 个` → **无死代码** |
 | check-dead-handlers | 180 → **0** |
 | 构建 | 通过（删转发链时编译器报错一次，已修净）|
 | 装机 | `install -r` 成功；4 进程、3120 LISTEN、页面 200 |
 | 用户数据 | 插件行 33 个仍在；工具链标记与 exec 探测 7/7 均正常 |
-| 交付包 | dist **逐字节等于** build；README/SHA256SUMS/文件三方一致（299.5 MiB / 314.1 MB）|
+| 交付包 | dist **逐字节等于** build；README/SHA256SUMS/文件三方一致（当时的读数 299.5 MiB / 314.1 MB —— **2026-09-30 已刷新到 299.61 MiB / 314,166,762 B**，见 §五 `check-layout-fixtures.mjs` 行之后的续记与 `docs/HANDOFF.md` §4③）|
 
 ### 五 保留未处理
 
 | 项 | 原因 |
 |---|---|
-| check-dshm-installer.cjs | 既有设计不匹配（断言 installer 写 `.dshm-plugin-rows.yml`，而 appendUserRow 已于 2026-09-25 有意删除）—— 需**重新定义该门禁要守护什么**，属独立议题 |
-| check-arkts-entry.mjs / check-layout-fixtures.mjs | exit 3：缺 DevEco CLT（tsc），**环境不足** |
-| check-fetch-shim.cjs / check-web-fetch-jitless.mjs | 需特定 node flag / PC 上无法复现设备专属垫片 |
-| tools/check-layout-fixtures.mjs.bak | 来源存疑（早于本轮）、无引用 |
+| check-dshm-installer.cjs | ~~既有设计不匹配（断言 installer 写 `.dshm-plugin-rows.yml`，而 appendUserRow 已于 2026-09-25 有意删除）—— 需**重新定义该门禁要守护什么**，属独立议题~~ ⇒ **2026-09-28 已处置**：两处陈旧断言重写（`^4.3.4`→`4.3.4`；删用户行断言改为锁**不再写用户行**），并补 P1-2 双向极端用例 5a/5b/5c ⇒ exit 0 / `RESULT: 24 passed, 0 failed`（**2026-09-29 增至 43 passed**：GitHub→npm 同名回退、monorepo 子包判定等 19 例） |
+| check-arkts-entry.mjs / check-layout-fixtures.mjs | ~~exit 3：缺 DevEco CLT（tsc），**环境不足**~~ ⇒ `check-arkts-entry.mjs` 的 exit 3 是**脚本缺陷**（四处 Linux 布局写死），**2026-09-28 已修至 exit 0**；`check-layout-fixtures.mjs` 同属一类（`findTsc()` 只认 Linux 布局），**2026-09-30 已把 Windows 回退写进脚本 ⇒ 不需 junction 即 exit 0**（exit 3 现为 0 条） |
+| check-fetch-shim.cjs / check-web-fetch-jitless.mjs | 原记"需特定 node flag / PC 上无法复现设备专属垫片"。**2026-09-28 已查明并修掉（exit 0）**——两条都不是环境问题，是脚本缺陷；`check-fetch-shim.cjs` 更由此挖出产品真 bug（原生 `FormData` 被编成 `"[object FormData]"`）。详见 `docs/90-…md` §3.6 |
+| ~~tools/check-layout-fixtures.mjs.bak~~ | 来源存疑（早于本轮）、无引用 ⇒ **2026-09-28 已删**（项目方"全清"拍板；见 `docs/90` §5.3/§6.3） |
 
 ---
 
@@ -4568,6 +4694,542 @@ ArkTS 组件若回调 prop 无默认值，**父组件不传就编译失败**。�
 | D9 §4.1 | `"sqlite":"3.51.3"` | 实测 **3.53.3** |
 | D9 §语音 | fixture 断言 12 条 | **21** 条 |
 | D9 §语音 | `STALE_MS` 5 分钟 | **10** 分钟（600000ms） |
-| D9 §依赖 | `arch-check --self-test` 8 样例 | **10** 个（脚本收尾文案本身陈旧） |
+| D9 §依赖 | `arch-check --self-test` 8 样例 | **10** 个（2026-09-28 已把脚本收尾文案从写死的 "8 个" 改为按 `cases.length` 计算 ⇒ **不再陈旧**；`docs/10-…md:788` 记的 10 个一直是对的） |
 | D9 §日志 | `diag()` 走 stderr | 写 `dshm-host.log` + **镜像到 stdout** |
 | D9 多处 | `hostcore/dshm-*.js` | **`hostcore/app/`** |
+
+---
+
+## 批次三十五（2026-09-28：核心 `0.1.7-rc.2` → `0.2.0-rc.1` 同步 —— 三处新增端点、零契约变化，附一个把漂移读反的坑）
+
+**任务**：官方 2026-09-28 发布 `dsh-v0.2.0-rc.1`（GitHub Releases，`prerelease: true`；
+npm `dist-tags.next`；`latest` 仍是 `0.1.7-rc.2`），按 `docs/40-上游升级手册.md` 同步。
+
+**结果**：升级成功，**改动面只有 4 处、且不改任何调用代码**（漂移全是新增端点，
+落在与我方无关的新命名空间）。过程中撞出一个**能把漂移方向读反**的坑，比升级本身更值得记。
+
+### 一 版本取证：以 GitHub 为准
+
+| 来源 | 读数 |
+|---|---|
+| GitHub Releases API | 最新 = **`dsh-v0.2.0-rc.1`**，`published_at 2026-09-28T12:36:21Z`，`prerelease: true`，`assets: []`（仅源码归档） |
+| npm `dist-tags` | `{alpha: 0.1.7-alpha.2, latest: 0.1.7-rc.2, next: 0.2.0-rc.1}` ⇒ 新版在 `next` 通道 |
+| 本仓当前 | `hostcore/core-recipe.json` 的 `coreVersion` = `0.1.7-rc.2` |
+
+> **为什么用 `next` 而不是 `latest`**：本仓上一版取的也是**当时最新的 rc**（`0.1.7-rc.2`），
+> 路径一贯是跟 rc 通道走；`latest` 停在上一个正式候选是上游的发布节奏，不代表"没有新版"。
+
+**上游要点（自 `0.1.7-rc.2` 起）**：修复「工具调度异常后对话无法继续」（已执行但结果未知的操作会提示先核实副作用）、
+会话图片失效后自动重传、「部分 Linux 环境在缺少可选原生预构建包时的 npm 安装失败」；
+调整「自动化任务改由**可选插件包**提供」（原内置）、「工作过程展示在不同初始化路径的默认值」；
+以及插件管理引导、「用 DeepSeek 账号模型的会话无需额外 API Key 即可网页搜索」等体验项。
+`changelog: https://github.com/deepseek-ai/deepseek-harness/compare/dsh-v0.1.7-rc.2...dsh-v0.2.0-rc.1`
+
+### 二 升级动作：只有 4 处（脚本化普查，不靠印象）
+
+全仓检索字面量 `0.1.7-rc.2` 得 **43 处**，逐条判定"必须随升级改"还是"文档叙述历史读数"：
+
+| # | 位置 | 为什么必须改 |
+|---|---|---|
+| ① | `hostcore/core-recipe.json` 的 `coreVersion` | 配方是**唯一事实来源**，所有工具脚本都从它读版本，不写死 |
+| ② | `dshcompat/src/main/ets/CompatIndex.ets` 的 `SUPPORTED_VERSIONS` | 受支持矩阵的**唯一声明处**（置 `0.2.0-rc.1` 为首，保留旧版）；同步补版本记录注释 |
+| ③ | `dshcompat/src/main/ets/Endpoints.ets` | **生成物，不手改**，由 `gen-compat-endpoints.mjs` 重写 |
+| ④ | `tools/update-device.ps1` 的版本判据 | 原为 `if ($afterCores -notmatch '0\.1\.7-rc\.2')` ⇒ 升级后**必然误报 FAIL** 并把结论置"未完全通过"、`exit 1`。**已改为读 recipe**（只要求新版在，不要求旧版不在——旧树并存是预期，见 `docs/50:45`） |
+
+> **本轮遗留 → 2026-09-28 已修**（原记"留档未改"，属独立缺陷、非升级必需；本轮收尾清理一并处理）：
+>
+> | 原缺陷 | 处置 |
+> |---|---|
+> | `tools/func_test_final.py` T0.3 写死 `'0.1.7-rc.2'`（跑功能验收会误判） | **已改为读 recipe**（新增 `want_core()`，读 `hostcore/core-recipe.json` 的 `coreVersion`）；同时 T0.2 的 `detail.count('=ok') >= 7` 改为逐项判定（写死总数会在新增探测目标后失效） |
+> | `tools/repro_report9.py:41` 写死 `DSHM_CORE_DIR=…/cores/0.1.7-rc.2` | **已删脚本**（一次性复现脚本，零引用；见 `docs/90` §5.3） |
+> | `tools/scan-core-plugins.mjs` 默认 `coreDir` 停在 `0.1.5-rc.2` | **已改为读 recipe**：`join(ROOT,'dist','core','work', \`dsh-core-${RECIPE.coreVersion}\`)` |
+> | `tools/update-device.ps1` 的 hdc 路径含 `<版本>` 占位符（`Test-Path` 抛异常 ⇒ 脚本在本机无法运行） | **仍未改**：占位符形态属"本机没有 DevEco Sdk 时的模板"，改成自动解析会牵动该脚本的定位（它是给项目方机器用的）。⇒ **本机装机仍只手敲 `hdc install -r`**；`tools/dshtest.py` 的同类占位符**已改为** `DSHM_HDC` → PATH → DevEco 工具链目录依次解析（hdc 自动解析生效，实测得到 DevEco 自带那个）。|
+
+### 三 物化与打包：镜像未同步 + 一次假失败
+
+| 现象 | 根因 | 处置 |
+|---|---|---|
+| `npm error code ETARGET / No matching version found for @deepseek-ai/dsh-cordis-client-runner@0.2.0-rc.1` | 本机 `~/.npmrc` 写死 `registry=https://registry.npmmirror.com`，而**镜像未同步 0.2.0-rc.1**（`versions` 止于 `0.1.7-rc.2`；`…sensevoice@0.2.0-rc.1` 同样 404） | `$env:npm_config_registry='https://registry.npmjs.org'`（**env 优先级高于 `~/.npmrc`**）；清掉失败留下的半成品 stage 再跑 |
+| `pack-core` 报 `$LASTEXITCODE=1` | pwsh 里 `2>&1 \| Tee-Object` 会把 stderr 的 NativeCommandError 混进管道 ⇒ **假失败** | 用 `1> out 2> err` 重定向；实测 **exit=0** |
+
+**读数**：`added 540 packages`（rc.1 当时；升级到 rc.2 时为 519 条，解包后权威计数为 **518 个包 / 26,066 文件 / 252,069,490 B**，见 `docs/parity-matrix.md` §3.3）；
+prune 删 24 项 / 85.5 MB，node_modules 330.0 → 244.5 MB；
+requiredNative 三项齐；`.codesign` 47 通过、3 未检出（`koffi.node` 属既有现象，另两个是
+`pack-core` 自己写的**占位文本**非真 ELF，见批次十六备注）；
+产物 `dsh-core-0.2.0-rc.1-openharmony-arm64.zip` **78,705,318 B / 29602 条目**
+（**rc.2 实测：78,081,448 B / 29,351 条目**——本行早期写的 `78,104,023 B / 29201` 是错的，2026-09-30 以 `dist/core/dsh-core-0.2.0-rc.2.manifest.json` 与 Python zipfile 复测纠正）；
+插件统计 `pluginRows 287→288`、`disabled 23→20`。
+
+> **两个非缺陷但要知道的现象**：① 树内 `dshm-core.json` 带 `builtAt` ⇒ 包**不是可复现构建**，
+> 逐次 sha256 不同（三次跑 `9279c4d5…`/`b8b48252…`/`67b85c26…`，条目数与体积恒定）；
+> ② `selfSignNatives()` **非幂等**——二次跑会重签 rg（`ensureRipgrepPlatformPackage()` 把未签版拷回）。
+
+### 四 ★ 把漂移方向读反：默认契约快照必须与新上表同步
+
+`tools/compat-drift.mjs` 的默认基线是 `.research/protocol/contracts.json`。上表升到 0.2.0-rc.1 后，
+若**只更新上表、不刷新这份快照**，门禁会把本轮**新增**的端点报成：
+
+```
+上游移除端点（3）—— 这些调用会返回 HTTP 404
+```
+
+——**方向完全相反**，且版本行因读的是旧 `.meta.json` 而显示 `0.1.7-rc.2`。
+
+```sh
+cp .research/protocol/contracts-0.2.0-rc.1.json .research/protocol/contracts.json
+cp .research/protocol/contracts-0.2.0-rc.1.json.meta.json .research/protocol/contracts.json.meta.json
+node tools/compat-drift.mjs; echo "exit=$?"   # 期望 0，版本行显示 0.2.0-rc.1
+```
+
+> **判别法**：报告里的"上游移除端点"若恰好等于你**刚在漂移报告里看到的新增端点**，
+> 就是快照没刷，不是真的删除。**看到"删除"先怀疑基线，再怀疑上游。**
+> 已写进 `docs/40-上游升级手册.md` §4.3（含上游契约自带版本号的机制说明）。
+
+### 五 漂移与上表重生成
+
+| 项 | 读数 |
+|---|---|
+| 契约采集 | `protocol-contract.mjs` ⇒ `contracts-0.2.0-rc.1.json` + `.meta.json`：`endpointCount 138`、`corePackage 0.2.0-rc.1` |
+| 漂移 | **+3 / −0 / 零契约变化**：`productAnalytics/{enabled,report,watchPolicy}`（前两个非流、第三个流且可取消） |
+| 我方调用 | 全仓检索 `productAnalytics` 在 `connection/src`、`appstate/src`、`entry/src`、`dshcompat/src`、`hostcore` 下**零命中** ⇒ **不改调用代码** |
+| 上表重生成 | 端点 138 / 流式 12 / 能力 15 / 未被能力引用 84；无 `WARN 能力 X 引用了不存在的端点` |
+
+> `.research/` 已被 `.gitignore` 排除 ⇒ 契约是我方**本地取证物**，不入库；
+> 新基线同步进本机 `.research/protocol/`，他人复现需按上面命令重采。
+
+### 六 装机与真机验证
+
+AGENTS.md 硬约束「只用 `hdc install -r`，绝不卸载」全程遵守。
+
+| 项 | 证据 |
+|---|---|
+| 装前基线 | `files/dsh/cores/` 只有 `0.1.7-rc.2`；`files/` 21 项（含 `diag-*` 家族）；应用未运行 |
+| 覆盖安装 | `hdc install -r entry-default-signed.hap` ⇒ `install bundle successfully` / `AppMod finish` / **exit=0** |
+| **数据保全** | 装后 `files/` 清单**逐项一致**（`dsh/`、`node_modules/`、`toolchain/`、`workspace/`、日志、`diag-*` 全在）⇒ el2 用户数据零损伤 |
+| **★ 跑的是新核心** | `files/node-output.log`：`BOOT_10_ENV_READY core=…/dsh/cores/0.2.0-rc.1 home=…/dsh/home port=3120 profile=ondevice` |
+| 新旧并存 | `files/dsh/cores/` = **`0.1.7-rc.2` 与 `0.2.0-rc.1` 并存**（升级不删旧树，符合 `docs/50:45`） |
+| 树内元数据 | `dshm-core.json`：`coreVersion 0.2.0-rc.1 / platform openharmony/arm64 / profile ondevice / nodeFloor 22.17.0`，三个 `overrides` 与 recipe 一致 |
+| 启动序列 | `BOOT_00_NODE_START pid=14922 node=v24.2.0 jitless=true` → `BOOT_20_CORE_FOUND entry=profile-boot.js` → `BOOT_30_PROFILE_READY` → `BOOT_40_PROFILE_BOOT` → `BOOT_65_AUTH_URL tokenLen=43` → `BOOT_60_HTTP_BIND port=3120` → `BOOT_70_HTTP_READY GET / → HTTP 401`（末项耗时 +3629ms） |
+| exec 探测七项 | `python3.12 / git / git-core/git / git-remote-http / rg / bash / git-ls-remote` **全 ok**，零回归 |
+| 插件挂载 | `grep 'did not activate\|pending (waiting'` **无命中** |
+
+> **日志落点这条要记住**：`BOOT_*` 行在 **`files/node-output.log`**，不在 `dshm-host.log`
+> （后者只有 exec 探测与 `IN-UPGRADE`）。本轮一开始就在错的日志里找，白费一轮。
+
+### 七 门禁与构建
+
+| 项 | 结果 |
+|---|---|
+| 必跑门禁 15 条 | **全部 exit=0**（含本轮修好的 `check-arkts-entry` / `check-web-fetch-jitless` / `check-fetch-shim`）；`compat-drift` **首跑 exit=1 即上面那个读反的假红**，刷新默认快照后 exit=0 |
+| `assembleHap --no-daemon` | **BUILD SUCCESSFUL**；`entry-default-signed.hap` 314,673,276 B（**本批次当时的读数**；当前产物为核心 `0.2.0-rc.2` 的 314,166,762 B） |
+| HAP 内容核对 | `tar -tf` 确认含 `resources/resfile/dsh-core-0.2.0-rc.1-openharmony-arm64.zip`，**旧 rc.2 zip 已不在包内**（resfile 去旧留新，只留当前版本一份）（**本批次当时的读数**；当前包内是 `dsh-core-0.2.0-rc.2-openharmony-arm64.zip`） |
+
+> 判据纪律照旧：`& node tools/<gate> *> $null` 后读 `$LASTEXITCODE`，**不要用 pwsh 管道判**——
+> `exit=2 :: System.Management.Automation.RemoteException` 是假红。
+
+### 八 本轮遗留
+
+| 项 | 状态 |
+|---|---|
+| **登录拉起系统浏览器（D28 四步）** | 本次 HAP **同时带上了 `WebApp.ets` 的登录修复**，**四步已于同日 21:18–21:34 跑完并全部通过**（详见 D28 的「真机复核」两表）：① 授权页 `auto` 外开；③ 回跳后设置面板出现「账号与余额」section ⇒ `credential-stored`；④ 点「查询用量」⇒ 弹确认框 ⇒ 点「打开」后 `ei.hmos.browser` 真被拉起并加载用量页，且做了阴/阳对照（取消 ⇒ diag/桥/浏览器三者都不动）。`diag-openlink` 累计 6 行（1×`auto` + 5×`confirm`），无 `failed`/`error` |
+| 脚本硬编码版本 | ✅ **已处理（2026-09-28 收尾清理）**：`tools/func_test_final.py`（T0.3 改为读 recipe 的 `want_core()`；T0.2 的 `>= 7` 改为逐项判定）、`tools/scan-core-plugins.mjs`（默认 `coreDir` 改为读 recipe）、`tools/repro_report9.py`（属一次性脚本，随清理 `git rm`）。另 `tools/update-device.ps1` 的 exec 探测判据 `$okCount -ge 7` 也改为逐项判定（结论段同步改用 `$execOk`）|
+| `tools/update-device.ps1` hdc 占位符 | **仍未改**（脚本在本机仍不可跑，手敲 `hdc install -r` 替代）；但 `tools/dshtest.py` 的同类占位符**已改为**按 `DSHM_HDC` → PATH → DevEco 工具链目录依次解析 |
+
+### 九 收尾清理（2026-09-28，批次三十六）
+
+用户指示「升级完成检测无误后就更新文档，清理环境」，就粒度提问后选定**全清**。四处产物：
+
+| 类别 | 动作 | 结果 |
+|---|---|---|
+| 一次性排查脚本 7 个 | `git rm` | 计数口径（`git ls-tree -r --name-only HEAD tools` 实测）：顶层 **64 → 57**、递归（含 `lib/`、`electron-runtime/`、`node-runtime/`）**92 → 85** 个文件。删的是：`repro_all.py`、`repro_local.py`、`repro_report9.py`、`close_picker2.py`、`verify_t1_clean.py`、`protocol-enum.mjs`、`check-layout-fixtures.mjs.bak`（124824 B，原"由项目方定"，本轮以"全清"拍板）；逐个 `Test-Path` 复核全部不存在 |
+| `dist/` 本轮临时重定向产物 6 个 | 删除 | `_drift.{out,err}`、`_drift2.{out,err}`、`_build020.{out,err}`（2026-09-28 21:08–21:09 本轮升级产生）；`dist/sideload/` 交付物保留 |
+| 保留脚本的硬编码 | 改 | `scan-core-plugins.mjs` 默认 coreDir、`func_test_final.py` T0.3 + T0.2、`update-device.ps1` exec 判据、`dshtest.py` 的 hdc 路径 —— 判据统一从 `hostcore/core-recipe.json` 读 |
+| 文档悬引用 | 改 | 8 个文档：`10`、`50`、`70`、`90`（§5.3/§5.6/§5.7/§6.3/§8.1）、`device-validation`、`functional-test-report`、`parity-matrix` |
+
+**保留**（有活引用/属门禁体系）：`tools/func_test_final.py`、`tools/dshtest.py`（验收资产）、`tools/dump-piai-schema-full.mjs`、`tools/neg-test-piai.mjs`（负测试）、`tools/protocol-enum2.mjs`。
+
+**验证**：`tools/func_test_final.py` 与 `tools/dshtest.py` 过 `py_compile`（exit 0）；`dshtest.py` 的 hdc 自动解析实测得到 `C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe`。
+
+---
+
+## 批次三十六：关闭行为改造 + 连接状态误报（0.2.0-rc.1）
+
+> 用户实测反馈两条（2026-09-28）。
+> 装机时设备锁屏，`aa start` 返回 `Error Code:10106102`（"设备已锁屏"），非崩溃。
+>
+> **⚠️ 本节已被** [`批次三十七`](#批次三十七托盘定为最终形态--启动40-秒自杀未判因--连接抖动定因0.2.0-rc.1)
+> **部分取代**（2026-09-29 真机验证后回填）：
+> 1. 「问题 1」的**改法本身仍然有效**，但其**退出路径**（顶栏「DSHM」菜单 → 退出应用）已被
+>    用户否决并**删除**，改为**托盘图标右键菜单**；托盘还必须经 `StatusBarTray.hold()` 第二进程贴住
+>    才真正常驻。判据以此处保留 + 批次三十七为准。
+> 2. 「问题 2」的**根因判定（ArkTS `RemoteMux.ets` 探活过激）已被推翻** ——
+>    用户看到的是 **WebView 里的 host web UI**，ArkTS 自绘 UI（`pages/Index.ets`）根本不可达，
+>    该改动对用户可见现象**无效**。真因见批次三十七。
+>    （`RemoteMux.ets` 的那组改动保留：它本身是"高负载下探活容错"的合理加固，**但不是**本现象的因。）
+
+### 问题 1：加上任务栏图标；关闭 → 切后台；点图标回前台（E-CB1）
+
+**改前**：点右上角关闭 = 直接终止应用（正在跑的任务与 Host 长连接一起断）。
+
+**改法（5 处）**：
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 1 | `entry/src/main/module.json5` | 声明 `ohos.permission.PREPARE_APP_TERMINATE`。SDK 权限表：`availableLevel: normal` + `grantMode: system_grant` ⇒ 普通应用可声明、安装即授予、无运行时弹窗 |
+| 2 | `entry/src/main/ets/entryability/EntryAbility.ets` | 新增 `onPrepareToTerminate()`：主窗返回 `true`（**取消**终止）并 `win.minimize()` 切后台；会话窗、以及"显式退出"标记存在时返回 `false`（放行） |
+| 3 | 同上 | **接上 `KeepAlive`（长时任务）** —— 见 E-CB3 |
+| 4 | `entry/src/main/ets/pages/WebApp.ets` | 顶栏「DSHM」菜单新增**退出应用**（`terminateSelf`）。因为关闭按钮已不再退出，**必须**另给一条真退出路径，否则用户被关在里面 |
+| 5 | `entry/src/main/module.json5` | **声明 `backgroundModes: ['dataTransfer']`** —— 实测发现：光有 `KEEP_BACKGROUND_RUNNING` 权限**不够**，不声明本字段时 `startBackgroundRunning` 直接失败（见 E-CB3）|
+
+**四条必须写下来的判据**：
+
+1. **为什么不用 `windowStageClose`**：SDK 明确「若应用（或三方框架）注册了
+   `windowStageClose` 监听，`onPrepareToTerminate` **不会被执行**」⇒ 两条路只能选一条。
+   本工程选后者，**刻意不注册**前者。
+2. **只在 2in1 与平板生效**：SDK 原文 "This API executes the callback normally only on
+   2-in-1 devices and tablets. It does not execute the callback on other devices."
+   ⇒ 手机全屏下点关闭仍按系统默认（回桌面），这是**平台行为**，不是实现缺陷。
+3. **返回值语义别记反**：`true` = **取消**终止；`false` = 继续终止。顺序也不能反 ——
+   必须先返回、再最小化；先最小化再返回的话系统仍会走完终止流程。
+4. **任务栏图标本来就具备**：`AppScope/app.json5` 早已声明
+   `icon: $media:layered_image` + `label: $string:app_name`（= "DSHM"）；
+   `removeMissionAfterTerminate` **未声明**（默认 false ⇒ 关闭后任务条目保留），
+   这正是"点任务栏图标能回来"所需。**无需新增资源**。
+
+### 问题 2：跑任务时反复显示"正在连接"（**Windows 端同样出现**）（E-CB2）
+
+**根因**：探活判死**过激**。
+
+`connection/src/main/ets/protocol/RemoteMux.ets` 的探活实现中，**探活超时计时器与收帧回调
+跑在同一个 JS 线程上**。跑任务时线程与网络都被占住、回帧处理被推迟，而原实现
+**单次超时（8s）即 `onSocketClosed`（判死）** ⇒ 触发重连 ⇒ 界面闪"正在连接"。
+
+**为什么"Windows 端也有"是定位的关键**：这条判据由**负载**触发，不是平台差异。
+若只在鸿蒙上出现，才该怀疑平台；**两端都出现就该怀疑策略本身**。
+这直接把排查从"鸿蒙适配问题"拉回"客户端探活策略对高负载没有容错"。
+
+**改法**：
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 单次超时 | 立即判死 | 只记一次失败（`noteProbeFailure`） |
+| 判死条件 | 单次 | **连续 3 次**无回帧（`PROBE_FAIL_THRESHOLD`） |
+| 超时阈值 | 8000ms | **20000ms**（服务端 2s 一个 Ping ⇒ 10 个周期） |
+| 失败计数清零 | — | 收到**任何**帧即清零（`settleProbe`）；连接建立/停止时也清零 |
+
+**为什么这不是"把断线检测改弱"**：
+
+- **真断线不靠这条路径发现**：socket 真死由 `close` 事件**立即**上报
+  （WebSocket 层的权威信号）。探活只兜「`close` 不来」的**静默失效**场景
+  （D2 §8.7.13 记录过这种失效）。
+- 该场景下最坏约 1 分钟才判死（3 × 20s 起）。这是**可接受**的代价 ——
+  远优于把所有健康连接在负载下反复误杀（后者会让"跑任务"变成"一直重连"）。
+
+**顺带修掉一处自相矛盾的注释**：`startLivenessProbe` 上方写着
+"为什么带唯一 `cursor`：让应答可辨认"，而**正下方代码**明确写了
+"cursor 已移除，否则会把健康连接判死"（`gateway/arguments-invalid` 那次的教训）。
+文档与代码相反 ⇒ 一并改正。这类"文档撒谎"会让后来者按错的注释去改代码。
+
+### 顺带修掉的既有缺口：`KeepAlive` 写好了但**从未被调用**（E-CB3）
+
+`platform/src/main/ets/notify/KeepAlive.ets` 有完整的长时任务实现
+（`attach` / `acquire` / `release` / `forceRelease`），但**全仓无人调用** ——
+只有 `platform/Index.ets` 的 re-export（全仓搜 `KeepAlive` 仅 5 处，全在定义与导出）。
+
+**后果**：应用退到后台会被系统挂起 ⇒ 与 Host 的长连接断、正在执行的任务停。
+
+**这条缺口让问题 1 的修法本来会是空的**：没有保活，
+`onPrepareToTerminate` 的最小化只是"把窗口收起来"，任务照样丢 —— **与用户诉求相反**。
+
+**改法**：主窗窗口就绪后 `keepAlive.attach(this.context)` + `acquire()`；
+`onDestroy` 里 `forceRelease()`（用 force 而非 release：销毁是终局，
+计数若因异常路径偏高，`release` 会留下一个永不释放的任务）。
+申请失败**只降级**（日志警告），不阻断任何功能。
+
+### 本轮验证
+
+| 项 | 结果 |
+|---|---|
+| 构建 | `assembleHap` **BUILD SUCCESSFUL** |
+| 回归门禁 | **23/23** 通过（含 `check-dead-code` / `check-dead-handlers`）|
+| 装机 | `hdc install -r` 成功（不动 el2 用户数据）|
+| 产物 | `entry-default-signed.hap` 300.2 MB，sha256 `f7ccd1ae93c3daab…` |
+| 真机行为 | **✅ 已逐项验证**（见下节「真机验证证据」）|
+
+**当时列的三件事，回填结论见批次三十七**：
+
+1. **2in1 点右上角关闭 → 切后台**：✅ 验证通过（判据：窗口消失但 `ps` 里进程仍在，
+   `BackGroundAbility` 子进程在，托盘图标在）。
+2. **顶栏「DSHM」菜单 → 退出应用**：❌ **该路径已按用户要求删除**，改为托盘右键菜单。
+3. **跑长任务不再闪"正在连接"**：❌ **未通过**（根因判定被推翻，见本节抬头与批次三十七）。
+
+---
+
+## 批次三十七：托盘定为最终形态 + 启动 40 秒自杀（未判因）+ 连接抖动定因（0.2.0-rc.1）
+
+> 2026-09-29，设备 `86E0226429000417`（HUAWEI MateBook 14 / `MNTXM-24B` / `devicetype=2in1`，
+> OpenHarmony-7.0.0.105 / API 26）。本批次含**三条**用户反馈的实测结论。
+
+### 一 托盘：从「能挂上」到「最终形态」
+
+**背景**：批次三十六挂上了图标，但真机上**点关闭后托盘图标不存在**，用户复现了两遍。
+根因是**少了官方三步里的第二步**：`addToStatusBar` 只是"申请一个位置"，
+必须再 `startAbility` 一个 `processMode = NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM` +
+`startupVisibility = STARTUP_HIDE` 的 UIAbility，**把进程贴到图标上**，图标才常驻。
+
+新增两个文件：
+
+| 文件 | 作用 |
+|---|---|
+| `entry/src/main/ets/system/StatusBarTray.ets` | 封装 `statusBarManager`：`install()`（挂图标，含菜单）/ `hold()`（第二进程贴住）/ `remove()` / `onIconClick()` / `onRightMenuClick()` / `isReady()` / `publishExitRequest()` / `subscribeExitRequest()` / `subscribeBgTerminating()` / `delayBeforeTerminate()` |
+| `entry/src/main/ets/backgroundability/BackGroundAbility.ets` | 被 `hold()` 拉起的无窗口 Ability；`onWindowStageCreate` 里 `hideAbility()`；`onPrepareToTerminate()` → `notifyBgTerminating()` → 返回 `false` |
+
+**★ 关键事实：托盘 API 来自 HMS，不是 OpenHarmony SDK**。
+
+```ts
+// kit: sdk\default\hms\ets\kits\@kit.DeskTopExtensionKit.d.ts（@since 6.0.0(20)）
+import { statusBarManager } from '@kit.DeskTopExtensionKit';
+```
+
+OpenHarmony 的 `ets/api` 下**没有**这个 kit —— 在仓库里 grep `statusBarManager`
+只能命中 `hms/` 目录。声明全量在 `sdk\default\hms\ets\api\@hms.pcService.statusBarManager.d.ts`（794 行）。
+
+**踩过的三个坑**：
+
+1. **`addToStatusBar` 是全有全无**：带 `statusBarGroupMenu` 的形态一旦被拒（菜单项数/`menuCode` 唯一性
+   等），整个图标都挂不上。`install()` 因此**退回**到不带菜单的 `bare` 形态再试一次，
+   第二次仍失败才抛出。
+2. **`QuickOperation.abilityName = ''`** ⇒ 左键点击走 `statusBarIconClick` 事件，由应用自己处理
+   （SDK 原文：传空字符串时点击服务可由监听该事件处理）。
+3. **`menuAction.notifyOnly = true` + `menuCode`** 才能让右键菜单项回到
+   `on('rightMenuClick')` 由应用处理，否则系统会尝试 `startAbility`。
+
+**用户两次修正，都照做**（`User said` 原话）：
+
+| # | 用户说 | 落地 |
+|---|---|---|
+| 1 | "任务栏上右键两个功能：退出应用，退出，只要一个就好了，单击图标直接打开APP即可" | 去掉重复项 |
+| 2 | "系统会自带一个退出，可以把退出应用改成打开应用" | 我们的菜单项改名为**打开应用**；真退出交给系统自带的「退出」 |
+
+**真机实测的最终布局**（`uitest dumpLayout`）：
+
+| 节点 | bounds | 说明 |
+|---|---|---|
+| 托盘图标 | `[1853,5][1913,68]`（`PluginRootComponent_Single_537591617`） | 顶栏胶囊行 `PcCapsuleComponent_Row_capsule` 内；**id 每次 dump 都会变** |
+| 右键菜单体 | `[1853,81][2133,250]`（`Menu`） | |
+| ├ 我们的「打开应用」 | `[1860,88][2126,158]` | `PcAccessRightMenu_RightMenuItem` |
+| └ 系统「退出」 | `[1860,173][2126,243]` | `PcAccessRightMenu_RightMenuExitItem` |
+
+进程侧佐证（`ps -ef`，两进程都在 ⇒ `hold()` 生效）：
+```
+20020292 14605 … com.dshm.dshclient
+20020292 15949 … com.dshm.dshclient:entry:BackGroundAbility:10
+```
+
+**「退出应用」已从顶栏「DSHM」菜单删除**（用户要求"不要放在菜单里，换别的方式退出"）。
+理由不只是用户没看到该菜单：**「关闭窗口」已经到了"切后台"**，
+把"真退出"放在紧邻窗口右上角三键的同一个视觉区域，**用户极易点错**；
+托盘右键是系统级常驻位置（微信等 PC 应用同款），语义上就该是"对整个应用动手"。
+
+**系统自带的「退出」不经过 `EntryAbility.onPrepareToTerminate`** —— 实测真退出且该回调无日志。
+所以"拦截关闭"与"托盘退出"这两条路径天然不冲突。
+
+### 二 ★ 应用冷启动约 40 秒后自杀（**未判因，已立项**）
+
+**时间线**（日志为 UTC，本地 = UTC+8）：
+
+| UTC | 本地 | 事件 |
+|---|---|---|
+| `09:40:03.637Z` | 17:40:03 | `dshm-host.log`：`--- boot pid=14371`（`update-device.ps1` Step6 的 `aa start`） |
+| ~`09:40:06Z` | 17:40:06 | 长时任务通知建立（下面那条显示已存在 37.4s） |
+| **`09:40:43.510Z`** | **17:40:43** | **`!! process.exit(0)：停止路径放行，真正退出`** ⇒ 冷启动后 **40 秒** |
+
+同刻 hilog 显示整个进程死亡：`AppLifeCycleManager: Ability state changed … state 5` /
+`WMSLife: requestDestruction … name: EntryAbility/com.dshm.dshclient/entry/0(persistentId: 159)` /
+`requestSceneSessionDestruction … terminateReason: 2` / `AppUsageAbility: process died`；
+托盘图标被摘：`MessageAccess: removeAccessPluginInfo slot: 537591617 bundleName: com.dshm.dshclient`
+（⇒ **确认 `537591617` 就是我们的托盘图标**）；长时任务通知被撤（`exist duration: 37363 ms`）。
+
+**嫌疑链**（**未证实**）：`host-stop-request` 只可能由 `DshHost.stop()` 写出；
+其非用户路径调用点只有 `EntryAbility.exitApp()`（`hostruntime` 的 `switchTo/rollbackTo`
+仅在 `!port.isRunning()` 时写，本次宿主在跑 ⇒ 排除）。`exitApp()` 的触发点只有两个：
+托盘右键「打开应用」（需人手点击，本次没有）与 **`StatusBarTray.subscribeBgTerminating`**
+（源头 = `BackGroundAbility.onPrepareToTerminate()` → `notifyBgTerminating()`）。
+⇒ **怀疑系统在启动约 40s 后例行触发该回调，我们把它当成"托盘后台进程已被系统结束"，
+进而关掉了整个应用。** 这条链本意是防"主 Ability 已死、图标还挂着"的半死态，
+若该回调会被例行调用，它就成了**自杀路径**。
+
+**已排除**：`appfreeze` / `APPFREEZE` / `SIGKILL` / `LowMemory` 在 hilog 里 **0 命中**；
+`memmgrservice` 只有 6 条无关行；`/data/log/faultlog/faultlogger|temp` 均 `Permission denied`（查不到崩溃单）。
+
+**下一步**：冷启动后静置 90s 看是否复现；复现即在 `onPrepareToTerminate` 与 `notifyBgTerminating`
+两侧加"调用者日志"定位；再决定"只摘图标不退应用"或"整体删掉该链"。
+
+### 三 ★ 「正在连接」抖动定因：**Host 心跳误杀健康连接**（两端同源）
+
+**现象**：左下角设置 banner 反复闪「重新连接中 → 连接成功」（鸿蒙端 m01711，Windows 端 m04277）。
+
+**Windows 端实测**：`Get-NetTCPConnection -OwningProcess <dsh-desktop-host>` 每 2s 计数序列
+`16, 6, 5, 6, 6, 5` ⇒ socket 在被**周期性掐断并重建**，与 banner 闪烁同源。
+
+**机制（上游源码，两端共用同一 core）**：
+
+- `@deepseek-ai/dsh-api-gateway/lib/index.js`：`MAX_MISSED_HEARTBEATS = 2`（`:172`）；
+  `startHeartbeat()`（`:241-248`）每 `websocketHeartbeatIntervalMs` 给每个 OPEN socket 发 Ping，
+  漏 2 次 Pong 即 `socket.terminate()`。默认周期 **2000ms**（schema `:597`）⇒ 约 **3 个周期（4–6s）**判死。
+- ★ **误杀机理**：**发 Ping 与收 Pong 跑在 Host 同一个事件循环上**。任务一忙
+  （端侧还是 `--jitless`，无 JIT）事件循环被占 ⇒ 计数照涨 ⇒ **健康连接被杀**。
+  上游 README 原文：「`websocketHeartbeatIntervalMs` 同时是 Ping 周期和 Pong 截止时间……
+  **如果部署的事件循环或网络可能停顿超过该间隔，必须调大此配置**」。
+- 「**Windows 端也有**」这条线索是关键：判据由**负载**触发，不是平台差异。
+  两端都出现 ⇒ 怀疑策略本身，而不是鸿蒙适配。这直接把排查拉回"客户端探活策略对高负载没有容错"。
+
+**Client 侧**（`@deepseek-ai/dsh-client-connection/lib/client.js`）：断线 → `emitState("disconnected")`
+→ `backoffDelay`（`backoffBaseMs 500` / `factor 2` / `backoffMaxMs 1e4`，半抖动）
+→ 重试前 `emitState("connecting")`（`:1040`）→ 握手成功 `emitState("connected")`（`:1097`）。
+UI 侧 `CONNECTING_MIN_VISIBLE_MS = 800`（`dsh-client-ui-settings-general/lib/client.js:242`）
+⇒ banner 闪 = **socket 被掐 + 立刻重连成功**，与心跳误杀高度吻合。
+
+**次要触发源（已实证）**：`node-output.log` 里 WebView 到 `ws://127.0.0.1:…` 报
+`ERR_CONNECTION_REFUSED(-102)`；另有 arkweb 自带 30s `NetworkTransactionTimeout` **206 次**
+（`net/http/arkweb_http_network_transaction_ext.cc:344`，`receivedBodyBytes:30711` 占 99 次）。
+⇒ 宿主进程短时不可达（例如上面「二」的自杀）也会造成同一现象。
+
+**修法（未落盘）**：profile 里给 `typert-gateway` 覆写 config（patch 语义为**整块替换**，两个键都要列）：
+
+```yaml
+- id: typert-gateway
+  name: "@deepseek-ai/dsh-api-gateway"
+  config:
+    websocketHeartbeatIntervalMs: 30000
+    streamInboxBytes: 262144
+```
+
+| 端 | 落地文件 | 生效代价 |
+|---|---|---|
+| Windows | `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`（当前**没有**该覆盖 ⇒ 仍 2000ms） | 重启 desktop |
+| 鸿蒙 | `hostcore/profile/ondevice/cordis.patch.yml` | **`node tools/pack-core.mjs` → 重建 HAP → `hdc install -r`** |
+
+### 四 本批次的一条方法论教训（hilog 取证）
+
+`hdc shell "hilog -w query"` → `… /data/log/hilog/hilog **4.0M** 1000` ⇒ 缓冲区 4 MB。
+清空后 **12 秒** dump 得 7943 行，其中 261 行是 arkweb 噪声
+（`A00000/com.dshm.dshclient/DSHM-NODELIVE: [../../arkweb/chromium_ext/…]`
+—— `DSHM-NODELIVE` 是 **arkweb 转发 web console 的 tag，不是我们的业务日志**）。
+我们自己的 `entry/tray`、`entry/background`、`testTag` **0 命中** ⇒ **不是没打日志，
+是缓冲只覆盖约 8–10 秒被冲掉**。
+
+**纪律**：`hilog -r` 清空 → **立刻**执行动作 → **数秒内** dump。
+另**不要用 `hdc shell 'cmd | grep A|B'`**：`/bin/sh` 会报 `B: inaccessible or not found` 并**挂死**命令（曾需强杀）。
+
+## 批次三十八（2026-09-30：核心 `0.2.0-rc.2` 真机复测**全绿** + 验收脚本两处缺陷根治）
+
+**本批次无功能改动，只有取证与工具修正。** 结论一句话：**上一轮的两条失败断言全转绿（38/38），
+而"验收脚本报 4 项 FAIL"是本轮唯一发现的缺陷——全在脚本里，不在应用里。**
+
+### 一 设备与产物现状（实测）
+
+| 项 | 读数 |
+|---|---|
+| 设备 | `86E0226429000417` HUAWEI MateBook 14 `MNTXM-24B`，`devicetype=2in1`，OpenHarmony-7.0.0.105 / API 26 |
+| 已装包 | `bm dump`：`versionName 1.0.0` / `versionCode 1000000` / `updateTime 1790694212888`（= 2026-09-29 23:00:13 CST）⇒ 装的就是 rc.2 那份 HAP |
+| 进程 | 主进程 pid **10135 起于 06:59:26**，11:43 观测 ⇒ **连续存活约 4.7 小时**；另有 `:entry:BackGroundAbility` / `:gpu` / 两个 `:render` |
+| 运行核心 | `node-output.log`：`BOOT_10_ENV_READY core=/data/storage/el2/base/haps/entry/files/dsh/cores/0.2.0-rc.2 home=… port=3120 profile=ondevice (+13ms)` |
+| 核心树 | `…/files/dsh/cores` 下 **0.1.7-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2 三棵并存**（新旧并存是预期行为，不是残留故障） |
+| 端口 | `netstat -tunlp`：`127.0.0.1:3120 LISTEN` + 多条 ESTABLISHED（客户端已接入） |
+
+### 二 `tools/func_test_final.py`：**PASS=38 / FAIL=0 / MANUAL=6**
+
+命令：`C:\Program Files\Huawei\DevEco Studio\plugins\harmony\lib\python\python.exe tools\func_test_final.py`
+（`$env:DSHM_HDC` 指向 hdc；输出落 `dist/_func_test_run2.log`，现场落盘 `dist/_func_test`）。
+
+**两条上轮失败项已转绿**：
+
+| 断言 | 上轮 | 本轮 |
+|---|---|---|
+| `T0.4 Host HTTP 有响应` | `HTTP ERR` | `HTTP 401，[Forward] tcp:13120 tcp:3120`（未带凭据的 401 是正常响应） |
+| `T2.4 会话列表渲染历史会话` | 失败 | `5 个会话` |
+
+其余关键读数：`T0.2 exec 探测 7/7`（python3.12 / git / git-core·git / git-remote-http / rg / bash / git-ls-remote 全 `=ok`）、
+`T0.3 运行核心 0.2.0-rc.2`、`T1.3` 系统目录选择器 378↔808 节点、`T2.5/T2.6` 前端接口 4 个会话 websocket、
+`T3.1–T3.6` 插件页、`T4.*` 工具链与文件系统、`T5.1–T5.8`（jitless fetch 垫片 / undici loader / 原生重定向 /
+execPath spawn / `DSHM_PLATFORM=ohos` / CLI 假壳 / bash 垫片 / python 桥）。
+
+6 项 `MANUAL`（脚本判不了，需看界面）：M1 命令面板与皮肤切换、M2 外观深浅、M3 状态栏颜色、
+M4 右侧工作台 Tab（文件变动/变更/终端）、M5 皮肤渲染（kimino-theme）、M6 真实 API Key 对话。
+
+### 三 首次验收跑出 4 项假 FAIL —— **全部是 `tools\device-acceptance.ps1` 自身缺陷**
+
+证据目录 `dist\acceptance\20260930-114428\`（`-SkipInstall`）。两个决定性异常：
+
+- **5 份 log 全部 5 字节**（只有一个换行）⇒ 判据全取不到；
+- **9 组 `.json` / `.jpeg` 尺寸完全相同**（`*.json` 恒 `261,513 B`、`*.jpeg` 恒 `232,434 B`）⇒ 6 次 `Click-Text` 一次都没点动。
+
+由此 6 项判定出现 4 项 FAIL：`核心已启动` / `客户端已接入` / `平台标识 = ohos` / `文件变更流已开`。
+
+**根因（三件，互不相关）**：
+
+1. **hilog 当判据必然假 FAIL**：hilog 是环形缓冲（`hilog -w query` → 4 MB），实测只覆盖约 8–10 秒；
+   而脚本 `hilog -r` 清空后要等 `$BootWaitSeconds`（默认 45 s）才抓 ⇒ 一次性启动事件
+   （`BOOT_10_ENV_READY` / `平台标识` / `DSHM-AUTH connect`）即便重现也早被冲掉。
+   另 `-SkipInstall` 下**不重启应用**，`aa start` 对已运行进程是 **no-op** ⇒ 启动事件永不重现。
+2. **导航路径写错**：主界面**没有「设置」这个文本**；真实路径是先点「账号菜单」（`popUpButton`）→ 弹层里才有
+   `设置` / `意见反馈` / `退出登录`。而且脚本点的「通用 / 核心 / 预设 / 技能」**三个根本不存在**
+   （设置对话框真实左栏是 **账号与余额 / 通用设置 / 模型 / 内置插件 / Agent 预设 / Our Free Model / 插件市场 / 皮肤市场 / 侧边卡片**）。
+   更关键的：**重启后主窗口会位移**（实测 `应用` 从 `[67,90]` 变 `[513,302]`）⇒ 坐标必须每次 dump 现取。
+3. **两条判据结构性取不到**：`DSHM-AUTH connect` 的唯一产出点是 `entry/src/main/ets/pages/Index.ets:1365`，
+   而入口是 `windowStage.loadContent('pages/WebApp')` ⇒ `pages/Index` **不可达**；
+   `files changes opened` 的唯一产出点 `entry/oh_modules/appstate/src/main/ets/store/SessionHub.ets:2500` 走 `console.info` → hilog，
+   且 `fs-watch` 在 `dshm-host.log` **全史只出现 1 次**（2026-09-27T09:38:02.666Z）⇒ 不能当每次验收的判据。
+
+**判据 ↔ 新信号源（设备侧持久文件，`shell` 身份可读）**：
+
+| 原判据 | 新信号源 | 依据 |
+|---|---|---|
+| 核心已启动 | `…/files/node-output.log` 的 `BOOT_10_ENV_READY core=…/dsh/cores/<ver>` | **每次启动轮转**，本轮权威；顺带读出运行核心版本 |
+| 客户端已接入 | `…/files/dshm-host.log` 的 `IN-UPGRADE GET /api/remote.mux` | 跨启动累积，配合启动标记切片 |
+| 平台标识 = ohos | 同上两个文件的 `平台标识：DSHM_PLATFORM=ohos` | 两边都记 |
+| 文件变更流已开 | **无稳定源** ⇒ **降级为人工项** | `fs-watch` 全史 1 次 |
+
+> **设备侧路径的坑（本轮踩到并纠正）**：可读的是
+> `/data/app/el2/100/base/com.dshm.dshclient/haps/entry/files`；
+> 日志里显示的 `/data/storage/el2/base/haps/entry/files` 是**应用自身沙箱视图**，
+> `ls` / `grep` / `file recv` 全部 `Permission denied`（shell 身份 `uid=2000(shell)`）。
+> `/data/log/faultlog/faultlogger` 同样取不到。
+>
+> **读中文日志的方式**：`hdc shell cat` 会经控制台 GBK 解码把中文全解坏 ⇒ 必须 `hdc file recv` 落盘后
+> 用 `[System.IO.File]::ReadAllText($p,[Text.Encoding]::UTF8)` 读（`E387`）。
+
+### 四 修法与复跑：**5 项判定全 PASS**
+
+`tools/device-acceptance.ps1` 由 215 行重写为 **307 行**，改了四处：
+
+- **强制冷启动**：`aa force-stop` → (`hdc install -r`) → `hilog -r` → `aa start`，并新增 `-HilogEarlySeconds`（默认 8）
+  先抢一份 hilog 早期窗口；
+- **判据改读设备侧持久日志**（`E385`），并撤掉两条取不到的判据（自动判定由 6 项改 **5 项**）；
+- **导航改两段式 + 现取坐标**：`账号菜单` → `设置` → 九个实测分区，每项记 OK/FAIL 写 `nav.md`；
+- **两个环境坑**：`hdc` 不再只认写死的一条路径（`E386`）；`.ps1` 必须带 **UTF-8 BOM**，否则 PowerShell 5.1 按 ANSI 解码 ⇒ 中文标签全乱。
+
+复跑（2026-09-30 12:01，`-SkipInstall`，证据目录 `dist\acceptance\20260930-120131\`）：
+
+```
+[PASS] 设备在线
+[PASS] 核心已启动（读出运行核心版本）   BOOT_10_ENV_READY core=…/dsh/cores/0.2.0-rc.2 … port=3120 profile=ondevice (+12ms)
+[PASS] 客户端已接入（凭据豁免生效）     IN-UPGRADE GET /api/remote.mux … cookie=224B origin=http://127.0.0.1:3120
+[PASS] 平台标识 = ohos                  平台标识：DSHM_PLATFORM=ohos（鸿蒙应用沙箱路径）
+[PASS] 本次启动后无异常退出 / 无崩溃关键字
+nav.md：账号菜单 OK → 设置 OK → 九个分区全部 OK
+```
+
+产物尺寸可自证"确实点动了"：九组 json **558–622 KB 各不相同**、jpeg **277–357 KB 各不相同**
+（对比修复前：9 组完全同尺寸）。
+
+### 五 长期项状态（本批次未解）
+
+- **40 秒自杀**：rc.2 上**仍未复现**（主进程 4.7 h 稳定）。`dshm-host.log` 全史共 **5 条**
+  `!! process.exit(0)：停止路径放行，真正退出`，时点 `2026-09-27T04:46:50.638Z` / `2026-09-29T09:07:27.078Z` /
+  **`2026-09-29T09:40:43.510Z`（就是那次 40 s 自杀）** / `2026-09-29T15:10:24.789Z` / `2026-09-30T00:28:27.333Z`。
+  强嫌疑仍是启动期未清理 `host-stop-request`（`hostcore/app/main.js:3988-4003`）；
+  `dsh/home` 是 `drwx------`，**hdc 读不到** ⇒ 这条路径无法用于证伪，需要改由应用侧自证。
+- **连接抖动**：真机侧本轮未再抓取（定因见批次三十七「三」）；修法（`typert-gateway`
+  覆写 `websocketHeartbeatIntervalMs` / `streamInboxBytes`）**仍未落盘**。

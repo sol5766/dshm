@@ -9,13 +9,33 @@
 #
 # ASCII output only.
 
-$readelf = 'D:\Huawei\DevEco Studio\sdk\default\openharmony\native\llvm\bin\llvm-readelf.exe'
-if (-not (Test-Path $readelf)) {
-    Write-Output ('ERROR: llvm-readelf not found at ' + $readelf)
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+# SDK 位置：先看环境变量，再退回 IDE 安装目录的常见位置（不要写死某一台机器的路径）。
+$sdkRoot = $env:DEVECO_SDK_HOME
+if (-not $sdkRoot) {
+    foreach ($c in @(
+        (Join-Path $env:ProgramFiles 'Huawei\DevEco Studio\sdk'),
+        'D:\Huawei\DevEco Studio\sdk',
+        (Join-Path $env:LOCALAPPDATA 'OpenHarmony\Sdk\26.0.0')
+    )) {
+        if ($c -and (Test-Path $c)) { $sdkRoot = $c; break }
+    }
+}
+
+$readelf = ''
+foreach ($c in @(
+    $(if ($sdkRoot) { Join-Path $sdkRoot 'default\openharmony\native\llvm\bin\llvm-readelf.exe' }),
+    $(if ($sdkRoot) { Join-Path $sdkRoot 'default\hms\native\llvm\bin\llvm-readelf.exe' })
+)) {
+    if ($c -and (Test-Path $c)) { $readelf = $c; break }
+}
+if (-not $readelf) {
+    Write-Output 'ERROR: llvm-readelf not found; set DEVECO_SDK_HOME'
     exit 1
 }
 
-$libsDir = 'D:\Develop\deepseek-harness-desktop-HarmonyOS\dist\electron\runtime\libelectron\ohos_hap\electron\libs\arm64-v8a'
+$libsDir = Join-Path $repoRoot 'dist\electron\runtime\libelectron\ohos_hap\electron\libs\arm64-v8a'
 $targets = @('libelectron.so', 'libadapter.so', 'libffmpeg.so')
 
 Write-Output ('libs dir : ' + $libsDir)
@@ -39,7 +59,7 @@ foreach ($name in $targets) {
 }
 
 Write-Output '=== libc++_shared.so from the OHOS SDK (needed alongside) ==='
-$sdkLibcxx = 'D:\Huawei\DevEco Studio\sdk\default\openharmony\native\llvm\lib\aarch64-linux-ohos\libc++_shared.so'
+$sdkLibcxx = if ($sdkRoot) { Join-Path $sdkRoot 'default\openharmony\native\llvm\lib\aarch64-linux-ohos\libc++_shared.so' } else { '' }
 if (Test-Path $sdkLibcxx) {
     Write-Output ('found    : ' + $sdkLibcxx + '  (' + [math]::Round((Get-Item $sdkLibcxx).Length / 1KB, 1) + ' KB)')
     $sections = & $readelf -S $sdkLibcxx 2>&1
