@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用问题 / 讨论
+    url: https://github.com/sol5766/dshm/discussions
+    about: 安装、配置、用法这类问题请走 Discussions，不要开 Issue。
+  - name: 安全漏洞
+    url: https://github.com/sol5766/dshm/security/advisories/new
+    about: 请勿用公开 Issue 报告安全问题。
+  - name: 上游 DeepSeek Harness
+    url: https://github.com/deepseek-ai/deepseek-harness/issues
+    about: dsh 本体、Web 前端、模型服务的问题请报到上游。

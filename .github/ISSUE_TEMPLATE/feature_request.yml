@@ -1,0 +1,46 @@
+name: 功能建议
+description: 提出一个新功能、新形态适配或改进建议
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        涉及架构改动、新平台适配、上游协议面调整的建议，**先讨论再动手** ——
+        这几类往往牵连较广，见 [CONTRIBUTING.md](https://github.com/sol5766/dshm/blob/main/CONTRIBUTING.md)。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题
+      description: 描述你遇到的困难或不便，而不是先给方案。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的做法
+      description: 你设想的解决方式。如果已知上游 dsh 或其它平台是怎么做的，一并说明。
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 及你为什么没有选它们。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: 前提确认
+      description: 本项目的两条根本约束会淘汰一部分方案，请先自查。
+      options:
+        - label: 方案不需要 WASM（端侧 `jitless ⇒ WebAssembly === undefined`）
+          required: false
+        - label: 方案不需要申请 JIT / ACL 等特殊权限（否则无法上架）
+          required: false
+        - label: 我已搜索过已有 Issue，确认这不是重复建议
+          required: true
