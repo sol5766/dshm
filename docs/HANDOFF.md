@@ -2,14 +2,15 @@
 
 > 本文给**接手的人**：现在到哪一步、哪些是真结论、哪些还没做、下一步怎么动手。
 > 契约类文档（D1/D2/D2b/D3/D3b/D4/D5）不动，见 [`README.md`](README.md) 的索引；本文只讲**状态**。
-> 最近一次更新：2026-09-30（§4④ 开源推送完成：GitCode + GitHub 覆盖、GitHub Release 重发）。
+> 最近一次更新：2026-10-03（§4① 心跳覆盖已落盘；§5 补上 D1–D3/N1–N5 的落地状态）。
 
 ---
 
 ## 1. 一句话现状
 
 鸿蒙 arm64 客户端（`com.dshm.dshclient`，DSHM）已能在 MateBook 14（2in1，OpenHarmony-7.0.0.105 / API 26）上自足跑起端侧 dsh core 0.2.0-rc.2，界面走 WebView 加载 Host web UI，语音输入、托盘常驻、长时保活均已真机验证。
-**两个未修完的缺陷**：①托盘/应用启动约 40 秒后自杀；②"正在连接"抖动（Windows 端同源，已定位机制、修法未落盘）。见 §4。
+`DSHM-DEV-TODO-ALL-2026-10-03.md` 的 9 项（D1/D2/D3/N1–N5）**已全部落地并真机核验**（逐项状态见 §5 末段）。
+**两个未修完的缺陷**：①托盘/应用启动约 40 秒后自杀；②"正在连接"抖动（Windows 端同源；鸿蒙端心跳覆盖已落盘，Windows 端仍未做）。见 §4。
 
 ---
 
@@ -128,7 +129,7 @@
 
 ## 4. 未完成事项（按优先级）
 
-### ① 连接抖动「重新连接中 → 连接成功」（**Windows 端与鸿蒙端同源，优先级最高**）
+### ① 连接抖动「重新连接中 → 连接成功」（Windows 端与鸿蒙端同源）
 
 现象：左下角设置 banner 反复闪「重新连接中 / 连接成功」。
 
@@ -146,7 +147,14 @@
   → 握手成功 `emitState("connected")`。UI `CONNECTING_MIN_VISIBLE_MS = 800`（`dsh-client-ui-settings-general/lib/client.js:242`）。
   ⇒ banner 闪 = **socket 被掐 + 立刻重连成功**。
 
-**修法（未落盘）**：把心跳周期调大，两个键都要列（patch 的语义是**整块替换**目标 config）：
+> ⚠️ **上面这条"误杀机理"只有上游源码依据，不是现场读数。** 早前版本本文写"本端表现为约 6 秒一轮的
+> 断开-重连"，那个读数出自**自研连接层**（`connection/src/main/ets/protocol/RemoteMux.ets:294-305` 的
+> "5.4s 关闭"），而该层在生产入口**不可达**（生产走官方 Web UI + 官方 gateway，见
+> `docs/review-report-2026-09-29.md:39`）。本机实测 `/api/remote.mux` 的 85 次 upgrade 间隔为
+> **median 304.7 s / max ≈45.9 h，全期只有 1 个 <10 s** ⇒ **不存在 6 秒固定节奏，本机未复现该症状**。
+> 因此这条改动应算**预防性加固**（依据 = 上游 README 的"必须调大"），不算某个已观测缺陷的修复。
+
+**修法（已落盘）**：把心跳周期调大，两个键都要列（patch 的语义是**整块替换**目标 config）：
 
 ```yaml
 - id: typert-gateway
@@ -158,8 +166,14 @@
 
 | 端 | 落到哪 | 生效代价 |
 |---|---|---|
-| Windows | `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`（当前**没有** `typert-gateway` 覆盖 ⇒ 仍是默认 2000ms） | 改完重启 desktop 即可 |
-| 鸿蒙 | `hostcore/profile/ondevice/cordis.patch.yml`（314 行，`PROFILE = process.env.DSHM_PROFILE \|\| 'ondevice'`，由 `hostcore/app/main.js:3654/3681` 装到 `$DSH_HOME/profiles/<PROFILE>`） | **必须 `node tools/pack-core.mjs` 重打 core → 重建 HAP → `hdc install -r`** |
+| Windows | `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`（当前**没有** `typert-gateway` 覆盖 ⇒ 仍是默认 2000ms，**这条路还没做**） | 改完重启 desktop 即可 |
+| 鸿蒙 | ✅ `hostcore/profile/ondevice/cordis.patch.yml`（已落盘，本地 600 行） | 改后需 `node tools/pack-core.mjs` 重打 core → 重建 HAP → `hdc install -r` |
+
+**鸿蒙端落地核验**（2026-10-03）：已跑完整链路（pack-core → assembleHap → `hdc install -r`），设备
+`dsh/home/profiles/ondevice/cordis.patch.yml` 里 `- id: typert-gateway` + `config:` + 两个键**都在**
+（compose 结果，不只是源文件）。⚠️ **但"心跳是否真的变成 30s"没有直接读数**：`dsh-api-gateway`
+启动不打印任何配置（`log(`/`logger`/`ctx.logger`/`console.` 全 0 命中），设备上又找不到 node 二进制
+（`--dump-config` 与 Node REPL 都不通）⇒ 只能证明"配置被 compose 进 profile"，不能证明"运行期生效"。
 
 另有一个已实证的次要触发源：WebView 到 `ws://127.0.0.1:…`（`/api/remote.mux`）报
 `ERR_CONNECTION_REFUSED(-102)`，以及 arkweb 自带 30s `NetworkTransactionTimeout`（`node-output.log` 里 206 次）。
@@ -210,6 +224,15 @@ sha256 `e8ef8be567f9a2b9c40d17c6a0dd2e3664c626b98069a1eb2afcd9644c4d8060`）。
 **仍剩**：`report.md` 里的人工清单需逐条勾选（命令面板、计划模式、轨迹、插件启停、工作区删除/归档、
 核心切换/回滚、**文件变更流**——该项因无稳定信号已从自动判定降级）；文档走查
 `docs/device-validation.md` 批次三十六/三十七/三十八。
+
+**2026-10-03 续记**：`tools/device-acceptance.ps1` 又修了一处**脚本自身缺陷** —— 六个 hilog 摘录
+（`boot/connect/errors/features/trace/hilog-early.log`）**恒为 5 B 空文件**。根因：`Save-Log` 用
+`hilog -x | grep …` 当判据，而本机 hilog 环形缓冲只覆盖约 8–10 s、ArkTS 侧 domain 也从未进过可读缓冲
+（见 §4② 的纪律框）⇒ 摘录注定为空。现改为**三源合并**：hilog（尽力而为）+ 设备侧持久日志（权威，
+`node-output.log` 与 `dshm-host.log` 已经精确切片到本轮 boot），并在 0 命中时写一行
+`# 本机没摘到 —— 不是"没问题"，是这几条信号本轮确实没出现；请回原始 device-*.log 复核`，
+避免"空文件"被读成"没信号"。复跑（`dist/acceptance/20261003-160344/`）：`boot.log` 711 B /
+`connect.log` 1558 B / `hilog-early.log` 2024 B，`report.md` 5/5 PASS、`nav.md` 11/11 OK。
 
 ### ④ 开源推送（**已完成**：GitCode + GitHub，两边都已覆盖为新血统）
 
@@ -268,6 +291,21 @@ author/committer 时刻相同。差异只在 commit 对象的元数据，且用 
 - **长时保活**：`KeepAlive`（`backgroundModes: ['dataTransfer']`）已接线并真机验证。
 - **品牌与启动**：图标、启动页（`#F3F7FB`）、启动耗时（`BOOT_10_ENV_READY … BOOT_70_HTTP_READY +3592ms`）。
 - **文档**：D8（`70-`，按主题的坑库）、D9（`90-`，端到端全流程，5177 行）已完稿。
+
+### `DSHM-DEV-TODO-ALL-2026-10-03.md` 九项落地状态（2026-10-03）
+
+| 项 | 落点 | 真机核验 |
+|---|---|---|
+| **D1** 皮肤市场行无限累积 | `hostcore/app/dshm-user-rows.js`：`carryForeignTopLevelEntries()` 里对 `SKIN_MARKET_PACKAGE` 去重 | 设备 `<profile>/cordis.patch.yml` 从 58 份降到 **1 份**（2,925 → 2,625 B） |
+| **D2** `version-exemptions` 报「缺少 coreDir」 | `main.js` `compatOpts` 补 `coreDir: CORE_DIR` | 投递 `.compat-req` 后 `.done` = `{"ok":true,…,"exemptions":{}}`，错误消失 |
+| **D3** `cd ~` 后 `pnpm add` 落到 `files/node_modules` | `main.js` `shimDirResolveLines()`：`$PWD` 分支加 `profiles/*` 形状检查 + `--profile` → `host-ready.json` → `ondevice` 回退链 | 两种 cwd 下 `.dir` 均 = `…/profiles/ondevice` |
+| **N1** `raw.githubusercontent.com` 被 TLS reset | `hostcore/app/fetch-shim.js` 新增镜像改写层（`DSHM_FETCH_MIRROR_PREFIX` / 关断 `DSHM_FETCH_MIRROR=0`） | `node-output.log` 里 `DSHM-MIRROR` 命中 3 次；`.dsh-skin-market/catalog.json` 拿到完整 **302 条** |
+| **N2** `dsh-our-free-model` 源顺序写反 | **不改插件源码** —— 该链经 `globalThis.fetch`，由 N1 垫片覆盖 `raw.githubusercontent.com` | 同上（raw 首跳被改写，撞墙消失） |
+| **N3** `dshmarket` 备用代理 `ghfast.top` 已死 | **不改插件源码** —— 垫片 `mirrorTable()` 已含 `ghfast.top` 换主机项 | 同 N1 |
+| **N4** 侧栏 `files` 页签被占死 | 根因 = `SidebarRightTabRegistry.register()` 取号非原子（`ids.add` 后 `refresh()` 抛错 ⇒ id 永久占死）。`tools/pack-core.mjs` 新增 `patchSidebarTabIdLeak()`（标记 `DSHM_TAB_ID_GUARD`）在异常路径回滚 | 只读区与核心树里标记 **各 1 处**；`tools/check-sidebar-tab-id-guard.mjs` 9/9 PASS；⚠️ 浏览器 console 实证**取不到**（本机 ArkWeb 不投递 `.onConsole`，`diag-web-console` 文件从未生成） |
+| **N5** 侧栏终端未接线 | `hostcore/profile/ondevice/cordis.patch.yml` 的 `terminal-bash` `shellPath` 改 `/usr/bin/zsh` | 设备 profile `:19 shellPath: /usr/bin/zsh` |
+
+另：`tools/check-fetch-mirror.cjs`（6/6 PASS）与 `tools/check-sidebar-tab-id-guard.mjs`（9/9 PASS）是 N1/N3 与 N4 的永久门禁。
 
 ---
 
