@@ -52,6 +52,13 @@ import { audio } from '@kit.AudioKit';
 import { util } from '@kit.ArkTS';
 // 听写→剪贴板：把识别文本写进系统剪贴板，供用户长按黏贴
 import { copyText } from 'platform';
+// 【2026-10-03】"用户可见目录 + agent 可读写删"的两件设备能力（见
+// platform/src/main/ets/system/FilePicker.ets 的注释，与
+// dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md §5.3）。
+// 【不含权限申请】本路线**不申请任何权限**（权限零差异铁律 + ACL 白名单只有 5 条，
+// 见 FilePicker.ets 顶部权限说明注释）⇒ 上一版的权限申请函数已整体删除。
+import { PickOutcome, probePathWritable, publicDownloadFolder } from 'platform';
+import type { PickedFolder } from 'platform';
 // 外链外开（2026-09-28，修「设置→登录」点不动）：见 OPEN_LINK_SHIM_JS。
 // isOpenableUrl 做 http/https 白名单；openExternalUrl 内部走 context.openLink。
 import { isOpenableUrl, openExternalUrl } from 'platform';
@@ -763,6 +770,12 @@ class DshDirectoryPickerBridge {
       return;
     }
     const docPicker = new picker.DocumentViewPicker(ctx as common.UIAbilityContext);
+    // 【2026-10-03 更正】这里原本在拉起选择器**之前**先申请两条"公共目录路径级权限"。
+    // **已删除**：本路线不申请任何权限（① 权限零差异铁律：新包必须与作者成品 HAP 的
+    // 11 项 requestPermissions 逐项一致；② 用户 AGC profile 的 ACL 白名单只有 5 条，
+    // 超出即 `grant request permissions failed`。理由与取证见 FilePicker.ets 顶部注释、
+    // dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md §4.2/§6.1）。
+    // 拿不到路径级写权不再靠"申请"解决，而是靠下面的**探写 + DOWNLOAD 模式兜底**。
     const options = new picker.DocumentSelectOptions();
     options.selectMode = picker.DocumentSelectMode.FOLDER;
     options.maxSelectNumber = 1;
@@ -789,9 +802,14 @@ class DshDirectoryPickerBridge {
     // 持久化目录授权：跨启动保留访问权。失败/超时只降级为「本次有效」，不阻断选择。
     // ⚠ 必须带超时：fileShare.persistPermission 在本机实测可能永不 settle
     //（疑似 file_access_service 对非系统应用不响应）——一旦挂起，结果永远
-    // 回不到 H5，表现为「选完无反应」。而 Host（node）访问用户目录实际依赖
-    // CUSTOM_SANDBOX/READ_WRITE_USER_FILE（已授权，directoryPicker/list 与
-    // workspace/create 直测均 200），并不依赖这里的持久化授权。
+    // 回不到 H5，表现为「选完无反应」。
+    // 【2026-10-03 更正】原文还写着"Host（node）访问用户目录实际依赖
+    // CUSTOM_SANDBOX/READ_WRITE_USER_FILE（已授权）"——**这句是错的**：这两项
+    // （以及本工程也声明了的 ACCESS_USER_FULL_DISK）都是**受限开放权限**
+    // （system_basic，需 AGC 审批 + Profile 关联 ACL），本项目走离线零 AGC 配额的
+    // 本地签名链 ⇒ 真机上等于没声明。Host 能"读"不是因为它们，而"写/删"正是
+    // 因此失败——这就是用户看到的"只能读、写只进沙箱、bash rm 也删不掉"的根因。
+    // 取证与判据见 dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md §3.1/§4.1。
     try {
       const policy: fileShare.PolicyInfo = {
         uri: uri,
@@ -812,6 +830,24 @@ class DshDirectoryPickerBridge {
       hilog.warn(DOMAIN, TAG, '目录授权持久化失败（不阻断）code=%{public}d msg=%{public}s', err.code, err.message);
     }
     const path: string = new fileUri.FileUri(uri).path;
+    // 【2026-10-03 新增】探写 + 兜底：把"用户可见 + agent 可读写删"从愿望变成判据。
+    // 【为什么在 ArkTS 侧做而不是写一个 cordis 插件】Host 的文件/命令能力全是
+    // **纯 POSIX/node 路径**（`dsh-fs-local` 只 import node:fs；`dsh-bash-local` 直接
+    // spawn，二者自身不做任何路径转换或沙箱判断），新插件跑在同一进程、同一 token 下
+    // ⇒ 受**同一份 OS 授权**约束，在 JS 层补不出权限。**只能在拿到授权的那一层换路径。**
+    // 详见 30 号文档 §2.2/§5.2。
+    if (!probePathWritable(path)) {
+      this.writeDiagMarker('diag-picker-public-fallback', `from=${path}`);
+      const pub: PickedFolder = await publicDownloadFolder(ctx);
+      if (pub.outcome === PickOutcome.PICKED && pub.path.length > 0) {
+        hilog.warn(DOMAIN, TAG, '所选目录不可写，已改用应用公共目录 path=%{public}s', pub.path);
+        this.writeDiagMarker('diag-picker-public-path', `to=${pub.path}`);
+        this.dispatchResolve(id, pub.path, '');
+        return;
+      }
+      this.writeDiagMarker('diag-picker-public-unavailable', `reason=${pub.reason}`);
+      hilog.warn(DOMAIN, TAG, '公共目录兜底不可用：%{public}s', pub.reason);
+    }
     hilog.info(DOMAIN, TAG, '目录选择完成 path=%{public}s', path);
     this.dispatchResolve(id, path, '');
   }

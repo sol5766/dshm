@@ -98,7 +98,7 @@ wget -O - 'http://127.0.0.1:3120/dshm-python/status' 2>/dev/null
 - **不 spawn 子进程**：Python 在宿主 node 进程内运行，`libpython_runner.so`
   NAPI addon dlopen libpython3.12.so.1.0（el1 bundle libs，与 koffi/sharp
   同通道）调 CPython embedding API。
-- **不 execve**：debug 签名域禁 exec（真机 E1-E19 实证）。
+- **不 execve**：debug 签名域禁止 exec。
 - **GIL 管理**：`PyGILState_Ensure/Release` + `PyEval_SaveThread`，多线程安全。
 - **stdlib 就位**：toolchain/python/lib/python3.12（首次启动从 resfile 解包）。
 - **跨请求共享同一解释器**：全局变量、已 import 的模块在后续请求中仍在；

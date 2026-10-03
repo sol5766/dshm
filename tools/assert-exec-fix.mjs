@@ -21,11 +21,30 @@ ok(!/hmfs 的执行许可与"文件创建者"绑定[\s\S]{0,200}修复=Node 重�
 
 // ── 探测清单与状态记录 ────────────────────────────────────────────────────
 ok(/function execProbeTargets\(\)/.test(c), 'execProbeTargets 定义');
-for (const label of ['python3.12', "'git'", 'git-core/git', 'git-remote-http', "'rg'"]) {
+// 【2026-10-03 新增 'ash'】它是本机 bash 垫片的**首行解释器**，也是"探针静默失效"
+// 的主角：清单里没有它 ⇒ 有人删掉探针本门禁也发现不了。
+for (const label of ['python3.12', "'git'", 'git-core/git', 'git-remote-http', "'rg'", "'ash'"]) {
   ok(c.includes(`label: ${label.startsWith("'") ? label : `'${label}'`}`), `目标 ${label} 在清单`);
 }
 ok(/async function ensureExecutables\(\)/.test(c), 'ensureExecutables 定义');
-ok(/if \(!pythonReady\(\) \|\| !gitReady\(\)\) \{[\s\S]{0,80}return;/.test(c), 'ensureExecutables 锚点守卫');
+/*
+ * 【门禁修复：从"存在性锚点"改成"可观测性锚点"】原第 28 条断言的**是"早退守卫存在"**：
+ *   ok(/if \(!pythonReady\(\) \|\| !gitReady\(\)\) \{[\s\S]{0,80}return;/.test(c), 'ensureExecutables 锚点守卫')
+ * 于是"探针永不执行"这件事反而**满足**门禁（`ash` 探针在真机上静默失效，
+ * 报告里只写"未激发"，门禁却仍 PASS ⇒ 门禁替缺陷背书）。
+ * 现口径：**未执行 ⇒ 不算通过**。判据改成三条，任一条不成立即 FAIL：
+ *   ① 早退守卫**必须不存在**（否则整批探针在工具链未就绪时一行都不跑）；
+ *   ② "缺件"也要进汇总（不能靠 continue 静默跳过 ⇒ 未激发无法伪装成"跑过了"）；
+ *   ③ 汇总 diag **无条件**执行（它是"探针真的跑过"的唯一机器可读信号）。
+ * 这条改动让门禁从"存在性锚点"变成"可观测性锚点"：PR 里删掉探针调用 ⇒ 本门禁 FAIL。
+ * 【正则必须是"代码锚点"而不是"字面量锚点"】`main.js` 的函数头注里逐字引用了旧守卫
+ * 做反例，若用裸字面量匹配，那句注释自己就会把本门禁判 FAIL。故要求它出现在**行首**
+ * （`\n\s*if (…) {` 换行 `return;`）——注释行前面有 `*` 与反引号，不满足。
+ */
+ok(!/\n\s*if \(!pythonReady\(\) \|\| !gitReady\(\)\) \{\s*\n\s*return;/.test(c),
+  '早退守卫已删除（未执行不再算通过）');
+ok(/summary\.push\(`\$\{t\.label\}=缺`\)/.test(c), '缺件如实进汇总（不是静默跳过）');
+ok(/diag\(`exec 探测：\$\{summary\.join\('，'\)\}`\)/.test(c), '汇总 diag 无条件执行（未执行 ⇒ 无此行 ⇒ FAIL）');
 ok(/summary\.push\(`\$\{t\.label\}=\$\{r\}`\)/.test(c), '探测结果进汇总（只记录不修复）');
 ok(/E1-E19 实验定案/.test(c), 'ensureExecutables 注释交代拆除依据');
 

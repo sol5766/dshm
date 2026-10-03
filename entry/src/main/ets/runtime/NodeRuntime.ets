@@ -14,10 +14,12 @@
  * ArkTS 的通道。回环端口能应答 HTTP，就说明 Host 真的在监听——这是可观测的事实。
  */
 import { BusinessError } from '@kit.BasicServicesKit';
+import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { process } from '@kit.ArkTS';
 import { socket } from '@kit.NetworkKit';
+import { claimPublicDownloadFolder, readBundleName } from 'platform';
 import dshhost from 'libdshhost.so';
 import {
   buildHostArgv,
@@ -48,13 +50,67 @@ const AUTH_URL_RETRY_INTERVAL_MS: number = 500;
 export class NodeRuntime implements RuntimePort {
   private readonly entryScript: string;
   private readonly sandboxHome: string;
+  /**
+   * 本应用包名（`Download/<包名>/` 的那一段）。**只用于诊断日志，不参与路径解析。**
+   *
+   * 【为什么只打日志】Host 的默认工作区有且只有一条路径来源：`DSHM_PUBLIC_DOWNLOAD`
+   * （`claimPublicDownload()` 的返回值）。曾经还有一条"把包名交给 Host、由 Host 自己拼
+   * `$HOME/Download/<包名>/` 再 mkdir"的路，端侧实测必 EPERM（应用进程直拼公共路径
+   * 建目录不被放行），已整条删除。包名保留在这里是因为它是**归属关系**的唯一可读读数：
+   * 与 `DSHM_PUBLIC_DOWNLOAD` 的末段比对，一眼能看出"认领到的目录是不是本应用的那个"。
+   * 【为什么在这里取一次】包名只能由 ArkTS 侧问系统（`platform` 的 `readBundleName()`
+   * → `bundleManager.getBundleInfoForSelfSync`，与公共目录能力**同一个来源**，不另写一份）。
+   * 取不到就是空串，日志里如实显示为空（不影响任何路径解析）。
+   */
+  private readonly bundleName: string;
+  /**
+   * UIAbility 上下文（`Host` 启动前认领公共下载目录要用它）。
+   *
+   * 【为什么是可选的】本类在单测/无 UI 的装配里也可能被构造；缺上下文时
+   * `claimPublicDownload()` 如实返回空串（Host 走沙箱回退），而不是抛异常。
+   */
+  private readonly abilityContext: common.Context | undefined;
 
-  constructor(entryScript: string, sandboxHome: string) {
+  constructor(entryScript: string, sandboxHome: string, abilityContext?: common.Context) {
     this.entryScript = entryScript;
     // 【为什么是 filesDir 而不是 cacheDir】实测：`hdc shell` 对 `…/el2/base/…` 下
     // cacheDir 无权限，而 `files` 目录可读。入口脚本的诊断日志会落在沙箱 HOME 下，
     // 我们必须能把它取回来（stdout 在设备上看不见，见 D6 E23）。
     this.sandboxHome = sandboxHome;
+    this.abilityContext = abilityContext;
+    this.bundleName = readBundleName();
+    hilog.info(DOMAIN, TAG, 'Host 环境：本应用包名=%{public}s（仅诊断；默认工作区路径由 DSHM_PUBLIC_DOWNLOAD 决定）',
+      this.bundleName.length > 0 ? this.bundleName : '(空)');
+  }
+
+  /**
+   * 启动 Host **之前**认领一次本应用在公共 `Download/<包名>/` 下的专属目录。
+   *
+   * 【为什么必须在这里、而且是 await】认领走 `DocumentPickerMode.DOWNLOAD` 的
+   * `save()`（无 UI、实测 ~106 ms），它建出的目录是**按包名归属的路径级授权**，
+   * Host 的 `node:fs` 与 bash 都吃同一份授权。结果必须**在 spawn 之前**放进 env
+   * （`buildHostEnv` 的 `DSHM_PUBLIC_DOWNLOAD`）——env 是 spawn 时定死的，天然无竞态；
+   * 若改成"启动后再写状态文件给 Host 读"，Host 早已用旧值算完默认工作区（本函数的
+   * 返回路径就是那个竞态的消除器）。
+   *
+   * 【每次启动都调】官方 FAQ `faqs-local-file-manager-46`：冷启动后系统可能不再授予
+   * 之前经 picker 拿到的 URI 权限 ⇒ 不能假设"建过一次永久有效"。
+   *
+   * 【失败不阻断】拿不到就返回空串，Host 明确回退 `<SANDBOX_HOME>/workspace` 并把
+   * 原因记进 diag（绝不出现 cwd = `/`）。本方法自己**不抛**。
+   */
+  private async claimPublicDownload(): Promise<string> {
+    if (this.abilityContext === undefined) {
+      hilog.warn(DOMAIN, TAG, '默认工作区：没有 UIAbility 上下文，跳过公共下载目录认领（Host 将回退沙箱）');
+      return '';
+    }
+    try {
+      return await claimPublicDownloadFolder(this.abilityContext);
+    } catch (e) {
+      const err = e as BusinessError;
+      hilog.warn(DOMAIN, TAG, '默认工作区：认领调用异常（按失败处理）：%{public}s', err.message);
+      return '';
+    }
   }
 
   kind(): RuntimeKind {
@@ -117,10 +173,20 @@ export class NodeRuntime implements RuntimePort {
    */
   async start(coreDir: string, homeDir: string, profile: string): Promise<HostHandle> {
     const port: number = HOST_DEFAULT_PORT;
+    /*
+     * 【2026-10-03：先把默认工作区认领好，再 spawn】(必须 await、必须在 buildHostEnv 之前)
+     * 认领到的路径经 `DSHM_PUBLIC_DOWNLOAD` 交给 Host，Host 只做 lstat+探写、**不再 mkdir**。
+     * 放在这里（而不是页面 onAppear 里）的理由：这是"Host 启动"这一动作的前置，任何
+     * 启动路径（首启/重启/切换核心）都必然经过它，不存在"某条路径忘了认领"。
+     */
+    const publicDownload: string = await this.claimPublicDownload();
     const argv: string[] = buildHostArgv(this.entryScript);
-    const env: string[] = buildHostEnv(coreDir, homeDir, this.sandboxHome, port, profile);
+    const env: string[] = buildHostEnv(coreDir, homeDir, this.sandboxHome, port, profile,
+      publicDownload);
     hilog.info(DOMAIN, TAG, 'startHost：入口=%{public}s 核心=%{public}s profile=%{public}s 端口=%{public}d',
       this.entryScript, coreDir, profile, port);
+    hilog.info(DOMAIN, TAG, 'startHost：DSHM_PUBLIC_DOWNLOAD=%{public}s（空=Host 会回退沙箱工作区）',
+      publicDownload.length > 0 ? publicDownload : '(空)');
     const res = dshhost.startHost(argv, env);
     hilog.info(DOMAIN, TAG, 'startHost 返回：started=%{public}s envApplied=%{public}d note=%{public}s',
       res.started ? 'true' : 'false', res.envApplied, res.note);

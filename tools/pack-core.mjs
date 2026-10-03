@@ -805,6 +805,208 @@ function embedProfile() {
 }
 
 /**
+ * DSHM **自带插件**包：源码在仓库 `hostcore/plugins/<dir>/`，打包时放进核心树
+ * `node_modules/@deepseek-ai/<pkg>/`（不是往 `hostcore/app/` 丢一个裸 .js——
+ * dsh loader 只认"包"：package.json + 入口）。
+ *
+ * 【为什么需要"声明成依赖"这一步】`@deepseek-ai/dsh-app-boot` 的运行时解析表
+ * （`createRuntimeResolution` → `collectInstallationScopePackages`）**只收录依赖闭包
+ * 里的包**：装了却没被任何 manifest 声明过的目录，loader 按名字找不到
+ * （`routeUrl` → `routeScoped` 查不到条目 ⇒ 退化成 Node 原生解析 ⇒ failed to import）。
+ * 三情形对照（`createRuntimeResolution`）给出的结果：
+ *   · 只把包丢进核心树 node_modules 而不声明 ⇒ entries 里**没有**它，NOT RESOLVABLE；
+ *   · 声明为 `@deepseek-ai/dsh-web-app` 的 dependency（它 ⊂ 安装锚点 `@deepseek-ai/dsh`
+ *     的依赖闭包）⇒ entries 里**有**它（scope=installation），RESOLVED。
+ * 这也正是 profile 的 cordis.patch.yml 里"browse/native 能解析，因为它 ⊂ dsh-web-app
+ * 的 dependencies"那条既有笔记的同一机制（见该文件 :239-241）。
+ *
+ * 【为什么不改上游源码】只改**打进树里的那份 manifest**，不改上游仓库；而且这是
+ * 打包层的常规手段（本文件已有 patchFsLocalLink / patchCredentialsOwnerCheck 等先例）。
+ * 恢复条件：删掉下面的声明与调用即可（`hostcore/plugins/` 与 cordis.patch.yml 的
+ * `insert:` 行是另外两处）。
+ *
+ * 【本清单是唯一真源，三处状态必须与它相等】`DSHM_PLUGIN_PACKAGES` 同时决定：
+ *   ① `STAGE/node_modules/@deepseek-ai/` 下的 `dshm-*` 目录集合；
+ *   ② `DSHM_PLUGIN_DECLARER` 的 `dependencies` 里 `@deepseek-ai/dshm-*` 键集合；
+ *   ③ 最终产物里 `@deepseek-ai/dshm-*` 的条目集合。
+ * `STAGE` 是**长期复用、从不重置**的暂存树，而本步的写入只按清单做事 ⇒ 如果只"按清单
+ * 拷进去 + 往 dependencies 里加键"，清单里**移除**一项时旧目录与旧依赖行会原样留在树上，
+ * 并被打进产物；门禁只看 `hostcore/` 源码与产物哈希，不看暂存树 ⇒ 该残留静默通过。
+ * 因此本步在写入前做**对称清理**（删掉 scope 下所有清单外的 `dshm-*` 条目；声明者里
+ * 先删掉全部 `@deepseek-ai/dshm-*` 键再按清单重写），写入后由
+ * `assertDshmBelongingsConsistent()` 对 ①② 做集合断言，不等即 `die` 并打印两边差集。
+ */
+const DSHM_PLUGIN_PACKAGES = [
+  // 模型可见的"文件改动"工具（remove / move / publish）：`ctx.fs` 契约里没有删除/
+  // 移动/复制方法，端侧又没有可用的 shell（连 `cp` 都没有）⇒ 这三件事只能由自带工具
+  // 提供。publish 的目标根取自 `DSHM_PUBLIC_DOWNLOAD`（ArkTS 认领到的用户可见目录），
+  // 落盘复用去 chmod 的 `open('w')→write→close` 原语（见 cordis.patch.yml ⑦）。
+  { name: '@deepseek-ai/dshm-tool-fs-remove', dir: 'dshm-tool-fs-remove' },
+  // 默认工作区登记（见 cordis.patch.yml ⑧ 与插件头注）：把 ArkTS
+  // 认领到的 `Download/<包名>/` 在启动期登记进工作区注册表，使官方 Web UI 的
+  // `recentWorkspace()` 选中它 ⇒ "新建会话"默认落在用户可见目录，而不是历史 picker
+  // 记忆值。**惰性**：没有 `DSHM_PUBLIC_DOWNLOAD` 时 apply() 直接返回。
+  { name: '@deepseek-ai/dshm-workspace-claim', dir: 'dshm-workspace-claim' },
+  // 去 chmod 的写入后端（见 cordis.patch.yml ⑩ 与插件头注）：
+  // 上游 `@deepseek-ai/dsh-fs-local` 的 `writeFileAtomic()` 用 `chmod` 保护暂存目录/暂存
+  // 文件，而鸿蒙 hmdfs 的用户可见公共目录（`Download/<包名>/`）不放行 chmod ⇒ 真机逐字
+  // `EPERM: operation not permitted, chmod …tmpdir`，"agent 写工作区文件"必失败。
+  // 本插件 `extends SandboxedFileSystem`，只重写 `writeText` / `editText` 的落盘一步
+  // （`open('w')→write→close`，31 号探针记录的放行组合）；读/路径封闭/锁/版本守卫照旧
+  // 继承上游。profile 里把 `fs-sandbox` 那一行停用、换成本插件。
+  { name: '@deepseek-ai/dshm-fs-write-nonchmod', dir: 'dshm-fs-write-nonchmod' },
+];
+/**
+ * 承载自带插件依赖声明的上游包。
+ *
+ * 选它的依据（两条都成立才算数）：
+ * ① 它必须在安装锚点 `@deepseek-ai/dsh` 的依赖闭包内（否则声明了也进不了解析表）；
+ * ② 它必须是端侧 profile 实际启用的 bundle（`hostcore/profile/ondevice/package.json`
+ *    的 `dsh.profile.bundles` 里就有它），这样"端侧真会用到的包"与"声明处"一致。
+ */
+const DSHM_PLUGIN_DECLARER = '@deepseek-ai/dsh-web-app';
+/** 自带插件在核心树里的 scope 目录（相对 `STAGE`）。 */
+const DSHM_PLUGIN_SCOPE_DIR = join('node_modules', '@deepseek-ai');
+/** 树内自带插件的**目录名前缀**（对称清理与 ① 断言的匹配依据）。 */
+const DSHM_PLUGIN_DIR_PREFIX = 'dshm-';
+/** 自带插件的**包名前缀**（"先清后写"依赖声明与 ② 断言的匹配依据）。 */
+const DSHM_PLUGIN_NAME_PREFIX = '@deepseek-ai/dshm-';
+
+/** 列出核心树 `node_modules/@deepseek-ai/` 下所有 `dshm-*` 条目名（排序，含目录与文件）。 */
+function listStagedDshmEntries() {
+  const nm = join(STAGE, DSHM_PLUGIN_SCOPE_DIR);
+  if (!existsSync(nm)) return [];
+  return readdirSync(nm).filter((e) => e.startsWith(DSHM_PLUGIN_DIR_PREFIX)).sort();
+}
+
+/** 集合差集的可读描述：多出来的与缺失的分别列出（空集写"无"）。 */
+function describeSetDiff(extra, missing) {
+  return `多出 [${extra.length ? extra.join('、') : '无'}] / 缺失 [${missing.length ? missing.join('、') : '无'}]`;
+}
+
+/**
+ * 回归锁：断言 ① 树内 `dshm-*` 集合 与 ② 声明者依赖里的 `@deepseek-ai/dshm-*` 键集合
+ * **都恰好等于** `DSHM_PLUGIN_PACKAGES`（③ 产物集合由"打包读的就是这棵树"保证）。
+ *
+ * 两个集合都**从磁盘现读**（不复用内存中间变量），断言的对象因此是"将要进产物的字节"
+ * 所对应的状态，而不是写入前的意图。任一不等即 `die`，并逐项打印清单/实际/差集与位置。
+ */
+function assertDshmBelongingsConsistent() {
+  const wantDirs = DSHM_PLUGIN_PACKAGES.map((p) => p.dir).sort();
+  const gotDirs = listStagedDshmEntries();
+  const extraDirs = gotDirs.filter((d) => !wantDirs.includes(d));
+  const missingDirs = wantDirs.filter((d) => !gotDirs.includes(d));
+  if (extraDirs.length || missingDirs.length) {
+    die(`自带插件目录集合与清单不一致：${describeSetDiff(extraDirs, missingDirs)}\n`
+      + `  清单（${wantDirs.length}）：${wantDirs.join('、') || '（空）'}\n`
+      + `  树内（${gotDirs.length}）：${gotDirs.join('、') || '（空）'}\n`
+      + `  位置：${join(STAGE, DSHM_PLUGIN_SCOPE_DIR)}`);
+  }
+
+  const declarerPath = join(STAGE, 'node_modules', DSHM_PLUGIN_DECLARER, 'package.json');
+  if (!existsSync(declarerPath)) die(`自带插件的声明处不存在：${declarerPath}`);
+  const declDeps = JSON.parse(readFileSync(declarerPath, 'utf8')).dependencies ?? {};
+  const gotNames = Object.keys(declDeps).filter((k) => k.startsWith(DSHM_PLUGIN_NAME_PREFIX)).sort();
+  const wantNames = DSHM_PLUGIN_PACKAGES.map((p) => p.name).sort();
+  const extraNames = gotNames.filter((n) => !wantNames.includes(n));
+  const missingNames = wantNames.filter((n) => !gotNames.includes(n));
+  if (extraNames.length || missingNames.length) {
+    die(`自带插件依赖声明与清单不一致：${describeSetDiff(extraNames, missingNames)}\n`
+      + `  清单（${wantNames.length}）：${wantNames.join('、') || '（空）'}\n`
+      + `  声明（${gotNames.length}）：${gotNames.join('、') || '（空）'}\n`
+      + `  位置：${declarerPath}`);
+  }
+
+  // 版本比对的"期望值"从**源码 manifest** 现读，不从 `added` 等内存变量借用
+  // （`DSHM_PLUGIN_PACKAGES` 的条目只有 name/dir，没有 version）。
+  const versionMismatch = DSHM_PLUGIN_PACKAGES
+    .map((p) => {
+      const srcManifest = join(ROOT, 'hostcore', 'plugins', p.dir, 'package.json');
+      if (!existsSync(srcManifest)) return `${p.name}: 源码 manifest 不存在 ${srcManifest}`;
+      const want = JSON.parse(readFileSync(srcManifest, 'utf8')).version;
+      return declDeps[p.name] === want ? null : `${p.name}: 源码 ${want} ≠ 声明 ${declDeps[p.name]}`;
+    })
+    .filter(Boolean);
+  if (versionMismatch.length) {
+    die(`自带插件依赖版本与清单不一致：${versionMismatch.join('；')}\n  位置：${declarerPath}`);
+  }
+
+  log(`[pack-core]   回归锁 ✓ 树内 ${wantDirs.length} 个 dshm-* 目录与 `
+    + `${DSHM_PLUGIN_DECLARER} 的 ${wantNames.length} 条 dshm-* 声明均等于清单`);
+}
+
+/** 把自带插件放进核心树，并让 loader 能按名字解析到它（见上方长注释）。 */
+function embedDshmToolPackages() {
+  log('\n[pack-core] ④b DSHM 自带插件包');
+  const nm = join(STAGE, DSHM_PLUGIN_SCOPE_DIR);
+
+  // ① 先验源码、算版本（此步不碰核心树）：任一项缺入口/manifest 或包名对不上即停。
+  const added = [];
+  for (const pkg of DSHM_PLUGIN_PACKAGES) {
+    const src = join(ROOT, 'hostcore', 'plugins', pkg.dir);
+    const entry = join(src, 'lib', 'index.js');
+    if (!existsSync(entry)) die(`自带插件缺少入口：${entry}`);
+    const manifestPath = join(src, 'package.json');
+    if (!existsSync(manifestPath)) die(`自带插件缺少 manifest：${manifestPath}`);
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    if (manifest.name !== pkg.name) {
+      die(`自带插件包名不一致：${manifestPath} 写的是 ${manifest.name}，打包清单写的是 ${pkg.name}`);
+    }
+    added.push({ dir: pkg.dir, name: pkg.name, version: manifest.version });
+  }
+
+  // ② 对称清理：删掉 scope 目录下**清单外**的 `dshm-*` 残留。
+  // 只按 `dshm-` 前缀匹配，绝不触碰 scope 下的其它包（`dsh-*`、`@ohos-ports` 等）。
+  const keep = new Set(added.map((p) => p.dir));
+  const stale = listStagedDshmEntries().filter((e) => !keep.has(e));
+  for (const name of stale) {
+    rmSync(join(nm, name), { recursive: true, force: true });
+    log(`[pack-core]   清理清单外的自带插件残留：node_modules/@deepseek-ai/${name}`);
+  }
+  log(stale.length
+    ? `[pack-core]   已清理 ${stale.length} 项清单外残留`
+    : '[pack-core]   无清单外的 dshm-* 残留（无需清理）');
+
+  // ③ 落树：清单内每一项覆盖进核心树。
+  for (const pkg of added) {
+    const src = join(ROOT, 'hostcore', 'plugins', pkg.dir);
+    const dest = join(nm, pkg.dir);
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(src, dest, { recursive: true, force: true });
+    log(`[pack-core]   ${pkg.name} → node_modules/@deepseek-ai/${pkg.dir}/（入口 lib/index.js）`);
+  }
+
+  // ④ 依赖声明"先清后写"：先移除声明者里**全部** `@deepseek-ai/dshm-*` 键，再按清单
+  // 依次写入当前项。清单里已移除的项由此从 manifest 中消失；声明者的其它依赖既不改值、
+  // 也不改相对顺序（键写回的顺序仍按清单顺序追加在末尾）。
+  // 【路径从 node_modules 起算】DSHM_PLUGIN_DECLARER 是**带 scope 的完整包名**
+  // （`@deepseek-ai/dsh-web-app`），不能再拼一次 `@deepseek-ai`——否则路径成为
+  // `node_modules/@deepseek-ai/@deepseek-ai/dsh-web-app`，被上面的存在性检查拦下。
+  const declarerPath = join(STAGE, 'node_modules', DSHM_PLUGIN_DECLARER, 'package.json');
+  if (!existsSync(declarerPath)) die(`自带插件的声明处不存在：${declarerPath}`);
+  const declarerText = readFileSync(declarerPath, 'utf8');
+  const declarer = JSON.parse(declarerText);
+  declarer.dependencies = declarer.dependencies ?? {};
+  for (const key of Object.keys(declarer.dependencies)) {
+    if (key.startsWith(DSHM_PLUGIN_NAME_PREFIX)) delete declarer.dependencies[key];
+  }
+  for (const pkg of added) declarer.dependencies[pkg.name] = pkg.version;
+  // 幂等：序列化结果与磁盘原文逐字节比较，相同则**不写**（沿用"内容不变则不写"的风格）。
+  const declarerNext = JSON.stringify(declarer, null, 2) + '\n';
+  if (declarerNext !== declarerText) {
+    writeFileSync(declarerPath, declarerNext, 'utf8');
+    log(`[pack-core]   已在 ${DSHM_PLUGIN_DECLARER} 的 dependencies 里重写自带插件声明（先清后写）：`
+      + `${added.map((p) => p.name).join('、')}`);
+    log('[pack-core]   （只影响打进树里的这份 manifest，不改上游仓库；依据见本函数上方注释）');
+  } else {
+    log(`[pack-core]   ${DSHM_PLUGIN_DECLARER} 的 dependencies 与清单逐字节一致（幂等跳过写入）`);
+  }
+
+  // ⑤ 回归锁：写入完成后的磁盘现状必须与清单完全一致，否则不进入打包。
+  assertDshmBelongingsConsistent();
+}
+
+/**
  * 在**打包之前**把构建元数据写进树里（`<top>/dshm-core.json`）。
  *
  * 为什么不能只留在外层清单里：外层清单在容器**外面**，端侧解包完只有树本身。
@@ -1988,6 +2190,328 @@ function patchAttachmentLocalLink() {
   log('[pack-core]   attachment-local 补丁：link→copyFile + 祖先 fsync 容错（鸿蒙沙箱）');
 }
 
+// ── ⑤ 鸿蒙前端兼容补丁（对齐 GitCode issue #1 / #2）───────────────────────
+/*
+ * 【这一组解决什么】
+ *   1) `dsh-resource://` 地址解析。三个上游前端 bundle 都是 `new URL(address)` 之后读
+ *      `.hostname` / `.pathname`。ArkWeb 把**未注册 scheme** 当 opaque URL：
+ *        Chromium / Node  : new URL("dsh-resource://file/session/s1/a.md")
+ *                           → hostname === "file", pathname === "/session/s1/a.md"
+ *        ArkWeb           : hostname === "",       pathname === "//file/session/s1/a.md"
+ *      后果三条：资源协议解析直接 return void 0（侧边栏文件预览报"文件资源服务不可用"）、
+ *      basename 模式匹配全灭、子会话链接打不开。修法 = hostname 为空时用正则从**原始
+ *      地址**取回 authority / path / query（8 组真实样例实测与 Chromium 语义逐字一致），
+ *      再走原有判定，不改上游判定逻辑本身。
+ *   2) pdfjs 的 `Map.prototype.getOrInsert(Computed)`。`pdfjs-dist@6.3.289` 在
+ *      `client.pdf.js` 里用了 40 处，ArkWeb 7.0.0.105 的 V8 没实现 ⇒ PDF 预览直接
+ *      TypeError。修法 = 给 `Map` / `WeakMap` 原型各补两个方法，**只在缺失时安装**
+ *      （有原生实现就 no-op，不会覆盖未来版本）。该 chunk 的主线程代码与它内联启动的
+ *      pdf worker 是**两个 realm**（worker 由 Blob URL 起，不继承页面启动期注入）⇒ 两处各装一次。
+ *   3) `dsh-subprocess-local` 的平台判定。`createProcessInspector()` 用
+ *      `platform === "linux"` 枚举，openharmony 落到末尾 `throw`（真机报错原文：
+ *      `subprocess-local: terminal inspection is unsupported on platform openharmony`）。
+ *      鸿蒙 /proc 与 Linux 同构（readdir(/proc)、/proc/<pid>/stat 的 tpgid/starttime、
+ *      /proc/<pid>/fd/0 均可用；/proc/<pid>/task/<tid>/syscall 缺失但上游本就 try/catch
+ *      降级）⇒ 直接复用 `LinuxProcessInspector`。同时把 shellActivity 注入在鸿蒙上关掉：
+ *      它给 bash 注入 `--rcfile`、给 zsh 注入 `ZDOTDIR` + `add-zle-hook-widget`，
+ *      端侧 zsh 不认那套 bash 语义。`selectContainmentMode` / `fallbackOwner` **不动**
+ *      （linux-scope 探测在鸿蒙本就失败、走既有 fallback 降级，属正确行为）。
+ * 【纪律】与上面所有 patch 一致：不改上游源码，只改打包产物；找不到待替换片段就 die。
+ */
+
+/** `Map` / `WeakMap` 的 `getOrInsert(Computed)` 兜底源码（缺失时才安装）。 */
+const MAP_COMPAT_SOURCE = `(function () {
+	function install(proto, name, impl) {
+		if (typeof proto[name] === "function") return;
+		Object.defineProperty(proto, name, { configurable: true, writable: true, enumerable: false, value: impl });
+	}
+	install(Map.prototype, "getOrInsert", function (key, value) {
+		const current = this.get(key);
+		if (current !== void 0) return current;
+		this.set(key, value);
+		return value;
+	});
+	install(Map.prototype, "getOrInsertComputed", function (key, compute) {
+		const current = this.get(key);
+		if (current !== void 0) return current;
+		const value = compute(key);
+		this.set(key, value);
+		return value;
+	});
+	install(WeakMap.prototype, "getOrInsert", function (key, value) {
+		const current = this.get(key);
+		if (current !== void 0) return current;
+		this.set(key, value);
+		return value;
+	});
+	install(WeakMap.prototype, "getOrInsertComputed", function (key, compute) {
+		const current = this.get(key);
+		if (current !== void 0) return current;
+		const value = compute(key);
+		this.set(key, value);
+		return value;
+	});
+})();
+/* DSHM_MAP_COMPAT */
+`;
+
+function patchResourceAddressArmor() {
+  const scope = join(STAGE, 'node_modules', '@deepseek-ai');
+
+  // ① dsh-client-resources：protocolOf() 的 hostname 兜底。
+  {
+    const target = join(scope, 'dsh-client-resources', 'lib', 'client.js');
+    if (!existsSync(target)) die(`资源地址补丁：找不到 ${target}`);
+    let text = readFileSync(target, 'utf8');
+    if (text.includes('DSHM_RESOURCE_ARMOR_PROTOCOL')) {
+      log('[pack-core]   资源地址补丁（client-resources.protocolOf）已存在（跳过）');
+    } else {
+      const before = '\t\t\tif (parsed.protocol !== `dsh-resource:`) return void 0;\n'
+        + '\t\t\treturn parsed.hostname === "" ? void 0 : parsed.hostname.toLowerCase();\n';
+      if (!text.includes(before)) {
+        die('资源地址补丁：client-resources 的 protocolOf() 实现已变化（未找到待替换片段），拒绝静默跳过');
+      }
+      const after = '\t\t\tif (parsed.protocol !== `dsh-resource:`) return void 0;\n'
+        + '\t\t\t/*\n'
+        + '\t\t\t * 【DSHM 鸿蒙补丁 DSHM_RESOURCE_ARMOR_PROTOCOL】ArkWeb 把未注册的 `dsh-resource:` 当 opaque URL：\n'
+        + '\t\t\t * 这里 hostname === ""（Chromium/Node 下是 "file"），原样返回就会让整条资源协议解析失败。\n'
+        + '\t\t\t * hostname 为空时用正则从原始地址取回 authority，语义与 Chromium 一致。\n'
+        + '\t\t\t */\n'
+        + '\t\t\tconst armor = parsed.hostname === "" ? /^[a-z][a-z\\d+.-]*:\\/\\/([^/?#]*)/iu.exec(address) : null;\n'
+        + '\t\t\tconst host = armor === null ? parsed.hostname : armor[1];\n'
+        + '\t\t\treturn host === "" ? void 0 : host.toLowerCase();\n';
+      text = text.replace(before, after);
+      writeFileSync(target, text, 'utf8');
+      log('[pack-core]   资源地址补丁：client-resources protocolOf() 加 opaque-URL authority 兜底');
+    }
+  }
+
+  // ② dsh-client-ui-sidebar-right：pathOf() 剥掉被并进 path 的 authority。
+  {
+    const target = join(scope, 'dsh-client-ui-sidebar-right', 'lib', 'client.js');
+    if (!existsSync(target)) die(`资源地址补丁：找不到 ${target}`);
+    let text = readFileSync(target, 'utf8');
+    if (text.includes('DSHM_RESOURCE_ARMOR_PATH')) {
+      log('[pack-core]   资源地址补丁（sidebar-right.pathOf）已存在（跳过）');
+    } else {
+      const before = '\t\tfunction pathOf(address) {\n'
+        + '\t\t\ttry {\n'
+        + '\t\t\t\treturn new URL(address).pathname;\n'
+        + '\t\t\t} catch {\n'
+        + '\t\t\t\treturn;\n'
+        + '\t\t\t}\n'
+        + '\t\t}\n';
+      if (!text.includes(before)) {
+        die('资源地址补丁：sidebar-right 的 pathOf() 实现已变化（未找到待替换片段），拒绝静默跳过');
+      }
+      const after = '\t\tfunction pathOf(address) {\n'
+        + '\t\t\ttry {\n'
+        + '\t\t\t\tconst parsed = new URL(address);\n'
+        + '\t\t\t\t/*\n'
+        + '\t\t\t\t * 【DSHM 鸿蒙补丁 DSHM_RESOURCE_ARMOR_PATH】ArkWeb 下 `dsh-resource://file/...` 的 pathname 是\n'
+        + '\t\t\t\t * `//file/...`（authority 被并进 path），basename 模式匹配会全灭。用正则从原始地址取回\n'
+        + '\t\t\t\t * authority 之后的 path，语义与 Chromium 一致。\n'
+        + '\t\t\t\t */\n'
+        + '\t\t\t\tif (parsed.hostname === "" && parsed.pathname.startsWith("//")) {\n'
+        + '\t\t\t\t\tconst armor = /^[a-z][a-z\\d+.-]*:\\/\\/([^/?#]*)([^?#]*)/iu.exec(address);\n'
+        + '\t\t\t\t\tif (armor !== null) return armor[2];\n'
+        + '\t\t\t\t}\n'
+        + '\t\t\t\treturn parsed.pathname;\n'
+        + '\t\t\t} catch {\n'
+        + '\t\t\t\treturn;\n'
+        + '\t\t\t}\n'
+        + '\t\t}\n';
+      text = text.replace(before, after);
+      writeFileSync(target, text, 'utf8');
+      log('[pack-core]   资源地址补丁：sidebar-right pathOf() 剥掉被并进 path 的 authority');
+    }
+  }
+
+  // ③ dsh-client-ui-subagent：parseSubagentChatAddress() 的 host / path / query 兜底。
+  {
+    const target = join(scope, 'dsh-client-ui-subagent', 'lib', 'client.js');
+    if (!existsSync(target)) die(`资源地址补丁：找不到 ${target}`);
+    let text = readFileSync(target, 'utf8');
+    if (text.includes('DSHM_RESOURCE_ARMOR_SUBAGENT')) {
+      log('[pack-core]   资源地址补丁（subagent.parseSubagentChatAddress）已存在（跳过）');
+    } else {
+      const before = '\t\t\tif (url.protocol !== "dsh-resource:" || url.hostname.toLowerCase() !== "subagentchat") return void 0;\n'
+        + '\t\t\tconst parts = url.pathname.split("/").filter(Boolean);\n'
+        + '\t\t\tif (parts.length !== 2 || parts[0] !== "session") return void 0;\n'
+        + '\t\t\tconst parentSessionId = url.searchParams.get("parent");\n'
+        + '\t\t\tconst mode = url.searchParams.get("mode");\n';
+      if (!text.includes(before)) {
+        die('资源地址补丁：subagent 的 parseSubagentChatAddress() 实现已变化（未找到待替换片段），拒绝静默跳过');
+      }
+      const after = '\t\t\t/*\n'
+        + '\t\t\t * 【DSHM 鸿蒙补丁 DSHM_RESOURCE_ARMOR_SUBAGENT】ArkWeb 下 `dsh-resource://subagentchat/...` 的\n'
+        + '\t\t\t * hostname === ""（判定直接失败），且 query 可能被并进 path ⇒ searchParams 取不到\n'
+        + '\t\t\t * parent / mode。这里用正则从原始地址取回 authority / path / query，再走原有判定与白名单。\n'
+        + '\t\t\t */\n'
+        + '\t\t\tconst armor = url.hostname === "" ? /^[a-z][a-z\\d+.-]*:\\/\\/([^/?#]*)([^?#]*)(\\?[^#]*)?/iu.exec(value) : null;\n'
+        + '\t\t\tconst host = armor === null ? url.hostname : armor[1];\n'
+        + '\t\t\tconst pathname = armor === null ? url.pathname : armor[2];\n'
+        + '\t\t\tconst query = armor === null ? url.search : armor[3] === void 0 ? "" : armor[3];\n'
+        + '\t\t\tif (url.protocol !== "dsh-resource:" || host.toLowerCase() !== "subagentchat") return void 0;\n'
+        + '\t\t\tconst parts = pathname.split("/").filter(Boolean);\n'
+        + '\t\t\tif (parts.length !== 2 || parts[0] !== "session") return void 0;\n'
+        + '\t\t\tconst searchParams = new URLSearchParams(query);\n'
+        + '\t\t\tconst parentSessionId = searchParams.get("parent");\n'
+        + '\t\t\tconst mode = searchParams.get("mode");\n';
+      text = text.replace(before, after);
+      writeFileSync(target, text, 'utf8');
+      log('[pack-core]   资源地址补丁：subagent parseSubagentChatAddress() 加 opaque-URL 兜底');
+    }
+  }
+}
+
+/*
+ * 【N4 侧栏页签 id 泄漏】`SidebarRightTabRegistry.register()` 的取号不是原子的。
+ *
+ * 上游实现：
+ *     const dispose = this.ctx.effect(() => {
+ *       this.ids.add(id);                  // ← 取号
+ *       const slot = this.enter(kind, entry);
+ *       this.refresh();
+ *       return () => { this.ids.delete(id); … };
+ *     }, …);
+ *
+ * cordis 的 `effect()` 只在 **setup 成功返回**后才把清理函数收进 disposables
+ * （`@deepseek-ai/cordis/lib/index.js:1249-1263`：`try { task = this._execute(runner) }`
+ * 抛错分支只做 `finalizeDisposal(dispose)`，也就是"已经收集到的"清理项）。因此
+ * `this.ids.add(id)` 之后、那个 `return () => {…}` 之前若发生异常（`enter()` 或
+ * `refresh()` → `notifySubscribers()` 里任一订阅者抛），**id 就永久留在 `this.ids`
+ * 里**，且没有任何 disposer 能再释放它。
+ *
+ * 后果正好是 N4：`dsh-better-sidebar` 每次 sync 都用同一 id 重试接管 `files`
+ * 页签，于是恒抛 `sidebarRight: tab type id "…" is already registered`，页签再也
+ * 立不起来，文件树落到宿主空态；只有刷新整个页面才恢复。（该插件 `sync()` 的
+ * 清理循环显式跳过 `FILES_KIND`，所以它自己永远不会清掉这条失败记录。）
+ *
+ * 修法：把"取号 + 入座 + 通知"做成**原子**——任一步抛错就按原样退回。这样重试
+ * 永远是干净的，页签最坏也只是晚一帧立起来，不会永久占死。
+ * （与 TODO §N4 修复建议③「平台侧＝对 slot id 做一次强制释放/重注册」同向，
+ *   但更小：只在异常路径上回滚，不改变成功路径的任何语义。）
+ */
+function patchSidebarTabIdLeak() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-right', 'lib', 'client.js');
+  if (!existsSync(target)) die(`侧栏页签守卫补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_TAB_ID_GUARD')) {
+    log('[pack-core]   侧栏页签守卫补丁（sidebarRight.tabs.register 取号回滚）已存在（跳过）');
+    return;
+  }
+  const before = '\t\t\t\tconst dispose = this.ctx.effect(() => {\n'
+    + '\t\t\t\t\tthis.ids.add(id);\n'
+    + '\t\t\t\t\tconst slot = this.enter(kind, entry);\n'
+    + '\t\t\t\t\tthis.refresh();\n'
+    + '\t\t\t\t\treturn () => {\n';
+  if (!text.includes(before)) {
+    die('侧栏页签守卫补丁：sidebar-right 的 register() 实现已变化（未找到待替换片段），拒绝静默跳过');
+  }
+  const after = '\t\t\t\tconst dispose = this.ctx.effect(() => {\n'
+    + '\t\t\t\t\t/* DSHM_TAB_ID_GUARD：取号与入座必须原子，否则异常路径会把 id 永久占死 */\n'
+    + '\t\t\t\t\tthis.ids.add(id);\n'
+    + '\t\t\t\t\tlet slot;\n'
+    + '\t\t\t\t\ttry {\n'
+    + '\t\t\t\t\t\tslot = this.enter(kind, entry);\n'
+    + '\t\t\t\t\t\tthis.refresh();\n'
+    + '\t\t\t\t\t} catch (reason) {\n'
+    + '\t\t\t\t\t\tthis.ids.delete(id);\n'
+    + '\t\t\t\t\t\tif (slot !== void 0) this.leave(kind, slot, entry);\n'
+    + '\t\t\t\t\t\tthrow reason;\n'
+    + '\t\t\t\t\t}\n'
+    + '\t\t\t\t\treturn () => {\n';
+  text = text.replace(before, after);
+  writeFileSync(target, text, 'utf8');
+  log('[pack-core]   侧栏页签守卫补丁：sidebarRight.tabs.register() 取号失败回滚');
+}
+
+function patchPdfMapCompat() {
+  const target = join(
+    STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-documentpreview', 'lib', 'client.pdf.js',
+  );
+  if (!existsSync(target)) die(`pdf 兼容补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_MAP_COMPAT')) {
+    log('[pack-core]   pdf 兼容补丁已存在（跳过）');
+    return;
+  }
+
+  // ① 主线程：chunk 工厂开头装一次（该 chunk 是懒加载，装在这里就不受注入时机影响）。
+  const factoryAnchor = 'factory: (require) => {';
+  if ((text.split(factoryAnchor).length - 1) !== 1) {
+    die('pdf 兼容补丁：chunk 工厂入口不唯一（未找到 factory 行），拒绝静默跳过');
+  }
+  const indented = MAP_COMPAT_SOURCE.replace(/\n+$/, '')
+    .split('\n').map((line) => (line === '' ? line : '\t\t' + line)).join('\n');
+  text = text.replace(factoryAnchor, factoryAnchor + '\n' + indented);
+
+  // ② pdf worker：worker 由 Blob URL 起，独立 realm，不继承页面/主线程的原型补丁 ⇒
+  //    在 Blob 分片数组**最前面**插一段同样源码的字符串字面量（JSON.stringify 保证转义正确）。
+  const blobAnchor = 'new Blob([_dsh_pdf_worker_default, ';
+  if ((text.split(blobAnchor).length - 1) !== 1) {
+    die('pdf 兼容补丁：内联 pdf worker 的 Blob 构造不唯一（未找到待替换片段），拒绝静默跳过');
+  }
+  text = text.replace(
+    blobAnchor,
+    'new Blob([' + JSON.stringify(MAP_COMPAT_SOURCE) + ', _dsh_pdf_worker_default, ',
+  );
+
+  writeFileSync(target, text, 'utf8');
+  log('[pack-core]   pdf 兼容补丁：Map/WeakMap.getOrInsert(Computed) 缺失兜底（主线程 + 内联 worker 各一处）');
+}
+
+function patchSubprocessOpenharmony() {
+  const dir = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib');
+
+  // ① 终端巡检器的平台判定（真机报错原文：terminal inspection is unsupported on platform openharmony）。
+  const runners = existsSync(dir) ? readdirSync(dir).filter((n) => /^runner-launch-.*\.js$/.test(n)) : [];
+  if (runners.length === 0) die(`subprocess-local 补丁：在 ${dir} 找不到 runner-launch-*.js`);
+  for (const name of runners) {
+    const target = join(dir, name);
+    let text = readFileSync(target, 'utf8');
+    if (text.includes('DSHM_OPENHARMONY_SUBPROCESS')) {
+      log(`[pack-core]   subprocess-local 补丁（${name}）已存在（跳过）`);
+      continue;
+    }
+    const before = '\tif (platform === "linux") return new LinuxProcessInspector(arch, internals);';
+    if (!text.includes(before)) {
+      die(`subprocess-local 补丁：${name} 的 createProcessInspector() 实现已变化（未找到待替换片段），拒绝静默跳过`);
+    }
+    const after = '\tif (platform === "linux" || platform === "openharmony" /* DSHM_OPENHARMONY_SUBPROCESS */) return new LinuxProcessInspector(arch, internals);';
+    writeFileSync(target, text.replace(before, after), 'utf8');
+    log(`[pack-core]   subprocess-local 补丁：${name} 的终端巡检器接受 openharmony（复用 LinuxProcessInspector）`);
+  }
+
+  // ②③ index.js：关掉鸿蒙上的 shellActivity 注入 + idle 分支接受 openharmony。
+  const indexTarget = join(dir, 'index.js');
+  if (!existsSync(indexTarget)) die(`subprocess-local 补丁：找不到 ${indexTarget}`);
+  let text = readFileSync(indexTarget, 'utf8');
+  if (text.includes('DSHM_OPENHARMONY_SUBPROCESS')) {
+    log('[pack-core]   subprocess-local 补丁（index.js）已存在（跳过）');
+    return;
+  }
+  const activityBefore = '\tif (spec.shellActivity !== true || platform === "win32" || spec.argv.length !== 2 || spec.argv[1] !== "-i") return void 0;';
+  if (!text.includes(activityBefore)) {
+    die('subprocess-local 补丁：prepareShellActivity() 首行已变化（未找到待替换片段），拒绝静默跳过');
+  }
+  text = text.replace(
+    activityBefore,
+    '\tif (spec.shellActivity !== true || platform === "win32" || platform === "openharmony" /* DSHM_OPENHARMONY_SUBPROCESS */ || spec.argv.length !== 2 || spec.argv[1] !== "-i") return void 0;',
+  );
+  const idleBefore = 'this.platform === "linux" && observed.complete === true && root === void 0';
+  if (!text.includes(idleBefore)) {
+    die('subprocess-local 补丁：inspectActivity() 的 linux 分支已变化（未找到待替换片段），拒绝静默跳过');
+  }
+  text = text.replace(
+    idleBefore,
+    '(this.platform === "linux" || this.platform === "openharmony") /* DSHM_OPENHARMONY_SUBPROCESS */ && observed.complete === true && root === void 0',
+  );
+  writeFileSync(indexTarget, text, 'utf8');
+  log('[pack-core]   subprocess-local 补丁：index.js 跳过鸿蒙的 shellActivity 注入 + idle 分支接受 openharmony');
+}
+
 function embedTreeInfo() {
   // 插件与原生模块清单：**在构建期算一次**，写进树里给端侧读。
   // 【为什么不在端侧现算】端侧要算同一件事，得在 27250 个文件 / 4000 个目录上递归
@@ -2299,9 +2823,34 @@ patchAppBootReadonlyStack();
 patchAgentPresetWorkflow();
 patchFsLocalLink();
 patchAttachmentLocalLink();
+/*
+ * 【⑤ 鸿蒙前端/平台兼容补丁】对应 GitCode issue #1（侧边栏资源预览不可用、PDF 预览
+ * 报错）与 #2（侧边栏终端 openharmony 被判为不支持），以及 N4（侧栏 files 页签被
+ * 占位、文件树空态）。四个都只改前端 bundle 与 subprocess-local 的 `.js`，**不含原生
+ * 二进制**，因此与下面的自签名顺序无关；放在这里是为了与其它 patch 函数聚在一起
+ * （自签名仍必须紧邻 pack() 之前，见下方注释）。
+ * 找不到待替换片段会 die，不会静默跳过 —— 上游升级后这里会立刻暴露，而不是悄悄失效。
+ */
+patchResourceAddressArmor();
+patchPdfMapCompat();
+patchSubprocessOpenharmony();
+patchSidebarTabIdLeak();
 ensureRipgrepPlatformPackage();
 patchFsSearchFallback();
 addOnDevicePreset();
+/*
+ * 【顺序：先落树，再写树内清单】注意**不要把这两步的因果说反**。
+ * `dshm-core.json` 的 plugins 数组由 `inventoryOf(node_modules)` 现算，而
+ * `inventoryOf` → `pluginRowsOf()` **只扫** `BUNDLES = ['@deepseek-ai/dsh-base',
+ * '@deepseek-ai/dsh-web-app']` 两个 bundle 的 `dsh.bundle.patch` 行
+ * （`tools/lib/core-inventory.mjs:24` 与 `:201-238`），**不扫 profile 的
+ * `cordis.patch.yml`**。本插件的行在 profile（`hostcore/profile/ondevice/cordis.patch.yml`
+ * 的 `insert:`）里 ⇒ 它**能加载**，但**不会**因为"落到树上"而出现在 `dshm-core.json`
+ * 的 plugins 数组里 —— "要出现在端侧'插件'页就必须先落到树上"这条因果**不成立**。
+ * 先落树仍然必要：loader 要能按包名解析到它（`dsh-web-app` 的 dependencies 里也由
+ * 本步声明）；只是这与 plugins 数组无关。
+ */
+embedDshmToolPackages();
 embedTreeInfo();
 verifyTreeInfoContract();
 patchSensevoiceForHms();
@@ -2317,6 +2866,13 @@ embedProfile();
  * 其 unsigned 清单本来就是"构建期未签"的如实记录，不因自签名而改变）。
  */
 const selfSign = selfSignNatives();
+/*
+ * 【打包前的最后一道回归锁】`embedDshmToolPackages()` 末尾已断言过一次；这里在
+ * `pack()` 之前**再断言一次**，锁的是"即将被 zip 读走的那棵树"。中间的
+ * embedProfile / selfSignNatives 都不碰 `@deepseek-ai/dshm-*`，重跑是为了让
+ * "产物集合 == 清单"这件事由打包点自己负责，而不是依赖上游步骤的既有行为。
+ */
+assertDshmBelongingsConsistent();
 const packed = pack();
 const manifest = writeManifest({ ...packed, ...sig, selfSign });
 

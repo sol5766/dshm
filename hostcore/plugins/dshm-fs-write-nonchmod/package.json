@@ -1,0 +1,23 @@
+{
+  "name": "@deepseek-ai/dshm-fs-write-nonchmod",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧的去 chmod 文件写入后端：上游 @deepseek-ai/dsh-fs-local 的 writeFileAtomic() 依赖 chmod（暂存目录 0o700 + 暂存文件 0o600），而鸿蒙 hmdfs 的用户可见公共目录（Download/<包名>/）不放行 chmod（EPERM），agent 就写不进工作区。本包 extends SandboxedFileSystem，只重写 writeText/editText 的落盘一步：同目录隐藏临时文件 .<名字>.<pid>.<uuid>.partial 写完后 rename 发布（原子、不用 chmod、不用 link），覆写时临时件继承目标 mode；读、路径解析、per-target 锁、版本守卫、fs/* 策略瀑布全部照旧复用上游。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/fsio-nochmod.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-fs": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-fs-sandbox": "0.2.0-rc.2"
+  }
+}

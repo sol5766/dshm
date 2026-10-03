@@ -10,12 +10,13 @@ whenToUse: 需要运行 shell 命令、安装工具、解释 .zshrc/.bashrc 或 
 
 ## 两层视图
 - **系统终端（开发者模式 / root pty）**：可以访问 `/usr/local`（含 `/usr/local/Homebrew` 与 `/usr/local/bin/zsh` 等），zsh、brew 在此可用且真实存在。
-- **应用沙箱（DSHM 运行层，uid 2000）**：没有这些命令，也读不了 `/usr/local`（实测 `ls /usr/local` 返回 Permission denied）。dsh 的 bash 会话只能使用以下基础环境。
+- **应用沙箱（DSHM 运行层，uid 2000）**：没有这些命令，也读不了 `/usr/local`（`ls /usr/local` 返回 Permission denied）。dsh 的 bash 会话只能使用以下基础环境。
 
 ## 基础环境（沙箱内可用）
 - `/system/bin` 由 toybox 提供 ls/cat/grep/sed/awk/tar/gzip/curl 等 400+ 常用命令。
-- 本包额外内置 busybox：`ash` `bash` `hush` `bzip2` `xz` `hexdump` `less` `nc` `unzip` `vi`。
-- 交互式 shell 为 bash（toybox/busybox 语义，非 GNU bash 全功能）。
+- 本包额外内置 busybox，按需落位常用 applet：`ash`、`bzip2`、`xz`、`hexdump`、`less`、`nc`、`unzip`、`vi`。
+- 交互式 shell 由随包 `bash` **垫片**提供，转发到 busybox 的 `ash`（toybox/busybox 语义，非 GNU bash 全功能）；**busybox 未编入 `bash`/`hush` applet**。
+- 沙箱内能否**执行**上述工具**取决于设备档位**：PC/2in1 档可执行；**手机档**沙箱内的可执行文件（busybox、`bash`/`hush` 垫片、python、git）会被系统拒绝执行（`EACCES`）⇒ 此时只能用文件工具完成工作，不要反复重试，也不要试图改 PATH、换解释器或绕过系统限制。
 
 ## Python 探测的坑（必读）
 

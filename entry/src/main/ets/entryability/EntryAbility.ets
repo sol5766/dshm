@@ -416,7 +416,12 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate<boolean>(KEY_CORE_INSTALLING, true);
     // 入口脚本随包放在 resources/resfile/resources/app/main.js（见 coreHost 的注释）
     // 沙箱 HOME 用 filesDir：hdc 对 cacheDir 无读权限，而诊断日志要能被取回（见 NodeRuntime 注释）
-    const runtime = new NodeRuntime(`${ctx.resourceDir}/resources/app/main.js`, ctx.filesDir);
+    // 第 3 实参 = UIAbility 上下文（本类自身就是 UIAbility，`this.context` 即 UIAbilityContext）：
+    // `NodeRuntime.start()` 要用它在 spawn 之前认领 `Download/<包名>/`（见 NodeRuntime 注释）。
+    // 【为什么必须在这里传】本方法是**首启唯一实际执行的 Host 启动路径**：不传 ⇒ 认领被跳过、
+    // `DSHM_PUBLIC_DOWNLOAD` 为空 ⇒ 默认工作区静默退回沙箱，用户可见存储上零足迹（40 轮真机实证）。
+    const runtime = new NodeRuntime(`${ctx.resourceDir}/resources/app/main.js`, ctx.filesDir,
+      this.context as common.UIAbilityContext);
     const host = new DshHost(ctx.filesDir, runtime);
     // 存成字段：退出流程要调 `host.stop()` 干净地停掉宿主（见 host 字段的说明）
     this.host = host;

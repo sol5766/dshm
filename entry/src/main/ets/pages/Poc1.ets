@@ -94,8 +94,10 @@ struct Poc1 {
   private prefillFromLocalHost(): void {
     try {
       const ctx = getContext(this) as common.UIAbilityContext;
+      // 第 3 实参 = UIAbility 上下文（与 EntryAbility / Index 两处构造点同口径）：
+      // `NodeRuntime.start()` 要用它认领 `Download/<包名>/`，缺了它默认工作区会退回沙箱。
       const host: DshHost = new DshHost(ctx.filesDir,
-        new NodeRuntime(`${ctx.resourceDir}/resources/app/main.js`, ctx.filesDir));
+        new NodeRuntime(`${ctx.resourceDir}/resources/app/main.js`, ctx.filesDir, ctx));
       const url: string = host.localHostReadyUrl();
       if (url.length === 0) {
         this.prefillNote = '本机核心还没写下启动链接（未启动？）。地址已按默认端口 3120 填好；'

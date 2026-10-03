@@ -33,7 +33,7 @@ pnpm add github.com/owner/repo   # GitHub 仓库（可加 #branch）
 ## 后备姿势：手动写队列（假壳不可用时）
 
 假壳的本质是往 `$HOME/dsh/home/install-queue/` 写 `.req` 文件（一行 spec）。
-如果 `pnpm -v` 都失败了（老版本 Host），手动走同样协议：
+如果 `pnpm -v` 都失败了（假壳尚未就位），手动走同样协议：
 
 ```bash
 SPEC='要装的包名或仓库地址'
