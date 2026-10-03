@@ -133,6 +133,16 @@ const DOMAIN: number = 0xD5D5;
 const TAG: string = 'DshWebApp';
 
 /**
+ * `files/diag-web-console` 的单次冷启动行数上限。
+ *
+ * 【为什么要有上限】网页端启动期 console 可达数千行（各类插件注册、资源探测、
+ * 警告刷屏），而排查真正要看的那几行（例：右侧栏占位失败时的 `already registered`）
+ * 会被淹没；且该文件在 `files/` 里，无限追加会持续占盘。取 4000 是实测折中：
+ * 足以覆盖一次冷启动的全部启动期输出，又能让文件停在几百 KB 量级。
+ */
+const CONSOLE_SINK_LINE_CAP: number = 4000;
+
+/**
  * `abilityAccessCtrl` 里"已授权"的取值。
  *
  * 【为什么写成常量而不是 import 枚举】`GrantStatus.PERMISSION_GRANTED` 是
@@ -701,6 +711,10 @@ class DshDirectoryPickerBridge {
   private readonly controller: () => webview.WebviewController;
   /** 单飞行守卫：系统选择器一次只能有一个；startPick 重入直接返回 'busy' */
   private picking: boolean = false;
+  /** `diag-web-console` 是否已在本次冷启动写过首行（决定 TRUNC 还是 APPEND） */
+  private consoleSinkOpened: boolean = false;
+  /** 本次冷启动已落盘的 console 行数（与 `CONSOLE_SINK_LINE_CAP` 比较） */
+  private consoleSinkLines: number = 0;
 
   constructor(hostContext: () => common.Context | undefined,
     controller: () => webview.WebviewController) {
@@ -732,6 +746,80 @@ class DshDirectoryPickerBridge {
   /** 诊断标记的公开包装：供 WebApp 组件的 onShowFileSelector / 权限回调留痕用。 */
   writeDiagMarkerPublic(name: string, detail: string = ''): void {
     this.writeDiagMarker(name, detail);
+  }
+
+  /**
+   * 【Web 侧 console 的文件落点】`files/diag-web-console`
+   *
+   * 【为什么需要】`.onConsole` 原本只把 console 转发到 hilog。但本机 hilog 对
+   * 本应用的 ArkTS 输出**不可读**：`hilog -x -D 0xd5d5` / `-T DshWebApp` 在
+   * 清缓冲 + 冷启动后恒为 0 行（连常规行都没有），而同一时刻
+   * `hilog -x | grep -i dshm` 有数千行 ⇒ 不是"DshWebApp 没打日志"，是这条通道
+   * 的 output 到不了可读缓冲。于是"网页端到底报了什么错"在真机上无从取证，
+   * 而网页端的错误恰恰是本端绝大多数界面问题的第一现场（例：右侧栏 `files`
+   * 页签被占位后文件树空白，网页端会刷 `already registered`，本端却看不到）。
+   *
+   * 【做法】与既有 `writeDiagMarker` 同一套（filesDir + 追加 + 写失败静默），
+   * 但有三点不同，都是为"console 是高频流"这一事实：
+   *   1. **每次冷启动截断**（首次写入用 TRUNC，之后 APPEND）——只保留本次运行，
+   *      否则跨次启动混在一起根本读不出时序；
+   *   2. **行数上限**（见 `CONSOLE_SINK_LINE_CAP`）——启动期 console 可达数千行，
+   *      无限追加会撑大 files 目录且淹没真正要看的那几行；到顶再写一行哨兵后停写；
+   *   3. **一条 console 压成一行**（换行替换成字面 `\n`）+ 单条长度截断，保证
+   *      "一行一条记录"，`grep` 才有意义。
+   *
+   * 【不是替身】hilog 那一路照旧保留：hilog 在别的机器/别的版本上仍可能是通的，
+   * 文件只是**并行**的兜底通道。返回 false 保留 ArkWeb 默认行为不变。
+   *
+   * @param level console 级别数值（MessageLevel：1 Debug / 2 Info / 3 Warn / 4 Error）
+   * @param source 源文件路径（`msg.getSourceId()`；**不是** `getSource()`——后者返回
+   *               `ConsoleMessageSource` 枚举（XML/JAVASCRIPT/NETWORK/CONSOLE），
+   *               是"这条消息哪来的"分类，不是文件位置）
+   * @param line 源文件行号（`msg.getLineNumber()`）
+   * @param message console 文本（`msg.getMessage()`）
+   */
+  writeConsoleLine(level: number, source: string, line: number, message: string): void {
+    try {
+      const ctx = this.hostContext();
+      if (ctx === undefined) {
+        return;
+      }
+      if (this.consoleSinkLines >= CONSOLE_SINK_LINE_CAP) {
+        return;
+      }
+      /*
+       * 【为什么先做类型收敛】真机首轮实测：本方法一行都没落盘，文件压根没被创建。
+       * 而 `flat` 是在 `openSync` **之前**算的 ⇒ 只要 `message` 不是字符串
+       * （`ConsoleMessage.getMessage()` 对某些来源可能给到空/未定义），
+       * `.split` 就会在建文件前抛，整个方法被 catch 吃掉，现象正是"文件不存在"。
+       * 宁可把这一层收敛写死，也不要让整条诊断通道被单条异常消息带走。
+       */
+      const raw: string = typeof message === 'string' ? message : `${message}`;
+      const src: string = typeof source === 'string' ? source : '';
+      const ln: number = typeof line === 'number' ? line : 0;
+      const lv: number = typeof level === 'number' ? level : 0;
+      const flat: string = raw.split('\n').join('\\n');
+      const body: string = flat.length > 2000 ? `${flat.substring(0, 2000)}…[单条已截断]` : flat;
+      const p: string = `${ctx.filesDir}/diag-web-console`;
+      const mode: number = this.consoleSinkOpened
+        ? (fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.APPEND)
+        : (fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
+      const file: fileIo.File = fileIo.openSync(p, mode);
+      if (!this.consoleSinkOpened) {
+        this.consoleSinkOpened = true;
+        fileIo.writeSync(file.fd,
+          `${new Date().toISOString()} === diag-web-console 本次冷启动开始（上限 ${CONSOLE_SINK_LINE_CAP} 行）===\n`);
+      }
+      this.consoleSinkLines += 1;
+      fileIo.writeSync(file.fd, `${new Date().toISOString()} L${lv} ${src}:${ln} ${body}\n`);
+      if (this.consoleSinkLines >= CONSOLE_SINK_LINE_CAP) {
+        fileIo.writeSync(file.fd,
+          `${new Date().toISOString()} === 已达 ${CONSOLE_SINK_LINE_CAP} 行上限，后续 console 不再落盘 ===\n`);
+      }
+      fileIo.closeSync(file);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'console 落盘失败：%{public}s', (e as Error).message);
+    }
   }
 
 
@@ -1025,6 +1113,8 @@ struct WebApp {
   private systemBarApplied: string = '';
 
   private controller: webview.WebviewController = new webview.WebviewController();
+  /** `.onConsole` 实际被触发的次数（与落盘行数分开记，用于区分"回调没来"和"落盘失败"） */
+  private consoleCbCount: number = 0;
   /** DOM 探针定时器句柄；-1 = 未启动。跨阶段保留，aboutToDisappear 统一清理 */
   private probeTimerId: number = -1;
   /** 目录选择桥：见类头注释。构造即建（无副作用），getter 惰性取宿主上下文 */
@@ -2467,14 +2557,36 @@ struct WebApp {
             this.dirPickerBridge.writeDiagMarkerPublic('diag-file-selector');
             return false;
           })
+          // web 侧 console 全量转发到 hilog：官方 web UI 的启动/运行错误
+          // （__ModuleLoader__ boot 失败、API 调用异常等）在 ArkTS 层不可见，
+          // 这里是等价于官方 DevTools console 的诊断通道。返回 false 保留默认行为。
+          // 2026-10-03 补：hilog 这一路在真机上不可读（见 writeConsoleLine 的注释），
+          // 故同时落一份到 files/diag-web-console，两者并行、互不替代。
           .onConsole((event?: OnConsoleEvent) => {
             if (event === undefined) {
               return false;
             }
             const msg: ConsoleMessage = event.message;
+            /*
+             * 【为什么先写这一笔，且不碰 msg 任何属性】2026-10-03 真机实测：
+             * 加了 sink 之后 `files/diag-web-console` 与 `diag-web-console-cb`
+             * **都没被创建**。要区分两种可能——
+             *   (a) `.onConsole` 压根没被调用；
+             *   (b) 回调来了，但取 `msg.getMessageLevel()` 之类就抛，整段挂掉。
+             * 故这里**先**不取任何属性、只走已验证可用的 `writeDiagMarkerPublic`
+             * （`diag-web-load` 一直在正常追加）记一笔。若本文件始终不出现，
+             * 即可断定是 (a)：本机 ArkWeb 不把 console 投递给 `.onConsole`。
+             */
+            this.consoleCbCount += 1;
+            if (this.consoleCbCount <= 3) {
+              this.dirPickerBridge.writeDiagMarkerPublic('diag-web-console-cb',
+                `第 ${this.consoleCbCount} 次 onConsole 回调`);
+            }
             hilog.info(DOMAIN, TAG, '[web] %{public}s:%{public}d %{public}s %{public}s',
               msg.getSource(), msg.getLineNumber(),
               msg.getMessageLevel(), msg.getMessage());
+            this.dirPickerBridge.writeConsoleLine(msg.getMessageLevel(), msg.getSourceId(),
+              msg.getLineNumber(), msg.getMessage());
             return false;
           })
           .onErrorReceive((event?: OnErrorReceiveEvent) => {
