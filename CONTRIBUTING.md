@@ -57,11 +57,14 @@ node tools/compat-drift.mjs
 node tools/assert-exec-fix.mjs
 node tools/assert-python-bridge.mjs
 node tools/assert-fs-search-fallback.mjs
+node tools/check-fetch-mirror.cjs
 ```
 
 `tools/` 下另有专项门禁（设计令牌棘轮、文档引用、布局断言、上架红线、协议往返、原生闭包等）。改动涉及哪个面就跑哪个；不确定时全跑一遍。
 
 其中 `check-sidebar-tab-id-guard.mjs` 守的是 `pack-core` 对核心树打的行为补丁（侧栏页签 id 守卫）：它把随包发布的源码原文抽出来放进壳里跑。前置是已跑过 `node tools/pack-core.mjs --skip-install`；未跑过时它以退出码 2 明确报「前置条件缺失」，不会伪装成通过。
+
+`check-fetch-mirror.cjs` 守的是出网镜像改写（端侧 `raw.githubusercontent.com` 被阻断的兜底）：全离线跑，起本地服务当镜像，断言哪些主机被改写、哪些必须放行。
 
 ## 提交信息
 
