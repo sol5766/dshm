@@ -307,6 +307,36 @@ author/committer 时刻相同。差异只在 commit 对象的元数据，且用 
 
 另：`tools/check-fetch-mirror.cjs`（6/6 PASS）与 `tools/check-sidebar-tab-id-guard.mjs`（9/9 PASS）是 N1/N3 与 N4 的永久门禁。
 
+### 第二轮真机报告（`DSHM-DEV-TODO-ALL-2026-10-03(1).md`，2026-10-03 17:29）落地状态
+
+该报告新增 **U1**（P0）与 **N6**（P2），已落地并真机验证；其余条目的状态复核以本文表格为准 ——
+报告的「D1/D2/D3/N5 未落实」判定与端侧实测矛盾（报告测的 `Host pid 17464` 那一轮与本机同一构建），
+不可采信。
+
+| 项 | 落点 | 真机核验 |
+|---|---|---|
+| **U1** `dsh-codearts-auth` 装不上（`failed to import`） | `hostcore/app/undici-shim.mjs` 补 `ProxyAgent`/`Pool`/`RetryAgent`/`RetryHandler` 具名导出 + 同步 `default` 对象 | 设备侧垫片 5,530 → **9,736 B**（sha256 `5796072bfbacb0b8…`）；重建 + `hdc install -r` 后 `node-output.log` 里 `did not activate` = **0**、`failed to import` = **0**、`codearts` = **0** |
+| **N6** profile patch 残留两条同 id `better-sidebar` | `hostcore/app/dshm-user-rows.js` 的 `carryForeignTopLevelEntries()` 收尾按主键反向扫描去重（保留最后一次，符合上游整体覆盖语义） | 设备 `<profile>/cordis.patch.yml` **123 行 2,764 B → 116 行 2,621 B**，`- id: better-sidebar` **2 → 1 条**；启动日志 `用户插件行：carry 阶段按主键去重，丢弃 1 行被覆盖的重复条目` |
+
+新增永久门禁 `tools/check-undici-shim-exports.mjs`：**以运行时事实为判据**（import 垫片取导出面 +
+递归扫核心树解析 `import { … } from 'undici'` / `await import('undici')` 的实际需求名），并带对照组
+（必须扫到 `Agent`/`fetch`）防假通过；无核心树时 exit 2。已进 `CONTRIBUTING.md` 门禁清单。
+
+**U1 的两个排查陷阱**（省时间）：
+1. `@deepseek-ai/dsh-app-boot/lib/index.js:3911` 的 `error: "failed to import"` 是**字符串字面量**，
+   不是异常文本 —— `entry.fiber === undefined` 时真正的原因当场就丢了，别指望日志给出理由。
+   （`FIBER_FAILED` 那条路径 `:3923-3934` 走 `await fiber.await()` 才拿得到 error。）
+2. ESM 具名导入在**解析期**校验导出存在性 ⇒ 缺一个名字整个模块图 import 失败，插件连 `apply()`
+   都到不了，表现为「插件装了但什么也没发生」。
+
+**刻意不补的导出**（不是遗漏）：`request` / `stream` / `interceptors`。它们的替身会**静默给错语义**
+（`request()` 返回 undici 专有的 `{statusCode, headers, body, trailers}` 而非 `Response`；`interceptors`
+空实现会关掉调用方拦截逻辑；`stream` 绑 duplex 语义）—— "import 明确报错" 比 "静默错行为" 好查。
+
+**N6 刻意不动的事**：「id 已不在任何 bundle 里」的孤儿行**不清理**。判定需要 profile `package.json`
+的 bundle 清单（当前 `carryForeignTopLevelEntries` 签名没有），且孤儿行只是无主覆盖（上游
+`applyEntryPatches` warn 后 skip）无害；误删「待装插件的配置行」会真丢用户配置。
+
 ---
 
 ## 6. 教训清单（省下重复踩坑的时间）
