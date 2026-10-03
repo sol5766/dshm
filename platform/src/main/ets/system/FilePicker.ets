@@ -21,7 +21,10 @@
  * 前者不该提示任何错误，后者必须提示，否则用户会以为文件已经带上了。
  */
 
-import { common } from '@kit.AbilityKit';
+// 【2026-10-03 改：不再需要 abilityAccessCtrl】本文件已**不申请任何权限**（见下方
+// 权限说明注释）。`common` 仍用于选择器上下文，`bundleManager` 仍用于定位
+// `Download/<包名>/`；原先导入的那两个权限类型也已一并删除。
+import { common, bundleManager } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { fileUri } from '@kit.CoreFileKit';
@@ -31,6 +34,34 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const DOMAIN: number = 0xD5A1;
 const TAG: string = 'platform/filepicker';
+
+/**
+ * ── 本路线**不申请任何权限**（2026-10-03 定稿，就地更正上一版方案）──
+ *
+ * 上一版曾计划额外声明并运行时申请**两条 Download / Documents 目录权限**
+ * （权限名见 `dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md` §4.2 的"已废弃"一行），
+ * 以换取任意 Download/Documents 子树的**路径级**读写。**该方案已废弃**，两条硬理由：
+ *
+ *   ① 【权限零差异铁律】新构建的包必须与作者成品 HAP
+ *      （`/tmp/DSHM-1.0.0-arm64-signed.hap`，`requestPermissions` 恰 **11 项**）
+ *      **逐项一致**，否则装不上。多声明任何一项都直接破坏这条等价关系。
+ *   ② 【ACL 白名单只有 5 条】用户的 AGC profile
+ *      （`.cert-work/com_dshm_dshclient.p7b`）`acls.allowed-acls` 只有
+ *      `FILE_ACCESS_PERSIST` / `READ_WRITE_USER_FILE` / `ACCESS_USER_FULL_DISK` /
+ *      `CUSTOM_SANDBOX` / `ALLOW_EXTERNAL_NATIVE_CODE`；任何**超出**这 5 条的 ACL
+ *      需求都会导致 `grant request permissions failed`（**已实测踩过**，
+ *      见 `.cert-work/apply_profile_dshm.py` 头注）。而这两项在官方文档里自相矛盾
+ *      （列为 normal 用户授权，正文又要求"继续采用受限权限申请方式"）⇒ 真机上
+ *      很可能仍在 ACL 射程内，正是上一条禁令要挡的形态。
+ *
+ * ⇒ 落点改为 `DocumentPickerMode.DOWNLOAD`：官方 FAQ `faqs-local-file-manager-67`
+ * 与安全控件 `DownloadFileButton` 口径一致——**这条路不需要任何权限**，
+ * 配合 `probePathWritable()` 的**实测**判据（而不是按权限表推断）。
+ * 取证见 `dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md` §4.2/§6.1。
+ */
+
+/** 探写用的临时文件名（建在目标目录里，探完即删）。 */
+const WRITE_PROBE_NAME: string = 'dshm-write-probe.tmp';
 
 /**
  * 端侧单文件上限（字节）。
@@ -104,6 +135,9 @@ export interface PickedFolder {
  * 由调用方按"不可用"处理（不拿 URI 冒充路径）。
  */
 export async function pickFolder(context: common.Context): Promise<PickedFolder> {
+  // 【2026-10-03 更正】这里原本先申请一次"公共目录路径级权限"。**已删除**：
+  // 本路线不申请任何权限（权限零差异铁律 + ACL 白名单只有 5 条，理由见文件顶部注释）。
+  // 用户若选了写不进去的目录，下面的探写会失败并自动退到 `publicDownloadFolder()` 兜底。
   let uris: string[] = [];
   try {
     const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
@@ -138,7 +172,273 @@ export async function pickFolder(context: common.Context): Promise<PickedFolder>
       reason: '已选中文件夹，但拿不到它的真实路径（Host 需要路径而不是 URI），因此无法作为工作区。'
     };
   }
+  // 【2026-10-03 新增】探一次"Host 能不能在这个目录里真写"。
+  // 【为什么必须探】Host 是 Node、按 POSIX 路径干活（`dsh-fs-local` 是纯 node:fs，
+  // 自身不做任何路径转换/沙箱判断），而"能读"不等于"能写"：本应用拿不到路径级写权时，
+  // 选中的目录只读得动——用户看到的正是"agent 只能读、写不进、bash rm 也删不掉"。
+  // 探得到的结论是**实测**，比按权限表推断可靠（hmfs 上元数据会撒谎，见 docs/70 §2.1）。
+  if (!probePathWritable(realPath)) {
+    hilog.warn(DOMAIN, TAG,
+      '所选目录不可写 path=%{public}s，改用应用公共目录', realPath);
+    const fallback: PickedFolder = await publicDownloadFolder(context);
+    if (fallback.outcome === PickOutcome.PICKED && fallback.path.length > 0) {
+      return {
+        outcome: PickOutcome.PICKED, uri: fallback.uri, path: fallback.path,
+        name: fallback.name,
+        reason: `所选目录（${realPath}）Host 只能读、不能写入/删除；已改用本应用在系统`
+          + `「文件管理 → 下载」下的专属目录，它在文件管理器里可见且 agent 可读写删。`
+      };
+    }
+    // 兜底也拿不到 ⇒ 保持原行为（返回用户选的路径）。宁可"能读不能写"，
+    // 也不要在这里发明第二种失败形态（调用方对 FAILED 的处置是回退沙箱浏览）。
+    hilog.warn(DOMAIN, TAG, '公共目录兜底不可用：%{public}s', fallback.reason);
+  }
   return { outcome: PickOutcome.PICKED, uri: uri, path: realPath, name: nameOfUri(uri), reason: '' };
+}
+
+/**
+ * 实测"Host 能不能在这个目录里写/删"。
+ *
+ * 【为什么用真写而不是查元数据或查权限状态】三条都不可靠：
+ *   · hmfs 的 `stat`/`access` 会撒谎（docs/70 §2.1：「对占位全部返回成功且 mode=0777」）；
+ *   · 权限状态"已授予"不等于这条路径可写（授权是按 URI/包名归属的，不是按权限位）；
+ *   · 只有真跑一次 `open(CREATE)` + `unlink`，才是"Host 侧 node:fs 能不能干成事"的同口径证据。
+ * 【为什么要 unlink 而不是留个空文件】留下垃圾文件会让"用户可见目录"变脏；
+ * 且**删除本身就本 patch 要验的能力之一**——探针删不掉，说明这个目录同样删不掉 agent 的文件。
+ * 【失败一律静默返回 false】探写是判据，不是业务；它自己不该抛错给 UI。
+ *
+ * @returns true = 该目录下 create+write+unlink 全部成功
+ */
+export function probePathWritable(path: string): boolean {
+  if (path.length === 0) {
+    return false;
+  }
+  const probe: string = `${path}/${WRITE_PROBE_NAME}`;
+  let file: fs.File | undefined = undefined;
+  let created: boolean = false;
+  try {
+    file = fs.openSync(probe, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    created = true;
+    fs.writeSync(file.fd, 'ok');
+    fs.closeSync(file);
+    file = undefined;
+    fs.unlinkSync(probe);
+    created = false; // 已自行清理 ⇒ 别让 finally 再删一次（否则会打一条无意义的"清理失败"）
+    return true;
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.info(DOMAIN, TAG, '探写失败（按不可写处理）：code=%{public}d msg=%{public}s', e.code, e.message);
+    return false;
+  } finally {
+    if (file !== undefined) {
+      try {
+        fs.closeSync(file);
+      } catch (closeErr) {
+        // 关闭失败不影响判据（上面已经按失败收场）
+        hilog.warn(DOMAIN, TAG, '探写文件关闭失败');
+      }
+    }
+    if (created) {
+      // 清理：write 失败时文件可能已被创建，别把它留在用户目录里。
+      try {
+        fs.unlinkSync(probe);
+      } catch (cleanupErr) {
+        hilog.warn(DOMAIN, TAG, '探写残留清理失败（不影响判据）');
+      }
+    }
+  }
+}
+
+/**
+ * 取"本应用在系统公共目录里的专属文件夹"，并确认它**可读写删**。
+ *
+ * 【为什么是它】`DocumentPickerMode.DOWNLOAD`（API 12+）是**唯一**不依赖任何受限权限、
+ * 又能给到"用户可见 + 路径级可读写"的路子。官方文档（docId
+ * `.../保存用户文件/save-user-file` 的「DOWNLOAD模式保存文件 / 模式特点」与 FAQ
+ * `faqs-local-file-manager-67`）逐字：
+ *   · 「自动创建在Download/包名/目录。跳过文件选择界面直接保存。」
+ *   · 「返回的URI已具备持久化权限，用户可在该URI下创建文件。」
+ *   · 「应用可以通过系统预定义的用户文件目录**直接使用@ohos.file.fs的能力进行访问**。
+ *      注意该方式应用只能访问到Download目录下的自己包名下的文件或文件夹。」
+ *   · 「**应用卸载重装后若包名未修改，应用也可直接访问卸载前存放在该目录下的文件或文件夹。**」
+ * FAQ 的示例甚至**不用 picker 的返回值**，而是自己拼
+ * `'file://docs/storage/Users/currentUser/Download/' + bundleName` 再用绝对路径 open(READ_WRITE)
+ * ⇒ 这是**按包名归属的路径级授权**，进程内任何代码（含 Host 的 node:fs 与 bash 的 rm）
+ * 都吃同一份授权。
+ *
+ * 【两步走】① 先按包名直拼路径并探写（重装后/二次进入时命中，**不再调 save**，
+ * 避免每次多造一个空文件）；② 不命中才用 DOWNLOAD 模式的 `save()` 建立归属与目录。
+ *
+ * 【未核实】① `save()` 返回的 URI 指向的是**目录**还是它预置的那个空文件——
+ * 文档示例写的是 `uri + '/test.txt'`，暗示目录；本函数两种都兼容（见下）。
+ * ② Node/koffi 侧是否与 `fileIo` 同权（文档完全未涉及 node），以及归属授权是否覆盖
+ * `unlink`——**唯一判据是真机跑一次 `bash rm`**（见 30 号文档 §7.2）。
+ */
+export async function publicDownloadFolder(context: common.Context): Promise<PickedFolder> {
+  const bundleName: string = readBundleName();
+  if (bundleName.length === 0) {
+    return {
+      outcome: PickOutcome.FAILED, uri: '', path: '', name: '',
+      reason: '拿不到本应用包名，无法定位 Download 下的专属目录。'
+    };
+  }
+  const dirUri: string = `file://docs/storage/Users/currentUser/Download/${bundleName}`;
+  let path: string = pathOfUri(dirUri);
+  // ① 已存在且可写 ⇒ 直接用（不碰 save()，不产生多余文件）
+  if (path.length > 0 && probePathWritable(path)) {
+    hilog.info(DOMAIN, TAG, '公共目录：命中已存在的应用专属目录 %{public}s', path);
+    return { outcome: PickOutcome.PICKED, uri: dirUri, path: path, name: bundleName, reason: '' };
+  }
+  // ② 用 DOWNLOAD 模式建立归属（自动创建 Download/<包名>/，跳过文件选择界面）
+  let createdUri: string = '';
+  try {
+    const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
+    options.pickerMode = picker.DocumentPickerMode.DOWNLOAD;
+    const view: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+    const uris: string[] = await view.save(options);
+    if (uris.length > 0) {
+      createdUri = uris[0];
+      path = pathOfUri(createdUri);
+      // 返回值可能是"目录 URI"也可能是 picker 预置的那个空文件的 URI —— 两种都要能吃：
+      // 指向文件时取它的父目录（FAQ/save-user-file 的示例是在返回值后面接 '/xxx.txt' 用，
+      // 说明正常的返回值是目录，但这里不赌）。
+      if (path.length > 0 && !isDirectory(path)) {
+        const slash: number = path.lastIndexOf('/');
+        if (slash > 0) {
+          path = path.substring(0, slash);
+        }
+      }
+    }
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, 'DOWNLOAD 模式不可用：code=%{public}d msg=%{public}s', e.code, e.message);
+    return {
+      outcome: PickOutcome.FAILED, uri: '', path: '', name: bundleName,
+      reason: `公共下载目录不可用（DOWNLOAD 模式失败：${e.code} ${e.message}）。`
+    };
+  }
+  if (path.length === 0) {
+    return {
+      outcome: PickOutcome.FAILED, uri: createdUri, path: '', name: bundleName,
+      reason: 'DOWNLOAD 模式没有返回可用路径。'
+    };
+  }
+  if (!probePathWritable(path)) {
+    return {
+      outcome: PickOutcome.FAILED, uri: createdUri, path: '', name: bundleName,
+      reason: `已建立 ${path}，但 Host 仍写不进去（真机需按 30 号文档 §7.2 的失败判别取证）。`
+    };
+  }
+  hilog.info(DOMAIN, TAG, '公共目录：DOWNLOAD 模式已建立 %{public}s', path);
+  return { outcome: PickOutcome.PICKED, uri: createdUri, path: path, name: bundleName, reason: '' };
+}
+
+/**
+ * 【2026-10-03 新增】启动期**幂等认领**一次"本应用在公共 Download 下的专属目录"。
+ *
+ * ── 它解决什么 ────────────────────────────────────────────────────────────────
+ * 37 轮真机判据 1 失败的直接原因是：Host 侧 `resolveWorkspaceDir()` 自己 `mkdir`
+ * `Download/<包名>/` 必然 EPERM（31 轮已定性：应用进程**直拼路径 mkdir 公共目录**
+ * 不被放行），于是默认工作区退回沙箱、用户的产物落在文件管理器看不见的地方。
+ * 而 **`DocumentPickerMode.DOWNLOAD` 的 `save()` 能建出这个目录**（31 轮真机：
+ * 106 ms、无 UI、返回目录 URI、`pickerPath == 直拼路径`）——官方 FAQ
+ * `faqs-local-file-manager-67` 的原话就是「自动创建在 Download/包名/ 目录。
+ * 跳过文件选择界面直接保存。」⇒ 认领这件事**只能**在 ArkTS 侧（拿到授权的那一层）
+ * 做，Host 补不出来（30 号文档 §2.2/§5.2）。
+ *
+ * ── 为什么**每次启动**都要认领，而不是"建过一次就够"───────────────────────────
+ * 官方 FAQ `faqs-local-file-manager-46` 逐字警告：「应用在冷启动后，系统可能不会
+ * 自动授予之前通过 picker 等系统能力获取的 URI 的持续读取权限」⇒ "上次建成功"
+ * **不能**推断"这次还可用"。本函数因此不读任何持久化状态，每次都实测一遍：
+ * `publicDownloadFolder()` 内部先直拼路径探写（命中即复用，不产生多余文件），
+ * 不命中才走 DOWNLOAD 模式的 `save()` 重建归属。
+ *
+ * ── 纪律 ─────────────────────────────────────────────────────────────────────
+ * · **不申请任何权限**（权限零差异铁律，见本文件顶部说明）：只调 picker，不碰 manifest。
+ * · **失败绝不阻断启动**：拿不到就返回空串，Host 明确走沙箱回退分支并记 diag。
+ * · **每次启动都调**、进程内只成功一次（结果缓存，避免多处重复拉起选择器）。
+ * · 结果交给 Host 的通道是 `DSHM_PUBLIC_DOWNLOAD`（`hostruntime` 的 `buildHostEnv()`），
+ *   在 **spawn 前**写进 env ⇒ 天然无竞态（Host 读到的一定是本次认领的结果）。
+ *
+ * @param context UIAbility 上下文（`DocumentViewPicker` 需要它）
+ * @returns 认领到的绝对路径；失败/不可用返回空串（**不猜**）
+ */
+export async function claimPublicDownloadFolder(context: common.Context): Promise<string> {
+  if (claimedDownloadDir.length > 0) {
+    return claimedDownloadDir;
+  }
+  try {
+    const folder: PickedFolder = await publicDownloadFolder(context);
+    if (folder.outcome === PickOutcome.PICKED && folder.path.length > 0) {
+      claimedDownloadDir = folder.path;
+      // 与 Host 的 diag 同前缀，端侧 grep 一条 `默认工作区：` 就能同时看到两侧读数。
+      hilog.info(DOMAIN, TAG,
+        '默认工作区：认领 %{public}s（DOWNLOAD 模式，无 UI；每次启动重认一次，见 FAQ-46）',
+        folder.path);
+      return folder.path;
+    }
+    hilog.warn(DOMAIN, TAG, '默认工作区：认领失败（%{public}s）⇒ Host 将回退沙箱工作区', folder.reason);
+    return '';
+  } catch (err) {
+    // publicDownloadFolder 自身已吞掉各类错误；这里再兜一层，保证"认领"永远不会把启动搞崩。
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '默认工作区：认领异常（按失败处理）：code=%{public}d msg=%{public}s',
+      e.code, e.message);
+    return '';
+  }
+}
+
+/**
+ * 进程内认领缓存（空串 = 尚未成功认领过）。
+ *
+ * 【为什么失败不留哨兵】失败可能是"这一次"的（如系统临时拒绝）：留哨兵会把一次瞬时
+ * 失败变成整个进程内的永久失败。这里的调用点只有一处（Host 启动前），所以重复调用
+ * 的代价只发生在"Host 反复启动"时，而那时**本该**重新实测一次（FAQ-46）。
+ */
+let claimedDownloadDir: string = '';
+
+/**
+ * 取本应用包名（`Download/<包名>/` 的那一段）。取不到返回空串（不猜）。
+ *
+ * 【为什么导出】两条理由，都要求包名只有**一份**来源：
+ *  ① `publicDownloadFolder()` 在本文件内就要用它拼 `Download/<包名>/`；
+ *  ② `entry/.../runtime/NodeRuntime.ets` 构造时取一次打诊断日志，用来核对
+ *     `DSHM_PUBLIC_DOWNLOAD` 的末段是不是本应用（归属关系一眼可读）。
+ * 两处各写一遍 `bundleManager` 调用迟早会分叉，而分叉的后果是"日志指向的目录与实际
+ * 认领到的目录不是同一个"，排查时会被带偏。故只此一份，导出复用。
+ * 【注意】它**不是路径来源**：默认工作区路径的唯一来源是本文件认领后经
+ * `DSHM_PUBLIC_DOWNLOAD` 交给 Host 的那份值（Host 的 `resolveWorkspaceDir()` 只消费它）。
+ */
+export function readBundleName(): string {
+  try {
+    const flags: number = bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION;
+    const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(flags);
+    return info.name;
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '取包名失败：code=%{public}d msg=%{public}s', e.code, e.message);
+    return '';
+  }
+}
+
+/** URI → 真实路径；失败返回空串（沿用 `pickFolder` 的"不拿 URI 冒充路径"口径）。 */
+function pathOfUri(uri: string): string {
+  try {
+    return new fileUri.FileUri(uri).path;
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, 'URI → 路径失败：%{public}s', e.message);
+    return '';
+  }
+}
+
+/** 路径是否目录（stat 失败按"不是目录"处理——那说明它压根不可访问）。 */
+function isDirectory(path: string): boolean {
+  try {
+    return fs.statSync(path).isDirectory();
+  } catch (err) {
+    return false;
+  }
 }
 
 /**

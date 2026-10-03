@@ -49,7 +49,27 @@ export {
   ThemeMode,
   themeModeOf
 } from './system/LocalPrefs';
-export { MAX_ATTACHMENT_BYTES, PickOutcome, pickDocument, pickFolder } from './system/FilePicker';
+export {
+  // 【2026-10-03】启动期**幂等认领**本应用在公共 Download 下的专属目录
+  //（DOWNLOAD 模式、无 UI、每次启动重认一次）。结果经 `buildHostEnv()` 的
+  // `DSHM_PUBLIC_DOWNLOAD` 在 spawn 前交给 Host，Host 只做"消费 + 验证"、不再 mkdir。
+  claimPublicDownloadFolder,
+  MAX_ATTACHMENT_BYTES,
+  PickOutcome,
+  pickDocument,
+  pickFolder,
+  // 【2026-10-03】"用户可见目录 + agent 可读写删"用到的两件设备能力
+  // （见 dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md）。
+  // **不导出权限申请**：本路线不申请任何权限（权限零差异铁律 + ACL 白名单只有 5 条），
+  // 上一版的权限申请函数已随 module.json5 的两条声明一并删除。
+  probePathWritable,
+  publicDownloadFolder,
+  // 【2026-10-03】包名的唯一来源（`Download/<包名>/` 的那一段）。**不是路径来源**：
+  // 默认工作区路径的唯一来源是上面 `claimPublicDownloadFolder()` 的返回值，经
+  // `buildHostEnv()` 的 `DSHM_PUBLIC_DOWNLOAD` 在 spawn 前交给 Host。包名只用于
+  // `NodeRuntime` 的一行诊断日志（核对认领到的目录末段是不是本应用）。
+  readBundleName
+} from './system/FilePicker';
 export type { PickedFile, PickedFolder } from './system/FilePicker';
 /** E147：字符串资源取值入口（状态字符串不能用 `$r`，须经此函数） */
 export { localized, localizedOr } from './system/Strings';

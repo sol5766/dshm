@@ -3349,7 +3349,18 @@ struct Index {
    */
   private coreHost(filesDir: string, resourceDir: string, cacheDir: string): DshHost {
     if (this.host === null) {
-      this.host = new DshHost(filesDir, new NodeRuntime(`${resourceDir}/resources/app/main.js`, filesDir));
+      /*
+       * 【2026-10-03】把 UIAbility 上下文一并交给载体：`NodeRuntime.start()` 要用它
+       * 在 spawn **之前**调一次 `platform` 的 `claimPublicDownloadFolder()`
+       * （`DocumentPickerMode.DOWNLOAD`，无 UI、~106 ms），把 `Download/<包名>/`
+       * 认领出来并经 `DSHM_PUBLIC_DOWNLOAD` 交给 Host。见 NodeRuntime 的同名方法注释。
+       * 【为什么在这里取】`coreHost()` 是本页唯一的宿主构造点，6 个调用点都已在
+       * 组件方法内 ⇒ `getContext(this)` 一定可用；改签名会把调用点全部翻一遍，
+       * 而这条链只需要"构造点时顺手拿到上下文"。
+       */
+      const ctx = getContext(this) as common.UIAbilityContext;
+      this.host = new DshHost(filesDir,
+        new NodeRuntime(`${resourceDir}/resources/app/main.js`, filesDir, ctx));
     }
     return this.host;
   }

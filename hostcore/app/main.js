@@ -917,6 +917,19 @@ function reportConfigError() {
 // ── 1. 沙箱 HOME ────────────────────────────────────────────────────────
 // dsh 的目录选择器以 os.homedir() 为起点；鸿蒙下它指向沙箱外目录（EPERM）。
 // 必须在任何 dsh 代码调用 homedir() 之前设置。
+/*
+ * 【必须在覆盖 HOME 之前把"原始 HOME"留一份】
+ *
+ * 真机探针读数：应用进程**原始** HOME = `/storage/Users/currentUser`（用户可见
+ * 公共目录的根），而下面这一行必须把它改成**沙箱** HOME（dsh 的 os.homedir() 要它）。
+ * 默认工作区最终要落在用户可见的 `Download/<包名>/`，这个值只用于 diag 一行
+ * （排查时"原始 HOME 是什么"决定了路径该长什么样）；错过了这一行，后面读到的 HOME
+ * 永远是沙箱，`$HOME/Download/...` 会解析成 `<sandbox>/Download/...` 这种
+ * **看起来对、实际错**的路径，而 diag 里再也看不出来。
+ * （本机复现：不抄这一份时 `host-ready.json` 的 workspace 是
+ *  `…/probe-remove-sandbox/Download/com.dshm.dshclient`。）
+ */
+const ORIGINAL_HOME = (process.env.HOME || '').trim();
 process.env.HOME = SANDBOX_HOME;
 process.env.USERPROFILE = SANDBOX_HOME;
 process.env.DSH_HOME = HOME_DIR;
@@ -966,10 +979,131 @@ if (SANDBOX_HOME.length > 0) {
  * 在我们这种"Node 跑在应用进程的一个线程里"的形态下它会改**整个进程**的 cwd，
  * 影响 ArkUI/其它线程。所以不碰 cwd，改为**把这个可写目录作为默认工作区传下去**，
  * 由客户端在建会话时显式指定（`session/create` 的 `cwd`）。
+ *
+ * ── 默认工作区 = "用户可见的 Download/<包名>/" ──────────────────────────────
+ * 目标是让 agent 的产物落在**用户能在文件管理器里看见**的地方，而不是应用沙箱内部。
+ * 端侧事实（真机探针读数）：
+ *   · 应用进程**原始** HOME = `/storage/Users/currentUser`（注意：不是 `process.env.HOME`
+ *     在**本文件执行到这一行时**的值——它早在上面那段就被改成了沙箱 HOME，
+ *     所以 diag 里用的是那里抄下来的 `ORIGINAL_HOME`）；
+ *   · `Download/<包名>/` = `/storage/Users/currentUser/Download/com.dshm.dshclient`，
+ *     该目录**写/读/删全通且不需要任何 ACL**（`DocumentPickerMode.DOWNLOAD` 的
+ *     `save()` 建立的是**按包名归属的路径级授权**，卸载重装后同包名仍可直接访问）；
+ *   · 但这条授权**只能由 ArkTS 侧经 picker 取得**：应用进程自己直拼路径 `mkdir`
+ *     公共目录**必 EPERM**（真机 hilog 原文见 `resolveWorkspaceDir()` 的头注）。
+ *
+ * 【通道：env，只有一条】认领结果由 ArkTS 在 **spawn 之前**写进 env
+ * （`DSHM_PUBLIC_DOWNLOAD`，见 `hostruntime` 的 `buildHostEnv()` 与 `NodeRuntime` 的
+ * `claimPublicDownload()`）。env 是 spawn 时定死的 ⇒ 天然无竞态；选它而不是"启动后读
+ * 一个状态文件"，是因为 Host 在**启动最早期**就要算出默认工作区，读文件会引入
+ * "文件还没写/还是上一轮的"这类时间窗，而这类错误的表现是**静默指向错的目录**。
+ * 【为什么不另传包名】曾经并传 `DSHM_BUNDLE`，让本文件自己拼 `$ORIGINAL_HOME/Download/<包名>`
+ * 再 mkdir —— 端侧实测必 EPERM（应用进程直拼公共路径建目录不被放行），已整条删除。
+ * 包名作为**路径来源**只会指向一个不存在、也建不出来的目录；现在它只出现在 ArkTS 的
+ * 一行诊断日志里，本文件需要包名时从 `DSHM_PUBLIC_DOWNLOAD` 的末段反推。
+ *
+ * 【安全回退（必须有）】认领失败、或认领到的路径 `lstat` 不是目录/探写不过时，
+ * 一律回退 `<SANDBOX_HOME>/workspace`。绝不允许出现 cwd = `/` 或不可写目录
+ * （E98 教训：cwd=`/` 会让 `session/follow` 抛 `…reading 'kind'`、
+ * `workspaceFiles/list` 报 cannot list）。
+ * 每个分支的**最终路径 + 理由 + 原始 HOME**都写进 diag，端侧可复核。
+ *
+ * 【为什么"实测探写"而不是查权限】hmfs 的 stat/access 会撒谎（docs/70 §2.1
+ * 「对占位全部返回成功且 mode=0777」）；`probePathWritable()` 的注释（FilePicker.ets）
+ * 已经记录了同一结论。故这里做一次 lstat + create+write+unlink。
  */
-const WORKSPACE_DIR = SANDBOX_HOME.length > 0 ? path.join(SANDBOX_HOME, 'workspace') : '';
-if (WORKSPACE_DIR.length > 0) {
-  ensureDir(WORKSPACE_DIR);
+const WORKSPACE_DIR = resolveWorkspaceDir();
+
+/** 探写判据：create+write+unlink 全部成功才算"这个目录真能当工作区"。 */
+function workspaceProbeWritable(dir) {
+  if (dir.length === 0) {
+    return false;
+  }
+  const probe = path.join(dir, '.dshm-workspace-probe');
+  let fd = null;
+  try {
+    fd = fs.openSync(probe, 'w');
+    fs.writeSync(fd, 'ok');
+    fs.closeSync(fd);
+    fd = null;
+    fs.unlinkSync(probe);
+    return true;
+  } catch (e) {
+    diag(`工作区探写失败（按不可写处理）：${dir} : ${e && e.message}`);
+    return false;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (e) { /* 关闭失败不影响判据 */ }
+    }
+    try { fs.unlinkSync(probe); } catch (e) { /* 可能已删掉 */ }
+  }
+}
+
+/**
+ * 解析默认工作区：**消费 + 验证** ArkTS 认领到的公共目录，否则回退 `<SANDBOX_HOME>/workspace`。
+ *
+ * ── 本函数**不建立**任何公共目录，只验证 ──────────────────────────────────────
+ * 应用进程按 `$ORIGINAL_HOME/Download/<包名>` 直拼路径并 `fs.mkdirSync(..., {recursive:true})`
+ * 在端侧**必 EPERM**（真机 hilog 原文）：
+ *     `默认工作区：mkdir /storage/Users/currentUser/Download/com.dshm.dshclient 失败（EPERM…）`
+ *     `默认工作区：所有 Download 候选都不可用 ⇒ 回退 …/files/workspace`
+ * 已定性：应用进程**直拼路径建公共目录**不被放行；该目录只能经
+ * `DocumentPickerMode.DOWNLOAD` 的 `save()`（ArkTS 侧、无 UI）建立归属。
+ * ⇒ "建立"整件事在 ArkTS（`platform` 的 `claimPublicDownloadFolder()`），
+ *   Host 只做两件**只读 + 探写**的事：① `lstat` 判它是目录；② `create+write+unlink`
+ *   实测可写。两条都过才采用。
+ *
+ * ── 顺序（唯一一条）──────────────────────────────────────────────────────────
+ *   ① `DSHM_PUBLIC_DOWNLOAD` 非空 ⇒ lstat 是目录 **且** 探写通过 ⇒ 采用它；
+ *   ② 否则**直接**回退 `<SANDBOX_HOME>/workspace`（在那里 mkdir：那是沙箱，本来就该建）。
+ * 任何情况下都**绝不**返回 `/`、相对路径或"看起来像路径的空串"；`SANDBOX_HOME` 也为空
+ * （异常装配）时返回 `''`（宿主用自己的 cwd），并把这一事实记进 diag。
+ *
+ * ── diag ────────────────────────────────────────────────────────────────────
+ * 每个分支都打出**最终选定的路径 + 选择理由 + 原始 HOME**，端侧一条 grep 即可复核。
+ *
+ * @returns 可用工作区的绝对路径；只有 `SANDBOX_HOME` 也为空时才返回 `''`。
+ */
+function resolveWorkspaceDir() {
+  const fallback = SANDBOX_HOME.length > 0 ? path.join(SANDBOX_HOME, 'workspace') : '';
+  const claimed = (process.env.DSHM_PUBLIC_DOWNLOAD || '').trim();
+  const reasons = [];
+  if (claimed.length === 0) {
+    reasons.push('DSHM_PUBLIC_DOWNLOAD 为空（ArkTS 侧 claimPublicDownloadFolder() 本次没认领到）');
+  } else {
+    // ① 必须是**目录**：lstat（不跟随末段链接），避免一个指向别处的链接冒充目录。
+    let isDir = false;
+    let why = '';
+    try {
+      isDir = fs.lstatSync(claimed).isDirectory();
+      if (!isDir) {
+        why = 'lstat 显示它不是目录';
+      }
+    } catch (e) {
+      why = `lstat 失败：${e && e.message}`;
+    }
+    if (isDir && workspaceProbeWritable(claimed)) {
+      diag(`默认工作区：${claimed}（来源=DSHM_PUBLIC_DOWNLOAD，即 ArkTS 经 DOWNLOAD 模式认领的`
+        + ` Download/<包名>/，用户可见；原始 HOME=${ORIGINAL_HOME || '(空)'}；`
+        + '选择理由=lstat 判为目录且 create+write+unlink 全部通过）');
+      return claimed;
+    }
+    reasons.push(`DSHM_PUBLIC_DOWNLOAD=${claimed} 不可用（${isDir ? '探写未通过' : why}）`);
+  }
+  // ② 回退：只在这里 mkdir（沙箱内可写，不是公共目录）。
+  if (fallback.length === 0) {
+    diag(`默认工作区：回退不可用（理由：${reasons.join('；')}）且 SANDBOX_HOME 为空 `
+      + `⇒ 返回空串（不 mkdir、不猜 '/'，宿主将用它自己的 cwd）`);
+    return '';
+  }
+  try {
+    fs.mkdirSync(fallback, { recursive: true });
+  } catch (e) {
+    diag(`默认工作区：回退目录 mkdir ${fallback} 失败（${e && e.message}）——仍返回它，`
+      + '由宿主在创建会话时如实报错，而不是在这里静默换一个猜的路径');
+  }
+  diag(`默认工作区：回退 ${fallback}（理由：${reasons.join('；')}；原始 HOME=${ORIGINAL_HOME || '(空)'}）`);
+  return fallback;
 }
 
 /*
@@ -1098,39 +1232,107 @@ function rewriteExecutable(dst, write, label) {
  *  端侧 busybox **没有编入 bash/hush applet**（真机 `busybox --list` 只有 ash/sh），
  *  而这里把 `bash` 写成了 busybox 的副本 ⇒ 运行 `bash -c …` 按 argv[0] 分发时
  *  报 `bash: applet not found`（exit 127），bash 工具通道整体回归。
- *  bash/hush 改由下面的 `ensureBashShim()` 写成**文本垫片**（/system/bin/sh 转发），
- *  不再参与 busybox 多合一复制。 */
+ *  bash/hush 改由下面的 `ensureBashShim()` 写成**文本垫片**；
+ *  不再参与 busybox 多合一复制。
+ *  【注】垫片在**手机档内不生效**（真机 `ash=denied`）——保留理由见 `bashShimLines()`
+ *  的"手机档内不生效"一节：无害 + 为 tablet/2in1 档预留 + 提供 `ash` exec 探针。 */
 const BUSYBOX_APPLETS = ['ash', 'bzip2', 'xz', 'hexdump', 'less', 'nc', 'unzip', 'vi'];
 
 /**
- * bash 垫片脚本（POSIX sh）：bash 工具通道的落点。
+ * bash / hush 垫片：bash 工具通道的落点。
  *
  * 【为什么是垫片而不是 busybox 副本】见 BUSYBOX_APPLETS 注释：该 busybox 无 bash
- * applet。真 bash 也不存在（沙箱里只有 toybox/busybox）。逐级探测保证语义最接近：
- *   真 bash（若将来系统自带）→ busybox ash（POSIX 超集，支持 [[ ]]、数组以外多数）→
- *   /system/bin/sh（toybox sh，最后兜底）。
+ * applet（本机对包内 busybox 的 applet 名表逐项核对：393 个名字含 `ash`/`sh`，
+ * **不含 `bash`/`hush`**）。真 bash 也不存在（沙箱里只有 toybox/busybox）。
+ *
+ * 【2026-10-03 P0 回归修复：首行解释器改为随包 ash 副本】
+ * 旧垫片首行是 `#!/system/bin/sh`，而真机探针证明端侧 **对三方应用 execve
+ * `/system/bin/sh`（含 `/bin/sh`，同一文件）被 SELinux 拒绝**：
+ *     V0-native-sysInfo = {…,"sh":"x-no:13","rm":"x-ok","toybox":"x-ok",…}
+ *     ls -lZ /system/bin/sh ⇒ -rwxr-xr-x root shell u:object_r:sh_exec:s0
+ * 即：模式 755 却 exec 失败 = **MAC 拒绝**（不是权限位问题）。而脚本的"首行解释器"
+ * 是**内核在 execve 时**打开的 —— 系统 shell 被拒 ⇒ 内核返回 EACCES ⇒ 整个垫片
+ * 从第一行就死，垫片内部的 `for cand` 探测链**一行都执行不到**。这正是真机 bash
+ * 工具报 `spawn bash EACCES`（errno 13，不是 ENOENT ⇒ `bash` 这个名字已被
+ * dsh-subprocess-local 按 PATH 成功解析到本垫片）的直接原因。
+ * 修复：解释器指向**随包自签名** busybox 的 `ash` 副本（`<binDir>/ash`：同目录、
+ * 同创建者、X_OK；探针 x-ok 且实测能真删文件；设备上 `/lib/ld-musl-aarch64.so.1`
+ * 存在 ⇒ musl 动态链接可载入）。
+ *
+ * 【硬约束：首行解释器必须是"绝对路径 + 该路径存在 + 可执行"】内核不接受 PATH
+ * 查找、不接受 `#!/usr/bin/env xxx` 这种二跳（那需要先能 exec env）。因此形态只能
+ * **在生成期选定**（见 bashShimLines）：ash 副本可用 ⇒ 形态 ①；不可用 ⇒ 形态 ②
+ * 退回旧探测链。运行时在脚本内"再探测一次解释器"是做不到的 —— 脚本要能跑起来
+ * 才谈得上探测，而它跑不起来的失败点恰恰是第一行。
+ *
  * 【为什么把参数原样透传】bash 工具传的是 `bash -c "<script>"`，脚本里可能含管道、
  * `&&`、重定向、`[[ ]]` 等；必须用 `exec` 把参数整体交给确定的解释器执行，不能在
  * 垫片里解析脚本内容（那会破坏引用/转义语义）。
  * 【为什么 `-lc` 与登录 shell】部分工具以 `bash -lc` 起登录 shell 取 PATH；垫片对
- * 未知选项不做处理，直接透传，由下层解释器自行处理（ash/sh 均认 `-c`）。
+ * 未知选项不做处理，直接透传，由下层解释器自行处理（ash 认 `-c`）。
+ * 【为什么不是 ELF 而是脚本】脚本由**内核 + 构造期自签名的 ash**执行；本体仍是
+ * 宿主进程写出的普通文件（hmfs 上可执行），不引入原生代码/CMake/新权限。
+ *
+ * 【⚠ 手机档内**不生效**（明确的已知边界，不要把它当可用能力）】
+ * 本机（手机档）的真机探针读数是 `ash=denied`：随包 `ash` 副本**同样**被
+ * 签名域/MAC 策略拒绝 execve（与 `rg`/`git`/python 真身同一类拒绝）。
+ * ⇒ 两个形态在这台设备上都起不来，`bash` 工具通道**在手机档仍是不可用**的。
+ * 那为什么保留它：
+ *   · **无害**：它只写两个文本文件到我们自己的 bin 目录（`bash`/`hush` 两个名字），
+ *     不改任何系统文件、不新增权限、不影响其它工具；
+ *   · **为 tablet / 2in1 档保留可能性**：那两个档位的签名域/MAC 策略与手机档不同，
+ *     "随包自签名 ELF 能否 execve"没有先验答案，垫片把这条路留着就不必再改代码；
+ *   · **诊断价值**：`execProbeTargets()` 里的 `ash` 探针是判断"随包自签名 ELF
+ *     能不能 exec"的**唯一**机器可读读数 —— 它给出 `ash=denied` 本身就是结论
+ *     （失败点在解释器可执行性，而不是 argv[0] 派发或沙箱）。
+ * 换句话说：它现在的价值是**探针 + 未来档位的预留**，不是"手机档能跑 bash"。
  */
-const BASH_SHIM_LINES = [
-  '#!/system/bin/sh',
-  '# DSHM bash 垫片：端侧 busybox 未编入 bash applet（applet not found），',
-  '# 逐级探测把它转发到真正可用的 POSIX 解释器。见 hostcore/app/main.js 注释。',
-  'for cand in /system/bin/bash /bin/bash /usr/bin/bash; do',
-  '  if [ -x "$cand" ] && [ "$cand" != "$0" ]; then',
-  '    exec "$cand" "$@"',
-  '  fi',
-  'done',
-  'for cand in "${DSH_BUSYBOX:-}" /system/bin/busybox; do',
-  '  if [ -n "$cand" ] && [ -x "$cand" ]; then',
-  '    exec "$cand" ash "$@"',
-  '  fi',
-  'done',
-  'exec /system/bin/sh "$@"',
-];
+const BASH_SHIM_INTERPRETER = 'ash';
+
+/** 垫片降级链末端的系统 shell（与旧实现同值，仅在第 2 形态里使用）。 */
+const BASH_SHIM_SYSTEM_SHELL = '/system/bin/sh';
+
+/**
+ * 生成垫片脚本（两形态，见上）。**形态选择在生成期做**，运行时只 `exec` 一条路。
+ *
+ * 形态 ①（正常）：binDir/ash 已在 busybox 布置阶段落位 ⇒ 解释器直接指向它。
+ * 形态 ②（保守）：该副本不在/不可执行 ⇒ **退回旧探测链**（真 bash → busybox ash →
+ *   `/system/bin/sh`）。形态 ② 在本机（`u:object_r:sh_exec:s0` 对三方应用 execve 返回
+ *   EACCES）下的首行解释器就已经失败，所以它只是"不比以前更脆"的兜底，不是可用路径；
+ *   形态 ① 才是本设备上的可用解（ash 副本是随包自签名 ELF，探针 x-ok 且实测能真删文件）。
+ *
+ * 【为什么用数组返回】保持与旧 `BASH_SHIM_LINES` 相同的消费方式（`join('\n') + '\n'`），
+ * 改动面收敛在一处。
+ * @param {string} binDir 运行时真实 bin 目录（**生成期写死绝对路径**，与注入 PATH 的目录同源）
+ */
+function bashShimLines(binDir) {
+  const ashi = path.join(binDir, BASH_SHIM_INTERPRETER);
+  if (execOk(ashi)) {
+    return [
+      `#!${ashi}`,
+      '# DSHM bash 垫片：端侧 /system/bin/sh 对三方应用 execve 被 SELinux 拒绝（EACCES），',
+      '# 故解释器改为随包自签名 busybox 的 ash 副本（同目录、同创建者、x-ok）。',
+      `# 参数原样转发：bash 工具传的是 bash -c "<script>"，垫片不解析脚本内容。`,
+      '# 见 hostcore/app/main.js 的 ensureBashShim() 注释。',
+      `exec ${JSON.stringify(ashi)} "$@"`,
+    ];
+  }
+  return [
+    `#!${BASH_SHIM_SYSTEM_SHELL}`,
+    '# DSHM bash 垫片（降级形态）：同目录 ash 副本未就位 ⇒ 保留旧探测链（见 main.js 注释）。',
+    'for cand in /system/bin/bash /bin/bash /usr/bin/bash; do',
+    '  if [ -x "$cand" ] && [ "$cand" != "$0" ]; then',
+    '    exec "$cand" "$@"',
+    '  fi',
+    'done',
+    'for cand in "${DSH_BUSYBOX:-}" /system/bin/busybox; do',
+    '  if [ -n "$cand" ] && [ -x "$cand" ]; then',
+    '    exec "$cand" ash "$@"',
+    '  fi',
+    'done',
+    `exec ${BASH_SHIM_SYSTEM_SHELL} "$@"`,
+  ];
+}
 
 /**
  * 布置 bash/hush 文本垫片到 bin 目录。
@@ -1141,13 +1343,20 @@ const BASH_SHIM_LINES = [
  * chmod 可能触发 EACCES"）。
  * 【hush 用同一份垫片】hush 是 busybox 的另一款 POSIX shell，端侧同样未编入；
  * 语义上与 bash 垫片同为"转发到可用 POSIX 解释器"，直接复用，不做第二份。
+ * 【落点只有 bash/hush 两个名字】不影响同目录的 pnpm/npm/npx/dsh 假壳、python/
+ * python3/pip3/git/rg wrapper、busybox 本体及 ash 等 applet 副本。
+ * 【调用时机】必须在 `ensureBusybox()` **之后**（ash 副本由它先落位），顶层调用块
+ * 已是这个顺序 —— 否则形态探测会误判成"ash 未就位"而降级。
+ * 【本档不生效】见 `bashShimLines()` 的"手机档内不生效"一节：布置**会成功**（写文件
+ * 不需要 exec 许可），但垫片跑不起来（`ash=denied`）。布置与否都不影响其它能力。
  * @returns 是否全部布置成功
  */
 function ensureBashShim(binDir) {
   if (!binDir || binDir.length === 0) {
     return false;
   }
-  const script = BASH_SHIM_LINES.join('\n') + '\n';
+  const lines = bashShimLines(binDir);
+  const script = lines.join('\n') + '\n';
   for (const name of ['bash', 'hush']) {
     const dst = path.join(binDir, name);
     // 幂等：已是同一份垫片且可执行就跳过（不重复写、不重复 chmod）。
@@ -1164,7 +1373,7 @@ function ensureBashShim(binDir) {
       return false;
     }
   }
-  diag('bash 垫片：bash/hush 已布置为 /system/bin/sh 转发（busybox 无 bash applet）');
+  diag(`bash 垫片：bash/hush 已布置（解释器 ${lines[0].slice(2)}；busybox 无 bash applet）`);
   return true;
 }
 
@@ -2324,11 +2533,15 @@ function ensureRipgrepWrapper(binDir) {
    * 曾试过把 rg 字节由本进程复制到 bin/rg-real（与可用的 busybox 同目录、同创建者），
    * 期望复现"本进程创建即可执行"。真机读数否定了这条假设：
    *     exec 探测：… rg=denied，rg-real=denied，bash=ok
-   * 真正的分界不是"谁创建"，而是 **ELF 与脚本**：
-   *   · `bash` 垫片可跑 —— 它是 `#!/system/bin/sh` 脚本，内核 exec 的是**系统**
-   *     二进制 /system/bin/sh（放行），脚本只作为参数传入；
-   *   · `rg`/`git`/python 真身是**第三方 ELF**，execve 由**签名域策略**拒绝
-   *     （与创建者/inode/执行位无关）。
+   * 真正的分界不是"谁创建"，而是 **ELF 与脚本**，以及**首行解释器可不可 exec**：
+   *   · `bash` 垫片当时可跑 —— 它是 `#!/system/bin/sh` 脚本，且**当时的**探针读数是
+   *     `/system/bin/sh` 可 exec。后续真机取证**推翻**了这条基线：`sh="x-no:13"`，
+   *     `u:object_r:sh_exec:s0` 被 MAC 拒绝 ⇒ 同形态垫片今天必死于第一行。现已改为
+   *     `#!<binDir>/ash`，而 `ash` 在本档同样 `denied` ⇒ 垫片在本档不生效
+   *     （见 bashShimLines 的"手机档内不生效"一节；保留理由是无害 + 为其它档位预留
+   *     + 提供 exec 探针）；
+   *   · `rg`/`git`/python 真身是**第三方 ELF**，execve 被**签名域/MAC 策略**拒绝
+   *     （与创建者/inode/执行位无关；`rg-real=denied` 与这条一致）。
    * ⇒ 解锁它们的唯一路径是**构建期签名**（binary-sign-tool），见 tools/ 的签名步骤；
    * 物化路径已撤销，只在探测里保留 rg 一行。
    */
@@ -3163,6 +3376,15 @@ function execProbeTargets() {
     // 【P0 回归的验收锚点】bash 垫片是"宿主进程写出的文本脚本"与 busybox 副本同一
     // 创建者类别（hmfs 上可执行）；这里真跑一次 `bash -c 'echo DSHM-EXEC-OK'`，把结果
     // 写进 diag——§6-1 的验收信号因此每次启动都有机器可读的取证，不必手工跑。
+    // 【前置判据：垫片的首行解释器】同批先探 `<bin>/ash` —— 垫片能否起来完全取决于
+    // 它（内核在 execve 时打开首行解释器）。本机读数 **`ash=denied`**（预期）：随包
+    // 自签名 ELF 同样被签名域/MAC 拒绝 ⇒ 垫片在本档不生效，见 `bashShimLines()` 的
+    // "手机档内不生效"一节。这条探针的价值正在于此：若某档位给出 `ash=ok` 而
+    // `bash=denied`，失败点就不在解释器可执行性（该去查 argv[0] 派发/沙箱），一眼可分。
+    // 路径与 PATH 首项同源（= 垫片所在目录）。
+    { label: 'ash', p: process.env.PATH ? (process.env.PATH.split(':')[0] + '/ash') : '',
+      args: ['-c', 'echo DSHM-ASH-OK'], env: process.env,
+       },
     { label: 'bash', p: process.env.PATH ? (process.env.PATH.split(':')[0] + '/bash') : '/system/bin/sh',
       args: ['-c', 'echo DSHM-EXEC-OK'], env: process.env,
        },
@@ -3211,9 +3433,24 @@ function execProbeTargets() {
  * exec 探测回退，不依赖这里的探测结果。
  */
 async function ensureExecutables() {
-  if (!pythonReady() || !gitReady()) {
-    return; // 未解包/半成品：解包收尾路径会再触发
-  }
+  /*
+   * 【探针不隶属"工具链就绪"：恒跑】这里曾经有一道早退守卫
+   *   `if (!pythonReady() || !gitReady()) { return; }`
+   * 后果（真机实测）：**工具链解包失败时整批 exec 探针一行都不跑**，于是
+   * "随包 ELF 能不能 exec"这条验收判据**静默失效**——报告里只能写"未激发"，
+   * 而门禁 `tools/assert-exec-fix.mjs` 当时把"早退守卫存在"当正向锚点，
+   * 等于替这个缺陷背书（该锚点已一并修掉）。
+   *
+   * 现口径：**恒跑**。理由与代价都写清楚：
+   *   · 每个目标自带"文件不存在 ⇒ 记 `缺`"的分支（下面的循环），所以半成品/未解包
+   *     状态下探针照样给出**读数**（"缺"本身就是结论，不是异常）；
+   *   · 本函数只探测 + 记录，没有任何修复动作（Phase 5 拆除后的口径未变），
+   *     因此提前跑不会改设备上的任何东西；
+   *   · 解包收尾那条挂载点（`finishToolchainExtraction`，pyOk && gitOk 时）仍会在
+   *     锚点齐备后**再跑一次**，最终的 exec 读数是那一次，不受这里的早读数影响。
+   * 判据"未执行 ⇒ 不算通过"由门禁 `tools/assert-exec-fix.mjs` 兜底：它现在断言
+   * 本函数**不存在**任何早退守卫，且汇总 diag 无条件执行。
+   */
   // 【探测前置】ls-remote 需要一个已存在的仓库（哪怕空的）——用本地命令 git init
   // 就地造一个（init 走的是**本地**路径，本来就可用，不受 §2.3 的子进程问题影响）。
   // 已经存在就跳过（幂等）；造失败也不阻断（探测那一项会如实报 fail）。
@@ -3234,12 +3471,15 @@ async function ensureExecutables() {
   const summary = [];
   for (const t of execProbeTargets()) {
     if (!t.p || t.p.length === 0 || statSize(t.p) <= 0) {
+      // 【"缺"是读数，不是跳过】(2026-10-03) 未解包/半成品时它照样进汇总 ⇒ 端侧能看到
+      // "这一项本次没有可执行文件"这一事实，而不是一行都没有（旧行为见本函数头注）。
       summary.push(`${t.label}=缺`);
-      continue; // rg 首装 boot 等场景：下次 boot 再验
+      continue;
     }
     const r = await probeExec(t.p, t.args, t.env);
     summary.push(`${t.label}=${r}`);
   }
+  // 【无条件执行】这一行是"探针真的跑过"的唯一机器可读信号（没有它 ⇒ 本门禁不算通过）。
   diag(`exec 探测：${summary.join('，')}`);
 }
 

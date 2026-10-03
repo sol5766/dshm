@@ -174,10 +174,25 @@ export function buildHostArgv(entryScript: string): string[] {
  *
  * 用"KEY=VALUE"字符串而不是两个平行数组：两端都不必维护下标对应关系，
  * 少一类"键值错位"的错法。
+ *
+ * 【默认工作区的通道只有一条：`DSHM_PUBLIC_DOWNLOAD`】
+ * 它由 ArkTS 侧在 **spawn 之前**认领（`platform` 的 `claimPublicDownloadFolder()`，
+ * 值形如 `/storage/Users/currentUser/Download/<包名>`），是 Host 默认工作区的**唯一**
+ * 路径来源：Host 只做 `lstat` 判目录 + 真探写，**不再自己 mkdir**（真机实测：应用进程
+ * 直拼路径 mkdir 公共目录必 EPERM）。
+ * **空串时不写这一项**：Host 会明确回退 `<SANDBOX_HOME>/workspace` 并把原因记进 diag，
+ * 绝不允许 cwd 变成 `/` 或空串。
+ * 【不要再加第二条"包名"通道】曾经同时传过 `DSHM_BUNDLE`（供 Host 自己拼
+ * `$HOME/Download/<包名>/`）。那条路已整条删除：直拼公共路径建目录在端侧必 EPERM，
+ * 包名作为**路径来源**只会指向一个不存在、也建不出来的目录。包名现在只用于诊断日志
+ * （`NodeRuntime` 构造时打一行），**不参与任何路径解析**；Host 侧的"包名"是
+ * `DSHM_PUBLIC_DOWNLOAD` 的末段，需要时从它反推。
+ *
+ * @param publicDownload ArkTS 侧启动前认领到的公共下载目录；空串 ⇒ 不写这一项
  */
 export function buildHostEnv(coreDir: string, homeDir: string, sandboxHome: string,
-  port: number, profile: string): string[] {
-  return [
+  port: number, profile: string, publicDownload: string = ''): string[] {
+  const env: string[] = [
     `DSHM_CORE_DIR=${coreDir}`,
     `DSHM_HOME=${homeDir}`,
     `DSHM_SANDBOX_HOME=${sandboxHome}`,
@@ -191,6 +206,11 @@ export function buildHostEnv(coreDir: string, homeDir: string, sandboxHome: stri
     // libuv 支持用该环境变量禁用这条路径；这是端侧能起来的前提之一。
     'UV_USE_IO_URING=0',
   ];
+  // 【为什么只在非空时追加】见上方说明：空值绝不写进去（Host 靠"这一项不存在"来判定回退）。
+  if (publicDownload.length > 0) {
+    env.push(`DSHM_PUBLIC_DOWNLOAD=${publicDownload}`);
+  }
+  return env;
 }
 
 /**

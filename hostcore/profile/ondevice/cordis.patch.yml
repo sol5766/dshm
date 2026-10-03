@@ -88,7 +88,14 @@
 #    （真机实证：终端打不开）。它的默认 `shellArgs`（`--noprofile --norc -i`）也不适用：
 #    端侧真正可用的是 busybox ash，不认那两个长选项。两处在此显式给定：
 #      · shellPath = 随包布置的 bash 垫片（hostcore/app/main.js 的 ensureBashShim；
-#        逐级探测真 bash → busybox ash → /system/bin/sh，见 BASH_SHIM_LINES）；
+#        垫片首行解释器 = `<bin>/ash`（随包自签名 busybox 的 ash 副本），参数原样透传。
+#        旧形态 `#!/system/bin/sh` 在本机必死于第一行：真机探针 `sh="x-no:13"`
+#        （`u:object_r:sh_exec:s0` 被 MAC 拒绝 exec），内核在 execve 时即打开首行
+#        解释器 ⇒ EACCES，垫片内部的探测链一行都执行不到。
+#        ⚠ **手机档内不生效**：`ash` 副本在本档同样 `denied`（真机 exec 探测读数）
+#        ⇒ 终端在本档仍起不来。保留它的理由见 main.js `bashShimLines()` 的
+#        "手机档内不生效"一节（无害 + 为 tablet/2in1 档预留 + 提供 exec 探针）。
+#        **shellPath 的值（垫片文件本身）不变**，只改了垫片内容，故本路径不受影响）；
 #      · shellArgs = ["-i"]（交互即可；ash 不认 --noprofile/--norc）。
 #    绝对路径 = 应用沙箱根（BOOT_10 实测 sandbox=/data/storage/el2/base/haps/entry/files），
 #    端侧稳定；与应用 PATH 首项同源（见 SANDBOX_HOME 定义）。
@@ -103,9 +110,11 @@
 
 # 【P1-2（2026-09-26）过时覆盖已清理】原在这里的 `- id: tool-bash disabled: true`
 # 是 bring-up 期的权宜——当时端侧 `bash` 是 busybox 副本、必报 `applet not found`，
-# 留着工具只会让模型拿到一个必然失败的工具。现在 bash 垫片随包布置且真机实测
-# `bash=ok`（见 hostcore/app/main.js 的 ensureBashShim 与 exec 探测锚点），
-# 官方默认（`disabled: process.platform === 'win32'`）在端侧即"启用"，故删掉本覆盖。
+# 留着工具只会让模型拿到一个必然失败的工具。现在 bash 垫片随包布置，官方默认
+# （`disabled: process.platform === 'win32'`）在端侧即"启用"，故删掉本覆盖。
+# ⚠ 如实登记：垫片在**手机档内不生效**（真机 exec 探测 `ash=denied` ⇒ 首行解释器
+# 起不来），所以本档的 `tool-bash` 事实上仍是"必然失败的工具"；保留启用状态是因为
+# 判据在探针（`exec 探测：…ash=…`）而不在开关，且 tablet/2in1 档可能可用。
 # 保留 `tool-pwsh`：鸿蒙确实没有 PowerShell，工具留着必然 ENOENT。
 - id: tool-pwsh
   disabled: true
@@ -312,3 +321,159 @@
 #    恢复条件：无（对齐官方桌面功能是验收目标，非临时措施）。
 - id: ui-sidebar-browser
   disabled: false
+
+# ⑦ 删除/移动/发布文件（DSHM 自带插件，2026-10-03）
+#
+#    【缺口】dsh 的 fs 契约（@deepseek-ai/dsh-fs）没有删除/移动方法——抽象类
+#    FileSystem 只有 resolve/stat/lstat/readText/streamText/readBytes/readByteRange/
+#    listDir/watch/writeText/editText，策略事件也只有 fs/write-intent、
+#    fs/edit-intent、fs/observed（没有删除意图槽）。后端 @deepseek-ai/dsh-fs-local
+#    自己 import 了 rm/rename（lib/index.js:10），即"能删"在实现层存在，但**模型
+#    可见的工具集里没有**（只有 read/write/edit/glob/grep）。bash 路线已死（真机证据：
+#    无可 exec 的 shell，见 ⑤ 的"手机档内不生效"）⇒ 这是唯一缺口。于是随核心树分发
+#    一个自带插件 `@deepseek-ai/dshm-tool-fs-remove`（源码
+#    hostcore/plugins/dshm-tool-fs-remove/，由 tools/pack-core.mjs 的
+#    embedDshmToolPackages() 放进核心树 node_modules）。
+#
+#    【同一个缺口还缺“复制”】正常路径下工作区**就是**用户可见的
+#    `Download/<包名>/`（ArkTS 认领 + 登记，见 ⑧；写入走 ⑩ 的后端），agent 直接写即可。
+#    但认领失败/探写不过时工作区会回退到沙箱 `<files>/workspace`，成品用户看不见；
+#    把成品搬出去需要一个复制动作，而端侧**没有 cp**、也没有可用的 shell，
+#    `ctx.fs` 同样没有复制方法 ⇒ 本插件的第三个工具 `publish(source, target?)`：
+#    把沙箱里的**一个文件按字节**写进用户可见下载目录，返回最终绝对路径供 agent
+#    告知用户。目标根只认 `DSHM_PUBLIC_DOWNLOAD`（ArkTS 认领后传入、Host 启动期已
+#    lstat + 探写验证过；见 hostcore/app/main.js 的 resolveWorkspaceDir()）——
+#    env 为空时**如实报错**，不拼路径、不退到进程 cwd（那会静默写错地方）。
+#    落盘用与 ⑩ 同源的去 chmod 原语 `mkdir → open('w') → writeFile(Buffer) → sync
+#    → close`；**不用** chmod（实测 EPERM）/ rename（未证实）/ link（沙箱禁）。
+#    如实登记的代价：就地写**非原子**（目标原本不存在时，失败后把半截文件 unlink 掉；
+#    目标原本存在时只能如实报错，不删用户已有文件）。
+#
+#    【写法照抄先例】与本节 :298-303 的两条 `insert:` 逐字同形——applyEntryPatches
+#    的普通 patch 行是"按 id 更新已有条目"，id 不存在时只 warn 后跳过；新增行必须
+#    用 `insert:`。先例注释见 :294-297。
+#
+#    【为什么是本层而不是 preset】preset 的 plugins 列表在 isolate 作用域内，profile
+#    的 patch 行按 id 够不着（见本文件 :183-186 的同一条教训）。本行挂在**部署层**，
+#    而 `tools` 是 host+per-scope 分层注册表，部署层注册进 global 层、每个 agent 读
+#    "自己作用域链选出的合并目录"，所以模型可见（dsh-web-app/cordis.patch.yml:455-470
+#    关掉根层 tool-fs/tool-fs-search/tool-jobs 的理由正是"preset 接管"，反过来证明
+#    根层注册本来是可见的）。
+#
+#    【决定记录：工具层完全不设限】（2026-10-03，按用户明确要求）
+#    插件**不做任何路径范围判断、不做确认/审批握手、不接 approval 服务**：绝对路径、
+#    会话 cwd 之外的路径一律照常执行；工具层唯一保留的失败是"相对路径 + 会话无 cwd
+#    ⇒ 无法解析"（这是语义必需的解析，不是范围判断），以及 `publish` 的"目标根缺失"
+#    （它不是范围判断，而是"没有可写的用户可见目录"这一事实）。
+#    唯一的闸门在**操作系统的路径授权**：端侧 sandbox-policy = danger-full-access 且
+#    permission-presets 的 danger-full-access ⇒ approval = never（见 :157-168）——
+#    即工具层没有任何闸门，某个路径能不能删/写由 OS 按包名/沙箱归属裁定，插件把 OS 的
+#    错误原样上报（真机实测：自己包名目录内可删，其余用户目录被 OS 拒绝）。
+#    这不是上游语义，是本端的决定。**可追溯的后果**：在本端当前配置下
+#    （danger-full-access + approval = never），remove/move/publish 在工具层没有任何
+#    闸门，模型的删除/覆盖意图只受 OS 授权约束，没有"先问一句"的机会。
+#
+#    【恢复条件】上游 @deepseek-ai/dsh-fs 若提供 remove/rename/copy，改插件的实现即可，
+#    本行不用动；若要整条摘掉：删掉本行 + pack-core 的 embedDshmToolPackages()。
+- insert:
+    - id: tool-fs-remove
+      name: '@deepseek-ai/dshm-tool-fs-remove'
+
+# ⑧ 默认工作区的"登记"（DSHM 自带插件，2026-10-03）
+#
+#    【缺口】本端"新建会话落在哪个目录"由客户端决定，官方 Web UI
+#    （@deepseek-ai/dsh-client-ui-workspace/lib/client.js，逐行核对）的顺序是：
+#      · restoreSelection(:927-947)：saved.sessionId 还在 ⇒ 用它的工作区，否则
+#        target = workspace?.workspaceId ?? recentWorkspace(items, byId)；
+#      · startSession(:849-862)：target = workspaceId ?? currentWorkspaceId ?? recent；
+#      · recentWorkspace(:1014-1030)：取"该工作区下会话最新 updatedAt；无会话时取
+#        workspace.createdAt"**最新**的那一条。
+#    ⇒ **注册表里最新的一条**就是默认工作区。历史经 picker 选过的
+#    `Download/com.example.dshprobe` 已经持久化在注册表（`$DSH_HOME`，el2，覆盖安装不清），
+#    真机的新会话 cwd 因此会落在那里（而不是本应用认领的目录）。
+#
+#    【官方的默认工作区为什么救不了】`dsh-workspace` 的 initializeDefault()
+#    (lib/index.js:423-443) 要求「注册表空 + 归档集空 + 会话历史空」，设备上有历史 ⇒
+#    返回 undefined；而它的目录来源 defaultWorkspaceDirectory()
+#    (dsh-api-workspace-controller/lib/index.js:609-641) 在 openharmony 落到
+#    `default: throw` 分支。两条都堵死 ⇒ 只能由本端在启动期登记一次。
+#
+#    【本行做什么】插件把 ArkTS 认领到的 `Download/<包名>/`
+#    （env `DSHM_PUBLIC_DOWNLOAD`，见 hostruntime 的 buildHostEnv / NodeRuntime）经
+#    官方 API `workspaceRegistry.create()` 登记进注册表 ⇒ 它成为最新一条 ⇒ 客户端
+#    默认工作区就是用户可见目录。create() 幂等（已登记则只解析，不新增行）。
+#
+#    【边界】① 不改上游 dsh；② 不新增权限；③ 不删/不改任何既有目录与既有登记
+#    （用户仍可在 UI 里自行删除历史工作区）；④ **绝不阻断启动**：apply() 同步返回，
+#    登记是自行吞错的浮空 promise，失败只打一行日志；⑤ 没有 DSHM_PUBLIC_DOWNLOAD
+#    时完全惰性（其它部署零副作用）。
+#
+#    【恢复条件】上游若给"默认工作区"提供不依赖空历史的配置（或
+#    defaultWorkspaceDirectory 支持 openharmony），删掉本行 + pack-core 的
+#    DSHM_PLUGIN_PACKAGES 里那一项即可。
+#
+#    ⚠ **2026-10-03 43 号修正（真机实证）**：上面"注册表里最新的一条就是默认工作区"
+#    只对**兜底分支**成立。官方 Web UI 的完整顺序是
+#      `startSession()`（client.js:846-859）：`target = workspaceId ?? currentWorkspaceId ?? recent`
+#    而 `currentWorkspaceId` = **当前主视图那条会话所属的工作区**（`:850-851`），
+#    `restoreSelection()`（`:925-947`）在 `saved.sessionId`（`dsh.sessions.current`，
+#    `:761`）还在时更是**直接用它、根本不看 `recentWorkspace`**。
+#    设备上恒有一条旧会话被自动恢复 ⇒ 只登记**不足以**让"新建会话"落在认领目录
+#    （真机 09:40 实测：登记成功但新会话 cwd 仍是 `Download/`）。
+#    **本端接受的已知局限**：本节只改"兜底"那一段优先级，改不动"当前会话所属工作区"
+#    那一段。曾经的 host 侧新会话落点覆盖方案已按 57 号整体回退（见
+#    `dsh-移植研究/57-回退钉子/简报.md`），本端**不**再改写客户端/host 的会话创建行为。
+- insert:
+    - id: dshm-workspace-claim
+      name: '@deepseek-ai/dshm-workspace-claim'
+
+# ⑩ 去 chmod 的文件写入后端（DSHM 自带插件，2026-10-03，44 号）
+#
+#    【缺口（根因，已是定论）】上游 `@deepseek-ai/dsh-fs-local` 的
+#    `writeFileAtomic()`（lib/index.js:494-543）用"私有暂存目录 + 原子发布"实现写入，
+#    前三步都要求 `chmod`：
+#        mkdir(stagingDir, { mode: 448 })      // 0o700
+#        chmod(stagingDir, 448)                // ← 鸿蒙 hmdfs 公共目录在这一句 EPERM
+#        open(tempPath, "wx", 384)             // 0o600
+#        handle.chmod(384)                     // ← 同类调用
+#        … if (mode !== void 0) handle.chmod(mode); rename(tempPath, absolutePath)
+#    真机逐字（会话 cwd = `Download/com.dshm.dshclient`）：
+#        Error: EPERM: operation not permitted, chmod
+#        '/storage/Users/currentUser/Download/com.dshm.dshclient/.手测-01.txt.<pid>.<uuid>.tmpdir'
+#    ⇒ 只要"落盘"这一步依赖 chmod，agent 往用户可见工作区写文件就**永远**失败。
+#
+#    【为什么换 ctx.fs 后端是合法插入点】上游把 `ctx.fs` 明确设计成可替换契约：
+#    `@deepseek-ai/dsh-fs-sandbox` 头注逐字写着 "Registers as `ctx.fs`
+#    （loading it INSTEAD OF `dsh-fs-local` is the whole swap）"。本端 profile 实际
+#    注册 `ctx.fs` 的就是 dsh-base 的 `fs-sandbox` 行 ⇒ 把那一行停用、换成本插件，
+#    **模型可见的工具集（read/write/edit）一个字不改**，`fs/*` 策略瀑布（fs/write-intent、
+#    fs/edit-intent、fs/observed 全在工具层发射）也不改。
+#
+#    【本行做什么】`@deepseek-ai/dshm-fs-write-nonchmod`（源码
+#    hostcore/plugins/dshm-fs-write-nonchmod/，由 tools/pack-core.mjs 的
+#    embedDshmToolPackages() 放进核心树 node_modules）`extends SandboxedFileSystem`，
+#    **只重写 `writeText` / `editText` 的落盘一步**，改用 31 号探针实测放行的组合：
+#        open(path,'w'[,mode]) → writeFile → close
+#    不用 chmod、不用 rename、不用 link（全部未证实或已证实被拒）。路径封闭
+#    （`checkedTarget`）、per-target 锁（`withLock`）、版本守卫
+#    （`FS_STALE_VERSION` / `FS_NOT_OBSERVED`）、`probe`/`readTextForDiff`/`readForEdit`/
+#    `applyLiteralEdit` 与返回结构全部与上游逐字同形（对照表见
+#    `44-写入去chmod/简报.md` §契约对照）。
+#
+#    【如实登记的语义差异】① 就地写**非原子**（上游是暂存+rename 发布；补齐需要未验证的
+#    rename，按"没证实就别用"不做）；② `createIfAbsent` 的 no-clobber 从"发布期"降级为
+#    "锁内检查期"（仅进程外并发创建者这一个窗口）；③ `fsync` 失败不再判写入失败（只打
+#    stderr 警告）；④ 更新既有文件时权限位反而更准（就地写不换 inode，mode 逐位保留）。
+#
+#    【怎么关掉】把下面两处删掉（`fs-sandbox` 的 disabled 行 + 本 insert 行）+
+#    pack-core 的 DSHM_PLUGIN_PACKAGES 里那一项，即完全回到上游 `dsh-fs-sandbox`。
+#    只想临时回退：在用户层 `$DSH_HOME/cordis.patch.yml` 写
+#    `- id: fs-write-nonchmod` + `disabled: true` 并给 `fs-sandbox` 写 `disabled: false`。
+#
+#    【恢复条件】上游若把 `writeFileAtomic()` 的 chmod 去掉（或让 chmod 失败可容忍），
+#    删掉下面两处即可。
+- id: fs-sandbox
+  disabled: true
+- insert:
+    - id: fs-write-nonchmod
+      name: '@deepseek-ai/dshm-fs-write-nonchmod'

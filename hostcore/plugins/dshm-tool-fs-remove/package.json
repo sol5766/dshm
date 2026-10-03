@@ -1,0 +1,22 @@
+{
+  "name": "@deepseek-ai/dshm-tool-fs-remove",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧自带的文件改动工具（remove / move / publish）：删除、移动、以及把沙箱里的文件按字节发布到用户可见的 Download/<包名>/。dsh 的 ctx.fs 契约（@deepseek-ai/dsh-fs）没有删除/移动/复制方法，端侧 bash 路线已死（手机档没有可 exec 的 shell，也没有 cp），故随核心树分发本工具；落盘复用去 chmod 的 open('w')→write→close 原语。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-fs": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
+  }
+}

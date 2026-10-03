@@ -1,0 +1,21 @@
+{
+  "name": "@deepseek-ai/dshm-workspace-claim",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧的默认工作区登记：把 ArkTS 认领到的 Download/<包名>/ 在启动期注册进 Host 的工作区注册表，使客户端（官方 Web UI 的 recentWorkspace / 本端中枢）的'新建会话'默认落在用户可见目录，而不是历史 picker 记忆值。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-workspace": "0.2.0-rc.2"
+  }
+}
