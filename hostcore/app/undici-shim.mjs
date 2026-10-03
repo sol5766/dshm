@@ -88,6 +88,82 @@ export const Dispatcher = Agent;
 export class EnvHttpProxyAgent extends Agent {
 }
 
+/**
+ * undici 的 `ProxyAgent`（把请求经 HTTP(S) 代理转发）。
+ *
+ * 【为什么是降级实现】真 `ProxyAgent` 要 CONNECT 隧道与完整 HTTP 栈，而端侧 jitless
+ * 用不了真 undici（WASM，见文件头）。这个导出**首先是给 ESM 具名导入用的**：
+ * 具名导入在解析阶段就校验导出存在性，缺一个名字会让**整个模块图** `failed to import`，
+ * 插件连 `apply()` 都到不了。这与本文件 `EnvHttpProxyAgent` 段记的是同一类事故
+ * （2026-09-24 dshmarket；2026-10-03 `dsh-codearts-auth` 0.2.1003 新增
+ * `lib/opencode-proxy.js` 又踩一次，真机 `codearts-auth (dsh-codearts-auth): failed to import`）。
+ *
+ * 行为上退化为直连 Agent，与"没配代理"等价——不会静默错路由。
+ *
+ * 【构造参数必须宽容】真 `ProxyAgent` 收 `{ uri, clientFactory }`，其中 `clientFactory`
+ * 内部会 `new Pool(...)`；某些调用方还会传 `{ proxy, requestTls, ... }`。这里**一律忽略、
+ * 绝不抛错** —— 抛错就成了运行期失败，比缺导出更难排查。
+ */
+export class ProxyAgent extends Agent {
+  constructor(options) {
+    super(options);
+    // 真 undici 两种形态都收：`new ProxyAgent('http://host:port')` 与 `{ uri }` / `{ proxy }`。
+    if (typeof options === 'string') {
+      this.uri = options;
+      return;
+    }
+    const opts = options === undefined || options === null ? {} : options;
+    const uri = opts.uri !== undefined ? opts.uri : opts.proxy;
+    this.uri = typeof uri === 'string' ? uri : '';
+  }
+}
+
+/**
+ * undici 的 `Pool`（到一个 origin 的连接池）。同样为具名导入而存在，退化为 `Agent`。
+ *
+ * 调用形态有 `new Pool(origin, opts)` 与 `new Pool({ origin, ... })` 两种，`Agent`
+ * 的构造器只记 options、不做校验，两种都能安全吞下。
+ */
+export class Pool extends Agent {
+}
+
+/**
+ * undici 的 `RetryAgent`（带重试策略的 Dispatcher）。
+ *
+ * 与 `ProxyAgent` 同理，**首先是给具名导入用的**：它是一个 Dispatcher，继承 `Agent`
+ * 就能被上游传给 `fetch(..., { dispatcher })`，只是不重试——退化为"不发重试"，
+ * 失败模式与被重试策略放行一致，不会静默错路由。当前没有已知使用方（预防性补齐，
+ * 见 report 的建议：同类缺口第三次复发时排查成本极高）。
+ *
+ * 【刻意**不**补的三个名字】`request` / `stream` / `interceptors`：
+ *   · `request()` 返回的是 undici 特有的 `{statusCode, headers, body, trailers}` 形态，
+ *     不是 `Response`。用 `dshmFetch` 冒充会**静默给错类型**，比缺导出更难查。
+ *   · `interceptors` 是拦截器工厂集合，装成空实现会**静默关掉调用方的拦截逻辑**。
+ *   · `stream` 同理（duplex 包装与真实流语义绑定）。
+ * 这三者一旦出现真实使用方，正确做法是**明确失败**（缺导出 ⇒ import 报错），
+ * 而不是给一个行为不一致的替身。缺什么名字由门禁 `check-undici-shim-exports.mjs` 报出。
+ */
+export class RetryAgent extends Agent {
+}
+
+/**
+ * undici 的 `RetryHandler`（`new RetryAgent(new RetryHandler(opts))` 里的重试策略）。
+ *
+ * 与 `RetryAgent` 同理：`RetryAgent` 的降级实现会忽略这个参数，于是净效果是"不重试"。
+ * 这里给的是空壳（不继承 `Agent`——它是 handler 不是 dispatcher，继承反而会误导调用方）。
+ *
+ * 【界线（为什么这四个补、另外三个不补）】判断标准是**降级后是否静默给出错误语义**：
+ *   · `Pool` / `ProxyAgent` / `RetryAgent` / `RetryHandler` —— 降级后请求要么直连成功、
+ *     要么在网络层**明确失败**；不会"看起来成功但结果不对"。
+ *   · `request` / `stream` / `interceptors` —— 降级会**静默**改变返回值类型 / 关掉调用方
+ *     的拦截逻辑。那比"缺导出、import 直接报错"更难排查，故**刻意不提供**。
+ */
+export class RetryHandler {
+  constructor(options) {
+    this.options = options === undefined || options === null ? {} : options;
+  }
+}
+
 export function setGlobalDispatcher(_dispatcher) {
 }
 
@@ -111,4 +187,15 @@ export async function fetch(input, init) {
   return await dshmFetch(input, opts, lookup === undefined ? {} : { lookup });
 }
 
-export default { fetch, Agent, Dispatcher, EnvHttpProxyAgent, setGlobalDispatcher, getGlobalDispatcher };
+export default {
+  fetch,
+  Agent,
+  Dispatcher,
+  EnvHttpProxyAgent,
+  ProxyAgent,
+  Pool,
+  RetryAgent,
+  RetryHandler,
+  setGlobalDispatcher,
+  getGlobalDispatcher,
+};

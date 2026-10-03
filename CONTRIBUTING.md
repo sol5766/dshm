@@ -64,6 +64,8 @@ node tools/check-fetch-mirror.cjs
 
 其中 `check-sidebar-tab-id-guard.mjs` 守的是 `pack-core` 对核心树打的行为补丁（侧栏页签 id 守卫）：它把随包发布的源码原文抽出来放进壳里跑。前置是已跑过 `node tools/pack-core.mjs --skip-install`；未跑过时它以退出码 2 明确报「前置条件缺失」，不会伪装成通过。
 
+`check-undici-shim-exports.mjs` 守的是 undici 垫片的**具名导出面**：它从垫片本体 `import()` 取真实导出，再把核心树全部 `from 'undici'` 的具名列表逐个比对。这条故障的症状是**不说话**的 —— ESM 具名导入在解析期校验导出存在性，缺一个名字就让整个模块图 `failed to import`，而 loader 只打一行 `… failed to import`、**不给 reason**（历史上已踩两次：2026-09-24 缺 `EnvHttpProxyAgent`；2026-10-03 缺 `Pool`/`ProxyAgent`）。它同样以退出码 2 报前置条件缺失。
+
 `check-fetch-mirror.cjs` 守的是出网镜像改写（端侧 `raw.githubusercontent.com` 被阻断的兜底）：全离线跑，起本地服务当镜像，断言哪些主机被改写、哪些必须放行。
 
 ## 提交信息
