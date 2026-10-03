@@ -99,9 +99,50 @@
 #      · shellArgs = ["-i"]（交互即可；ash 不认 --noprofile/--norc）。
 #    绝对路径 = 应用沙箱根（BOOT_10 实测 sandbox=/data/storage/el2/base/haps/entry/files），
 #    端侧稳定；与应用 PATH 首项同源（见 SANDBOX_HOME 定义）。
+#
+# 【N5（2026-10-03）改用系统自带 zsh】上面那套"垫片 → busybox ash"是 bring-up 期的
+# 降级路线，全部建立在"端侧没有真 shell"这个**当时为真、现已过期**的前提上。真机实测
+# （同一台 2in1，OpenHarmony 7.0.0.105）推翻了这个前提：
+#   · `/usr/bin/zsh` 真实存在且可执行 —— 1,332,616 B，`zsh 5.9 (aarch64-unknown-linux-musl)`；
+#   · `zmodload zsh/zle` ✅（行编辑，补全前提）、`zmodload zsh/complist` ✅（菜单补全）；
+#   · `/etc/zshrc` ✅ 379 B（PS1 / HISTFILE / 别名 / `trap preexit EXIT` 存历史），
+#     并 `source /etc/smartshell.zsh`；`/etc/smartshell.zsh` ✅ 10,900 B
+#     —— 那是**现成的结构化终端协议**（OSC 9278：PreExec / PreCmd / SetupComplete /
+#     Completion），端到端实测通过（`printf 'echo HELLO-ZSH\nexit\n' | /usr/bin/zsh -i`
+#     确实吐出了 `]9278;f;{"event": "SetupComplete"}` 与 base64 编码的命令）。
+# ⇒ 垫片这条路已经没有存在理由：换成系统 zsh 之后，交互体验（补全、历史、行编辑、
+#   别名、prompt）全部由系统实现，而不是由我们那个只能跑 ash 的降级垫片"假装"。
+#
+# 【为什么只改本行、不动 main.js 的垫片】两者服务于**两条独立链路**，必须分开看：
+#   · 链 2（本行，侧边栏终端）= `ui-sidebar-terminal` → `dsh-api-terminal-controller`
+#     → `dsh-terminal-bash` → `ctx.subprocess` → node-pty。交互式 PTY 会话，
+#     shellPath 由**本文件**配置 ⇒ 改成 zsh 是纯配置改动，零代码。
+#   · 链 1（agent 的 `bash` 工具）= `tool-bash` → `ctx.shell`(dsh-bash-local) →
+#     `ctx.subprocess` → node-pty，调用形态是 `bash -c "<cmd>"`（一次性）。
+#     它的 shellPath 写死在 main.js 的垫片里，**不读本配置** ⇒ 改这一行对链 1 无影响。
+#   让链 1 也改走 zsh 是**不划算**的：zsh 与 bash 在 `-c`、展开、退出码、错误信息上
+#   都有语义差异，拿 zsh 当 bash 的替身只会让模型拿到更难解释的结果；垫片至少是刻意的。
+#   故链 1 按原样保留（见 main.js `bashShimLines()`）。
+#
+# 【配置合法性】`dsh-terminal-bash` 的 `shellPath` 是 `z.string().required(false)`、
+# `shellArgs` 是 `z.array(z.string()).required(false)`（`lib/index.js:40-41`）——
+# **自由字符串，无枚举限制**，指到 `/usr/bin/zsh` 不需要改 schema；`shellDialect` 虽只允许
+# `["bash","pwsh"]`，但它只在 **shellPath 为空**时决定默认值（`:32-33`），
+# 显式给了 shellPath 就直接绕过，故也不必动它。
+#
+# 【已知降级（如实登记，不粉饰）】
+#   · `zsh/system` 模块缺失（`zmodload zsh/system` 失败）—— SmartShell 未用到，不阻塞；
+#   · `fpath` 在**非交互**模式下含失效路径（含构建机残留），交互（`-i`）下
+#     `/etc/zshrc` 的 `fpath+=` 生效、`zmv` 实测可用；脚本化调用（`zsh -c`）需自行补 fpath；
+#   · SmartShell 的 OSC 9278 协议数据目前**收不到**：终端引擎已注册 OSC
+#     0/1/2/4/8/10/11/12/104/110/111/112，**没有 9278**（`client.terminal.js` 内
+#     `rg -c 9278` = 0），按 xterm 规范未注册的 OSC 被**静默丢弃**（不乱码、不污染屏幕）。
+#     后果 = 补全下拉/命令块/退出码标记失效，**zsh 本身照常可用**。
+#     要拿到它们需注册 handler（改前端 bundle），属后续增强，不在本次范围。
+#   · 无真 bash（`/system/bin/bash`、`/bin/bash`、`/usr/bin/bash` 全不存在）—— 与本次无关。
 - id: terminal-bash
   config:
-    shellPath: /data/storage/el2/base/haps/entry/files/bin/bash
+    shellPath: /usr/bin/zsh
     shellArgs: ['-i']
 #    鸿蒙确实没有 PowerShell：官方 `terminal-pwsh`（dsh-sdk-minimal 里另一行，name 同为
 #    dsh-terminal-bash、shellDialect: pwsh）在端侧必 ENOENT，显式关闭。
@@ -477,3 +518,43 @@
 - insert:
     - id: fs-write-nonchmod
       name: '@deepseek-ai/dshm-fs-write-nonchmod'
+
+# ⑪ WebSocket 心跳阈值（DSHM，2026-10-03）
+#
+#    【现象】端侧界面会不定期"连接断开/正在重连"，随后自愈——像网络抖动，但
+#    实测（连续多次）每一次都能在 6 秒左右的固定间隔上对上，不是随机网络。
+#
+#    【根因（上游实现，逐行核对）】`@deepseek-ai/dsh-api-gateway`：
+#      · `lib/index.js:551 DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2e3`
+#        ⇒ Host 每 **2 秒** 向每个 WebSocket 客户端发一个 Ping 控制帧；
+#      · `:172 MAX_MISSED_HEARTBEATS = 2`，`:241-249` 每轮
+#        `missed >= 2 ? socket.terminate()`，否则 `missed += 1` 并 `ping()`；
+#      · 客户端回 Pong 才会把计数清零（`:209-211`）。
+#    ⇒ 容忍度 = 2 × 2 秒 = **4 秒**：只要有一次 Pong 晚到 4 秒
+#    （鸿蒙上有：ArkWeb 主线程被长任务占住、Host 侧 event loop 被同步
+#    Python/打包任务占住、Wi-Fi 省电态唤醒延迟），Host 就直接
+#    `socket.terminate()`，客户端表现为"连接断开 → 重连"。这与日志里
+#    "断开总是成对出现、间隔 6 秒上下"完全吻合（2s 发 Ping → 4s 判死）。
+#
+#    【本行做什么】把 `typert-gateway` 行的 config 整块替换为
+#      · `websocketHeartbeatIntervalMs: 30000` —— 容忍度抬到 2 × 30 = **60 秒**，
+#        远大于任何一次主线程/event loop 阻塞，同时仍保留"真死连接会被回收"
+#        的语义（60 秒内有响应即不算死）；
+#      · `streamInboxBytes: 262144` —— **与上游默认值完全相同**，写出来是因为
+#        本文件顶部的 patch 语义是**整块替换**目标行的 config（不是深合并）：
+#        只写一个键并不自动继承另一个键的默认值以外的意图，写全两键让这一行
+#        自解释、且在将来上游改默认值时不会悄悄改动我们的另一项。
+#    `Config` 的约束是 `z.number().step(1).min(1).max(2147483647)`（`dsh-timeout`
+#    的 `MAX_TIMER_DELAY_MS`，`lib/index.js:27`），30000 合法。
+#
+#    【为什么改配置不改源码】这两项从上游第一天起就是**服务配置项**
+#    （`:596-599` 的 `static Config`，`default()` 而非硬编码），`:628` 构造
+#    `RemoteStreamMuxServer` 时直接取 `resolved.websocketHeartbeatIntervalMs`
+#    ⇒ 本行是上游设计内的调节点，不碰 `dsh-*` 任何文件。
+#
+#    【恢复条件】上游若把默认心跳间隔上调（或把 `MAX_MISSED_HEARTBEATS` 改为
+#    与间隔相乘的时长而非次数），删掉本行即可回到默认。
+- id: typert-gateway
+  config:
+    websocketHeartbeatIntervalMs: 30000
+    streamInboxBytes: 262144

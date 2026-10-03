@@ -464,6 +464,27 @@ function carryForeignTopLevelEntries(seedText, prevText) {
     if (seedKeys.has(key)) {
       continue;                            // 种子已定义：以种子为准（升级要能流入）
     }
+    /*
+     * 【D1（2026-10-03）市场行不由 carry 供给】
+     *
+     * 市场行（`- id: dsh-skin-market`）的唯一供给方是托管文件
+     * `.dshm-market-rows.yml`（见 ensureMarketRows）。但它同时也会**物理出现**在上一版
+     * patch 里 —— 只要托管块标记（`# >>> dshm-user-rows` / `# <<< dshm-user-rows`）从
+     * patch 中丢失，`withoutManaged()` 就排除不掉托管块，市场行于是被 carry 原样保留。
+     * 而 composeUserRows 随后**又**把托管行追加一次 ⇒ 每启动净增 1 份，无限累积。
+     *
+     * 标记为什么会丢：上游「设置 → 插件」切开关（`dsh-plugin-manager` 的
+     * writePluginEnabled）与「设置」页保存配置（`dsh-config-editor` 的 edit）都是
+     * "YAML 解析 → 改条目 → 整体序列化写回"，注释不在 YAML 数据模型里，于是被吞掉。
+     * 真机实测轨迹：09-29 清理至 1 份 → 09-30 约 15 份 → 10-02 实测 58 份（5208 B，
+     * 正常应 2130 B），58 份内容完全一致。
+     *
+     * 修法：carry 阶段**直接丢弃**市场行。市场行的供给只走托管通道，因此无论标记在不在、
+     * 上游写入者怎么重写注释，份数都恒定。这也让本函数对"标记丢失"这个上游行为免疫。
+     */
+    if (key === SKIN_MARKET_PACKAGE) {
+      continue;
+    }
     kept.push(entry);
   }
   return kept.join('\n');

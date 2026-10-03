@@ -345,6 +345,98 @@ class DshmResponse {
 // ── fetch ─────────────────────────────────────────────────────────────────
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
+/*
+ * ── 出网镜像改写（N1 / N3，2026-10-03）────────────────────────────────────
+ *
+ * 【问题（真机实测）】`raw.githubusercontent.com` 的 TLS 握手被直接重置：
+ * DNS → 185.199.108.133 ✅、TCP 443 建连 0.12s ✅、TLS → `ConnectionResetError` 0.14s
+ * —— 典型的 SNI 阻断；同一时刻 `cdn.jsdelivr.net` 200/0.33s、`gh-proxy.com`
+ * 200/1.24 MB/2.71s 都正常。而多个插件写死的"备用代理" `ghfast.top` 已彻底失效
+ * （30s 超时无响应，连直连都不如）。
+ *
+ * 【后果】端侧三条链路全挂在同一个被阻断的主机上：
+ *   ① `dsh-skin-market` `lib/catalog.js:8` —— 皮肤目录的**唯一源**就是 raw 上的
+ *      `data/catalog.json`，零代理零回退；`AbortSignal.timeout(12_000)` 一超时就静默
+ *      降级本地缓存 ⇒ 用户只看到"转很久、列表还是旧的"；
+ *   ② `dsh-our-free-model` `src/{updater,feed}.js` —— 首选源是 raw（注释却写着
+ *      "jsDelivr first"，见 N2），每次检查更新都要先拿 15s 超时撞一次墙才回退；
+ *   ③ `dshmarket` `lib/routes.js:1162` —— 硬编码直连 raw、6s 超时，而回退代理
+ *      （`lib/regions.js:55` 的 `ghfast.top`）正是那个已死的。
+ *
+ * 【为什么改在垫片而不是逐个改插件】那三个插件**不在本仓库**（只存在于端侧 profile 的
+ * `node_modules`），改端侧副本会被插件升级覆盖，根治还得推给各自作者。而它们**都**经由
+ * 本垫片出网（jitless ⇒ 原生 fetch/undici 不可用，`globalThis.fetch` 就是这个函数）
+ * ⇒ 在这里统一改写：一处生效、三个插件同时受益，且与插件版本无关。
+ *
+ * 【只动**实测不可达**的主机】表里只放本机实测不通的主机；可达的主机（含镜像自身）
+ * 一律放行 ⇒ 改写天然幂等：改写后的主机不再命中表，重定向链上不可能自激。
+ * 表可以加行——但只加实测过的，不按猜想填。
+ *
+ * 【两处不改写】
+ *   ① 调用方显式钉住了 DNS（`lookup`）时不动 —— 那是上游 `web_fetch` 的 SSRF 防护
+ *      （防解析与连接之间被重绑定）。它钉住的地址是针对**原主机**解析出来的，
+ *      换了主机那批地址就没有意义，继续透传等于把请求指向错的 IP。
+ *   ② 非 http(s) 协议不动。
+ *
+ * 【开关】`DSHM_FETCH_MIRROR=0` 整体关闭（排查用）；
+ * `DSHM_FETCH_MIRROR_PREFIX=<url>` 换掉主镜像前缀（镜像自身失联时无需改代码）。
+ */
+const MIRROR_PRIMARY = 'https://gh-proxy.com';
+let mirrorTableCache = null;
+let mirrorTableKey = null;
+
+function mirrorPrimary() {
+  const override = (process.env.DSHM_FETCH_MIRROR_PREFIX || '').trim();
+  return override.length > 0 ? override.replace(/\/+$/, '') : MIRROR_PRIMARY;
+}
+
+function mirrorDisabled() {
+  return (process.env.DSHM_FETCH_MIRROR || '').trim() === '0';
+}
+
+function mirrorTable() {
+  const p = mirrorPrimary();
+  // 缓存按前缀取值：`DSHM_FETCH_MIRROR_PREFIX` 是运行期可变的，
+  // 只缓存表、不缓存"哪个前缀"才不会在改前缀后继续用旧镜像。
+  if (mirrorTableCache === null || mirrorTableKey !== p) {
+    mirrorTableKey = p;
+    mirrorTableCache = new Map([
+      // 前缀式代理：镜像收到的必须是**完整原始 URL**（含 scheme 与主机）。
+      ['raw.githubusercontent.com', `${p}/https://raw.githubusercontent.com`],
+      // 已失效的备用代理。它自身的 URL 形态与前缀式代理一致
+      // （`https://ghfast.top/https://raw.githubusercontent.com/...`），
+      // 所以只换主机、路径原样保留即可。
+      ['ghfast.top', p],
+    ]);
+  }
+  return mirrorTableCache;
+}
+
+const mirrorHits = new Map();
+
+/**
+ * 命中镜像表则返回改写后的 URL，否则 `null`（调用方保持原 URL）。
+ * @param parsed 已解析的目标 URL
+ * @param lookup 调用方透传的 DNS 钉住函数（有值即整条不改写）
+ */
+function mirrorTarget(parsed, lookup) {
+  if (mirrorDisabled()) return null;
+  if (lookup !== undefined && lookup !== null) return null;
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  const host = parsed.hostname.toLowerCase();
+  const base = mirrorTable().get(host);
+  if (base === undefined) return null;
+  const next = `${base}${parsed.pathname}${parsed.search}`;
+  const n = (mirrorHits.get(host) || 0) + 1;
+  mirrorHits.set(host, n);
+  // 只在头几次与每百次打一行：这两个主机是"插件每次拉数据"级别的频次，
+  // 无节制地打会把 node-output.log 淹掉。要确认改写生效，看头三行就够。
+  if (n <= 3 || n % 100 === 0) {
+    console.error(`DSHM-MIRROR ${host} → ${base}（本进程第 ${n} 次）`);
+  }
+  return next;
+}
+
 function onceFetch(url, init, headers, encoded, signal, redirectsLeft, timeoutMs, lookup, redirectMode) {
   return new Promise((resolve, reject) => {
     let parsed;
@@ -354,7 +446,25 @@ function onceFetch(url, init, headers, encoded, signal, redirectsLeft, timeoutMs
       reject(new TypeError(`Invalid URL: ${url}`));
       return;
     }
-    const mod = parsed.protocol === 'https:' ? https : http;
+    /*
+     * 镜像改写在**唯一一个**出网汇点做：`onceFetch` 是实际发请求的地方，
+     * 而且重定向也是递归调用它 ⇒ 跳转后的目标同样受同一条规则约束，
+     * 不必在 `dshmFetch` 与重定向分支里各写一遍（那样两处迟早会漂移）。
+     *
+     * `parsed` 保持**原样**（重定向的解析基准、`response.url`、超时文案都用它），
+     * 改写结果只进 `target`（真正连出去的那个）。混用会让相对重定向解到镜像域上。
+     */
+    let target = parsed;
+    const mirrored = mirrorTarget(parsed, lookup);
+    if (mirrored !== null) {
+      try {
+        target = new URL(mirrored);
+      } catch (error) {
+        // 镜像表配错（如前缀里漏了 scheme）时退回原 URL，不让配置错误变成请求失败。
+        console.error(`DSHM-MIRROR 改写结果无法解析，回退原 URL：${mirrored}`);
+      }
+    }
+    const mod = target.protocol === 'https:' ? https : http;
     const options = {
       method: init.method === undefined ? 'GET' : String(init.method).toUpperCase(),
       headers: Object.fromEntries(headers.entries()),
@@ -372,7 +482,7 @@ function onceFetch(url, init, headers, encoded, signal, redirectsLeft, timeoutMs
     if (lookup !== undefined && lookup !== null) {
       options.lookup = lookup;
     }
-    const req = mod.request(parsed, options, (res) => {
+    const req = mod.request(target, options, (res) => {
       const status = res.statusCode === undefined ? 0 : res.statusCode;
       const resHeaders = new DshmHeaders();
       for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) resHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]);

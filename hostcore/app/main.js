@@ -1551,8 +1551,23 @@ function shimDirResolveLines() {
     '# 归一化：--dir > 有效 $PWD > --profile > host-ready.json > ondevice',
     'if [ -z "$DIR_OPT" ] || [ "$DIR_OPT" = "/" ]; then',
     '  if [ -n "$PWD" ] && [ "$PWD" != "/" ]; then',
-    '    DIR_OPT="$PWD"',
-    '  else',
+    /*
+     * 【D3（2026-10-03）$PWD 档必须确认"这确实是一个 profile 目录"】
+     *
+     * 旧写法无条件采纳 `$PWD`，于是 `cd ~`（= 应用沙箱根 `<files>/`）之后安装插件，
+     * `$PWD` 命中本档 ⇒ 目标被当成 profile ⇒ 包落到 `<files>/node_modules/`、
+     * 并在 `<files>/package.json` 写一份裸 manifest。真机现象：`pnpm add <pkg>`
+     * 返回 `ok:true`，但插件在 profile 里根本不存在，重启后也不出现 —— 报成功却不可见。
+     *
+     * 判据只认**形状**：`${HOME_DIR}/profiles/<name>`。写成 shell 的 case 模式
+     * （`"${HOME_DIR}/profiles/"*`）而不是前缀比较，是为了让 `<name>` 必须非空且
+     * 不含多余的 `/`（`profiles/a/b` 不匹配 `profiles/*`，`profiles/` 也不匹配）。
+     * 不匹配时**不采纳**，让控制流落到下面的 `--profile` / host-ready.json / ondevice
+     * 三档 —— 那才是"没给 --dir 时该去哪儿"的正解。
+     */
+    `    case "$PWD" in "${HOME_DIR}/profiles/"*) DIR_OPT="$PWD" ;; esac`,
+    '  fi',
+    '  if [ -z "$DIR_OPT" ]; then',
     '    PN="$PROF_OPT"',
     '    if [ -z "$PN" ]; then',
     `      PN=$(sed -n 's/.*"profile"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "${HOME_DIR}/host-ready.json" 2>/dev/null)`,
@@ -4357,7 +4372,24 @@ async function start() {
         //  "空 spec"（后者会让用户以为该填包名）。
         if (isCompat) {
           installBusy = true;
-          const compatOpts = { log: (m) => log(`  [compat] ${m}`) };
+          const compatOpts = {
+            log: (m) => log(`  [compat] ${m}`),
+            /*
+             * 【D2（2026-10-03）豁免通道必须有 coreDir】
+             *
+             * `dshm-compat.js` 的 `requireCoreDir(opts)` 在 coreDir 为空时**直接抛错**，
+             * 而豁免实现来自上游 `@deepseek-ai/dsh-app-boot`，那份代码只存在于核心树里
+             * （`node_modules/@deepseek-ai/dsh-app-boot`）⇒ 没有 coreDir 就无从 `loadAppBoot`。
+             * 真机现象：`dsh plugin version-exemptions` 恒返回
+             *   `{"ok":false,"error":"缺少 coreDir（或注入 appBoot），无法加载上游 dsh-app-boot 的豁免实现"}`
+             * —— 本行此前只设了 profileDir，coreDir 从未设过，整条 `dsh plugin` 辅命令通道
+             * 因此坏死（`dsh plugin allow-version` 走的就是这里）。
+             *
+             * 取值来源：本文件顶层的 `CORE_DIR` 常量（已在作用域内）= 宿主当前**已激活**的
+             * 核心版本目录，与 loader 实际解析到的树同源，不会指错版本。
+             */
+            coreDir: CORE_DIR,
+          };
           //  profileDir 决定写进哪个 compatibility.json。缺 `.dir` 时回退宿主 profile
           //  目录（与 ensureProfile 的落点同源）；**不能**静默跳过——那会让"授予成功"
           //  变成空操作。
