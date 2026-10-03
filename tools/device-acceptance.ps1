@@ -7,7 +7,7 @@
 #
 # 它做什么：
 #   1) 找设备、装最新 HAP（-SkipInstall 时跳过）、**冷启动一次**应用、等核心就绪；
-#   2) 采集**可脚本化**的证据：hilog 早期窗口、设备侧持久日志、各页面布局 dump 与截图；
+#   2) 采集**可脚本化**的证据：设备侧持久日志（权威）＋ hilog 早窗（尽力而为）、各页面布局 dump 与截图；
 #   3) 落盘到 dist/acceptance/<时间戳>/，并生成 report.md（自动读数已填好，需看界面的项留给你勾选）。
 #
 # 【E385 判据为什么改读设备侧持久日志】
@@ -64,9 +64,33 @@ $devFiles = '/data/app/el2/100/base/com.dshm.dshclient/haps/entry/files'
 function Run-Hdc([string]$cmd) {
   return ((& $hdc shell $cmd 2>&1) -join "`n")
 }
+# 摘录一个阶段的行。
+# 【为什么不能只读 hilog】hilog 环形缓冲实测覆盖只有约 8–10 秒，且本机 ArkTS 侧 hilog 根本
+#   读不到（domain 0xD5D5 全史 0 命中）⇒ 六个 hilog 摘录曾经全是 0 字节空文件，等于没采证据。
+# 【为什么 node-output.log 能替代】它捞的是 Host 进程的完整 stdout/stderr——ArkWeb/CEF 的原生
+#   日志（NetworkTransactionTimeout、CppCrash…）与 Host 自己的 BOOT_*/平台标识/IN-UPGRADE
+#   都在里面，是 hilog 的**超集**。所以判据来源统一换成：hilog（尽力而为）+ 设备侧持久日志。
 function Save-Log([string]$name, [string]$pattern) {
-  $text = Run-Hdc "hilog -x | grep -E '$pattern' | tail -60"
-  $text | Set-Content -Path (Join-Path $out "$name.log") -Encoding UTF8
+  $hit = @()
+  $hilog = Run-Hdc "hilog -x | grep -E '$pattern' | tail -60"
+  if ($hilog) { $hilog = $hilog.Trim(); if ($hilog.Length -gt 0) { $hit += ($hilog -split "`r?`n") } }
+  foreach ($body in @($nodeOut, $hostSinceBoot)) {
+    if (-not $body -or $body.Length -eq 0) { continue }
+    foreach ($ln in ($body -split "`r?`n")) {
+      if ($ln.Length -gt 0 -and [regex]::IsMatch($ln, $pattern)) { $hit += $ln }
+    }
+  }
+  $hit = @($hit | Select-Object -Last 60)
+  $head = @(
+    ('# 摘录：' + $name),
+    ('# 模式：' + $pattern),
+    ('# 来源：hilog -x（本机通常为空）+ 设备侧 device-node-output.log / device-dshm-host.log（本次启动之后）'),
+    ('# 命中：' + $hit.Count + ' 行（超过 60 行只留末尾 60 行）')
+  )
+  if ($hit.Count -eq 0) {
+    $head += '# 本机没摘到 —— 不是"没问题"，是这几条信号本轮确实没出现；请回原始 device-*.log 复核。'
+  }
+  ($head + $hit) -join "`r`n" | Set-Content -Path (Join-Path $out "$name.log") -Encoding UTF8
 }
 # 拉设备侧文件并按 UTF-8 解码（E387：`hdc shell cat` 会经控制台 GBK 解码，中文全乱 ⇒ 必须 recv 后读）
 function Pull-DeviceFile([string]$remote, [string]$name) {
@@ -74,6 +98,23 @@ function Pull-DeviceFile([string]$remote, [string]$name) {
   & $hdc file recv $remote $local 2>&1 | Out-Null
   if (Test-Path $local) { return [System.IO.File]::ReadAllText($local, [Text.Encoding]::UTF8) }
   return ''
+}
+# 拉一次两份设备侧持久日志，并把 dshm-host.log 截到"本次启动标记（写锁巡检）之后"。
+# dshm-host.log 跨启动累积：不截的话会拿上几轮的行当本轮读数（假 PASS/假 FAIL）。
+# node-output.log 每次启动轮转，本身就是本轮权威，不用截。
+function Sync-DeviceLogs {
+  $script:nodeOut  = Pull-DeviceFile "$devFiles/node-output.log" 'device-node-output.log'
+  $script:hostLog  = Pull-DeviceFile "$devFiles/dshm-host.log"   'device-dshm-host.log'
+  $script:hostSinceBoot = ''
+  if ($hostLog.Length -gt 0) {
+    $hl = $hostLog -split "`r?`n"
+    for ($i = $hl.Count - 1; $i -ge 0; $i--) {
+      if ($hl[$i].Contains('写锁巡检')) {
+        $script:hostSinceBoot = ($hl[$i..($hl.Count - 1)] -join "`n")
+        break
+      }
+    }
+  }
 }
 function Save-Ui([string]$name, [string]$clickAt) {
   if ($clickAt.Length -gt 0) {
@@ -158,17 +199,16 @@ if (-not $SkipInstall) {
 # hilog 只在启动后几秒内还有启动事件，先抢一份早窗；剩下的时间留给界面就绪
 $early = [Math]::Min($HilogEarlySeconds, [Math]::Max(0, $BootWaitSeconds - 2))
 Start-Sleep -Seconds $early
-Save-Log 'hilog-early' 'BOOT_|DSHM_PLATFORM|平台标识|DSHM-AUTH|DSHM-TRACE|files changes|remote\.mux'
 Write-Host ('等待核心就绪（剩余 ' + ([Math]::Max(0, $BootWaitSeconds - $early)) + ' s）…')
 Start-Sleep -Seconds ([Math]::Max(0, $BootWaitSeconds - $early))
 
 # ── 3) 采证据 ─────────────────────────────────────────────────────────────
-# 设备侧持久日志：node-output.log 每次启动轮转（本轮权威），dshm-host.log 跨启动累积（配合启动标记用）
-$nodeOut = Pull-DeviceFile "$devFiles/node-output.log" 'device-node-output.log'
-$hostLog = Pull-DeviceFile "$devFiles/dshm-host.log"   'device-dshm-host.log'
+# 设备侧持久日志：node-output.log 每次启动轮转（本轮权威），dshm-host.log 跨启动累积（配 Sync-DeviceLogs 截取）
+Sync-DeviceLogs
 
+Save-Log 'hilog-early' 'BOOT_|DSHM_PLATFORM|平台标识|DSHM-AUTH|DSHM-TRACE|files changes|remote\.mux'
 Save-Log 'boot'     'BOOT_10_ENV_READY|BOOT_65|DSHM_PLATFORM|平台标识'
-Save-Log 'connect'  'DSHM-AUTH connect|DSHM-CONN|DSHM-WS'
+Save-Log 'connect'  'DSHM-AUTH connect|DSHM-CONN|DSHM-WS|IN-UPGRADE'
 Save-Log 'trace'    'DSHM-TRACE'
 Save-Log 'features' 'commands/list|agentPresets/list|skills/list|llm providers|workspace baseline|files changes opened'
 Save-Log 'errors'   'CppCrash|AppKilledReporter|JS_ERROR|exitSigno'
@@ -205,15 +245,8 @@ foreach ($n in $nav) {
 $navLines -join "`r`n" | Set-Content -Path (Join-Path $out 'nav.md') -Encoding UTF8
 
 # ── 4) 自动判定 ───────────────────────────────────────────────────────────
-# dshm-host.log 是跨启动累积的：只看"本次启动标记（写锁巡检）之后"的行
-$hostLines = @()
-if ($hostLog.Length -gt 0) { $hostLines = $hostLog -split "`r?`n" }
-$bootIdx = -1
-for ($i = $hostLines.Count - 1; $i -ge 0; $i--) {
-  if ($hostLines[$i].Contains('写锁巡检')) { $bootIdx = $i; break }
-}
-$hostSinceBoot = ''
-if ($bootIdx -ge 0) { $hostSinceBoot = ($hostLines[$bootIdx..($hostLines.Count - 1)] -join "`n") }
+# 界面导航会再花几十秒：判据用的日志在 Sync-DeviceLogs 时已取，这里**不再拉第二次**
+# （拉第二次也只会变多——那样"本轮读数"与"报告里的读数"就可能不是同一份，报告会失真）。
 
 $coreLine = ''
 $mCore = [regex]::Match($nodeOut, 'BOOT_10_ENV_READY[^\r\n]*')
@@ -293,7 +326,8 @@ $lines += '        `fs-watch` 全史只出现过 1 次（2026-09-27），不是�
 $lines += ''
 $lines += '## 截图与布局'
 $lines += ''
-$lines += '同目录下：<页面>.json（uitest dumpLayout）、<页面>.jpeg（截图）、<阶段>.log（hilog 摘录）、'
+$lines += '同目录下：<页面>.json（uitest dumpLayout）、<页面>.jpeg（截图）、<阶段>.log（分阶段摘录：来源＝'
+$lines += 'hilog 尽力而为 + 设备侧持久日志，本机 hilog 通常为空 ⇒ 空文件不代表无信号，回 device-*.log 复核）、'
 $lines += 'device-*.log（从设备拉下来的持久日志，UTF-8 原文）、nav.md（导航是否点动）。'
 $lines += ''
 $lines += '## 结论'
