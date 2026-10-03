@@ -61,6 +61,8 @@ node tools/assert-fs-search-fallback.mjs
 
 `tools/` 下另有专项门禁（设计令牌棘轮、文档引用、布局断言、上架红线、协议往返、原生闭包等）。改动涉及哪个面就跑哪个；不确定时全跑一遍。
 
+其中 `check-sidebar-tab-id-guard.mjs` 守的是 `pack-core` 对核心树打的行为补丁（侧栏页签 id 守卫）：它把随包发布的源码原文抽出来放进壳里跑。前置是已跑过 `node tools/pack-core.mjs --skip-install`；未跑过时它以退出码 2 明确报「前置条件缺失」，不会伪装成通过。
+
 ## 提交信息
 
 采用 [Conventional Commits](https://www.conventionalcommits.org/) 前缀：`feat:` / `fix:` / `docs:` / `chore:` / `refactor:`，可带范围，如 `fix(security): ...`。
