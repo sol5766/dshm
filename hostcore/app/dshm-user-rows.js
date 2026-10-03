@@ -410,9 +410,11 @@ function ensureMarketRows(profileDir, profileName, io) {
  *
  * @param seedText  本次要写入的种子全文
  * @param prevText  覆盖**之前**的 patch 原文
+ * @param io        可选注入 { log }（去重计数要进启动日志才有可观测性）
  * @returns 需要追加的条目文本（可能为空串）
  */
-function carryForeignTopLevelEntries(seedText, prevText) {
+function carryForeignTopLevelEntries(seedText, prevText, io) {
+  const iLog = typeof (io || {}).log === 'function' ? io.log : () => {};
   if (typeof prevText !== 'string' || prevText.length === 0) {
     return '';
   }
@@ -487,7 +489,42 @@ function carryForeignTopLevelEntries(seedText, prevText) {
     }
     kept.push(entry);
   }
-  return kept.join('\n');
+  /*
+   * 【N6（2026-10-03）同一主键只保留最后一次出现】
+   *
+   * 上游 `applyEntryPatches` 对非 insert 行走的是"按 id 整体覆盖"（`target[key] = value`，
+   * **不是深合并**）⇒ 同一 id 的多行里，只有**最后一行**有效，前面的等于已经作废。
+   * 本函数却把每一行都原样 carry ⇒ 作废行永久留在 patch 里逐轮累积。
+   *
+   * 真机实证（设备 profile cordis.patch.yml，123 行）：`- id: better-sidebar` 出现 2 次
+   * —— `:75` 带 `config: {agentOpenTools, titleBarScheme, titleBarPresetId, titleBarCompat}`，
+   * `:118` 是 `disabled: true`。按上游语义最终生效的只有 `disabled: true`，那份 config
+   * 早就被覆盖掉了，却一直跟着 carry。
+   *
+   * 这里就按上游语义剪掉"后面还有同 key"的行：容量与顺序都不变（保留最后一次出现的位置），
+   * 只是删掉确定无效的重复。对 D1 的市场行是同类问题的更强形态（那个由上面的显式 skip
+   * 处理，因为它的供给必须完全交给托管通道）。
+   *
+   * 注意：**只按 key 去重，不碰"id 已不在任何 bundle 里"的孤儿行**。孤儿行的判定需要
+   * profile package.json 的 bundle 清单，而当前签名里没有它；且孤儿行是无主覆盖（上游只
+   * warn 后 skip）⇒ 无害，而误删一个"待安装插件的配置行"会真丢用户配置。取舍：不动。
+   */
+  const seenLater = new Set();
+  const deduped = [];
+  for (let i = kept.length - 1; i >= 0; i -= 1) {
+    const key = keyOf(kept[i]);
+    if (seenLater.has(key)) {
+      continue;                            // 后面还有同 key ⇒ 本行已被覆盖，丢掉
+    }
+    seenLater.add(key);
+    deduped.push(kept[i]);
+  }
+  deduped.reverse();
+  const droppedDup = kept.length - deduped.length;
+  if (droppedDup > 0) {
+    iLog(`用户插件行：carry 阶段按主键去重，丢弃 ${droppedDup} 行被覆盖的重复条目`);
+  }
+  return deduped.join('\n');
 }
 
 /**
@@ -529,7 +566,7 @@ function composeUserRows(profileDir, io) {
   let pendingCarried = '';
   try {
     const seedRaw = fs.readFileSync(patchPath, 'utf8');
-    pendingCarried = carryForeignTopLevelEntries(seedRaw, prevPatchText);
+    pendingCarried = carryForeignTopLevelEntries(seedRaw, prevPatchText, opts);
   } catch (e) {
     pendingCarried = '';
   }

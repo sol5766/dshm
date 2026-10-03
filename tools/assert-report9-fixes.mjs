@@ -210,6 +210,32 @@ console.log('\n# 5) profile patch 保留非种子条目（缺陷4）');
 
   // 场景 D：首次安装（无 prev）→ 空
   ok('无原文 → 空（首次安装）', carry(seed, '') === '');
+
+  /* 场景 E（N6，2026-10-03）：同一主键只保留**最后一次**出现。
+   * 上游 `applyEntryPatches` 对非 insert 行走 `target[key] = value`（整体覆盖，非深合并）
+   * ⇒ 同 id 的前几行等于已作废；carry 却把每一行都带上 ⇒ 作废行永久累积。
+   * 真机实证：设备 profile cordis.patch.yml 里 `- id: better-sidebar` 出现 2 次。 */
+  const dup = [
+    '- id: better-sidebar',
+    '  config:',
+    '    agentOpenTools: false',
+    '- id: keepme',
+    '  z: 3',
+    '- id: better-sidebar',
+    '  disabled: true',
+  ].join('\n');
+  const carriedE = carry(seed, `${seed}\n${dup}\n`);
+  ok('N6 同主键去重：只留最后一次出现',
+    (carriedE.match(/^-\s*id:\s*better-sidebar$/gm) || []).length === 1,
+    `实际 ${JSON.stringify(carriedE)}`);
+  ok('N6 去重保留的是**最后**那份（disabled: true，不是 config 那份）',
+    carriedE.includes('disabled: true') && !carriedE.includes('agentOpenTools'),
+    `实际 ${JSON.stringify(carriedE)}`);
+  ok('N6 去重不影响无重复的条目', carriedE.includes('keepme'), `实际 ${JSON.stringify(carriedE)}`);
+  const logsE = [];
+  carry(seed, `${seed}\n${dup}\n`, { log: (m) => logsE.push(m) });
+  ok('N6 去重计数进启动日志（可观测）',
+    logsE.some((m) => m.includes('去重')), `实际 ${JSON.stringify(logsE)}`);
 }
 
 console.log('\n' + '='.repeat(58));
