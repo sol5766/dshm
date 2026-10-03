@@ -303,7 +303,7 @@ author/committer 时刻相同。差异只在 commit 对象的元数据，且用 
 | **N2** `dsh-our-free-model` 源顺序写反 | **不改插件源码** —— 该链经 `globalThis.fetch`，由 N1 垫片覆盖 `raw.githubusercontent.com` | 同上（raw 首跳被改写，撞墙消失） |
 | **N3** `dshmarket` 备用代理 `ghfast.top` 已死 | **不改插件源码** —— 垫片 `mirrorTable()` 已含 `ghfast.top` 换主机项 | 同 N1 |
 | **N4** 侧栏 `files` 页签被占死 | 根因 = `SidebarRightTabRegistry.register()` 取号非原子（`ids.add` 后 `refresh()` 抛错 ⇒ id 永久占死）。`tools/pack-core.mjs` 新增 `patchSidebarTabIdLeak()`（标记 `DSHM_TAB_ID_GUARD`）在异常路径回滚 | 只读区与核心树里标记 **各 1 处**；`tools/check-sidebar-tab-id-guard.mjs` 9/9 PASS；⚠️ 浏览器 console 实证**取不到**（本机 ArkWeb 不投递 `.onConsole`，`diag-web-console` 文件从未生成） |
-| **N5** 侧栏终端未接线 | `hostcore/profile/ondevice/cordis.patch.yml` 的 `terminal-bash` `shellPath` 改 `/usr/bin/zsh` | 设备 profile `:19 shellPath: /usr/bin/zsh` |
+| **N5** 侧栏终端未接线 | `hostcore/profile/ondevice/cordis.patch.yml` 的 `terminal-bash` `shellPath` 改 `/usr/bin/zsh` | **真机端到端打通**（三条独立证据）：① 布局树出现 `[tab] "zsh 关闭"`（页签名取自 `shellPath`，证明配置生效而非默认 `/bin/bash`）；② `ps` 见 `60902 /usr/bin/zsh -i`，**PPID = 48971 = Host 进程**；③ `/proc/60902/fd/{0,1,2,10} → /dev/pts/0`，`env` 含 `TERM=xterm-256color`。另从 PTY 主设备写入命令后实读到回显（`OUT-CAPTURED` / `ZSH=5.9`）|
 
 另：`tools/check-fetch-mirror.cjs`（6/6 PASS）与 `tools/check-sidebar-tab-id-guard.mjs`（9/9 PASS）是 N1/N3 与 N4 的永久门禁。
 
