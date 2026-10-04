@@ -855,6 +855,17 @@ const DSHM_PLUGIN_PACKAGES = [
   // （`open('w')→write→close`，31 号探针记录的放行组合）；读/路径封闭/锁/版本守卫照旧
   // 继承上游。profile 里把 `fs-sandbox` 那一行停用、换成本插件。
   { name: '@deepseek-ai/dshm-fs-write-nonchmod', dir: 'dshm-fs-write-nonchmod' },
+  // 侧栏 Office 文档预览改走系统预览窗（见 cordis.patch.yml ⑫ 与插件头注）：
+  // 上游内置 office 实现（`@deepseek-ai/dsh-client-ui-sidebar-documentpreview/lib/client.js`
+  // 的 `…/office`）的读取函数是恒 reject 的桩，只有 `remote.officeToPdf` 就绪才会换成真
+  // 实现；而它的宿主提供者 `@deepseek-ai/libreoffice-kit` 在 openharmony-arm64 上结构性
+  // 不可达（`resolveEngine()` 抛 `Unsupported LibreOfficeKit host: …`）⇒ 端侧开
+  // doc/docx/ppt/pptx 只会看到「Office 预览不可用」+ 正文空转。
+  // 本插件是**纯客户端**插件（host 半边是空 apply，照 `@deepseek-ai/dsh-client-ui-open-in-app`
+  // 的做法）：`priority` 非 `builtin` ⇒ 一定赢 `candidates[0]`，把内置桩顶掉，改用
+  // `loading:"bytes-complete"` + 正文面板/工具栏按钮调 ArkTS 桥 `openFilePreview` 弹系统预览窗。
+  // **只认领 `doc/docx/ppt/pptx`**：`xls/xlsx/csv/tsv` 归内置 Excel（纯客户端实现，端侧正常）。
+  { name: '@deepseek-ai/dshm-office-system-preview', dir: 'dshm-office-system-preview' },
 ];
 /**
  * 承载自带插件依赖声明的上游包。

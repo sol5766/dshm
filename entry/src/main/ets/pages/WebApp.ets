@@ -62,6 +62,12 @@ import type { PickedFolder } from 'platform';
 // 外链外开（2026-09-28，修「设置→登录」点不动）：见 OPEN_LINK_SHIM_JS。
 // isOpenableUrl 做 http/https 白名单；openExternalUrl 内部走 context.openLink。
 import { isOpenableUrl, openExternalUrl } from 'platform';
+// 【2026-10-04】系统原生预览（PreviewKit）：Office 全族/pdf/图片/音视频。
+// 上游的 Office 预览要过 LibreOffice 引擎转换，而 `libreoffice-kit` 在本平台
+// 直接 `Unsupported LibreOfficeKit host`（WASM 回退在 `--jitless` 下必死）
+// ⇒ 引擎路线结构性不可达，设备自带预览服务是唯一落点（也是"原生体验"的落点）。
+// 见 platform/src/main/ets/system/FilePreview.ets。
+import { mimeTypeForName, openSystemPreview, uriFromPath } from 'platform';
 // 方案 B：在 WebView 请求麦克风的时刻同步启动 ArkTS 侧环形采集。
 // 依据：真机实测官方那路（getUserMedia→MediaRecorder→重采样）音频识别不准，
 // 而同设备 AudioCapturer 直采总是正确 ⇒ provider 优先用这一路。
@@ -1140,6 +1146,7 @@ struct WebApp {
     ,'nativeCaptureState': (): string => this.nativeCaptureState()
     ,'takeNativeCapture': (): string => this.takeNativeCapture()
     ,'openExternal': (url: string, mode: string): void => this.openExternal(url, mode)
+    ,'openFilePreview': (path: string): string => this.openFilePreview(path)
   };
 
   /**
@@ -1225,6 +1232,70 @@ struct WebApp {
       // openExternalUrl 内部已 catch，走到这里说明是意料外的异常：同样留痕
       this.dirPickerBridge.writeDiagMarkerPublic('diag-openlink', `error ${e.message}`);
       hilog.warn(DOMAIN, TAG, '外开异常：%{public}s', e.message);
+    });
+  }
+
+  /**
+   * 系统原生预览入口（OPEN_OFFICE_SHIM_JS 的同步桥目标，2026-10-04）。
+   *
+   * 【为什么同步返回字符串】javaScriptProxy 只支持同步调用，而 openPreview 是异步的。
+   * 与 `openExternal` 同范式：这里 fire-and-forget，同步把**受理状态**回给调用方
+   * （`'ok'` 已投递 / `'nouri'` 路径转 URI 失败 / `'empty'` 空路径），真正的成败由
+   * 异步回调写诊断落盘 + hilog。
+   *
+   * 【为什么路径要再校验】桥参数是不可信输入（页面脚本可伪造调用）。这里不信任
+   * 任何前缀，只做"非空 + 能转成 URI"两道；**是否允许访问该路径由系统裁决**
+   * （d.ts 前置条件逐字：调用方须保证 URI 支持委托访问），我们不自己造白名单——
+   * 造了也拦不住真越权，只会让合法路径被误拒。
+   */
+  private openFilePreview(path: string): string {
+    const target: string = typeof path === 'string' ? path.trim() : '';
+    if (target.length === 0) {
+      hilog.warn(DOMAIN, TAG, '系统预览被拒（空路径）');
+      return 'empty';
+    }
+    this.dirPickerBridge.writeDiagMarkerPublic('diag-file-preview', `request ${target}`);
+    const uri: string = uriFromPath(target);
+    if (uri.length === 0) {
+      this.dirPickerBridge.writeDiagMarkerPublic('diag-file-preview', `nouri ${target}`);
+      hilog.warn(DOMAIN, TAG, '系统预览：路径转 URI 失败 %{public}s', target);
+      return 'nouri';
+    }
+    this.launchSystemPreview(target, uri);
+    return 'ok';
+  }
+
+  /**
+   * 真正调 PreviewKit（见 platform/system/FilePreview.ets）。
+   *
+   * 【失败必须让用户看见】真机上 openPreview 可能因 syscap 缺失（手机/平板）、
+   * URI 无委托访问、同 1 秒内重复调用而失败。静默失败就是本次要修的那个 bug 的
+   * 翻版（点了没反应）⇒ 失败一定弹提示 + 写 `diag-file-preview`。
+   */
+  private launchSystemPreview(path: string, uri: string): void {
+    const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    const leaf: string = path.substring(path.lastIndexOf('/') + 1);
+    const mime: string = mimeTypeForName(leaf);
+    openSystemPreview(ctx, uri, leaf, mime).then((ok: boolean): void => {
+      if (ok) {
+        this.dirPickerBridge.writeDiagMarkerPublic('diag-file-preview', `ok ${uri}`);
+        hilog.info(DOMAIN, TAG, '系统预览已弹出：%{public}s', leaf);
+        return;
+      }
+      this.dirPickerBridge.writeDiagMarkerPublic('diag-file-preview', `failed ${uri}`);
+      this.getUIContext().showAlertDialog({
+        title: '系统预览未受理',
+        message: `系统未能打开这个文件的预览窗。\n\n${leaf}`,
+        confirm: {
+          value: '知道了',
+          action: (): void => {
+            // 空实现即全部行为：确认后自动关闭弹窗
+          }
+        }
+      });
+    }, (e: Error): void => {
+      this.dirPickerBridge.writeDiagMarkerPublic('diag-file-preview', `error ${e.message}`);
+      hilog.warn(DOMAIN, TAG, '系统预览异常：%{public}s', e.message);
     });
   }
 
@@ -2490,7 +2561,7 @@ struct WebApp {
           .javaScriptProxy({
             object: this.bridges,
             name: '__DSHM_BRIDGES__',
-            methodList: ['startPick', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture', 'openExternal'],
+            methodList: ['startPick', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture', 'openExternal', 'openFilePreview'],
             controller: this.controller
           })          // 官方 web UI 自己按 prefers-color-scheme 适配暗色：跟随系统、不强制反色
           .darkMode(WebDarkMode.Auto)

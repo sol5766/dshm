@@ -598,3 +598,93 @@
   config:
     websocketHeartbeatIntervalMs: 30000
     streamInboxBytes: 262144
+
+# ⑫ 侧栏 Office 文档预览改走系统预览窗（DSHM 自带插件，2026-10-04）
+#
+#    【缺口（根因，已是定论）】侧栏文档预览的"选哪个实现"在
+#    `@deepseek-ai/dsh-client-ui-sidebar-documentpreview/lib/client.js:604-618`：
+#    `candidates = matchingDocumentPreviews(definitions, file.path)`、`selected = candidates[0]`；
+#    排序键（`:286-293`）是 `right.rank - left.rank || right.length - left.length ||
+#    left.order - right.order`，其中 `rank = definition.priority === "builtin" ? 0 : 1`（`:291`）
+#    ⇒ **一个 priority 非 builtin 的同后缀实现，一定排在内置实现前面。**
+#
+#    而内置 office 实现（`:5639-5699`，id `…/office`，`extensions = ["doc","docx","ppt","pptx"]`）
+#    的读取函数是**恒 reject 的桩**：`:5652 let read = unavailable;`，只有
+#    `:5700 ctx.inject(["remote","remote.officeToPdf","remote.workspaceFiles"], …)` 完备
+#    之后才会被换成真实现。而 `remote.officeToPdf` 的宿主提供者
+#    `@deepseek-ai/libreoffice-kit`：`lib/index.js:1267 resolveEngine()` 的 `platformTarget()`
+#    （`:1241-1246`）只认 darwin / win32 / linux，`:1288` 对其它宿主直接
+#        throw new Error(`Unsupported LibreOfficeKit host: ${platform}-${arch}`)
+#    ⇒ 在 **openharmony-arm64 上结构性不可达**（真机 `node-output.log` 里 office 相关标识符 0 命中，
+#    `dsh-office-to-pdf` 这条 host 路由根本没被加载）。
+#
+#    后果有两层，两层都在真机复现过：
+#    ① 用户看到 zh 字典 `:5112` 那句
+#       「Office 预览不可用。请在运行 DeepSeek Harness 的主机上启用文档预览服务。」；
+#    ② 更长的时间里是**「一直渲染中」**——因为内置实现用的是 `loading: "renderer"`（`:5661`），
+#       而 renderer 模式下正文只在 `content !== void 0` 时才渲染（`:749-785` 的 content useMemo；
+#       `:970` 的转圈又要 `mode !== "renderer"`），桩永远不产出内容 ⇒ 正文区长期空转。
+#
+#    【为什么不是改上游、也不是加配置项】内置 office 的 `read` 唯一来源是
+#    `remote.officeToPdf`，而该服务在端侧没有任何可接受的宿主实现；把 LibreOfficeKit 搬到
+#    openharmony-arm64 不是本仓库可控范围（要一份能在这台设备上跑的 LibreOffice 引擎）。
+#    端侧本来就有**系统级**的 Office 预览能力（`PreviewKit`，syscap
+#    `SystemCapability.FileManagement.FilePreview.Core`，2in1 形态在
+#    `sdk/default/hms/ets/api/device-define/2in1-hmos.json` 里具备），已经由
+#    `platform/src/main/ets/system/FilePreview.ets` + `WebApp.ets` 的 `openFilePreview` 桥
+#    接到 Web 侧 ⇒ 正确做法是让侧栏**认领**这四个后缀、正文与工具栏都指向那个桥。
+#
+#    【本行做什么】`@deepseek-ai/dshm-office-system-preview`（源码
+#    hostcore/plugins/dshm-office-system-preview/，由 tools/pack-core.mjs 的
+#    embedDshmToolPackages() 放进核心树 node_modules）是一个**纯客户端**插件：
+#    host 半边是空 `apply()`（照上游 `@deepseek-ai/dsh-client-ui-open-in-app/lib/index.js`
+#    的 481 B 样板，注释里写明"空 apply 只是为了让插件出现在 host cordis.yml / Loader 里，
+#    浏览器半边走 exports["./client"]，由 package.json 的 dsh.client 声明被发现"）。
+#    浏览器半边（`lib/client.js`）做四件事：
+#      · `ctx.documentPreviews.register({ id: "…/office", extensions: ["doc","docx","ppt","pptx"],
+#        binaryExtensions: 同上, priority: "extension", loading: "bytes-complete", wrap: false })`
+#        —— 只认领这四个后缀，用非 builtin 的 priority 顶掉内置桩；
+#      · 正文槽 `sidebar.right.tab.document` 注册面板组件（读
+#        `useResource(props.resourceAddress).value?.absolutePath`，与上游 `MarkdownBody`
+#        `:1554-1555` 同一取法），显示文件名/大小 + 一个「系统预览」按钮；
+#      · 侧栏标题栏的 `sidebar.right.tab.document.actions` 与空态失败块的
+#        `sidebar.right.tab.document.unpreviewable` 各注册一个同款按钮（这两个 list 槽由上游
+#        `TextPreview` 的父条目声明，见 `:6827-6846` —— **本插件不重复声明**，否则
+#        `dsh-client-ui-slots/lib/index.js:191-194` 会抛 `slot "…" is already declared`）；
+#      · 三个按钮都调 ArkTS 桥 `globalThis.__DSHM_BRIDGES__.openFilePreview(absolutePath)`
+#        （`WebApp.ets:1251-1266` 的返回契约：`'ok'` 成功 / `'empty'` / `'nouri'`），
+#        由 `platform` 的 `openSystemPreview()` 弹系统预览窗。
+#
+#    【为什么 loading 必须是 bytes-complete】renderer 模式要求正文自己回执
+#    （`actions.rendered(tabId, revision, version)`，`:1331-1336`，且非 renderer 模式直接早退），
+#    而 `content === void 0` 时正文**既不转圈也不渲染槽**（`:970` / `:971`）⇒ 空白。
+#    `bytes-complete` 则由侧栏自己走 `readBytes(…, {}, signal)` 整读一遍
+#    （上限 `maxFileBytes = 32 MiB`，`@deepseek-ai/dsh-api-workspace-files/lib/index.js:385`），
+#    读完 `actions.complete()` 让 `content = {kind:"bytes", …}`，正文面板立刻有内容；
+#    读失败（如超 32 MiB 抛 `workspace-file/too-large`）则落进 `:996-1017` 的空态失败块，
+#    而 `emptyFailureRecourse("workspace-file/too-large") === "open"`（`:173-181`）
+#    ⇒ `.unpreviewable` 槽里的按钮仍然渲染。两条路径都给得出入口。
+#
+#    【为什么不认领 xls/xlsx/csv/tsv】内置 Excel 实现（`:5853-5880`）是**纯客户端**的
+#    （`LazyExcelBody` → `lib/client.excel.js`），端侧本来就正常；本插件一旦认领就会把它顶掉，
+#    而本插件并不重新实现表格渲染 ⇒ 那是**功能退化**。
+#
+#    【边界】· 不改上游 dsh 一个字节、不新增任何权限、不碰任何既有目录；
+#    · **绝不阻断启动**：`apply()` 只做注册，注册全部包在 `ctx.effect` 里由 cordis 回收；
+#      桥在**点击时**才现取（非 DSHM 环境 / 页面重载后都不会在模块求值期拿到失效引用）；
+#    · locale 用自有 ns `dshmOfficeSystemPreview`（上游 `sidebarOffice` 已注册，
+#      复用会在 `dsh-client-locale/lib/client.js:1387-1412` 抛
+#      `locale namespace "…" already has locale "…"`）；
+#    · 注入的 `<style>` 的 `data-plugin` 写本插件包名（`dsh-client-modules/lib/client.js:194-197`
+#      的 `removeOwnedStyles(id)` 按 `style[data-plugin=<模块 id>]` 精确摘除）。
+#
+#    【怎么关掉】删掉下面这个 insert 行 + pack-core 的 DSHM_PLUGIN_PACKAGES 里那一项，
+#    即完全回到上游内置 office 实现（也就是回到"Office 预览不可用"那句提示）。
+#    只想临时回退：在用户层 `$DSH_HOME/cordis.patch.yml` 写
+#    `- id: dshm-office-system-preview` + `disabled: true`。
+#
+#    【恢复条件】上游若给 `remote.officeToPdf` 补上 openharmony 宿主实现（或把侧栏 office
+#    预览改成不依赖宿主渲染），删掉下面这个 insert 行 + pack-core 里那一项即可。
+- insert:
+    - id: dshm-office-system-preview
+      name: '@deepseek-ai/dshm-office-system-preview'

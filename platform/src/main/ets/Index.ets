@@ -71,6 +71,22 @@ export {
   readBundleName
 } from './system/FilePicker';
 export type { PickedFile, PickedFolder } from './system/FilePicker';
+// 【2026-10-04】系统原生文件预览（PreviewKit）。只为**非文本**文件（Office 全族、
+// pdf、图片、音视频）提供机制：路径→URI、后缀→MIME、可用性、开/关系统预览窗。
+// 上游的 Office 预览走 LibreOffice 引擎转换，而 `libreoffice-kit` 在本平台直接
+// `Unsupported LibreOfficeKit host`（WASM 回退在 `--jitless` 下必死）⇒ 引擎路线
+// 结构性不可达，设备自带能力是唯一落点，也是"原生体验"的落点。
+// **本模块不含策略**：什么时候弹窗、点不点确定，全在装配层。
+export {
+  canPreviewFile,
+  closeSystemPreview,
+  isPreviewDisplayed,
+  isSystemPreviewableName,
+  mimeTypeForName,
+  openSystemPreview,
+  SYSTEM_PREVIEW_SUFFIXES,
+  uriFromPath
+} from './system/FilePreview';
 /** E147：字符串资源取值入口（状态字符串不能用 `$r`，须经此函数） */
 export { localized, localizedOr } from './system/Strings';
 
