@@ -1,0 +1,37 @@
+{
+  "name": "@deepseek-ai/dshm-office-system-preview",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧插件：认领 doc/docx/ppt/pptx 的侧边栏文档预览，改用系统预览窗（PreviewKit）打开；上游内置 office 预览依赖宿主 LibreOfficeKit，在 openharmony-arm64 上结构性不可达（见插件头注）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  }
+}
