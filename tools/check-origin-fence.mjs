@@ -93,6 +93,25 @@ async function waitReady(deadlineMs) {
   return false;
 }
 
+/**
+ * 等 Host 真正「宣告」自己的 auth URL（host-ready.json 落盘），而不是只等端口有应答。
+ *
+ * 为什么必须单独等文件：`waitReady()` 把任何 `status > 0` 视为就绪，而 0.2.1-alpha.1 起上游的启动顺序
+ * 变了一点点——**先**应答一个 404（webServer 已监听、connection 信任栅栏与 auth URL 尚未就绪），
+ * **后**才写 host-ready.json。0.2.0-rc.2 是反过来的（先落盘 +5415ms、再以 401 应答 +5631ms）。
+ * 旧写法于是变成「应答即读文件、读到就过、读不到就退 2」，把上游的正常顺序变化误报成失败。
+ * 只等文件这一条对两版都成立，且比「只看状态码」更贴近门禁真正的前提。
+ */
+async function waitHostReadyFile(deadlineMs) {
+  const readyPath = join(HOME_DIR, 'host-ready.json');
+  const until = Date.now() + deadlineMs;
+  while (Date.now() < until) {
+    if (existsSync(readyPath)) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return existsSync(readyPath);
+}
+
 /** Mint the browser cookie exactly like a browser would: GET /?token=... */
 async function mintCookie() {
   const readyPath = join(HOME_DIR, 'host-ready.json');
@@ -163,6 +182,13 @@ try {
   const ready = await waitReady(readyMs);
   if (!ready) {
     console.error(`FAIL: host never answered on 127.0.0.1:${PORT}`);
+    shutdown(2);
+  }
+  // waitReady 只证明「端口有人应答」，0.2.1-alpha.1 起上游会先给一个 404（见 waitHostReadyFile 注释），
+  // 所以再等 host-ready.json 真正落盘；只等文件这一条对 0.2.0-rc.2 与 0.2.1-alpha.1 都成立。
+  const fileWaitMs = Number(process.env.DSHM_CHECK_READY_FILE_MS ?? '20000');
+  if (!(await waitHostReadyFile(fileWaitMs))) {
+    console.error(`FAIL: host answered on 127.0.0.1:${PORT} but host-ready.json never appeared within ${fileWaitMs}ms`);
     shutdown(2);
   }
   const cookie = await mintCookie();

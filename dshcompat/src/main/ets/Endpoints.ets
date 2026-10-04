@@ -6,14 +6,14 @@
  *   node tools/gen-compat-endpoints.mjs
  * 漂移检测：node tools/compat-drift.mjs（对当前安装/checkout 的上游重新提取并比对）
  *
- * 采集对象：@deepseek-ai/dsh 0.2.0-rc.2 · 140 个 endpoint
+ * 采集对象：@deepseek-ai/dsh 0.2.1-alpha.1 · 140 个 endpoint
  */
 
 import { ArgsShape, DshCapability, DshEndpoint, UpstreamIdentity } from './CompatTypes';
 
 export const UPSTREAM_IDENTITY: UpstreamIdentity = {
-  corePackage: '0.2.0-rc.2',
-  capturedAt: '2026-09-29T13:59:55.459Z',
+  corePackage: '0.2.1-alpha.1',
+  capturedAt: '2026-10-04T13:40:12.375Z',
   endpointCount: 140
 };
 

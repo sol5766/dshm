@@ -37,7 +37,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
-const STAGE = join(ROOT, 'dist', 'core', 'work', 'dsh-core-0.2.0-rc.2');
+/* 【目录名跟随配方，不写死版本】否则升核心后本门禁会静默扫旧树（或报"前置条件缺失"掩盖真因）。 */
+const RECIPE = JSON.parse(readFileSync(join(ROOT, 'hostcore', 'core-recipe.json'), 'utf8'));
+const STAGE = join(ROOT, 'dist', 'core', 'work', `dsh-core-${RECIPE.coreVersion}`);
 const SHIM = join(ROOT, 'hostcore', 'app', 'undici-shim.mjs');
 
 if (!existsSync(STAGE)) {

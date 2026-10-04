@@ -1,6 +1,6 @@
 {
   "$comment": "DSHM 端侧 dsh 核心树的配方（唯一事实来源）。tools/pack-core.mjs 读它来物化、裁剪、校验、打包。改版本/换移植件都只改这里。",
-  "coreVersion": "0.2.0-rc.2",
+  "coreVersion": "0.2.1-alpha.1",
   "platform": {
     "os": "openharmony",
     "cpu": "arm64"
