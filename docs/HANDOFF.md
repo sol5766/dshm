@@ -309,7 +309,9 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 
 **读数计划**（设备一回来就跑）：`dist/_verify1.ps1` 一键完成「`hdc install -r` → 轮询
 `host-ready.json` 等宿主就位（核心 zip 指纹变了，首启要先解包 26k 文件）→ 预热一轮 → 正式冷启动 →
-留 240 s 让用户点【设置→账号→登录】→ 拉日志（含 `dsh-js-tid` / `dshm-hb.log`）+ 自动拉 `.cpuprofile` 档案 → 打印诊断版自检、
+留 240 s 让用户点【设置→账号→登录】（这 240 s 里**后台并行**跑 `dist/_routeaudit.mjs`：把那 27 条
+「停滞前到达的路由」串行+并发各复放一遍、500 ms 一发 `GET /` 探针找无应答窗口）→ 拉日志（含 `dsh-js-tid` /
+`dshm-hb.log`）+ 自动拉 `.cpuprofile` 档案 → 打印诊断版自检、
 时间轴、H1/H2 粗判，并对每份档案跑 `dist/_prof.js` 输出 A/B/C/A′ 判决」；`_verify1.ps1` 另拉
 `dsh-js-tid` 并每 ~250 ms 采一次 `wchan/stat` 写 `jstid-samples.log`（判 H1/H2 的 wchan 直方图），
 外加 `dshm-hb.log`（心跳最大间隔 ⇒ H1／(B) 判决段）与 `SYNC-RING`/`SYNC-WARN`/`SYNC-WARN-LOG`/
@@ -432,6 +434,51 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   ⇒ 本机加 bundle **不会**拉长同步加载块，也仍复现不出「HTTP ready 之后的停顿」；设备侧 6 个第三方 bundle
   （`dsh-skin-market`/`dsh-our-free-model`/`dshmarket`/`dsh-codearts-auth`/`dsh-context`/`dshm-dev-link`）本机全都不存在，
   照搬不了设备 profile ⇒ 真机 60 s 只能靠真机档案定因。
+
+- 🎯 **停滞前那一秒到底到达了哪些请求（真机日志逐行取全）**。`dist/_s7.txt` 的 HOST 行共 631 条，
+  范围 `11:06:27.906`–`11:08:57.838`，而**停滞窗口 `11:06:31.060`–`11:07:33.598` 内 HOST 行数 = 0**。
+  窗口前 `11:06:28.300`–`11:06:30.100` 共 46 行，**最后 12 条**是：
+  `29.643 POST /api/session/modelCatalog`、`29.654 POST /api/settings/describe`、`29.723 GET /`（探针）、
+  `29.725 POST /api/dynamicCordisRunner/syncInspectManifest`、`29.735 GET /favicon-dark.svg`、
+  `29.738 GET /favicon.svg`、`29.742 POST /api/credentials/describe`、`29.898 GET /`（探针）、
+  `29.970 POST /api/schedule/catalog`、`29.972 POST /api/agentPresets/list`、`29.978 POST /api/schedule/list`、
+  `29.987 GET /`（探针）。整段 46 条里还有 `28.989 IN-UPGRADE GET /api/remote.mux`、
+  `29.618 POST /api/session/list`、`29.515 GET /plugins/events`、`29.518 GET /api/our-free-model/events`、
+  `29.274/29.626 POST /api/dynamicCordisRunner/inventory`、`29.141/29.142 GET /api/our-free-model/announcements|meta`、
+  `29.381 GET /open-in-app/apps` 等（27 条 API 路由已逐条抄进 `dist/_routeaudit.mjs` 的 `SEQ`）。
+  两次独立停滞（round 2 的 `11:06:29.978`、`_h2.log` 的 `09:49:25.166`）**最后一条真实请求都是
+  `POST /api/schedule/list`** ⇒ `schedule/list` 进嫌疑名单，但这只是**到达顺序**，没证明因果
+  （它由 `dsh-schedule/lib/typert.host.js:427` 暴露；本机 2-bundle profile 无 schedule bundle ⇒ 本机 404，复放不了）。
+  另注：`POST /api/jet-hub` 是**每 60.0 s 一发**的客户端轮询 ⇒ 日志里看到「间隔 60 s」多半是它、不是停滞；
+  判停滞必须看「探针连上但不回包」或 `LOOP-GAP`。
+  会话列表链（本机读源码，用于判「攒了几周会话会不会拖慢冷启动」）：
+  `dsh-api-session-controller/lib/index.js:1888 async list(signal)` → `dsh-session-query/lib/index.js:95-116 async listSessions(signal)`
+  → `dsh-session-persistence-jsonl/lib/index.js:2603 async list(options)` → `listArtifacts(signal)` `:3065-3091`
+  对**每个**已存会话做 `listGenerations()`（`:3038-3046`）+ `readGenerationHeader()`（`:3093-3127`，读首行、必要时
+  `zstd` 首帧解压、`JSON.parse`）+ `stat` ⇒ 列一次会话表 = O(会话数) 次小 I/O；同步原语只有 `:3 readdirSync`
+  （仅 `:3409-3416 assertUsableRoot()` 用）。本机 home 里**一个会话都没有**（只有 `install-queue/`、`profiles/`、
+  `storages/workspace.json`、`.credentials.yaml`、`host-ready.json`）⇒ 本机 `POST /api/session/list` 永远 0 工作，
+  「设备攒的会话把冷启动拖慢」这条**本机无法验证**，只能看真机 `IN-DONE POST /api/session/list <ms>`。
+- **新工具 `dist/_routeaudit.mjs`（PC 侧，经 `hdc fport tcp:3120 tcp:3120` 直接打设备宿主）**：不必等用户点登录，
+  宿主一就绪就把上面那 27 条 API 路由复放一遍 —— `Pass A` 串行逐条（归因单条路由）、`Pass B` 并发爆发
+  （`keepAlive`、`maxSockets:8`，复现争用），全程另开 500 ms 一发的 `GET /` 探针（3 s 超时）推断「宿主无应答窗口」，
+  爆发后再盯 `--watch`（默认 25 s）——设备上正是「爆发之后立刻 60 s 静默」。用法：
+  `node dist/_routeaudit.mjs --port 3120 --token-file dist/verify1/host-ready.json [--timeout 20000] [--watch 45]`；
+  输出判决行 + `dist/routeaudit/routeaudit-<ts>.json`（逐条 `started/ms/ttfb/status/len`）。
+  本机验证（bootprobe 起的本机宿主、2-bundle 空 home）：27 条全绿、`settings/describe 36ms/33333B`、
+  `session/list 1ms/268B`、`dynamicCordisRunner/inventory 1ms/91B`、`GET /` 探针 13 发 0 失败、无应答窗口 0 段；
+  设备独有的 `our-free-model/*`、`open-in-app/apps`、`schedule/*` 在本机是 404（本机没有那些 bundle/插件，设备上有）。
+  ⚠️ 两个坑都在脚本里修掉了：① `GET /plugins/events` 与 `GET /api/our-free-model/events` 是**长连事件流**，
+  本来就不回 end —— 早期版本把它们记成「20 s TIMEOUT」，判决行因此误报「最慢落在 GET /plugins/events」；
+  现在这两条只量 ttfb（拿到响应头即成功、随即断开）。② 盯守窗口必须延续到爆发**之后**，否则漏掉「爆发后转静默」。
+- **`dist/_verify1.ps1` 新增 6a/7 步**：宿主就位后立刻 `hdc file recv $F/dsh/home/host-ready.json` 到
+  `dist/verify1/host-ready.json`，再**后台**起 `_routeaudit.mjs`（`--watch 45`），与 6/7 步的 250 ms `wchan/stat`
+  采样**并行**跑完 240 s 登录窗口 ⇒ 停滞一旦被触发，同一时刻有四份对齐读数：探针失败窗口（routeaudit）、
+  `jstid-samples.log` 的 wchan、`dshm-hb.log` 的心跳断档、patch4 的 `.cpuprofile`。
+  7/7 之后新增「路由延迟审计」段打印判决与关键行（全文 `dist/verify1/routeaudit.out.txt`，明细 json 在
+  `dist/verify1/routeaudit/`）。脚本仍是 UTF-8 **带 BOM**（`edit` 会吃掉 BOM，改完必须
+  `[System.IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($true)))` 再
+  `[Parser]::ParseFile` 验 0 error —— 少 BOM 时 PowerShell 5.1 按 ANSI 读，中文串会把语法读崩、报一堆假错）。
 
 当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,325,699 B**（含 patch6/7/8/9/10/11，
 备份 `dist/fallback/DSHM-patch11-314325699.hap`；另有 patch10 314,325,699 / patch9 314,321,604 / patch8 314,317,507 /
