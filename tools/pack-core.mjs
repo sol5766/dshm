@@ -1652,7 +1652,9 @@ function addSystemAddonPackage() {
    * 用户看到的是"发消息后没反应"）。
    * 文件内容无所谓：真正加载时一定经过我们 hook 的 `Module._extensions['.node']`，
    * 那里会把路径改写成 HAP 里的 `libs/<abi>/libsystem.so`（与 koffi/sharp 同一条机制）。
-   * 两个 libc 变体都放，是因为加载器按 `process.report.header.glibcVersionRuntime` 选目录。
+   * 两个 libc 变体都放，是因为上游加载器按 `process.report.header.glibcVersionRuntime` 选目录——
+   * 那一句我们已经摘掉了（E388，见下），现在按 `/proc/self/maps` 判；两个目录映射到同一份
+   * `libsystem.so`，所以放两份只是保证上游判断逻辑无论怎么改都不会缺件。
    */
   const placeholder = 'DSHM placeholder: real binary is loaded from HAP libs/<abi>/libsystem.so\n';
   writeFileSync(join(target, 'bin', 'musl', 'system.node'), placeholder, 'utf8');
@@ -1671,6 +1673,7 @@ function addSystemAddonPackage() {
    */
   const flockJs = join(nm, 'node-addon-system', 'lib', 'flock.js');
   const flockPatched = `/** Lazy POSIX flock entry; importing it does not load a native addon. */
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { getSystemErrorName } from 'node:util';
@@ -1694,8 +1697,27 @@ function loadBinding() {
     }
     let filename = 'system.node';
     if (platform === 'linux') {
-        const report = process.report.getReport();
-        filename = join(report.header.glibcVersionRuntime ? 'glibc' : 'musl', filename);
+        /*
+         * DSHM 端侧修补（E388）：**不要**用 process.report.getReport() 判 libc。
+         * 它是"全进程诊断报告"——端侧实测耗时 55.8 s（会枚举 CPU 并逐个打开 sysfs
+         * cpufreq 做实时频率查询），而且是**同步**调用，正好落在会话写租约
+         * （SessionWriteLease.acquire → tryLockExclusive）的热路径上 ⇒ 冷启动后
+         * 事件循环被挡 ~62 s，期间登录/模型选择/插件市场/预览全部无响应（真机
+         * .cpuprofile：61,621 个样本里 55,829 个（90.6%）在这条链上）。
+         * 两个 libc 变体本来都是同一份占位文件、由 .node 处理器重定向到 HAP
+         * libs/<abi>/libsystem.so，判 glibc/musl 不影响加载，所以只做一次便宜的
+         * 判断（/proc/self/maps，node-addon-native-custom-loader 同款），判不出来
+         * 就按 musl（OpenHarmony 就是 musl）。
+         */
+        let libc = 'musl';
+        try {
+            if (/\\/libc\\.so\\.6|\\/libc-2\\.\\d+\\.so/.test(readFileSync('/proc/self/maps', 'utf8'))) {
+                libc = 'glibc';
+            }
+        } catch {
+            /* 读不到 maps 就走 musl 默认 */
+        }
+        filename = join(libc, filename);
     }
     const require = createRequire(import.meta.url);
     const manifest = require.resolve(\`@deepseek-ai/node-addon-system-\${platform}-\${arch}/package.json\`);
