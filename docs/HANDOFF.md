@@ -175,6 +175,11 @@
 > ③ 恢复首版行为，也让将来追平上游时少一处自定义（用户明确要求过"回到首版那套"）。
 > **想重开**：恢复上面的 yaml 与 ⑪ 段，且必须在**回退后先量到现场读数**（默认 6 秒回收是否真的
 > 造成重连/卡顿）再决定，不要再只凭上游 README 那句"必须调大"。
+>
+> ⚠️ 与下面 §4③ 的关系：③ 的现场读数（`127.0.0.1:3120` 在 `boot+8s` 起约 60 s 不收请求）是**这四个症状
+> 的另一种解释**，而且有真机日志作证（`dist/_silence2.cjs` 找到 `_h2.log` 一处 **+61.5 s** 的会话内沉默，
+> 沉默前后正是"请求排队 → 一次性补齐"）。两者谁是真因，由 ③ 的读数计划（ACCEPT / LOOP-GAP /
+> 采样档案）判决；回退心跳只是先回到首版行为、少一处自定义。
 
 | 端 | 落到哪 | 生效代价 |
 |---|---|---|
@@ -228,31 +233,59 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 
 **已排除**：① 本机复现不了——`dist/_bootprobe.mjs` 用同一份 `hostcore/app/main.js` + 核心树冷启动
 150 s，295 次探针只有 7 次 `ECONNREFUSED`（都在 listen 之前），启动爆发 18 个请求全部 49–108 ms，
-宿主 stdout 662 行、**无任何 ≥3 s 沉默** ⇒ 停滞是**设备独有**（剩余差异只可能是 ArkWeb 交互、
+宿主 stdout 662 行、**无任何 ≥3 s 沉默**；后来又补上 `BOOTPROBE_MUX=1`（原始 WebSocket 握手升级
+`/api/remote.mux`，5 次全部 `101`，连接保持 20 s 再重连）**仍不停滞**（177 探针、慢点只有 listen 前的
+`ECONNREFUSED`、宿主 stdout 635 行无 ≥3 s 沉默）⇒ 停滞是**设备独有**（剩余差异只可能是 ArkWeb 交互、
 设备独有插件、FUSE 路径、busybox/git 包装器、内存/发热节流）；② accept 队列满（`connect()` 立即成功、
 `rx_queue` 只有 1–2）；③ libuv 线程池饥饿（4 个 `libuv-worker` 两种状态下都在 FUTEX）；④
 `/api/dynamicCordisRunner/*` 端点阻塞（`syncInspectManifest`/`inventory` 是纯内存同步操作）；
 ⑤ 我们自己的采样器自伤（boot `pid=1129` 那一轮 `IN-REQ` 命中数为 1、`dshm-python` 命中数为 1，都是
-启动横幅 ⇒ 那轮既没开 `IN_LOG` 也没跑过 python 桥）。
+启动横幅 ⇒ 那轮既没开 `IN_LOG` 也没跑过 python 桥）；⑥ `@deepseek-ai/dsh-schedule`（停滞前最后一条
+请求 `POST /api/schedule/list` 的归属）、`@deepseek-ai/dsh-atomic-write`（`withFileLock` 的退避是
+`await new Promise(resolve => setTimeout(...))`，异步）、`recoverOrphanLocks`（宿主唯一一处启动期同步
+递归遍历，但调用点在 `main.js:4318`、即 `BOOT_40_PROFILE_BOOT (+335ms)` 附近，早于停滞 8 s）。
 
-**已知的死路**（别再走）：用宿主日志的「沉默间隙」判因。宿主只在启动与入站请求时写日志，沉默是常态；
-`dist/_silence.cjs` 在 `dist/_h*.log` 上找到的 198 处 ≥8 s 间隙，最大的全是跨天/设备休眠。
+**候选（未定，别当结论）**：停滞是否紧跟 `/api/remote.mux` 的 WebSocket 升级。`dist/_muxcorr.cjs` 对
+`dist/_h*.log` 里 125 次去重升级统计「到下一条带时间戳日志行的间隔」，分布
+`<100ms:4 / 100ms-1s:13 / 1-5s:47 / 5-20s:11 / 20-50s:5 / 50-100s:3 / >100s:42`（`>100s` 那批多是
+"升级后本会话再无日志"，不可判）；**三次已知停滞确实都在升级后 1–2 s**（`_h2.log` 09:42:42.000→
+09:42:43.116、09:49:24.133→09:49:25.166；round 2 `11:06:28.989`→`11:06:31.060`），但样本量不足以定因，
+且本机已能复现 101 升级却仍不停滞。
+
+**已知的死路**（别再走）：只靠「沉默间隙的绝对大小」判因。宿主只在启动与入站请求时写日志，沉默是常态；
+`dist/_silence.cjs` 在 `dist/_h*.log` 上找到的 198 处 ≥8 s 间隙，最大的全是跨天/设备休眠（165,127.8 s、
+66,294.6 s…），其后一律是新 boot 横幅。**但把「沉默 + 一次性爆发」当成签名是有用的**：
+`dist/_silence2.cjs`（≥6 s 间隙、分类为会话内 / 跨 boot、并把沉默前最后一条 `IN-REQ` 与爆发后的
+`IN-DONE` 配对）在 206 处里筛出**只有 4 处会话内**，其中 `dist/_h2.log` 的 09:49:25.166 → 09:50:26.668
+（**+61.5 s**）沉默前最后一条是 `POST /api/schedule/list`，爆发后头 5 行是 5 个 `toybox wget` 的 `GET /`
+挤在 26.668–26.673 的 5 ms 内 = accept 队列积压一次性排空 ⇒ **「60 s 不收请求」在宿主自己的日志里就有
+证据**（不再只依赖我的探针）；另一处 09:42:43.116（+186.3 s）同形。注意 `_h2.log` 那段时间约每 60 s
+一次 boot（09:42:36.574 → 09:47:16.817 → 09:48:17.779 → 09:49:18.630），与下面 §4② 的自杀现象同期。
 
 **读数计划**（设备一回来就跑）：`dist/_verify1.ps1` 一键完成「`hdc install -r` → 冷启动 →
-桥内 `DSHM_IN_LOG=1` + `DSHM_TS_LOG=1` → 留 240 s 让用户点【设置→账号→登录】→ 拉四份日志 →
-打印时间轴与 H1/H2 判决」。为此已加三组自证读数（commit `4f03ddd`）：
+桥内 `DSHM_IN_LOG=1` + `DSHM_TS_LOG=1` → 留 240 s 让用户点【设置→账号→登录】→ 拉四份日志 + 自动拉
+`.cpuprofile` 档案 → 打印时间轴、H1/H2 粗判、并对每份档案跑 `dist/_prof.js` 输出 A/B/C 判决」。
+为此已加四组自证读数：
 
 - 宿主 `ACCEPT #n ip:port`（`hostcore/app/main.js`，包 `server.on('connection')`）——直接回答
   「accept 到底有没有被调用」，不再靠 `/proc` 推断；
 - 宿主 `LOOP-GAP <ms>` / `LOOP-ALIVE 第 n 拍`（1 s 一拍看门狗）——判决 (H1) JS loop 被同步操作挡住
   还是 (H2) loop 在转只是没轮到 accept；
+- 宿主 **V8 CPU 采样档案**（commit `2e0bf6f`，`dist/_patch4.cjs`）：`LOOP-GAP >= 3000ms` 时自动
+  `Profiler.stop` 落盘 `<files>/dshm-diag/dshm-profile-loop-gap-<ts>.cpuprofile`（最多 3 份）再重开采样。
+  阻塞发生在**原生同步调用**里时，采样线程照样能采到发起它的 JS 帧；`dist/_prof.js` 给三态判决：
+  **A)** 无 ≥5 s 采样缺口 + 非空转同栈连续 ≥1000 样本 ⇒ loop 被同步调用挡住，**档案里直接点名
+  `node_modules/<插件>/lib/index.js:<行>`**；**B)** 存在 ≥5 s 采样缺口 ⇒ 采样整段缺失 ⇒ 进程/线程被
+  **冻结或节流**（不是 JS 阻塞）；**C)** 空转 ≥50% 且无长非空转段 ⇒ loop 在转但没收请求 ⇒ 查
+  accept/事件注册路径。仪器自检 `dist/_blocktest.cjs`（`spawnSync` / `Atomics.wait` / 忙等三种合成阻塞）
+  三份档案都正确判成 A) 并逐字点名阻塞行（3930 / 3237 / 2350 样本）；
 - 页面 `fetch start|done|fail`（前 300 条全量 + 耗时）、`ws open|close|error`、`rpc start|done`
   （`entry/src/main/ets/pages/WebApp.ets` 的 `OPEN_LINK_SHIM_JS`）——把「点击 → 拿授权 URL → 外开」
   拆成「页面发不出去」（被挡住）与「宿主回得慢」两半，并排除「mux 直到 boot+70s 才 open」。
 
-当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,309,740 B**
-（resfile 里的 `main.js` 233,049 B，含上述埋点）；设备离线（`hdc list targets` 只有 `COM1 UART`），
-**尚未安装**。
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,309,738 B**（含 patch4，
+备份 `dist/fallback/DSHM-patch4-314309738.hap`；resfile 里的 `main.js` 235,838 B，含上述全部埋点）；
+设备离线（`hdc list targets` 只有 `COM1 UART`），**尚未安装**。
 
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。
 > 清空 → 立刻动作 → 数秒内 dump。`entry/tray`、`entry/background`、`testTag` 在事后 dump 里
