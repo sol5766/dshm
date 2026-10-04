@@ -5229,7 +5229,10 @@ nav.md：账号菜单 OK → 设置 OK → 九个分区全部 OK
 - **40 秒自杀**：rc.2 上**仍未复现**（主进程 4.7 h 稳定）。`dshm-host.log` 全史共 **5 条**
   `!! process.exit(0)：停止路径放行，真正退出`，时点 `2026-09-27T04:46:50.638Z` / `2026-09-29T09:07:27.078Z` /
   **`2026-09-29T09:40:43.510Z`（就是那次 40 s 自杀）** / `2026-09-29T15:10:24.789Z` / `2026-09-30T00:28:27.333Z`。
-  强嫌疑仍是启动期未清理 `host-stop-request`（`hostcore/app/main.js:3988-4003`）；
+  强嫌疑仍是启动期未清理 `host-stop-request`（`hostcore/app/main.js:3988-4003`）——（⚠️ **该推断已被推翻**：见 `docs/HANDOFF.md` §4② —— 一定是应用侧某条 `DshHost.stop(reason)` 被调到。
+  2026-10-04 又添第三种可能：它可能是 E388 那个「冷启动后 60 s 宿主完全无响应」的**下游**——4 次
+  `!! process 'exit' event, code=0` 全部落在 E388 修复之前的 boot，修复后 0 次；样本仅 3 段 boot，未定案。）
   `dsh/home` 是 `drwx------`，**hdc 读不到** ⇒ 这条路径无法用于证伪，需要改由应用侧自证。
 - **连接抖动**：真机侧本轮未再抓取（定因见批次三十七「三」）；修法（`typert-gateway`
-  覆写 `websocketHeartbeatIntervalMs` / `streamInboxBytes`）**仍未落盘**。
+  覆写 `websocketHeartbeatIntervalMs` / `streamInboxBytes`）**2026-10-03 曾落盘、2026-10-04 已回退** ⇒
+  当前两端都走官方默认 2000ms（回收窗口 `3 × 2s ≈ 6s`）。
