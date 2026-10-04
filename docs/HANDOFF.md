@@ -2,7 +2,7 @@
 
 > 本文给**接手的人**：现在到哪一步、哪些是真结论、哪些还没做、下一步怎么动手。
 > 契约类文档（D1/D2/D2b/D3/D3b/D4/D5）不动，见 [`README.md`](README.md) 的索引；本文只讲**状态**。
-> 最近一次更新：2026-10-03（§4① 心跳覆盖已落盘；§5 补上 D1–D3/N1–N5 的落地状态）。
+> 最近一次更新：2026-10-04（§5 补上侧边栏 office 预览的根因、做法与真机验收）。
 
 ---
 
@@ -336,6 +336,56 @@ author/committer 时刻相同。差异只在 commit 对象的元数据，且用 
 **N6 刻意不动的事**：「id 已不在任何 bundle 里」的孤儿行**不清理**。判定需要 profile `package.json`
 的 bundle 清单（当前 `carryForeignTopLevelEntries` 签名没有），且孤儿行只是无主覆盖（上游
 `applyEntryPatches` warn 后 skip）无害；误删「待装插件的配置行」会真丢用户配置。
+
+### 侧边栏 office 文档预览（2026-10-04，`cadb811`）
+
+**症状**：侧边栏打开 `doc/docx/ppt/pptx` 一直「渲染中」，随后报「Office 预览不可用。请在运行
+DeepSeek Harness 的主机上启用文档预览服务」。
+
+**根因（已定，勿再猜）**：内置 office 实现的 `read` 是**恒 reject 的桩**
+（`dsh-client-ui-sidebar-documentpreview/lib/client.js:5652` `let read = unavailable;`），它等的是宿主侧
+注册 `remote.officeToPdf`；而该服务的宿主实现 `@deepseek-ai/libreoffice-kit` 只认 darwin/win32/linux
+（`lib/index.js:1267 resolveEngine()` / `:1241-1246 platformTarget()`），在 openharmony-arm64 上**结构性
+不可达**（`:1288 throw new Error(\`Unsupported LibreOfficeKit host: …\`)`）。内置实现还写
+`loading: "renderer"`，正文自己不结束加载 ⇒ 界面表现为永远转圈。
+
+**做法**：新增端侧客户端插件 `@deepseek-ai/dshm-office-system-preview`，认领 `doc/docx/ppt/pptx` 的侧边栏
+预览，正文显示文件名 + 大小 + 「用系统预览打开」按钮，标题栏右侧同一个入口；点击走 ArkTS 桥
+`openFilePreview` → PreviewKit，由系统原生预览窗渲染。**与上游默认的取舍**：这是"把不可用变成可用"，
+不是"把可用变成另一个样子"——所以只认领坏掉的那四个后缀。
+
+| 关键点 | 事实 |
+|---|---|
+| 为什么非 builtin 就赢 | `matchingDocumentPreviews` rank = `priority === "builtin" ? 0 : 1`；`candidates` 只返回 matched、不追加 fallback ⇒ 后缀命中的非 builtin 必为 `candidates[0]` |
+| **必须** `loading: "bytes-complete"` | 它由宿主读完整个文件后把 `content = {kind:"bytes", data}` 交给正文；写 `"renderer"` 则要求正文自行结束加载，否则永远转圈（这正是上游坏掉的一半原因） |
+| **不要**认领 `xls/xlsx/csv/tsv` | 内置 Excel 实现是纯客户端的、本来就正常（`LazyExcelBody` + `client.excel.js`），认领它 = 回退可用预览 |
+| 读上限 | 整文件 `readBytes` 走 `maxFileBytes` = **32 MB**（`dsh-api-workspace-files/lib/index.js:385`），不是分页的 2 MB（`:384`）⇒ 3–4.6 MB 的测试 ppt 安全 |
+| locale ns | 必须用自有 ns（`dshmOfficeSystemPreview`）；复用上游 `sidebarOffice` 会抛 `locale namespace "…" already has locale` |
+| host 半边 | 空 `apply`（照 `@deepseek-ai/dsh-client-ui-open-in-app/lib/index.js` 的 481 B 形状）——真正干活的都在客户端半边 |
+| 不需要 `dsh.client.external` | `react` / `react/jsx-runtime` / `@deepseek-ai/dsh-client-ui-primitives` 都在 9 个浏览器种子词里（`dsh-client-modules` 的 `rM()` 直接播种） |
+| CSS 注入 | 必须自带（照 `dsh-client-ui-approval/lib/client.js:10-29`），且 `style.dataset.plugin` **必须是本插件包名** —— `dsh-client-modules` 的 `removeOwnedStyles(id)` 按它回收 |
+| bridge 调用 | `globalThis.__DSHM_BRIDGES__.openFilePreview` 必须在**点击回调里**惰性取；核心树里 `__DSHM_BRIDGES__` 的唯一既有消费者是 `dsh-experimental-client-ui-voice-input` |
+
+**落地三处（缺一即静默失效）**：`hostcore/plugins/dshm-office-system-preview/`、
+`tools/pack-core.mjs` 的 `DSHM_PLUGIN_PACKAGES`、核心种子 `hostcore/profile/ondevice/cordis.patch.yml`
+的 `- insert:` 行。⚠️ **只写前两处不会报错**：`ensureProfile()`（`hostcore/app/main.js:3935-4063`）每次启动
+都用种子**覆盖**设备侧 profile，而 `assertDshmBelongingsConsistent()`（`pack-core.mjs:894-936`）只校验
+目录/声明/版本，**不校验种子里的启用行**。
+
+**ArkTS 侧**：`platform/src/main/ets/system/FilePreview.ets` 新增（后缀→MIME 表、`uriFromPath`
+（`fileUri.getUriFromPath`）、`canPreviewFile`/`openSystemPreview`/`isPreviewDisplayed`/`closeSystemPreview`
+薄封装）；`WebApp.ets` 加 `openFilePreview` 桥。⚠️ **bridges 对象与 `javaScriptProxy` 的 `methodList` 两处
+必须同步改** —— 同一组件链式两次 `javaScriptProxy` 只有最后一次生效。
+
+**同时删除**：上一轮加的冷启动 Office 探测（App 刚启动就弹系统预览窗，属打扰）。
+
+**真机验收（2026-10-04）**：
+- 冷启动无 console 报错；宿主 index.html 的 combo URL 逐字含 `@deepseek-ai/dshm-office-system-preview/client.js`。
+- 宿主送达 Web UI 的 bundle 与仓库源码**规范化后逐字符相同**（13,501 字符，sha256
+  `05bd8188430d90a2ef50e612be3e8a49fbf95b00f8ae40805f26370f09f47525`；原始 16,213 B vs 送达 16,179 B
+  差 34 B = `//# sourceMappingURL=client.js.map` 的字节数，被 combo 的 `prepareSource()` 剥掉）。
+- 打开真实工作区 `.pptx`：侧边栏显示文件名 + 「用系统预览打开」按钮，点击后系统预览窗弹出并显示内容；
+  `diag-file-preview` 记到 `request`/`ok` 两行（**此前 Web UI 从不调用该桥**，这是行为改变的判据）。
 
 ---
 
