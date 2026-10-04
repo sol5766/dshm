@@ -213,6 +213,47 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 还是"该链整体删掉"。已排除：`appfreeze`/`SIGKILL`/`LowMemory` 全 0 命中；
 `/data/log/faultlog/**` 无读权限（查不到崩溃单）。
 
+### ③ 启动后一两分钟「什么都慢」（鸿蒙端，**未判因；本机不可复现**）
+
+用户原话（m17861/m17885）：**每次启动都慢；登录转圈、模型选择卡「加载中」、插件市场与插件预览都在等
+登录**——四个症状共用同一条路径。已实测的现场形态（真机，冷启动）：
+
+- 约 `boot+8s` 起、约 60–80 s 内，`127.0.0.1:3120` 的 TCP **三次握手 1ms 内就完成**，但 `recv` 一直超时
+  （sampler 连续 59 个样本 `conn=1…4ms recv=-1 RECV-TimeoutError`）⇒ 连接进了 accept 队列**没人收**；
+  `/proc/net/tcp` 的 LISTEN `rx_queue` 单调增长也证明没 accept。
+- 同一窗口内宿主 `dshm-host.log` **字节数恒定**（无任何 `diag()`）、进程 CPU 只涨 ~1.4% 单核、所有线程
+  停在 `FUTEX`/`EVENTPOLL`；但监听 fd 确实以 `EPOLLIN` 注册在某个 epoll 集合里。
+- 停滞结束后积压一次性补齐，**登录全链只花 2.2 s**（`POST /api/account/startSignIn` → 浏览器回跳
+  `GET /oauth/callback` → `modelCatalog` → `getProfile`/`getBalance`）。
+
+**已排除**：① 本机复现不了——`dist/_bootprobe.mjs` 用同一份 `hostcore/app/main.js` + 核心树冷启动
+150 s，295 次探针只有 7 次 `ECONNREFUSED`（都在 listen 之前），启动爆发 18 个请求全部 49–108 ms，
+宿主 stdout 662 行、**无任何 ≥3 s 沉默** ⇒ 停滞是**设备独有**（剩余差异只可能是 ArkWeb 交互、
+设备独有插件、FUSE 路径、busybox/git 包装器、内存/发热节流）；② accept 队列满（`connect()` 立即成功、
+`rx_queue` 只有 1–2）；③ libuv 线程池饥饿（4 个 `libuv-worker` 两种状态下都在 FUTEX）；④
+`/api/dynamicCordisRunner/*` 端点阻塞（`syncInspectManifest`/`inventory` 是纯内存同步操作）；
+⑤ 我们自己的采样器自伤（boot `pid=1129` 那一轮 `IN-REQ` 命中数为 1、`dshm-python` 命中数为 1，都是
+启动横幅 ⇒ 那轮既没开 `IN_LOG` 也没跑过 python 桥）。
+
+**已知的死路**（别再走）：用宿主日志的「沉默间隙」判因。宿主只在启动与入站请求时写日志，沉默是常态；
+`dist/_silence.cjs` 在 `dist/_h*.log` 上找到的 198 处 ≥8 s 间隙，最大的全是跨天/设备休眠。
+
+**读数计划**（设备一回来就跑）：`dist/_verify1.ps1` 一键完成「`hdc install -r` → 冷启动 →
+桥内 `DSHM_IN_LOG=1` + `DSHM_TS_LOG=1` → 留 240 s 让用户点【设置→账号→登录】→ 拉四份日志 →
+打印时间轴与 H1/H2 判决」。为此已加三组自证读数（commit `4f03ddd`）：
+
+- 宿主 `ACCEPT #n ip:port`（`hostcore/app/main.js`，包 `server.on('connection')`）——直接回答
+  「accept 到底有没有被调用」，不再靠 `/proc` 推断；
+- 宿主 `LOOP-GAP <ms>` / `LOOP-ALIVE 第 n 拍`（1 s 一拍看门狗）——判决 (H1) JS loop 被同步操作挡住
+  还是 (H2) loop 在转只是没轮到 accept；
+- 页面 `fetch start|done|fail`（前 300 条全量 + 耗时）、`ws open|close|error`、`rpc start|done`
+  （`entry/src/main/ets/pages/WebApp.ets` 的 `OPEN_LINK_SHIM_JS`）——把「点击 → 拿授权 URL → 外开」
+  拆成「页面发不出去」（被挡住）与「宿主回得慢」两半，并排除「mux 直到 boot+70s 才 open」。
+
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,309,740 B**
+（resfile 里的 `main.js` 233,049 B，含上述埋点）；设备离线（`hdc list targets` 只有 `COM1 UART`），
+**尚未安装**。
+
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。
 > 清空 → 立刻动作 → 数秒内 dump。`entry/tray`、`entry/background`、`testTag` 在事后 dump 里
 > 0 命中**不代表日志没打**。另：**不要用 `hdc shell 'cmd | grep A|B'`**（`/bin/sh` 会报
