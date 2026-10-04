@@ -478,8 +478,19 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
   if (globalThis.__DSHM_OPEN_LINK_SHIM__) { return; }
   globalThis.__DSHM_OPEN_LINK_SHIM__ = true;
 
+  /* 诊断：把"何时看到 waiting-browser / 何时把外开交出去 / 何时发 RPC"写进
+     files/diag-web-console（ArkTS 的 .onConsole 落盘自带 ISO 时间戳）。
+     这样"点击 → 拿到授权 URL → 打开浏览器"每一跳都能与宿主侧 IN-REQ/IN-DONE 对齐，
+     不必再靠没有时间戳的 ArkWeb 行序去猜。 */
+  function log(msg) {
+    try { console.info('[dshm-link] ' + msg); } catch (e) { /* 无 console：忽略 */ }
+  }
+  log('shim installed');
+
   /* 已自动外开过的 URL：watch 流会重复推送同一 attempt，只开一次 */
   var opened = {};
+  /* 诊断用：已记录的"非账号"item 帧数量（只记前 20 条，避免刷屏） */
+  var itemFrames = 0;
 
   function bridges() {
     var b = globalThis.__DSHM_BRIDGES__;
@@ -509,13 +520,14 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
     var b = bridges();
     if (!b) { return false; }
     if (!auto) {
-      try { b.openExternal(u, 'confirm'); } catch (e) { /* 桥异常：忽略 */ }
+      try { b.openExternal(u, 'confirm'); log('deliver confirm ' + u); } catch (e) { /* 桥异常：忽略 */ }
       return true;
     }
     if (opened[u]) { return true; }
     /* 只有投递成功才记账：桥抛异常说明这次没送出去，必须留给重试 */
     try { b.openExternal(u, 'auto'); } catch (e) { return false; }
     opened[u] = true;
+    log('deliver auto ' + u);
     return true;
   }
 
@@ -538,6 +550,7 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
     if (out(u, true)) { return; }
     /* watch 流会重复推送同一份 AccountView，去重，别把队列撑成一串重复项 */
     if (pendingAuto.indexOf(u) >= 0) { return; }
+    log('bridge not ready, queued ' + u);
     /* 重试窗口从第一次投递失败起算；窗口内每次失败都续上，超时才放手 */
     if (Date.now() > pumpUntil) { pumpUntil = Date.now() + 15000; }
     pendingAuto.push(u);
@@ -550,6 +563,7 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
       var attempt = view.attempt;
       if (!attempt || typeof attempt !== 'object') { return; }
       if (attempt.phase !== 'waiting-browser') { return; }
+      log('waiting-browser authorizeUrl=' + (typeof attempt.authorizeUrl === 'string' ? 'yes' : 'no'));
       if (typeof attempt.authorizeUrl === 'string') { autoOpen(attempt.authorizeUrl); }
     } catch (e) { /* 形状不符：忽略 */ }
   }
@@ -565,7 +579,19 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
             try {
               if (typeof event.data !== 'string') { return; }
               var frame = JSON.parse(event.data);
-              if (frame && frame.type === 'item') { scanAccount(frame.value); }
+              if (frame && frame.type === 'item') {
+                /* 诊断：先如实记下帧形状（判据一行没改）。既能确认自动外开走的是哪条
+                   路径，也能在"扫不到账号状态"时看出 item 的 value 到底长什么样。 */
+                var v = frame.value;
+                if (v && typeof v === 'object' && (v.attempt !== undefined || v.status !== undefined)) {
+                  log('ws item attempt=' + (v.attempt && v.attempt.phase ? v.attempt.phase : '-') +
+                    ' url=' + (v.attempt && typeof v.attempt.authorizeUrl === 'string' ? 'yes' : 'no'));
+                } else if (itemFrames < 20) {
+                  itemFrames++;
+                  log('ws item #' + itemFrames + ' keys=' + (v && typeof v === 'object' ? Object.keys(v).join(',') : typeof v));
+                }
+                scanAccount(v);
+              }
             } catch (e) { /* 非 JSON 帧：忽略 */ }
           });
         } catch (e) { /* 不支持 addEventListener：退化为不监听这条流 */ }
@@ -606,7 +632,10 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
         } catch (e) { /* 取不到 URL：按非 account 处理 */ }
         var pending = nativeFetch.call(globalThis, input, init);
         if (url.indexOf('account/') < 0) { return pending; }
+        var rpcStartedAt = Date.now();
+        log('rpc start ' + url.slice(0, 120));
         return pending.then(function (response) {
+          log('rpc done status=' + (response && response.status) + ' ms=' + (Date.now() - rpcStartedAt));
           try {
             if (response && typeof response.clone === 'function') {
               response.clone().json().then(function (body) {

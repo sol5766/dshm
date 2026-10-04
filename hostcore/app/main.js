@@ -105,6 +105,37 @@ diag(`userData=${USER_DATA} DSH_BASE=${DSH_BASE}`);
 // 所以要如实打印这两个值，才能判断它到底在找哪个目录名。
 diag(`platform=${process.platform} arch=${process.arch} versions=${JSON.stringify(process.versions)}`);
 
+/*
+ * 【诊断（E82）】给上层日志补时间戳（opt-in：`DSHM_TS_LOG=1`）。
+ *
+ * 【为什么需要】`diag()` 自己有 `[ISO]` 前缀并落进 `dshm-host.log`，但**插件/上层**
+ * 打的 `console.*` 没有：`[deepseek-account] request/response` 这种恰好夹住网络往返的
+ * 行因此只能靠"行序"猜时间，端侧那两个 boot 的"点击→浏览器"窗口就是这么失去刻度的。
+ *
+ * 【为什么逐行读环境变量】`process.env` 是活对象，运行期置 `DSHM_TS_LOG=1` 立刻生效，
+ * 不必为一次取证重编 HAP，也不必让正式形态默认多一段前缀。
+ */
+try {
+  const tsMethods = ['log', 'info', 'warn', 'error', 'debug'];
+  let tsWrapped = 0;
+  for (const tsName of tsMethods) {
+    const tsOrig = console[tsName];
+    if (typeof tsOrig !== 'function' || tsOrig.__dshmTsWrapped === true) continue;
+    const tsFn = function (...args) {
+      if (process.env.DSHM_TS_LOG === '1') {
+        return tsOrig.apply(console, [`[${new Date().toISOString()}]`, ...args]);
+      }
+      return tsOrig.apply(console, args);
+    };
+    tsFn.__dshmTsWrapped = true;
+    console[tsName] = tsFn;
+    tsWrapped++;
+  }
+  diag(`插件日志时间戳前缀已就绪（${tsWrapped} 个 console 方法；DSHM_TS_LOG=1 时逐行生效）`);
+} catch (e) {
+  diag(`插件日志时间戳前缀安装失败：${String(e)}`);
+}
+
 const realExit = process.exit.bind(process);
 /**
  * 是否允许真正退出（E90）。
@@ -221,12 +252,30 @@ try {
               ` ver=${h['sec-websocket-version']} cookie=${h.cookie === undefined ? '(none)' : h.cookie.length + 'B'}` +
               ` origin=${h.origin}`);
           });
-          server.on('request', (req) => {
+          server.on('request', (req, res) => {
             if (process.env.DSHM_IN_LOG !== '1') return;
             const h = req.headers || {};
             diag(`IN-REQ ${req.method} ${req.url} conn=${h.connection} upgrade=${h.upgrade}` +
               ` cookie=${h.cookie === undefined ? '(none)' : h.cookie.length + 'B'}` +
               ` origin=${h.origin} ua=${h['user-agent']}`);
+            /*
+             * 【诊断（E82）】补上**耗时**：IN-REQ 只回答"请求到没到"，回答不了"这一跳
+             * 花了多久"。启动后慢的投诉里，"客户端 RPC 占多少、宿主 handler 占多少"
+             * 一直是空的——插件自己的 stdout（如 `[deepseek-account]`）没有时间戳，
+             * 端侧 ArkWeb 的日志也没有，只有这一层能给出绝对刻度。
+             * 挂在 `res` 上是纯被动监听，不参与响应，也不改任何既有行为。
+             */
+            const t0 = Date.now();
+            try {
+              res.on('finish', () => {
+                diag(`IN-DONE ${req.method} ${req.url} ${Date.now() - t0}ms status=${res.statusCode}`);
+              });
+              res.on('close', () => {
+                if (!res.writableFinished) {
+                  diag(`IN-ABORT ${req.method} ${req.url} ${Date.now() - t0}ms`);
+                }
+              });
+            } catch (e) { /* 挂载失败不影响请求处理 */ }
           });
         } catch (e) {
           diag(`IN-LOG 挂载失败：${String(e)}`);
