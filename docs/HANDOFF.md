@@ -310,7 +310,9 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 **读数计划**（设备一回来就跑）：`dist/_verify1.ps1` 一键完成「`hdc install -r` → 轮询
 `host-ready.json` 等宿主就位（核心 zip 指纹变了，首启要先解包 26k 文件）→ 预热一轮 → 正式冷启动 →
 留 240 s 让用户点【设置→账号→登录】→ 拉五份日志 + 自动拉 `.cpuprofile` 档案 → 打印诊断版自检、
-时间轴、H1/H2 粗判，并对每份档案跑 `dist/_prof.js` 输出 A/B/C 判决」。
+时间轴、H1/H2 粗判，并对每份档案跑 `dist/_prof.js` 输出 A/B/C/A′ 判决」；`_verify1.ps1` 另拉
+`dsh-js-tid` 并每 ~250 ms 采一次 `wchan/stat` 写 `jstid-samples.log`（判 H1/H2 的 wchan 直方图），
+外加 `dshm-hb.log`（心跳）与 `SYNC-RING`/`SYNC-SLOW-LOG` 判读段。
 为此已加这些自证读数（全部**默认开启**，不再需要在宿主进程里跑 python 桥 setenv）：
 
 - 宿主 `ACCEPT #n ip:port`（`hostcore/app/main.js`，包 `server.on('connection')`）——直接回答
@@ -353,9 +355,54 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   `LOOP-GAP 3256ms`、`SYNC-SLOW 2500ms Atomics.wait`、`SYNC-SLOW-LOG`、`SYNC-RING`、`js-tid=`、
   恢复后仍 `401`、退出 `code=0`，8/8 检查 PASS。
 
-当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,321,604 B**（含 patch6/7/8/9，
-备份 `dist/fallback/DSHM-patch9-314321604.hap`；另有 patch8 314,317,507 / patch6 314,317,511 / patch5 314,309,739 /
-patch4 314,309,738 / patch3 314,309,740；resfile 里的 `main.js` 248,009 B，含上述全部埋点）；
+- **心跳线程 `HB`**（`dist/_patch10.cjs`，2026-10-04 晚）：宿主里再起一个 `Worker`（`DSHM_HB=0` 可关），
+  每秒往 `<DIAG_LOG 同目录>/dshm-hb.log` 追一行 `HB <n> <epochMs> <iso> cpu=<utime+stime ticks>`
+  （`appendFileSync` 在 worker 自己的线程里跑，与主 loop 是否被挡无关）。⇒ 主线程静默而 `HB` 连续 = **H1**
+  （主线程被同步调用挡住，再由 `SYNC-RING`/`SYNC-SLOW-LOG`/`js-tid` 的 wchan 点名）；`HB` 也断在同一段 =
+  **(B) 进程级冻结/节流**。worker 必须 `unref()`，否则会拖住主进程的自然排空退出。
+  本机自检 `dist/_p10test.mjs`：6 项 5 OK（心跳启动 / HB 12 行 / 与 `LOOP-GAP` 同期 / `cpu=` 单调不减 /
+  退出 `code=0`）；1 项 MISS 是**合成阻塞器自身的假象**——`Atomics.wait` 那 3.2 s 里同进程 worker 的
+  `setInterval` 也停了（`HB 4 27.228` → `HB 5 30.712` 正好盖住 `LOOP-GAP 3186@30.582`），而启动期那次
+  3.27 s 停顿（同步模块加载）期间 HB 连续正常。⇒ 心跳判别力不受影响，但「`Atomics.wait` 期间心跳会不会断」
+  在 Windows 本机**尚未孤立验证**（记在这里，别再当结论用）。
+
+- **`dist/_prof.js` 新增判决 A′ + 族直方图**（2026-10-04 晚）：`idlePct < 30 && 覆盖 >= 1000 ms &&
+  最长同栈 < 300 样本` ⇒ `A′) 采样不停、覆盖 ms、非空转 99%：loop 整段都在跑「一长串短同步调用」
+  （既不是等待、也不是空转）`。旧的三态 A/B/C 只认「同一条栈被连续采到 ≥1000 次」，会把这种
+  **每个调用只占几十微秒**的同步洪流误判成「不明」。同时新增族直方图（`esm-sync-loader` /
+  `profile-resolution` / `cjs-loader` / `v8-compile` / `fs-sync-*` / `yaml-config` / `inflate-trie` /
+  `gc` / `idle`）与「other 族里最多的 8 条链」——未知族必须点名，不能把没归类的当不重要。
+  ⚠️ 判族只看**非伪帧**：早期版本拿整条链去匹配 `/\(root\)/`，任何未命中的栈都被算成 `idle`
+  （曾把 idle 抬到 28%，真实 idle 只有 0.2%）。
+
+- 🎯 **本机已复现同形态的同步模块加载块**（2026-10-04 晚，`dist/_bootprobe.mjs` 原配方空 home：
+  `--jitless --experimental-sqlite --expose-internals`）：每次冷启动都有一段 **3.2–3.4 s 的同步
+  模块解析/加载/编译**（`LOOP-GAP 3357ms`），期间零 accept、零日志，之后一次性恢复 = 真机
+  「冷启动后 ~60 s 完全静默再爆发」的同形态、小规模版本。档案
+  `dist/bootprobe/sandbox_A/dshm-diag/dshm-profile-loop-gap-*.cpuprofile`（2020 样本 / 覆盖 3213 ms /
+  **无 ≥200 ms 采样缺口**）判 **A′**，族直方图：`esm-sync-loader 45.2%`、`other 18.7%`、
+  `cjs-loader 15.0%`、`profile-resolution 12.5%`、`fs-sync-read 3.2%`、`yaml-config 2.2%`、
+  `fs-sync-stat 1.2%`、`gc 0.9%`、`inflate-trie 0.8%`、`idle 0.1%`。链上点名的是 dsh 自己的运行时拦截：
+  `installRuntimeInterception @…/lib/index.js:1656` → `ResolutionRouter:1355` → `compileResolution:1185` →
+  `canonicalPath:1173` → `collectInstallationScopePackages:681` → `readPackageManifest:673`
+  （+ `composeProfile @…/profile-boot-BZ2ZjNWi.js:205` → `runProfile:224`），以及同步 ESM 钩子
+  `makeSyncRequest @node:esm/hooks:632 ← resolveSync ← #resolveAndMaybeBlockOnLoaderThread`。
+  ⇒ 目标①的**首选机制候选**：首次用到的模块树在同步解析/加载（真机 10 个 bundle + 6 个第三方插件 +
+  eMMC/冷缓存；本机 2 个 bundle 就 3.2 s ⇒ 真机 60 s 量级合理）。**待真机档案证伪或证实。**
+
+- **A/B 反证：`--expose-internals` 去不掉**。`dist/_bootprobe.mjs` 新增 `BOOTPROBE_INTERNALS=0` 与
+  `BOOTPROBE_SUFFIX=_x`（A/B 两次运行互不覆盖 home/timeline）。同配方两轮：带它时 `LOOP-GAP 3357ms`、
+  第一发成功探针 +3582 ms；去掉后宿主**启动即失败**（`dsh-app-boot/lib/index.js:4120 boot()` →
+  `runProfile` 抛错 → 我的 `fail()` 路径 `code=0` 退出，89/89 探针全失败）。⇒ 这条**同步**加载路径正是
+  `--expose-internals` 买来的（`@deepseek-ai/cordis-plugin-loader/lib/index.js:11-38` 用
+  `requireInternal("internal/modules/esm/loader").getOrInitializeCascadedLoader()` 拿内部 loader 再
+  `resolveSync`），但删掉这个参数宿主根本起不来，所以不能靠「去掉参数」解决。
+  另测 **`NODE_COMPILE_CACHE`**（同配方冷/热两轮，`dist/ccache`）对 `LOOP-GAP` 无影响
+  （3485 / 3328 ms，缓存目录只有 1 个文件、0 B）——`--jitless` 下没有 JIT 编译产物可缓存，这条路不通。
+
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,325,699 B**（含 patch6/7/8/9/10，
+备份 `dist/fallback/DSHM-patch10-314325699.hap`；另有 patch9 314,321,604 / patch8 314,317,507 / patch6 314,317,511 /
+patch5 314,309,739 / patch4 314,309,738 / patch3 314,309,740；resfile 里的 `main.js` 250,614 B，含上述全部埋点）；
 设备离线（`hdc list targets` → `[Empty]`），**尚未安装**。
 
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。
