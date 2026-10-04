@@ -5467,3 +5467,28 @@ Select-String -Path .gitignore -Pattern "codegenie"               # 期望：/.c
 | 文档说的和代码不一致 | §5.6 | **修配置，不修文档措辞**；偏差写进 as-built 记录，不改写历史文档 |
 | `.codegenie` 那 449 MB 能删吗？ | §6.2 | **待决策**。它是归真验证（§3.1）的唯一取版本手段 |
 | 归真验证跑不出命中 | §3.1 | 先 `git --git-dir=.codegenie/.git log --oneline` 确认基线提交——**归真是对"一个具体提交"的验证，不是可无限复用的命令** |
+
+---
+
+## 8. as-built 增量（2026-10-04）：核心升到 `0.2.1-alpha.1`
+
+本章 §2.9 的基线数字是 `0.2.0-rc.2` 那一版的实测值。按 §5.6 的纪律（**偏差写进 as-built 记录、不改写历史文档**），新值单列于此；逐条判定与完整命令链见 `docs/40-上游升级手册.md` §4.5，契约事实见 `docs/10-协议兼容事实基线.md` §8.7.25。
+
+| 项 | `0.2.0-rc.2`（§2.9 基线） | `0.2.1-alpha.1`（本次实测） |
+|---|---|---|
+| 解包体积 / 文件数 | 252,069,490 B / 26,066 文件 | 264.0 MB / 27,034 文件 |
+| 分发包 / 条目数 | 78,081,448 B / 29,351 条目 | **84,003,922 B / 30,451 条目** |
+| 分发包 sha256 | `45836d8a…fff3b3` | **`7103724994614f2321d45a8d64f09c1ede379fde698e99eb52992c61d4c826e3`** |
+| 原生签名 | signed 47 / unsigned 1 | signed 47 / unsigned 3（判据见下注，不看计数） |
+| 契约 | 140 端点 / 13 流式 / 15 能力 / 86 未被引用 | **140 / 13 / 15 / 86，逐条一致（连续第四次零漂移）** |
+| HAP（signed） | 314,329,793 B（E388 版） | **320,195,241 B** / sha256 `60eb817f094be90419eb28becdf55dacd6bb9f6cfd44bdd5517bea9651920c7c` |
+| 真机验收 | LOOP-GAP 0 条（E388 修复后） | `BOOT_10_ENV_READY core=…/dsh/cores/0.2.1-alpha.1`、`LOOP-GAP` 0 条、`IN-DONE` 53 条（最慢 6341/4965 ms） |
+
+> ⚠️ 本次 `unsigned` 由 1 变 3 **不是回归**：`addSystemAddonPackage()` 在 `selfSignNatives()` **之后**才创建 `@deepseek-ai/node-addon-system-linux-arm64/bin/{glibc,musl}/system.node` 两个占位文本（真身是 HAP `libs/` 里的 `libsystem.so`），首次打包（占位尚未生成）报 1、重打包报 3 ⇒ 判据仍看清单内容，不看计数（§2.9 的两个注已说明这一点）。
+
+> ⚠️ 本次还暴露并修掉一处**门禁自身缺陷**（与升级无关，但被新核的启动顺序变化暴露）：`tools/check-origin-fence.mjs` 的就绪判定把任何 `status > 0` 当作就绪、随后一次性读 `host-ready.json`；新核改成「先 404 应答、后落盘」后该门禁 3/3 误报失败（旧核 3/3 通过）。修法 = `waitReady` 之后再等文件真正落盘（`DSHM_CHECK_READY_FILE_MS`，默认 20000）；修后两版核心各 3/3 PASS，并按 §3 的纪律补了两条负测试。
+
+> ⚠️ 升级还会在**设备侧 live profile** 留下一条历史包袱：真机 `dsh.profile.bundles` 仍列着新核已删除的
+> `@deepseek-ai/dsh-experimental-schedule-bundle`，由宿主启动时的 bundle 预检**静默移除**（日志：
+> `【bundle 预检】dsh.profile.bundles 里 1 行不可解析，已移除（防启动抛错）`），**不抛错、功能不丢**
+> ——`POST /api/schedule/{catalog,list}` 仍 200（schedule 现由 `dsh-web-app` 自带）。
