@@ -262,10 +262,11 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 证据**（不再只依赖我的探针）；另一处 09:42:43.116（+186.3 s）同形。注意 `_h2.log` 那段时间约每 60 s
 一次 boot（09:42:36.574 → 09:47:16.817 → 09:48:17.779 → 09:49:18.630），与下面 §4② 的自杀现象同期。
 
-**读数计划**（设备一回来就跑）：`dist/_verify1.ps1` 一键完成「`hdc install -r` → 冷启动 →
-桥内 `DSHM_IN_LOG=1` + `DSHM_TS_LOG=1` → 留 240 s 让用户点【设置→账号→登录】→ 拉四份日志 + 自动拉
-`.cpuprofile` 档案 → 打印时间轴、H1/H2 粗判、并对每份档案跑 `dist/_prof.js` 输出 A/B/C 判决」。
-为此已加四组自证读数：
+**读数计划**（设备一回来就跑）：`dist/_verify1.ps1` 一键完成「`hdc install -r` → 轮询
+`host-ready.json` 等宿主就位（核心 zip 指纹变了，首启要先解包 26k 文件）→ 预热一轮 → 正式冷启动 →
+留 240 s 让用户点【设置→账号→登录】→ 拉五份日志 + 自动拉 `.cpuprofile` 档案 → 打印诊断版自检、
+时间轴、H1/H2 粗判，并对每份档案跑 `dist/_prof.js` 输出 A/B/C 判决」。
+为此已加五组自证读数（全部**默认开启**，不再需要在宿主进程里跑 python 桥 setenv）：
 
 - 宿主 `ACCEPT #n ip:port`（`hostcore/app/main.js`，包 `server.on('connection')`）——直接回答
   「accept 到底有没有被调用」，不再靠 `/proc` 推断；
@@ -281,7 +282,12 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   三份档案都正确判成 A) 并逐字点名阻塞行（3930 / 3237 / 2350 样本）；
 - 页面 `fetch start|done|fail`（前 300 条全量 + 耗时）、`ws open|close|error`、`rpc start|done`
   （`entry/src/main/ets/pages/WebApp.ets` 的 `OPEN_LINK_SHIM_JS`）——把「点击 → 拿授权 URL → 外开」
-  拆成「页面发不出去」（被挡住）与「宿主回得慢」两半，并排除「mux 直到 boot+70s 才 open」。
+  拆成「页面发不出去」（被挡住）与「宿主回得慢」两半，并排除「mux 直到 boot+70s 才 open」；
+- **日志开关本身**（`dist/_patch5.cjs`）：`IN-REQ/IN-DONE` 与插件日志时间戳从「运行期 setenv 才开」
+  改成**默认开**（`DSHM_IN_LOG=0` / `DSHM_TS_LOG=0` 可关）。理由：原来每次取证都要先用 python 桥
+  在宿主进程里 setenv，而那个桥就是在宿主进程里跑 CPython，属于「谁挡住了事件循环」的嫌疑人；
+  测量工具不能依赖被测对象。本机自检 `dist/_p5test.mjs`：不设任何 env，`IN-REQ`/`IN-DONE`/
+  时间戳横幅/看门狗横幅/`ACCEPT #` 全部出现（PASS）。
 
 当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,309,738 B**（含 patch4，
 备份 `dist/fallback/DSHM-patch4-314309738.hap`；resfile 里的 `main.js` 235,838 B，含上述全部埋点）；

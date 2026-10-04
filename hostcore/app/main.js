@@ -121,8 +121,9 @@ try {
   for (const tsName of tsMethods) {
     const tsOrig = console[tsName];
     if (typeof tsOrig !== 'function' || tsOrig.__dshmTsWrapped === true) continue;
-    const tsFn = function (...args) {
-      if (process.env.DSHM_TS_LOG === '1') {
+const tsFn = function (...args) {
+// 【诊断版（E86）】默认挂时间戳（`DSHM_TS_LOG=0` 关闭）：取证不该依赖运行期 setenv。
+if (process.env.DSHM_TS_LOG !== '0') {
         return tsOrig.apply(console, [`[${new Date().toISOString()}]`, ...args]);
       }
       return tsOrig.apply(console, args);
@@ -131,7 +132,7 @@ try {
     console[tsName] = tsFn;
     tsWrapped++;
   }
-  diag(`插件日志时间戳前缀已就绪（${tsWrapped} 个 console 方法；DSHM_TS_LOG=1 时逐行生效）`);
+diag(`插件日志时间戳前缀已就绪（${tsWrapped} 个 console 方法；诊断版默认逐行生效，DSHM_TS_LOG=0 关闭）`);
 } catch (e) {
   diag(`插件日志时间戳前缀安装失败：${String(e)}`);
 }
@@ -272,8 +273,15 @@ try {
               }
             });
           } catch (e) { /* 挂载失败不影响 accept */ }
-          server.on('request', (req, res) => {
-            if (process.env.DSHM_IN_LOG !== '1') return;
+server.on('request', (req, res) => {
+/*
+ * 【诊断版（E86）】默认开启入站日志（`DSHM_IN_LOG=0` 显式关闭）。
+ *
+ * 原来是 `!== '1' 就 return`，于是每次取证都要先用 python 桥在宿主进程里 setenv，
+ * 而那个桥是在本进程里跑 CPython 的 —— 它本身就是「谁挡住了事件循环」的嫌疑人。
+ * 诊断期间默认开启，让测量与被测对象解耦（正式形态要恢复门控或摘掉埋点）。
+ */
+if (process.env.DSHM_IN_LOG === '0') return;
             const h = req.headers || {};
             diag(`IN-REQ ${req.method} ${req.url} conn=${h.connection} upgrade=${h.upgrade}` +
               ` cookie=${h.cookie === undefined ? '(none)' : h.cookie.length + 'B'}` +
