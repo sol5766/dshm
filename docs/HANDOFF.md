@@ -480,6 +480,17 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   `[System.IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($true)))` 再
   `[Parser]::ParseFile` 验 0 error —— 少 BOM 时 PowerShell 5.1 按 ANSI 读，中文串会把语法读崩、报一堆假错）。
 
+- **冷/热对照读数：`dist/_bootgaps.mjs`（按 boot 段切分 `dshm-host.log`）**。一次取证里日志是**追加**的，
+  里面有「装完首启（4/7）→ 预热重启（4b/7）→ 正式测量」三段 boot。脚本按 `--- boot pid=` 切段，打印每段
+  「行数 / 最大 LOOP-GAP / 次数 / 心跳最大间隔（给 `--hb`）」并附最大那次的 `SYNC-RING`/`SYNC-WARN-LOG`/
+  `SYNC-COUNT` 上下文，最后给冷/热对照判决：第 1 段 60 s 而第 2 段只有 3 s ⇒ **冷缓存/冷 eMMC I/O 放大**
+  （页缓存预热、提前异步读能显著改善）；两段同量级 ⇒ **不是冷缓存**，是固定的同步工作量
+  （模块数/解析/编译/插件数）。这也正是本机（SSD、热缓存、2 bundle、0 会话）复现不出 60 s 的原因：
+  真机的放大因子在**存储层**，本机把 CPU 侧形态复现出来了、把 I/O 侧放大丢掉了。
+  自检：`dist/_bg_fixture.log`（合成「冷 60123ms / 热 3122ms」两段 + `--hb`）判决正确；真机旧日志
+  `dist/_h6.log`（11,150 行）正确切成 114 段 boot。`_verify1.ps1` 的 7/7 之后新增「每轮 boot 的 LOOP-GAP
+  对照」段自动跑它（`--json dist/verify1/bootgaps.json`）。
+
 当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,325,699 B**（含 patch6/7/8/9/10/11，
 备份 `dist/fallback/DSHM-patch11-314325699.hap`；另有 patch10 314,325,699 / patch9 314,321,604 / patch8 314,317,507 /
 patch6 314,317,511 / patch5 314,309,739 / patch4 314,309,738 / patch3 314,309,740 —— patch10 与 patch11 的
