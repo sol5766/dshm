@@ -311,7 +311,7 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 `host-ready.json` 等宿主就位（核心 zip 指纹变了，首启要先解包 26k 文件）→ 预热一轮 → 正式冷启动 →
 留 240 s 让用户点【设置→账号→登录】→ 拉五份日志 + 自动拉 `.cpuprofile` 档案 → 打印诊断版自检、
 时间轴、H1/H2 粗判，并对每份档案跑 `dist/_prof.js` 输出 A/B/C 判决」。
-为此已加五组自证读数（全部**默认开启**，不再需要在宿主进程里跑 python 桥 setenv）：
+为此已加这些自证读数（全部**默认开启**，不再需要在宿主进程里跑 python 桥 setenv）：
 
 - 宿主 `ACCEPT #n ip:port`（`hostcore/app/main.js`，包 `server.on('connection')`）——直接回答
   「accept 到底有没有被调用」，不再靠 `/proc` 推断；
@@ -341,9 +341,21 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   （= 调用方签名）。本机自检 `dist/_p6test.mjs`：写 `host-stop-request`（含签名）→ 6/6 读数齐备、
   `exit=0`、用时 6.2 s（PASS）。
 
-当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,317,511 B**（含 patch6/7，
-备份 `dist/fallback/DSHM-patch6-314317511.hap`；另有 patch5 314,309,739 / patch4 314,309,738 /
-patch3 314,309,740；resfile 里的 `main.js` 242,107 B，含上述全部埋点）；
+- **同步调用环 `SYNC-RING`**（`dist/_patch9.cjs`，2026-10-04 晚）：包装同步
+  `fs.existsSync/statSync/lstatSync/readdirSync/readFileSync/realpathSync/readlinkSync/accessSync/`
+  `openSync/readSync/writeSync/mkdirSync/rmSync/renameSync/unlinkSync/copyFileSync`、
+  `child_process.spawnSync/execFileSync/execSync`、`Atomics.wait`：进入即入环（上限 24 条，**零 I/O**），
+  单次 ≥1 s 立刻 `diagSync('SYNC-SLOW …')`（同步落盘，进程被杀也不丢），环内 ≥1 s 的另存一份
+  `SYNC-SLOW-LOG`（不会被便宜调用挤出环外）。`LOOP-GAP` 行后追加
+  `SYNC-RING <最后 12 条：时长（多久前进入）调用名 参数>`。⇒ 挡住 loop 的那个同步调用**直接点名**；
+  即使阻塞方是原生/FFI 调用（环尾不变），也能看到它前后是哪几条调用。
+  本机自检 `dist/_p9test.mjs`（用 `--require dist/_p9block.cjs` 在宿主里造一次 2.5 s `Atomics.wait`）：
+  `LOOP-GAP 3256ms`、`SYNC-SLOW 2500ms Atomics.wait`、`SYNC-SLOW-LOG`、`SYNC-RING`、`js-tid=`、
+  恢复后仍 `401`、退出 `code=0`，8/8 检查 PASS。
+
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,321,604 B**（含 patch6/7/8/9，
+备份 `dist/fallback/DSHM-patch9-314321604.hap`；另有 patch8 314,317,507 / patch6 314,317,511 / patch5 314,309,739 /
+patch4 314,309,738 / patch3 314,309,740；resfile 里的 `main.js` 248,009 B，含上述全部埋点）；
 设备离线（`hdc list targets` → `[Empty]`），**尚未安装**。
 
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。
