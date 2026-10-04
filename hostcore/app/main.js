@@ -506,6 +506,53 @@ try {
   diag(`JS 线程 tid 读取失败：${String(e)}`);
 }
 
+/*
+ * 【诊断（E93）】心跳线程：用第二个 loop 把「JS 主线程被挡住」和「整个进程被冻住」分开。
+ *
+ * 停滞期我们观察到 0 accept、0 日志、进程 CPU 只涨 ~1.4% 单核。这既可能是
+ *   (H1) 主线程被同步等待挡住（第二个 loop 照样在跑），
+ * 也可能是 (B) 整个进程被平台冻结/节流（连第二个 loop 一起停）。
+ * 两者都"没动静"，只有独立线程的心跳能区分。
+ *
+ * 做法：worker_threads 里每 1s 往 DIAG_LOG 同目录的 `dshm-hb.log` 追一行
+ *   `HB <n> <epochMs> <iso> cpu=<进程 utime+stime ticks>`
+ * 心跳线程自己的 appendFileSync 与主 loop 状态无关地落盘，于是拉一次日志就能看出：
+ *   · 心跳连续、主线程静默 ⇒ H1（结合 SYNC-RING / js-tid 的 wchan 找那个同步调用）；
+ *   · 心跳也断在同一段 ⇒ (B) 进程级冻结（不再是"谁挡住了 loop"的问题）。
+ * `DSHM_HB=0` 关闭。worker 用 unref() 挂起，不参与主进程存活判定（排空后照样能自然退出）。
+ */
+try {
+  if (process.env.DSHM_HB === '0') {
+    diag('心跳线程已按 DSHM_HB=0 关闭');
+  } else {
+    const dshmHbFile = path.join(path.dirname(DIAG_LOG), 'dshm-hb.log');
+    const dshmHbSrc = [
+      "const fs = require('node:fs');",
+      "const file = require('node:worker_threads').workerData.file;",
+      "function cpuTicks() {",
+      "  try {",
+      "    const s = fs.readFileSync('/proc/self/stat', 'utf8');",
+      "    const r = s.slice(s.lastIndexOf(')') + 2).split(' ');",
+      "    return Number(r[11]) + Number(r[12]);",
+      "  } catch (e) { return -1; }",
+      "}",
+      "let n = 0;",
+      "try { fs.appendFileSync(file, '# 心跳线程启动 pid=' + process.pid + ' ' + new Date().toISOString() + ' cpu=' + cpuTicks() + '\\n'); } catch (e) {}",
+      "setInterval(() => {",
+      "  n += 1;",
+      "  try { fs.appendFileSync(file, 'HB ' + n + ' ' + Date.now() + ' ' + new Date().toISOString() + ' cpu=' + cpuTicks() + '\\n'); } catch (e) {}",
+      "}, 1000);",
+    ].join('\n');
+    const { Worker } = require('node:worker_threads');
+    const dshmHbWorker = new Worker(dshmHbSrc, { eval: true, workerData: { file: dshmHbFile } });
+    dshmHbWorker.on('error', (e) => { try { diag(`心跳线程错误：${String(e)}`); } catch (e2) { /* ignore */ } });
+    dshmHbWorker.unref();
+    diag(`心跳线程已启动（pid=${process.pid}；每 1s 写 ${dshmHbFile}；DSHM_HB=0 关闭）`);
+  }
+} catch (e) {
+  diag(`心跳线程启动失败：${String(e)}`);
+}
+
 try {
   let dshmLastTick = Date.now();
   let dshmTickNo = 0;
