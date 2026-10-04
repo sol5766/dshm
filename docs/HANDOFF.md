@@ -261,7 +261,34 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 启动横幅 ⇒ 那轮既没开 `IN_LOG` 也没跑过 python 桥）；⑥ `@deepseek-ai/dsh-schedule`（停滞前最后一条
 请求 `POST /api/schedule/list` 的归属）、`@deepseek-ai/dsh-atomic-write`（`withFileLock` 的退避是
 `await new Promise(resolve => setTimeout(...))`，异步）、`recoverOrphanLocks`（宿主唯一一处启动期同步
-递归遍历，但调用点在 `main.js:4318`、即 `BOOT_40_PROFILE_BOOT (+335ms)` 附近，早于停滞 8 s）。
+递归遍历，但调用点在 `main.js:4318`、即 `BOOT_40_PROFILE_BOOT (+335ms)` 附近，早于停滞 8 s）；
+⑦ 进程被平台冻结/SIGSTOP（round 2 的 18 个 `/proc/<pid>/stat` 样本 state **全程 S**、pid 恒定 `7359`
+（无重启）、`nthr` 79→72、Δcpu 181 ticks / 57.8 s ≈ 3.1% 单核；不过 `S` 不能完全排除 cgroup freezer，
+这一点交给采样档案的 A/B 判决）；⑧ python 桥自伤（round 2 里采样器**自己的** socket 探针在 11:07:34
+收到过宿主响应，而同一个 python 脚本当时仍在执行 ⇒ 桥跑 python 时不占 JS 线程；本机 `dist/_pytest.mjs`
+想再验一次，但本机 python stdlib 未就绪（`stdlib not ready (extraction in progress?)`），结论待真机复验）。
+
+**本轮新增读数（2026-10-04 晚，二次判读 round 2 数据）**：
+
+- `dist/_state.cjs` 读 `_net5.sh` 采样里的 `/proc/<pid>/stat`：停滞窗口 18 个样本 **state 全 S**、
+  `nthr` 79→72、`Δcpu = 181 ticks / 57.8 s ≈ 3.1% 单核`；窗口内探针结局 `rc=137 killed=1` ×17
+  （3 s 看门狗杀掉）与 `rc=1 killed=0` ×1（恢复瞬间连接被断）。
+- 🎯 **宿主自己的日志把「整段没跑 JS」钉死了**：`dist/_s7.txt` 的 631 条 `HOST` 行里，恢复瞬间
+  （采样本地时刻 `1791112054309–1791112054311`，≈2 ms）一次性出现 **120 条**宿主日志，其**内容时间戳
+  全落在 `11:07:34.078–11:07:34.284`（206 ms 内）**，且**没有任何一条落在停滞窗口
+  `11:06:31–11:07:33` 内**；这 120 条里既有一路积压的探针 `GET /`，也有真实客户端请求
+  （`POST /api/commands/list`、`POST /api/jet-hub`、`POST /api/dsh-context/detail`、`POST /api/skills/list`）。
+  ⇒ 60 s 内宿主**一次 `IN-REQ`（= 一次 accept + 一次 JS 回调）都没有**，恢复时才一次性排空。
+- **可加的一步决定性探针（会停掉宿主，建议 opt-in）**：停滞期内写 `<files>/dsh/home/host-stop-request`
+  （或 `kill -TERM <pid>`），若宿主 ~2 s 内退出 ⇒ 1.5 s 停止轮询/整条 loop 还活着（偏 H2），
+  若迟迟不退出 ⇒ JS loop 整段没在跑（偏 H1）；退出原因串会进 `dshm-host.log`（patch6/7）。
+- 🎯 **已加「JS 线程 tid」读数（`dist/_patch8.cjs`，2026-10-04 晚）**：真机上停滞期只能看到一个七十多行的
+  线程表（`MainThread`/`.dshm.dshclient` 都重复出现），**无法确定哪个 tid 是 JS 主线程**，而
+  `/proc/<tid>/syscall` 在真机不可读 ⇒ H1/H2 判不了。现在宿主启动时读一次 `/proc/thread-self/stat`
+  的第 1 字段（= **当前线程**的 tid），写日志行 `JS 线程 tid=…` 并落到 `<files>/dsh-js-tid`，
+  `LOOP-GAP` 行同时带 `js-tid=`。于是停滞期 shell 侧**无需任何注入**即可：
+  `tid=$(cat <files>/dsh-js-tid); cat /proc/<pid>/task/$tid/wchan; cat /proc/<pid>/task/$tid/stat`
+  ⇒ `wchan=futex_wait`/state `R` 自旋 = H1（被同步调用挡住）；`wchan=*epoll*` = H2（loop 在转）。
 
 **候选（未定，别当结论）**：停滞是否紧跟 `/api/remote.mux` 的 WebSocket 升级。`dist/_muxcorr.cjs` 对
 `dist/_h*.log` 里 125 次去重升级统计「到下一条带时间戳日志行的间隔」，分布
