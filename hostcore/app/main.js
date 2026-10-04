@@ -478,6 +478,34 @@ try {
  *   每 20 拍 → 记 `LOOP-ALIVE 第 n 拍`（证明 loop 活着）。
  * 于是「停滞期有没有 LOOP-ALIVE」就是 H1/H2 的判决，无需再猜。
  */
+/*
+ * 【诊断（E91）】把「哪个 tid 是 Node 的 JS 线程」变成 shell 可直接读的事实。
+ *
+ * 真机停滞期我们只能看到一个十几到七十多个 tid 的线程表（`MainThread`/`.dshm.dshclient`
+ * 都重复出现），无法确定哪个是 JS 主线程 ⇒ 「JS 线程此刻在 futex_wait（H1：被同步调用
+ * 挡住）还是在 epoll_wait（H2：loop 在转）」这种判读做不了（真机上 /proc/<tid>/syscall 不可读）。
+ *
+ * `/proc/thread-self/stat` 的第 1 字段就是**当前线程**的 tid。启动时读一次：写进日志、并写
+ * 到 DIAG_LOG 同目录的 `dsh-js-tid`。之后 shell 侧无需任何注入：
+ *   tid=$(cat <files>/dsh-js-tid)
+ *   cat /proc/<pid>/task/$tid/wchan ; cat /proc/<pid>/task/$tid/stat
+ */
+let dshmJsTid = '';
+try {
+  dshmJsTid = String(fs.readFileSync('/proc/thread-self/stat', 'utf8')).trim().split(' ')[0];
+  if (/^\d+$/.test(dshmJsTid)) {
+    const dshmTidFile = path.join(path.dirname(DIAG_LOG), 'dsh-js-tid');
+    try { fs.writeFileSync(dshmTidFile, dshmJsTid + '\n'); } catch (e) { /* 写不进去不影响启动 */ }
+    diag(`JS 线程 tid=${dshmJsTid}（已写 ${dshmTidFile}；停滞期读 /proc/${process.pid}/task/${dshmJsTid}/stat|wchan 判 H1/H2）`);
+  } else {
+    dshmJsTid = '';
+    diag("JS 线程 tid 读取结果异常（非数字），已忽略");
+  }
+} catch (e) {
+  dshmJsTid = '';
+  diag(`JS 线程 tid 读取失败：${String(e)}`);
+}
+
 try {
   let dshmLastTick = Date.now();
   let dshmTickNo = 0;
@@ -487,7 +515,7 @@ try {
     dshmLastTick = now;
     dshmTickNo += 1;
     if (gap >= 1500) {
-      diag(`LOOP-GAP ${gap}ms（事件循环停顿；第 ${dshmTickNo} 拍）`);
+diag(`LOOP-GAP ${gap}ms（事件循环停顿；第 ${dshmTickNo} 拍；js-tid=${dshmJsTid || '?'}）`);
       if (gap >= 3000 && typeof dshmDumpProfile === 'function') {
         try { dshmDumpProfile('loop-gap'); } catch (e) { /* 采样落盘失败不影响主流程 */ }
       }
