@@ -312,6 +312,60 @@ try {
 }
 
 /*
+ * 【诊断（E85）】启动即开 V8 CPU 采样（真机阻塞期的调用栈）。
+ *
+ * LOOP-GAP 只能判决「loop 停摆(H1)」还是「loop 在转(H2)」；若判成 H1，还得知道是谁挡的。
+ * loop 被同步调用挡住时任何 JS 定时器都跑不了，只能靠独立线程的采样器——V8 CPU profiler
+ * 就在独立线程打点，能采到「发起这次同步调用的 JS 帧」。本机已验证：忙等 400ms 时
+ * 398 个样本里 343 个精确落在忙等那一行（dist/_proftest.cjs）。
+ * 采样间隔 1000µs；看门狗发现 >=3s 停顿后（loop 恢复时）stop 落盘，再重新开始，最多 3 份。
+ * 全程 try/catch：拿不到 inspector 只记一行 PROF-UNAVAILABLE，绝不影响启动。
+ */
+let dshmDumpProfile = null;
+try {
+  const fsProf = require('node:fs');
+  const PROF_DIR = path.join(path.dirname(DIAG_LOG), 'dshm-diag');
+  const inspector = require('node:inspector');
+  const profSession = new inspector.Session();
+  profSession.connect();
+  let profRunning = false;
+  let profDumps = 0;
+  const profPost = (method, params) => new Promise((resolve, reject) => {
+    profSession.post(method, params || {}, (err, result) => (err ? reject(err) : resolve(result)));
+  });
+  const startProf = () => {
+    if (profRunning || profDumps >= 3) { return Promise.resolve(); }
+    return profPost('Profiler.start').then(() => {
+      profRunning = true;
+      diag('PROF-STARTED（采样间隔 1000us）');
+    }).catch((e) => { diag(`PROF-START-FAIL ${String(e)}`); });
+  };
+  dshmDumpProfile = (tag) => {
+    if (!profRunning || profDumps >= 3) { return; }
+    profRunning = false;
+    profDumps += 1;
+    profPost('Profiler.stop').then((r) => {
+      try {
+        fsProf.mkdirSync(PROF_DIR, { recursive: true });
+        const file = path.join(PROF_DIR, `dshm-profile-${tag}-${Date.now()}.cpuprofile`);
+        fsProf.writeFileSync(file, JSON.stringify(r.profile));
+        diag(`PROF-DUMPED ${file} nodes=${r.profile.nodes.length} samples=${r.profile.samples.length}`);
+      } catch (e) {
+        diag(`PROF-DUMP-FAIL ${String(e)}`);
+      }
+      return startProf();
+    }).catch((e) => { diag(`PROF-STOP-FAIL ${String(e)}`); });
+  };
+  profPost('Profiler.enable')
+    .then(() => profPost('Profiler.setSamplingInterval', { interval: 1000 }))
+    .then(() => startProf())
+    .catch((e) => { diag(`PROF-UNAVAILABLE ${String(e)}`); dshmDumpProfile = null; });
+} catch (e) {
+  diag(`PROF-UNAVAILABLE（本机 Node 无 inspector 或不可用）：${String(e)}`);
+  dshmDumpProfile = null;
+}
+
+/*
  * 【诊断（E84）】事件循环看门狗。
  *
  * 为什么需要：真机冷启动后 ~8s 起约 60s 内，宿主日志一个字节都不长（`host=` 恒定），
@@ -333,6 +387,9 @@ try {
     dshmTickNo += 1;
     if (gap >= 1500) {
       diag(`LOOP-GAP ${gap}ms（事件循环停顿；第 ${dshmTickNo} 拍）`);
+      if (gap >= 3000 && typeof dshmDumpProfile === 'function') {
+        try { dshmDumpProfile('loop-gap'); } catch (e) { /* 采样落盘失败不影响主流程 */ }
+      }
     } else if (dshmTickNo % 20 === 0) {
       diag(`LOOP-ALIVE 第 ${dshmTickNo} 拍`);
     }
