@@ -8,7 +8,7 @@
 
 ## 1. 一句话现状
 
-鸿蒙 arm64 客户端（`com.dshm.dshclient`，DSHM）已能在 MateBook 14（2in1，OpenHarmony-7.0.0.105 / API 26）上自足跑起端侧 dsh core 0.2.0-rc.2，界面走 WebView 加载 Host web UI，语音输入、托盘常驻、长时保活均已真机验证。
+鸿蒙 arm64 客户端（`com.dshm.dshclient`，DSHM）已能在 MateBook 14（2in1，OpenHarmony-7.0.0.105 / API 26）上自足跑起端侧 dsh core 0.2.1-alpha.1，界面走 WebView 加载 Host web UI，语音输入、托盘常驻、长时保活均已真机验证。
 `DSHM-DEV-TODO-ALL-2026-10-03.md` 的 9 项（D1/D2/D3/N1–N5）**已全部落地并真机核验**（逐项状态见 §5 末段）。
 **三个症状（其中两个已定案）**：①托盘/应用启动约 40 秒后自杀（未判因）；②"正在连接"抖动（Windows 端同源；鸿蒙端心跳覆盖 2026-10-03 落盘、**2026-10-04 已回退**，Windows 端从未做）；③原先"启动后一两分钟什么都慢"已于 2026-10-04 **定案并修复**——E388 的 `process.report.getReport()`，见 §4③。①②见 §4。
 
@@ -510,16 +510,19 @@ HAP `libs/arm64/libsystem.so`，判哪个目录**不影响加载**。
 `session/modelCatalog` 首次 **66,503 ms → 4,535 ms**（随后 58–222 ms）、最慢 4.5 s、无 ≥10 s 请求；
 预热后第二次冷启动同样 0 条。详见 `70-鸿蒙移植踩坑与修复总览.md` §13。
 
-当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,329,793 B**（含 E388 修复 +
-patch6/7/8/9/10/11），sha256 `CCDBAA17EF28D77FADE60B413EA310DE640DA1BF305E571F6752F3296B9658E0`（unsigned 312,315,196 B）；
-核心分发包 `dist/core/dsh-core-0.2.0-rc.2-openharmony-arm64.zip` = **78,136,685 B** / 29,369 条目，
-sha256 `d928e451fbaa281b582703efefc3463759b7118370f8899e325ace47e06f6099`；
-备份 `dist/fallback/DSHM-E388-314329793.hap`；另有 patch11 314,325,699 / patch10 314,325,699 / patch9 314,321,604 /
-patch8 314,317,507 / patch6 314,317,511 / patch5 314,309,739 / patch4 314,309,738 / patch3 314,309,740。
-⚠️ **signed 体积会撞车**（patch10 与 patch11 同为 314,325,699 B；本次 314,329,793 B 与 E388 之前那版也相同）
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **320,195,241 B**（核心升到
+`0.2.1-alpha.1` + E388 修复 + patch6/7/8/9/10/11），sha256 `60eb817f094be90419eb28becdf55dacd6bb9f6cfd44bdd5517bea9651920c7c`
+（unsigned 318,182,482 B）；
+核心分发包 `dist/core/dsh-core-0.2.1-alpha.1-openharmony-arm64.zip` = **84,003,922 B** / 30,451 条目，
+sha256 `7103724994614f2321d45a8d64f09c1ede379fde698e99eb52992c61d4c826e3`；
+备份 `dist/fallback/DSHM-core0.2.1a1-320195241.hap`；另有 DSHM-E388-314329793 / patch11 314,325,699 /
+patch10 314,325,699 / patch9 314,321,604 / patch8 314,317,507 / patch6 314,317,511 / patch5 314,309,739 /
+patch4 314,309,738 / patch3 314,309,740。
+⚠️ **signed 体积会撞车**（patch10 与 patch11 同为 314,325,699 B）
 ——**核对产物靠 sha256 + 内容**（`resfile` 里 `main.js` 252,510 B、含 `SYNC-COUNT`/`dshmSyncNote`；
-HAP 内核心 zip 里的 `…/node-addon-system/lib/flock.js` 3155 B、含 `/proc/self/maps` 且**已无** `getReport` 调用）。
-真机：`hdc install -r` 已装并复验通过（见上）。
+HAP 内核心 zip 的条目名就是新版本号、抽出的 zip sha256 与 `dist/core/` 一致，
+其 `…/node-addon-system/lib/flock.js` 含 `/proc/self/maps` 且**已无** `getReport` 调用）。
+真机：`hdc install -r` 已装并复验通过（`BOOT_10_ENV_READY core=…/dsh/cores/0.2.1-alpha.1`、`LOOP-GAP` 0 条）。
 
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。
 > 清空 → 立刻动作 → 数秒内 dump。`entry/tray`、`entry/background`、`testTag` 在事后 dump 里
@@ -596,7 +599,7 @@ author/committer 时刻相同。差异只在 commit 对象的元数据，且用 
 
 ## 5. 已完成的（不要再重做）
 
-- **端侧核心自足运行**：core 0.2.0-rc.2 打进 HAP，`libdshhost.so` 与应用同进程起 Node 线程；
+- **端侧核心自足运行**：core 0.2.1-alpha.1 打进 HAP，`libdshhost.so` 与应用同进程起 Node 线程；
   exec 探测 7/7（`python3.12`、`git`、`git-core/git`、`git-remote-http`、`rg`、`bash`、`git-ls-remote`）。
 - **语音输入**：HMS `SpeechRecognizer` 桥接，已作为独立插件 `ohosSenseVoice` 开源在 GitCode。
 - **系统托盘常驻**（`statusBarManager`，来自 **HMS** 的 `@kit.DeskTopExtensionKit`，不是 OpenHarmony SDK）：

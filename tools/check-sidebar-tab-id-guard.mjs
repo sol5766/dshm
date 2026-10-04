@@ -32,7 +32,12 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
-const SRC = join(ROOT, 'dist', 'core', 'work', 'dsh-core-0.2.0-rc.2', 'node_modules',
+/*
+ * 【目录名跟随配方，不写死版本】同 `tools/check-model-roundtrip.mjs:46` 的同一课：
+ * 写死 `dsh-core-<版本>` 会在升核心时静默指向旧树（或直接报"前置条件缺失"而看不出真因）。
+ */
+const RECIPE = JSON.parse(readFileSync(join(ROOT, 'hostcore', 'core-recipe.json'), 'utf8'));
+const SRC = join(ROOT, 'dist', 'core', 'work', `dsh-core-${RECIPE.coreVersion}`, 'node_modules',
   '@deepseek-ai', 'dsh-client-ui-sidebar-right', 'lib', 'client.js');
 
 if (!existsSync(SRC)) {

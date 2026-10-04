@@ -12,6 +12,19 @@
 2. **「更新最新 dsh 版本」在当前标签下没有可做的事**：`latest` = `next` = `0.2.0-rc.2`（正是本仓 `hostcore/core-recipe.json` 钉的版本）；唯一更新的是 `alpha` = `0.2.1-alpha.1`（2026-10-03 发布，带 `cordis 4.0.5-alpha.1` 框架层跳版）。**这一步需要用户拍板**，见 §4。
 3. **推给用户之前必须先处理一条 P0**：三轮诊断留下的**埋点目前是出厂默认全开的**，且 `process.exit` 拦截 + 6 个信号监听器仍在（§2 的 P0-1）。E388 修复本身与埋点无关，但**带着满身埋点发布**是这一轮最该先清掉的债。
 
+> **本轮执行后的更新（同日，报告落笔之后）**——三条结论的用户裁定与执行结果，读本报告时以此为准：
+>
+> | 报告里的结论 | 用户裁定 / 执行结果 |
+> |---|---|
+> | §0-2「当前标签下没有可做的事，需用户拍板」 | 用户选**现在就升 `0.2.1-alpha.1`** ⇒ 已执行完毕：契约层**零漂移**（140 → 140，连续第四次），唯一实变在依赖闭包（`cordis ~4.0.5-alpha.1` 预发布联动 ⇒ 插件 peer 跟版）；产物与真机验收见 §1 的「产物（同日升级后）」行与 `docs/40-上游升级手册.md` §4.5 |
+> | §0-3「发布前必须先处理埋点 P0」 | 用户选**埋点先留着**（要用它抓「点登录后宿主 code=0 自杀」的那一次）⇒ 本轮**不摘**埋点，`process.exit` 拦截与信号监听保留；发布前仍须回到本项 |
+> | §2 的 P1-1（`check-parity` 内嵌 UI 清单停在 `0.1.2-alpha.1`）与 D8（`hostcore/app/main.js:2423` 假壳版本号） | **有意不在升级提交里顺手改**（避免把「升级」与「清债」混在一个 diff），留作独立提交 |
+>
+> 另外，升级过程本身**新暴露并修掉**了一处门禁缺陷（不在本报告范围内，记在此处备查）：
+> `tools/check-origin-fence.mjs` 的就绪判定是竞态——`waitReady()` 把任何 `status > 0` 当就绪、`mintCookie()` 随即
+> 一次性读 `host-ready.json`；新核改成「先 404 应答、后落盘」后该门禁 3/3 误报失败（旧核 3/3 通过）。
+> 修法 = 等文件真正落盘（`DSHM_CHECK_READY_FILE_MS`），修后两版核心各 3/3 PASS，另补两条负测试。
+
 ---
 
 ## 1. 本轮已修（E388，真机复验通过）
@@ -23,7 +36,8 @@
 | 根因 | 上游 `@deepseek-ai/node-addon-system/lib/flock.js` 用 `process.report.getReport()` 判 libc —— 它是「全进程诊断报告」，端侧实测 55.8 s，且同步、恰在会话写租约热路径上。上游在 openharmony 上本应直接抛 `ERR_FLOCK_UNSUPPORTED_PLATFORM`（快失败），是我方 `tools/pack-core.mjs` 的 E103 平台门把它放行了 |
 | 修法 | `pack-core` 重写 `flock.js` 的模板改读 `/proc/self/maps` 判 glibc/musl（判不出按 musl）；两个 libc 变体本就映射到同一份 `libs/arm64/libsystem.so`，判哪个目录不影响加载 |
 | 验证 | 修复后 `LOOP-GAP` 0 / `.cpuprofile` 转储 0 / `session/modelCatalog` 首次 4,535 ms（随后 58–222 ms）/ 无 ≥10 s 请求；两次独立冷启动（含预热后）结果一致 |
-| 产物 | `entry-default-signed.hap` 314,329,793 B（sha256 `CCDBAA17…B9658E0`）；核心 zip 78,136,685 B；备份 `dist/fallback/DSHM-E388-314329793.hap`；提交 `5f27b18`（本地，**未推送**） |
+| 产物 | 报告落笔时：`entry-default-signed.hap` 314,329,793 B（sha256 `CCDBAA17…B9658E0`）；核心 zip 78,136,685 B；备份 `dist/fallback/DSHM-E388-314329793.hap`；提交 `5f27b18`（本地，**未推送**） |
+| 产物（**同日升级后，最终**） | `entry-default-signed.hap` **320,195,241 B**（sha256 `60eb817f…1920c7c`）；核心 zip **84,003,922 B** / 30,451 条目（sha256 `7103724…4c826e3`）；备份 `dist/fallback/DSHM-core0.2.1a1-320195241.hap`；真机 `BOOT_10_ENV_READY core=…/dsh/cores/0.2.1-alpha.1`、`LOOP-GAP` 0 条 |
 
 ---
 

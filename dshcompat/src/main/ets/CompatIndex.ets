@@ -82,7 +82,7 @@ export interface VersionCheck {
  *                 故本次升级只需重生成上表 + 更新矩阵，**不必改调用代码**。
  *                 证据：`.research/protocol/contracts-0.2.0-rc.1.json`（本地取证，
  *                 `.research/` 已被 `.gitignore` 排除）+ `compat-drift` 实跑 exit=1（3 处新增）。
- *   0.2.0-rc.2 —— 端侧当前基线（140 端点）。相对 0.2.0-rc.1：**+2 / −0**、零契约变化：
+ *   0.2.0-rc.2（140 端点）。相对 0.2.0-rc.1：**+2 / −0**、零契约变化：
  *                 · 新增 `userQuestions/{answer,attachWait}`（前者一元 NAMED、后者流式可取消，
  *                   命名空间整体为新包）。
  *                 · 既有 138 个端点**逐条一致**（形状、参数、流式标记、可取消性均无变化）。
@@ -90,8 +90,18 @@ export interface VersionCheck {
  *                 故本次升级只需重生成上表 + 更新矩阵，**不必改调用代码**。
  *                 证据：`.research/protocol/contracts-0.2.0-rc.2.json`（本地取证，
  *                 `.research/` 已被 `.gitignore` 排除）+ `compat-drift` 实跑 exit=1（2 处新增）。
+ *   0.2.1-alpha.1 —— 端侧当前基线（140 端点）。相对 0.2.0-rc.2：**零漂移**——
+ *                 · 端点数量不变（140），既有 140 个端点**逐条一致**：形状、参数名、流式标记、
+ *                   可取消性、声明包全部相同 ⇒ 上表除版本号与采集时间外**一个字节都没变**。
+ *                 · 这是连续第四次「契约层零意外」（0.1.5-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2 / 本次）。
+ *                 ⇒ 本次升级只需重生成上表 + 更新矩阵，**不动任何调用代码与能力映射**。
+ *                 证据：`.research/protocol/contracts-0.2.1-alpha.1.json`（本地取证，
+ *                 `.research/` 已被 `.gitignore` 排除；`endpointCount: 140`）+
+ *                 `DSH_CONTRACTS=<新契约> DSH_VERSION=0.2.1-alpha.1 node tools/compat-drift.mjs`
+ *                 实跑 **exit=0「无漂移」**（跨版本比对，未先动默认快照）。
  */
 const SUPPORTED_VERSIONS: string[] = [
+  '0.2.1-alpha.1',
   '0.2.0-rc.2',
   '0.2.0-rc.1',
   '0.1.7-rc.2',
