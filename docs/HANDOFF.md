@@ -154,7 +154,7 @@
 > **median 304.7 s / max ≈45.9 h，全期只有 1 个 <10 s** ⇒ **不存在 6 秒固定节奏，本机未复现该症状**。
 > 因此这条改动应算**预防性加固**（依据 = 上游 README 的"必须调大"），不算某个已观测缺陷的修复。
 
-**修法（已落盘）**：把心跳周期调大，两个键都要列（patch 的语义是**整块替换**目标 config）：
+**修法**：把心跳周期调大，两个键都要列（patch 的语义是**整块替换**目标 config）：
 
 ```yaml
 - id: typert-gateway
@@ -164,16 +164,30 @@
     streamInboxBytes: 262144
 ```
 
+> ⚠️ **2026-10-04：这条覆盖已在鸿蒙端回退，恢复官方默认 2000ms**
+> （`hostcore/profile/ondevice/cordis.patch.yml` 的 ⑪ 段现在只留说明、不留 `config`）。理由三条：
+> ① 它的依据（下面那段"6 秒成对断开"）出自生产入口**不可达**的自研连接层，本机从未复现该症状
+>    ⇒ 它从来不是某个已观测缺陷的修复，只是预防性加固；
+> ② 读代码可以确认**判死发生在自增之前**，即回收时刻是 `3 × interval` 而不是注释里写的 `2 × interval`：
+>    上游默认 `3 × 2s ≈ 6s`，改成 `30000` 后是 **~90 秒**。它把**半死连接的回收窗口拉长 15 倍**，而
+>    "启动后一两分钟什么都慢、之后突然全好"正是这个形态 —— 登录/模型选择/插件市场/插件预览四个
+>    症状都走这条 mux 连接，它是这条路径上**唯一的自定义改动**，先复归默认再谈别的原因；
+> ③ 恢复首版行为，也让将来追平上游时少一处自定义（用户明确要求过"回到首版那套"）。
+> **想重开**：恢复上面的 yaml 与 ⑪ 段，且必须在**回退后先量到现场读数**（默认 6 秒回收是否真的
+> 造成重连/卡顿）再决定，不要再只凭上游 README 那句"必须调大"。
+
 | 端 | 落到哪 | 生效代价 |
 |---|---|---|
-| Windows | `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`（当前**没有** `typert-gateway` 覆盖 ⇒ 仍是默认 2000ms，**这条路还没做**） | 改完重启 desktop 即可 |
-| 鸿蒙 | ✅ `hostcore/profile/ondevice/cordis.patch.yml`（已落盘，本地 600 行） | 改后需 `node tools/pack-core.mjs` 重打 core → 重建 HAP → `hdc install -r` |
+| Windows | `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`（**没有** `typert-gateway` 覆盖 ⇒ 官方默认 2000ms；与鸿蒙端现状一致） | 改完重启 desktop 即可 |
+| 鸿蒙 | ❌ **已回退**（2026-10-04）：`hostcore/profile/ondevice/cordis.patch.yml` 的 ⑪ 段不再带 `config` | 若重开需 `node tools/pack-core.mjs` 重打 core → 重建 HAP → `hdc install -r` |
 
-**鸿蒙端落地核验**（2026-10-03）：已跑完整链路（pack-core → assembleHap → `hdc install -r`），设备
-`dsh/home/profiles/ondevice/cordis.patch.yml` 里 `- id: typert-gateway` + `config:` + 两个键**都在**
-（compose 结果，不只是源文件）。⚠️ **但"心跳是否真的变成 30s"没有直接读数**：`dsh-api-gateway`
-启动不打印任何配置（`log(`/`logger`/`ctx.logger`/`console.` 全 0 命中），设备上又找不到 node 二进制
+**鸿蒙端落地核验（历史：2026-10-03 落盘 → 2026-10-04 回退）**：当时跑完整链路（pack-core →
+assembleHap → `hdc install -r`），设备 `dsh/home/profiles/ondevice/cordis.patch.yml` 里
+`- id: typert-gateway` + `config:` + 两个键**都在**（compose 结果，不只是源文件）。⚠️ **但"心跳是否
+真的变成 30s"从来没有直接读数**：`dsh-api-gateway` 启动不打印任何配置
+（`log(`/`logger`/`ctx.logger`/`console.` 全 0 命中），设备上又找不到 node 二进制
 （`--dump-config` 与 Node REPL 都不通）⇒ 只能证明"配置被 compose 进 profile"，不能证明"运行期生效"。
+**"没量到就落盘"正是这次回退的第一条教训。**
 
 另有一个已实证的次要触发源：WebView 到 `ws://127.0.0.1:…`（`/api/remote.mux`）报
 `ERR_CONNECTION_REFUSED(-102)`，以及 arkweb 自带 30s `NetworkTransactionTimeout`（`node-output.log` 里 206 次）。
