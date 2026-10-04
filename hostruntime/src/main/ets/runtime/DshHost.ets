@@ -465,11 +465,11 @@ export class DshHost {
         message: `已安排切换到 ${version}（当前 ${before}）：请完全退出应用后重新打开，新版本即生效。`
       };
     }
-    const wasRunning: boolean = this.handle !== null || this.port.isRunning();
-    if (wasRunning) {
-      const stopped: OpResult = await this.stop();
-      if (!stopped.ok) {
-        return { ok: false, message: `切换前必须停下当前核心，但停止失败：${stopped.message}` };
+const wasRunning: boolean = this.handle !== null || this.port.isRunning();
+if (wasRunning) {
+const stopped: OpResult = await this.stop('DshHost.switchCore：切换前停当前核心');
+if (!stopped.ok) {
+return { ok: false, message: `切换前必须停下当前核心，但停止失败：${stopped.message}` };
       }
       /*
        * 【必须确认它真的退了（E99）】原生层只允许一个 Node 实例；若上一个实例还在退出过程中，
@@ -503,9 +503,9 @@ export class DshHost {
         this.lastFailureNote = '';
         return { ok: true, message: `已切换到 ${version} 并已在运行（${decision.reason}）` };
       }
-      // 极少见：起得来但激活被拒（例如状态写盘失败）。此时**必须**把候选停下，
-      // 否则会出现"在跑的不是 current"这种自相矛盾的状态。
-      await this.stop();
+// 极少见：起得来但激活被拒（例如状态写盘失败）。此时**必须**把候选停下，
+// 否则会出现"在跑的不是 current"这种自相矛盾的状态。
+await this.stop('DshHost.switchCore：激活被拒后收掉候选');
       return { ok: false, message: `拒绝激活 ${version}：${decision.reason}` };
     }
 
@@ -548,11 +548,11 @@ export class DshHost {
           + '请完全退出应用后重新打开，新版本即生效。'
       };
     }
-    const wasRunning: boolean = this.handle !== null || this.port.isRunning();
-    if (wasRunning) {
-      const stopped: OpResult = await this.stop();
-      if (!stopped.ok) {
-        return { ok: false, message: `回滚前停止当前核心失败：${stopped.message}` };
+const wasRunning: boolean = this.handle !== null || this.port.isRunning();
+if (wasRunning) {
+const stopped: OpResult = await this.stop('DshHost.rollbackTo：回滚前停当前核心');
+if (!stopped.ok) {
+return { ok: false, message: `回滚前停止当前核心失败：${stopped.message}` };
       }
       if (this.port.isRunning()) {
         return { ok: false, message: '上一个核心实例还在退出，请稍等几秒后重试回滚。' };
@@ -620,8 +620,15 @@ export class DshHost {
     }
   }
 
-  /** 停止核心（幂等）。 */
-  async stop(): Promise<OpResult> {
+/**
+ * 停止核心（幂等）。
+ *
+ * 【诊断（E88）】`reason` 是**调用方的签名**，会被写进 `host-stop-request` 的内容里。
+ * 宿主轮询到该文件时把内容拼进日志（见 `hostcore/app/main.js` 的停止通道），于是
+ * 「哪条 ArkTS 路径按了停止键」在事后拉回的 `dshm-host.log` 里直接可读——
+ * 这是「宿主自己干净退出（code=0）」三次现场里唯一缺失的读数。默认空串，不改变行为。
+ */
+async stop(reason: string = ''): Promise<OpResult> {
     /*
      * 协作式停止（E90）：先把"停止请求"落到 `$DSH_HOME`，再等运行时真的退出。
      *
@@ -636,7 +643,7 @@ export class DshHost {
       const f: fs.File = fs.openSync(requestPath,
         fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
       try {
-        fs.writeSync(f.fd, `${Date.now()}\n`);
+fs.writeSync(f.fd, `${Date.now()} ${reason}\n`);
       } finally {
         fs.closeSync(f);
       }

@@ -843,7 +843,7 @@ export default class EntryAbility extends UIAbility {
     if (host === undefined) {
       return Promise.resolve();
     }
-    return host.stop().then((res: OpResult) => {
+return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res: OpResult) => {
       if (res.ok) {
         hilog.info(DOMAIN, TAG, '核心已停止：%{public}s', res.message);
       } else {

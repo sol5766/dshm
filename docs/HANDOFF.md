@@ -218,6 +218,24 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 还是"该链整体删掉"。已排除：`appfreeze`/`SIGKILL`/`LowMemory` 全 0 命中；
 `/data/log/faultlog/**` 无读权限（查不到崩溃单）。
 
+> **2026-10-04 晚更新（信道缺口 + 机制定案）**：上面「没有 `收到停止请求`」这条推断**不成立**——
+> `hostcore/app/main.js:756 log()` 只走 `console.log`（→ `node-output.log`，每次冷启动被截断），
+> 只有 `diag()` 才落 `dshm-host.log`（我们唯一能拉回的文件），而 `requestStop` / `requestAppRestart`
+> 全用 `log()`。停宿主的两条入口（`NodeRuntime.stop`、`DshHost.stop`）的机制已在本机实证：
+> `host-stop-request` → `requestStop()` → 上游 `shutdown.shutdown(0)`（`createProcessShutdown` 的
+> `complete` 只设 `process.exitCode`，`profile-boot-BZ2ZjNWi.js:21-25`）→ 整棵树 dispose →
+> `@deepseek-ai/dsh-host-webserver/lib/index.js:307-308` 经 cordis `runDisposable`
+> （`@deepseek-ai/cordis/lib/index.js:965`）关掉 HTTP server → loop 排空 → `beforeExit` →
+> **code 0 自然退出**；`requestStop` 的 1.5 s 兜底 timer 是 `unref()` 的，所以**只有排空超过 1.5 s**
+> 才会出现 `!! process.exit(0)：停止路径放行` 行（`_h6.log` 里 15 次有、3 次没有，就是这个差别）。
+> ⇒ 这类"自杀"**一定是应用侧某个 `DshHost.stop(reason)` 被调到了**，不是上游自然排空，也不是崩溃
+> （`installFailLoud` 对未捕获异常是 exit 1）。`dist/_patch6.cjs` + `dist/_patch7.cjs` 已把
+> 「谁按的停止键」变成日常读数：`log()` 镜像进文件、`SERVER-CLOSE … :: <调用者栈>`、
+> `!! beforeExit` / `!! EXIT-SNAPSHOT <句柄快照>`、把 `host-stop-request` **文件内容**（= 调用方签名）
+> 拼进停止原因，且 ArkTS 侧四处调用点报名（`switchCore`×2 / `rollbackTo` /
+> `EntryAbility.stopHostThenExit` / `Index 核心操作`）。本机自检 `dist/_p6test.mjs` PASS。
+> **设备侧下一次自杀就会直接打印是哪条 ArkTS 路径。**
+
 ### ③ 启动后一两分钟「什么都慢」（鸿蒙端，**未判因；本机不可复现**）
 
 用户原话（m17861/m17885）：**每次启动都慢；登录转圈、模型选择卡「加载中」、插件市场与插件预览都在等
@@ -289,9 +307,17 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   测量工具不能依赖被测对象。本机自检 `dist/_p5test.mjs`：不设任何 env，`IN-REQ`/`IN-DONE`/
   时间戳横幅/看门狗横幅/`ACCEPT #` 全部出现（PASS）。
 
-当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,309,738 B**（含 patch4，
-备份 `dist/fallback/DSHM-patch4-314309738.hap`；resfile 里的 `main.js` 235,838 B，含上述全部埋点）；
-设备离线（`hdc list targets` 只有 `COM1 UART`），**尚未安装**。
+- **退出成因读数**（`dist/_patch6.cjs` + `dist/_patch7.cjs`，2026-10-04 晚，一并纳入本计划）：
+  `SERVER-LISTENING` / `SERVER-CLOSE <addr> :: <调用者栈 6 帧>`（谁关掉监听句柄）、
+  `!! beforeExit code=… exitCode=…（loop 已排空） handles=…`、`!! EXIT-SNAPSHOT …`（退出瞬间句柄/请求快照）、
+  六种信号与 `disconnect` 记录、`log()` 镜像进可拉取文件、停止原因串里带 `host-stop-request` 内容
+  （= 调用方签名）。本机自检 `dist/_p6test.mjs`：写 `host-stop-request`（含签名）→ 6/6 读数齐备、
+  `exit=0`、用时 6.2 s（PASS）。
+
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,317,511 B**（含 patch6/7，
+备份 `dist/fallback/DSHM-patch6-314317511.hap`；另有 patch5 314,309,739 / patch4 314,309,738 /
+patch3 314,309,740；resfile 里的 `main.js` 242,107 B，含上述全部埋点）；
+设备离线（`hdc list targets` → `[Empty]`），**尚未安装**。
 
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。
 > 清空 → 立刻动作 → 数秒内 dump。`entry/tray`、`entry/background`、`testTag` 在事后 dump 里
