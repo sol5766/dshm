@@ -515,7 +515,8 @@ try {
     dshmLastTick = now;
     dshmTickNo += 1;
     if (gap >= 1500) {
-diag(`LOOP-GAP ${gap}ms（事件循环停顿；第 ${dshmTickNo} 拍；js-tid=${dshmJsTid || '?'}）`);
+      diag(`LOOP-GAP ${gap}ms（事件循环停顿；第 ${dshmTickNo} 拍；js-tid=${dshmJsTid || '?'}）`);
+      dshmRingDump(`LOOP-GAP-${gap}ms`);
       if (gap >= 3000 && typeof dshmDumpProfile === 'function') {
         try { dshmDumpProfile('loop-gap'); } catch (e) { /* 采样落盘失败不影响主流程 */ }
       }
@@ -847,6 +848,96 @@ let requestAppRestart = null; // 由 start() 内注册（那时才知道 HOME_DI
     diag(`execPath spawn 兜底安装失败（不阻塞）：${e && e.message}`);
   }
 })();
+
+/*
+ * 【诊断（E92）】同步调用环（SYNC-RING）：停滞期"哪个同步调用挡住了 loop"的直接读数。
+ *
+ * 现象（真机冷启动，~60s）：宿主一个字节日志都不写、TCP 只握手不 accept、CPU 只涨 ~1.4%
+ * 单核、线程停在 FUTEX/EVENTPOLL。这最像 JS loop 被**同步**操作挡住，但一直拿不到"是哪一个"：
+ * 真机 `/proc/<tid>/syscall` 不可读，`LOOP-GAP`（E84）只说停了多久、不说停在哪。
+ *
+ * 做法：内存环 + 零 I/O。包装同步 fs / child_process / Atomics 入口，进入时 push 一条
+ * `{n,a,t0,ms:-1}`（环上限 24 条），返回时补 `ms`；单次 >=1s 立即 `diagSync` 一条
+ * `SYNC-SLOW`（同步落盘，进程被杀也不丢）。挡住 loop 的那个调用 = 最后一条 `未返回`，
+ * 或那条 `SYNC-SLOW` 行。包装是透传的，只记账，不改任何业务语义。
+ */
+const dshmSyncRing = [];
+const dshmSyncSlowLog = [];
+function dshmRingPush(entry) {
+  dshmSyncRing.push(entry);
+  if (dshmSyncRing.length > 24) { dshmSyncRing.shift(); }
+}
+function dshmRingDump(tag) {
+  try {
+    const now = Date.now();
+    const tail = dshmSyncRing.slice(-12).map((e) =>
+      `${e.ms < 0 ? "未返回" : e.ms + "ms"}（${now - e.t0}ms 前进入）${e.n} ${e.a}`).join(" ⏐ ");
+    diag(`${tag} SYNC-RING ${tail}`);
+    /* 单次 >=1s 的调用另存一份，不会被便宜调用挤出环外 —— 它就是"挡住 loop 的那一个"。 */
+    if (dshmSyncSlowLog.length > 0) {
+      const slows = dshmSyncSlowLog.map((e) => `${e.ms}ms ${e.n} ${e.a}`).join(" ⏐ ");
+      diag(`${tag} SYNC-SLOW-LOG ${slows}`);
+    }
+  } catch (e) { /* 记账失败不影响主流程 */ }
+}
+try {
+  const dshmRingShort = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
+  const dshmTrack = (name, fn) => function (...args) {
+    const t0 = Date.now();
+    let arg = "";
+    try {
+      const p = args[0];
+      arg = typeof p === "string" ? p : (p && p.path ? String(p.path) : (p == null ? "" : String(p)));
+    } catch (e) { /* ignore */ }
+    const entry = { n: name, a: dshmRingShort(arg, 96), t0, ms: -1 };
+    dshmRingPush(entry);
+    try {
+      return fn.apply(this, args);
+    } finally {
+      entry.ms = Date.now() - t0;
+      if (entry.ms >= 1000) {
+        try { diagSync(`SYNC-SLOW ${entry.ms}ms ${name} ${entry.a}`); } catch (e) { /* ignore */ }
+        dshmSyncSlowLog.push({ n: name, a: entry.a, ms: entry.ms });
+        if (dshmSyncSlowLog.length > 8) { dshmSyncSlowLog.shift(); }
+      }
+    }
+  };
+  const dshmSyncFs = ["existsSync", "statSync", "lstatSync", "readdirSync", "readFileSync",
+    "realpathSync", "readlinkSync", "accessSync", "openSync", "readSync", "writeSync",
+    "mkdirSync", "rmSync", "renameSync", "unlinkSync", "copyFileSync"];
+  for (const name of dshmSyncFs) {
+    const orig = fs[name];
+    if (typeof orig !== "function") { continue; }
+    try { fs[name] = dshmTrack(name, orig); } catch (e) { /* 只读属性就跳过 */ }
+  }
+  const dshmSyncCp = require("node:child_process");
+  for (const name of ["spawnSync", "execFileSync", "execSync"]) {
+    const orig = dshmSyncCp[name];
+    if (typeof orig !== "function") { continue; }
+    try {
+      Object.defineProperty(dshmSyncCp, name, { configurable: true, enumerable: true, writable: true, value: dshmTrack(name, orig) });
+    } catch (e) { /* ignore */ }
+  }
+  try {
+    const dshmWait = Atomics.wait;
+    Atomics.wait = function (...args) {
+      const t0 = Date.now();
+      const entry = { n: "Atomics.wait", a: String(args[3] == null ? "" : args[3]), t0, ms: -1 };
+      dshmRingPush(entry);
+      try { return dshmWait.apply(Atomics, args); } finally {
+        entry.ms = Date.now() - t0;
+        if (entry.ms >= 1000) {
+          try { diagSync(`SYNC-SLOW ${entry.ms}ms Atomics.wait ${entry.a}`); } catch (e) { /* ignore */ }
+          dshmSyncSlowLog.push({ n: "Atomics.wait", a: entry.a, ms: entry.ms });
+          if (dshmSyncSlowLog.length > 8) { dshmSyncSlowLog.shift(); }
+        }
+      }
+    };
+  } catch (e) { /* ignore */ }
+  diag("同步调用环已安装（进入即记账，单次 >=1s 记 SYNC-SLOW；停顿后随 LOOP-GAP 打 SYNC-RING）");
+} catch (e) {
+  diag(`同步调用环安装失败（不阻塞）：${e && e.message}`);
+}
 
 /** 读我们自己的 state.json，得到"当前版本"，据此拼出核心树目录。 */
 function currentCoreDir() {
