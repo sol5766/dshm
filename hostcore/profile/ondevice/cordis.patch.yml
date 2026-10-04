@@ -519,85 +519,33 @@
     - id: fs-write-nonchmod
       name: '@deepseek-ai/dshm-fs-write-nonchmod'
 
-# ⑪ WebSocket 心跳阈值（DSHM，2026-10-03）
+# ⑪ WebSocket 心跳阈值（DSHM，2026-10-03 加入 → 2026-10-04 回退，当前**不生效**）
 #
-#    【这条是什么性质】**预防性加固，不是已复现缺陷的修复**。请按此理解，
-#    不要把下面的取值当成"修好了某个现场问题"。
+#    【现状】下面那行 `typert-gateway` 的 config **已删除**，回到上游默认：
+#      · `@deepseek-ai/dsh-api-gateway/lib/index.js:551 DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2e3`
+#        （Host 每 2 秒向每个 WebSocket 客户端 `ping()`）；
+#      · `:172 MAX_MISSED_HEARTBEATS = 2`；`:236-253` 每轮**先判 `missed >= 2` 再自增**
+#        ⇒ 判死发生在第 3 个周期，默认 `3 × 2 秒 ≈ 6 秒` 收掉不回 Pong 的连接
+#        （`:209-211` 收到 Pong 清零）。
 #
-#    【上游默认行为（逐行核对，与设备无关，这部分是确定的）】
-#    `@deepseek-ai/dsh-api-gateway`：
-#      · `lib/index.js:551 DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2e3`
-#        ⇒ Host 每 **2 秒** 向每个 WebSocket 客户端发一个 Ping 控制帧；
-#      · `:172 MAX_MISSED_HEARTBEATS = 2`，`:241-249` 每轮
-#        `missed >= 2 ? socket.terminate()`，否则 `missed += 1` 并 `ping()`；
-#      · 客户端回 Pong 才会把计数清零（`:209-211`）。
-#    ⇒ 默认容忍度 = 2 × 2 秒 = **4 秒**：只要接连两轮 Pong 未在到期前回来
-#    （鸿蒙上可能的诱因：ArkWeb 主线程被长任务占住、Host 侧 event loop 被
-#    同步 Python/打包任务占住、Wi-Fi 省电态唤醒延迟），Host 就
-#    `socket.terminate()`，客户端表现为"连接断开 → 重连"。
-#    上游 `README.zh.md:89` 对此有明确指引：「`websocketHeartbeatIntervalMs`
-#    同时是 Ping 周期和 Pong 截止时间…如果部署的事件循环或网络可能停顿超过
-#    该间隔，**必须调大**」。
+#    【当初为什么加】按上游 `README.zh.md:89`「部署的事件循环或网络可能停顿超过该间隔，
+#    必须调大」，把容忍度抬到 `2 × 30 = 60 秒`。当时读代码得到的关键事实是：判死发生在
+#    自增之前 ⇒ 实际回收时刻是 `3 × interval`，改后是 **~90 秒**，不是注释里写的 60 秒。
 #
-#    【现场读数：与"固定 6 秒节奏"不符，勿沿用旧说法】
-#    早期审核报告（`docs/review-report-2026-09-29.md:288` 4-H1）把根因挂在一段
-#    端侧实测上——"客户端回 Pong → 15s 保持；不回 Pong → 服务端 5.4s 关闭"，
-#    并据此描述为"断开总是成对出现、间隔 6 秒上下"（2s 发 Ping → 4s 判死）。
-#    但那段读数出自 `connection/src/main/ets/**` 这套**自研连接层**，而同一份
-#    报告 `:39` 已认定该层在生产入口**不可达**（生产走官方 Web UI + 官方
-#    gateway）⇒ 它测的不是本 `typert-gateway` 这条连接。
-#    2026-10-03 在真机（MateBook 14 MNTXM-24B / OpenHarmony 7.0.0.105 API 26）
-#    上直接统计 `IN-UPGRADE GET /api/remote.mux`：跨 09-27→10-03 共 **85** 次
-#    upgrade，间隔 **中位数 304.7 s、最大 ≈45.9 h（挂起/息屏整段）**，全期
-#    **只有 1 个 < 10 s 的间隔（2.3 s）**。不存在 6 秒量级的成对断开。
-#    ⇒ 本机未复现该症状。上面那条"吻合"的推论**已被证伪**，本行不能算作
-#    对某个已观测缺陷的修复。
+#    【为什么回退】
+#      ① 支撑它的现场读数（`docs/review-report-2026-09-29.md:288` 4-H1 的"断开成对出现、
+#         间隔 6 秒上下"）出自 `connection/src/main/ets/**` 这套自研连接层，而同一份报告
+#         `:39` 已认定该层在生产入口**不可达** ⇒ 它测的不是本 `typert-gateway` 这条连接。
+#         2026-10-03 真机统计 `IN-UPGRADE GET /api/remote.mux`：09-27→10-03 共 85 次，
+#         间隔中位数 304.7 s、最大 ≈45.9 h（挂起/息屏整段），全期只有一个 < 10 s（2.3 s）
+#         ⇒ 该症状本机未复现。**本行从来不是"已观测缺陷的修复"，只是预防性加固。**
+#      ② 它把**半死连接的回收窗口从 ~6 秒拉到 ~90 秒**，而"启动后一两分钟什么都慢、
+#         之后突然全好"正是这个形态；登录/模型选择/插件市场/插件预览四个症状都走这条 mux
+#         连接 ⇒ 这是这条路径上我们唯一的改动，先复归上游默认，再谈别的原因。
+#      ③ 恢复上游默认=恢复首版行为，也让将来追平上游时少一处自定义。
 #
-#    【本行做什么】把 `typert-gateway` 行的 config 整块替换为
-#      · `websocketHeartbeatIntervalMs: 30000` —— 容忍度抬到 2 × 30 = **60 秒**，
-#        远大于任何一次主线程/event loop 阻塞，同时仍保留"真死连接会被回收"
-#        的语义（60 秒内有响应即不算死）；
-#      · `streamInboxBytes: 262144` —— **与上游默认值完全相同**，写出来是因为
-#        本文件顶部的 patch 语义是**整块替换**目标行的 config（不是深合并）：
-#        只写一个键并不自动继承另一个键的默认值以外的意图，写全两键让这一行
-#        自解释、且在将来上游改默认值时不会悄悄改动我们的另一项。
-#    `Config` 的约束是 `z.number().step(1).min(1).max(2147483647)`（`dsh-timeout`
-#    的 `MAX_TIMER_DELAY_MS`，`lib/index.js:27`），30000 合法。
-#
-#    【为什么改配置不改源码】这两项从上游第一天起就是**服务配置项**
-#    （`:596-599` 的 `static Config`，`default()` 而非硬编码），`:628` 构造
-#    `RemoteStreamMuxServer` 时直接取 `resolved.websocketHeartbeatIntervalMs`
-#    ⇒ 本行是上游设计内的调节点，不碰 `dsh-*` 任何文件。
-#
-#    【恢复条件】上游若把默认心跳间隔上调（或把 `MAX_MISSED_HEARTBEATS` 改为
-#    与间隔相乘的时长而非次数），删掉本行即可回到默认。
-#
-#    【附：同一报告的 4-H2 不在本仓库可达路径上】`connection/**` 的
-#    `ReconnectController.stopped` 单向闩（`Backoff.ets:40,60-63,81-83`）同样
-#    只在自研连接层里，生产入口不可达，故本次不处理。
-#
-#    【本行做什么】把 `typert-gateway` 行的 config 整块替换为
-#      · `websocketHeartbeatIntervalMs: 30000` —— 容忍度抬到 2 × 30 = **60 秒**，
-#        远大于任何一次主线程/event loop 阻塞，同时仍保留"真死连接会被回收"
-#        的语义（60 秒内有响应即不算死）；
-#      · `streamInboxBytes: 262144` —— **与上游默认值完全相同**，写出来是因为
-#        本文件顶部的 patch 语义是**整块替换**目标行的 config（不是深合并）：
-#        只写一个键并不自动继承另一个键的默认值以外的意图，写全两键让这一行
-#        自解释、且在将来上游改默认值时不会悄悄改动我们的另一项。
-#    `Config` 的约束是 `z.number().step(1).min(1).max(2147483647)`（`dsh-timeout`
-#    的 `MAX_TIMER_DELAY_MS`，`lib/index.js:27`），30000 合法。
-#
-#    【为什么改配置不改源码】这两项从上游第一天起就是**服务配置项**
-#    （`:596-599` 的 `static Config`，`default()` 而非硬编码），`:628` 构造
-#    `RemoteStreamMuxServer` 时直接取 `resolved.websocketHeartbeatIntervalMs`
-#    ⇒ 本行是上游设计内的调节点，不碰 `dsh-*` 任何文件。
-#
-#    【恢复条件】上游若把默认心跳间隔上调（或把 `MAX_MISSED_HEARTBEATS` 改为
-#    与间隔相乘的时长而非次数），删掉本行即可回到默认。
-- id: typert-gateway
-  config:
-    websocketHeartbeatIntervalMs: 30000
-    streamInboxBytes: 262144
+#    【恢复条件】若真机复现"默认 6 秒回收导致重连风暴"，再按 `README.zh.md:89` 调大，
+#    并把那一次的现场读数一并写在这里（不要只留推论）。
 
 # ⑫ 侧栏 Office 文档预览改走系统预览窗（DSHM 自带插件，2026-10-04）
 #
