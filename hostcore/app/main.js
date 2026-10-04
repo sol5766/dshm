@@ -252,6 +252,26 @@ try {
               ` ver=${h['sec-websocket-version']} cookie=${h.cookie === undefined ? '(none)' : h.cookie.length + 'B'}` +
               ` origin=${h.origin}`);
           });
+          /*
+           * 【诊断（E83）】accept 轨迹。
+           *
+           * 真机读数（sampler7）：停滞期 TCP 三次握手 1ms 内完成，但 recv 一直超时，
+           * 且 /proc/net/tcp 的 LISTEN rx_queue 单调增长 ⇒ 连接进了 accept 队列却没人收。
+           * 但同一时刻我们看到的线程状态是 `epoll_wait`、监听 fd 也确实注册在某个 epoll 集合里
+           * ——两者逻辑上不能同时成立。这行读数直接回答"accept 有没有被调用"，不再靠推断。
+           * 前 500 条全记，之后每 25 条记一次（正常一次冷启动的连接数在几十到几百量级）。
+           */
+          try {
+            let dshmAccepts = 0;
+            server.on('connection', (socket) => {
+              dshmAccepts += 1;
+              if (dshmAccepts <= 500 || dshmAccepts % 25 === 0) {
+                let remote = '?';
+                try { remote = `${socket.remoteAddress ?? '?'}:${socket.remotePort ?? '?'}`; } catch (e) { /* 取不到就算了 */ }
+                diag(`ACCEPT #${dshmAccepts} ${remote}`);
+              }
+            });
+          } catch (e) { /* 挂载失败不影响 accept */ }
           server.on('request', (req, res) => {
             if (process.env.DSHM_IN_LOG !== '1') return;
             const h = req.headers || {};
@@ -289,6 +309,38 @@ try {
   diag('入站请求诊断已安装（IN-UPGRADE / IN-REQ）');
 } catch (e) {
   diag(`入站请求诊断安装失败：${String(e)}`);
+}
+
+/*
+ * 【诊断（E84）】事件循环看门狗。
+ *
+ * 为什么需要：真机冷启动后 ~8s 起约 60s 内，宿主日志一个字节都不长（`host=` 恒定），
+ * 所有线程停在 FUTEX/EVENTPOLL、进程 CPU 只涨 ~1.4% 单核。两种解释完全相反：
+ *   (H1) JS 事件循环被某个同步操作挡住 —— loop 根本没转；
+ *   (H2) loop 在转，只是没轮到 accept/响应（那问题就在别处，比如 WebView 侧）。
+ * 每 1s 打一拍（只读 Date.now()，不碰任何业务路径）：
+ *   相邻两拍间隔 >=1.5s → 记 `LOOP-GAP <ms>`（= 被挡住的时长）；
+ *   每 20 拍 → 记 `LOOP-ALIVE 第 n 拍`（证明 loop 活着）。
+ * 于是「停滞期有没有 LOOP-ALIVE」就是 H1/H2 的判决，无需再猜。
+ */
+try {
+  let dshmLastTick = Date.now();
+  let dshmTickNo = 0;
+  const dshmWatchdog = setInterval(() => {
+    const now = Date.now();
+    const gap = now - dshmLastTick;
+    dshmLastTick = now;
+    dshmTickNo += 1;
+    if (gap >= 1500) {
+      diag(`LOOP-GAP ${gap}ms（事件循环停顿；第 ${dshmTickNo} 拍）`);
+    } else if (dshmTickNo % 20 === 0) {
+      diag(`LOOP-ALIVE 第 ${dshmTickNo} 拍`);
+    }
+  }, 1000);
+  if (typeof dshmWatchdog.unref === 'function') { dshmWatchdog.unref(); }
+  diag('事件循环看门狗已安装（1s 一拍；停顿 >=1.5s 记 LOOP-GAP，每 20 拍记 LOOP-ALIVE）');
+} catch (e) {
+  diag(`事件循环看门狗安装失败：${String(e)}`);
 }
 
 /*

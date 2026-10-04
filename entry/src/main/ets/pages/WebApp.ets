@@ -491,6 +491,8 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
   var opened = {};
   /* 诊断用：已记录的"非账号"item 帧数量（只记前 20 条，避免刷屏） */
   var itemFrames = 0;
+  /* 诊断用：已记录的"非账号"fetch 条数（只记前 300 条，覆盖启动爆发 + 开设置 + 点登录） */
+  var fetchLogged = 0;
 
   function bridges() {
     var b = globalThis.__DSHM_BRIDGES__;
@@ -595,6 +597,14 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
             } catch (e) { /* 非 JSON 帧：忽略 */ }
           });
         } catch (e) { /* 不支持 addEventListener：退化为不监听这条流 */ }
+        /* 诊断：账号状态走的是 mux WebSocket（/api/remote.mux）。如果浏览器迟迟不开，
+           先要排除"mux 直到 boot+70s 才 open"这条解释 —— 那和账号插件本身无关。
+           也顺带记下重连/断开时刻，用来核对心跳回收窗口。 */
+        try {
+          socket.addEventListener('open', function () { log('ws open ' + String(url).slice(0, 90)); });
+          socket.addEventListener('close', function (ev) { log('ws close code=' + (ev && ev.code) + ' ' + String(url).slice(0, 90)); });
+          socket.addEventListener('error', function () { log('ws error ' + String(url).slice(0, 90)); });
+        } catch (e) { /* 不支持 addEventListener：忽略 */ }
         return socket;
       };
       WrappedWS.prototype = NativeWS.prototype;
@@ -631,19 +641,32 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
           url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
         } catch (e) { /* 取不到 URL：按非 account 处理 */ }
         var pending = nativeFetch.call(globalThis, input, init);
-        if (url.indexOf('account/') < 0) { return pending; }
+        var isAccount = url.indexOf('account/') >= 0;
+        /* 诊断：账号链路之外的请求也记前 300 条"发起 → 完成"耗时。
+           用途：把"启动后慢"拆成两半 —— 页面 JS 迟迟发不出 fetch（被挡住），
+           还是发出去了宿主/网络回得慢。一次冷启动的爆发约 30 条，300 条足够覆盖
+           「启动 + 打开设置 + 点登录」三段，又不会把 diag-web-console 刷爆。 */
+        var watched = isAccount || fetchLogged < 300;
+        if (watched && !isAccount) { fetchLogged++; }
+        if (!watched) { return pending; }
         var rpcStartedAt = Date.now();
-        log('rpc start ' + url.slice(0, 120));
+        log((isAccount ? 'rpc start ' : 'fetch start ') + url.slice(0, 120));
         return pending.then(function (response) {
-          log('rpc done status=' + (response && response.status) + ' ms=' + (Date.now() - rpcStartedAt));
+          log((isAccount ? 'rpc done status=' : 'fetch done status=') +
+            (response && response.status) + ' ms=' + (Date.now() - rpcStartedAt) +
+            (isAccount ? '' : ' ' + url.slice(0, 80)));
           try {
-            if (response && typeof response.clone === 'function') {
+            if (isAccount && response && typeof response.clone === 'function') {
               response.clone().json().then(function (body) {
                 scanAccount(body && body.result ? body.result : body);
               }, function () { /* 非 JSON 响应：忽略 */ });
             }
           } catch (e) { /* clone 失败：忽略，原响应照常返回 */ }
           return response;
+        }, function (err) {
+          log((isAccount ? 'rpc fail' : 'fetch fail') + ' ms=' + (Date.now() - rpcStartedAt) +
+            ' ' + url.slice(0, 80));
+          throw err;
         });
       };
     }
