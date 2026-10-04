@@ -491,12 +491,33 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   `dist/_h6.log`（11,150 行）正确切成 114 段 boot。`_verify1.ps1` 的 7/7 之后新增「每轮 boot 的 LOOP-GAP
   对照」段自动跑它（`--json dist/verify1/bootgaps.json`）。
 
-当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,325,699 B**（含 patch6/7/8/9/10/11，
-备份 `dist/fallback/DSHM-patch11-314325699.hap`；另有 patch10 314,325,699 / patch9 314,321,604 / patch8 314,317,507 /
-patch6 314,317,511 / patch5 314,309,739 / patch4 314,309,738 / patch3 314,309,740 —— patch10 与 patch11 的
-signed 大小**同为 314,325,699 B，只是巧合**：两份 sha256 不同，`resfile/resources/app/main.js` 条目
-252,510 B 且含 `SYNC-COUNT`/`dshmSyncNote`，核对靠内容不靠体积）；resfile 里的 `main.js` 252,510 B，含上述全部埋点；
-设备离线（`hdc list targets` → `[Empty]`），**尚未安装**。
+**🎯 2026-10-04 定案并修复（E388）：冷启动后 ~60 s 全静默的真根因 = `flock.js` 里的 `process.report.getReport()`。**
+
+读数链（三个自证埋点 + 一次 `.cpuprofile`）：① 心跳线程连续（`dshm-hb.log` 每秒一行、`cpu=` 单调增）
+⇒ **进程没被冻**，是 JS 主线程被**同步**调用挡住；② `LOOP-GAP 62915ms`，而 `SYNC-COUNT 同步调用总耗时 425ms`
+（包装过的 fs 只占 0.4 s）⇒ **大头在包装面之外的 native**，只看 fs 记账会误判成「没有同步调用」；
+③ `.cpuprofile`（61,621 样本）判决 **A**、**最长连续非空转同栈 55,829 样本（≈55.8 s、自耗时 90.6%）**，整条链是
+`getReport @node:internal/process/report ← loadBinding @…/node-addon-system/lib/flock.js:6 ← errno ← tryLockExclusive
+@…/node-addon-system/lib/index.js:700 ← SessionWriteLease.acquire`。
+根因是我们自己的 **E103 平台门**（`platformRaw` 不是 win32/darwin 就一律当 `linux`）放行了上游
+「openharmony 直接抛 `ERR_FLOCK_UNSUPPORTED_PLATFORM`」的那条分支，把**快失败**变成 **56 s 同步停顿**。
+修法：`tools/pack-core.mjs` 里重写 `flock.js` 的模板不再调 `getReport()`，改读 `/proc/self/maps` 判 glibc/musl
+（判不出按 musl）——两个 libc 变体本来就是同一份占位文件、都由 `.node` 处理器按 basename 重定向到
+HAP `libs/arm64/libsystem.so`，判哪个目录**不影响加载**。
+真机复验（同一台设备、同一冷启动窗口）：`LOOP-GAP` **0 条**、`.cpuprofile` 转储 **0**、
+`session/modelCatalog` 首次 **66,503 ms → 4,535 ms**（随后 58–222 ms）、最慢 4.5 s、无 ≥10 s 请求；
+预热后第二次冷启动同样 0 条。详见 `70-鸿蒙移植踩坑与修复总览.md` §13。
+
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,329,793 B**（含 E388 修复 +
+patch6/7/8/9/10/11），sha256 `CCDBAA17EF28D77FADE60B413EA310DE640DA1BF305E571F6752F3296B9658E0`（unsigned 312,315,196 B）；
+核心分发包 `dist/core/dsh-core-0.2.0-rc.2-openharmony-arm64.zip` = **78,136,685 B** / 29,369 条目，
+sha256 `d928e451fbaa281b582703efefc3463759b7118370f8899e325ace47e06f6099`；
+备份 `dist/fallback/DSHM-E388-314329793.hap`；另有 patch11 314,325,699 / patch10 314,325,699 / patch9 314,321,604 /
+patch8 314,317,507 / patch6 314,317,511 / patch5 314,309,739 / patch4 314,309,738 / patch3 314,309,740。
+⚠️ **signed 体积会撞车**（patch10 与 patch11 同为 314,325,699 B；本次 314,329,793 B 与 E388 之前那版也相同）
+——**核对产物靠 sha256 + 内容**（`resfile` 里 `main.js` 252,510 B、含 `SYNC-COUNT`/`dshmSyncNote`；
+HAP 内核心 zip 里的 `…/node-addon-system/lib/flock.js` 3155 B、含 `/proc/self/maps` 且**已无** `getReport` 调用）。
+真机：`hdc install -r` 已装并复验通过（见上）。
 
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。
 > 清空 → 立刻动作 → 数秒内 dump。`entry/tray`、`entry/background`、`testTag` 在事后 dump 里
