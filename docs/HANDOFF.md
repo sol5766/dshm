@@ -309,10 +309,11 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
 
 **读数计划**（设备一回来就跑）：`dist/_verify1.ps1` 一键完成「`hdc install -r` → 轮询
 `host-ready.json` 等宿主就位（核心 zip 指纹变了，首启要先解包 26k 文件）→ 预热一轮 → 正式冷启动 →
-留 240 s 让用户点【设置→账号→登录】→ 拉五份日志 + 自动拉 `.cpuprofile` 档案 → 打印诊断版自检、
+留 240 s 让用户点【设置→账号→登录】→ 拉日志（含 `dsh-js-tid` / `dshm-hb.log`）+ 自动拉 `.cpuprofile` 档案 → 打印诊断版自检、
 时间轴、H1/H2 粗判，并对每份档案跑 `dist/_prof.js` 输出 A/B/C/A′ 判决」；`_verify1.ps1` 另拉
 `dsh-js-tid` 并每 ~250 ms 采一次 `wchan/stat` 写 `jstid-samples.log`（判 H1/H2 的 wchan 直方图），
-外加 `dshm-hb.log`（心跳）与 `SYNC-RING`/`SYNC-SLOW-LOG` 判读段。
+外加 `dshm-hb.log`（心跳最大间隔 ⇒ H1／(B) 判决段）与 `SYNC-RING`/`SYNC-WARN`/`SYNC-WARN-LOG`/
+`SYNC-COUNT` 判读段（含「统计到的大头 ≠ LOOP-GAP 总量」这条读法）。
 为此已加这些自证读数（全部**默认开启**，不再需要在宿主进程里跑 python 桥 setenv）：
 
 - 宿主 `ACCEPT #n ip:port`（`hostcore/app/main.js`，包 `server.on('connection')`）——直接回答
@@ -400,9 +401,43 @@ hilog 同步显示整个进程消失、托盘图标被摘（`removeAccessPluginI
   另测 **`NODE_COMPILE_CACHE`**（同配方冷/热两轮，`dist/ccache`）对 `LOOP-GAP` 无影响
   （3485 / 3328 ms，缓存目录只有 1 个文件、0 B）——`--jitless` 下没有 JIT 编译产物可缓存，这条路不通。
 
-当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,325,699 B**（含 patch6/7/8/9/10，
-备份 `dist/fallback/DSHM-patch10-314325699.hap`；另有 patch9 314,321,604 / patch8 314,317,507 / patch6 314,317,511 /
-patch5 314,309,739 / patch4 314,309,738 / patch3 314,309,740；resfile 里的 `main.js` 250,614 B，含上述全部埋点）；
+- **同步调用环升级：从「只看最后 12 条」到「能看出形状」**（`dist/_patch11.cjs`，E94/E95，2026-10-04 晚）。
+  patch9 的 `SYNC-RING` 只能回答「最后 12 条同步调用是谁」：一次**巨型**调用（例：一次 58 s 的
+  `readFileSync`）能被 `SYNC-SLOW` 直接点名；但真机最可能的形状是**一长串中等调用**（每次几十~几百 ms，
+  累计 60 s）——它们单次都不到 1 s（一条 `SYNC-SLOW` 都不会有），又会被便宜调用挤出环外。故新增：
+  `SYNC-WARN`（单次 ≥200 ms 立即同步落盘，上限 600 行 ⇒ 停滞期**实时流**：是「1 条 58 s」还是
+  「600 条 100 ms」一眼可辨）、`SYNC-WARN-LOG`（环里最近 24 条 ≥200 ms，随 `LOOP-GAP` 打印）、
+  `SYNC-COUNT`（按调用名累计**次数/总耗时**，`LOOP-GAP` 时打 Top12 ⇒ 耗时归谁：`statSync` 洪流＝解析、
+  `readFileSync` 洪流＝加载、`openSync/readSync`＝冷 eMMC I/O、`spawnSync`＝子进程）。5/5 hunk，
+  `node --check` rc=0，自检 `dist/_p11test.mjs` **PASS 12/12**（含「实时 SYNC-WARN ≥2000 ms」与
+  「SYNC-COUNT 记到了 Atomics.wait」）。`diagSync` 走 `fs.appendFileSync`（不在被包装名单里）⇒ 不会自递归。
+- ⚠️ **校准读数（必读，别把 SYNC-COUNT 当总数）**：本机那次 3.4 s 启动块里，`SYNC-COUNT` 只统计到
+  **490–506 ms**（`readFileSync×2213=209ms ⏐ realpathSync×1909=182ms ⏐ existsSync×2022=84ms ⏐ statSync×335=11ms …`）
+  ⇒ 被包装的 fs/子进程入口只占整段的 **~1/7**；剩下的大头在 V8 **内部**（ESM/CJS loader 用内部绑定读文件、
+  `v8 compile`），我们的包装器看不见。所以真机停滞期若 `SYNC-COUNT 总耗时` 远小于 `LOOP-GAP 值`，
+  那**不是**「没有同步调用」，而是「大头在包装面之外」——此时只有 `.cpuprofile` 的族直方图能点名
+  （本机 45.2% 落在 `esm-sync-loader`）。这条已写进 `_verify1.ps1` 的判读文字。
+- **排除一个候选：同步 SQLite**。`--experimental-sqlite` 是启动参数，`@deepseek-ai/dsh-session-query-sqlite`
+  里面 `const { DatabaseSync } = await import("node:sqlite")` 后所有查询都是**同步 native**（`.get()/.all()`），
+  理论上「一个同步调用挡 60 s」很合形状。但**两层 profile 层都把它钉成永不打开**：
+  `node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:143-149` 与
+  `node_modules/@deepseek-ai/dsh-web-app/cordis.patch.yml:22-30` 都是
+  `- id: session-query-sqlite` + `path: ':memory:'` + `openAt: never`；全树 grep `openAt` 只有这两处（另两个
+  命中是前端 pdf.js 与插件自身的 schema），我们的 `hostcore/profile/ondevice/cordis.patch.yml`、home 层、
+  真机 live profile 都没有覆盖它 ⇒ **SQLite 在端侧从未被打开**，这条候选可以划掉（不要再翻）。
+- **本机加 bundle 数的实验（负结果）**：`dist/core/devlike/dsh-core-0.2.0-rc.2/` 用 **Junction** 拼出真实核心树
+  （顶层 `node_modules`）＋ `profiles/ondevice/` 只列本机存在的 4 个 `@deepseek-ai/*`（`dsh-base`/`dsh-web-app`/
+  `dsh-experimental-auto-review`/`dsh-experimental-schedule-bundle`），`_bootprobe.mjs` 新增 `BOOTPROBE_CORE_DIR`
+  指过去：`LOOP-GAP 3383ms`（对 2 bundle 的 3357 ms **无差别**）、档案 `nodes=5227 samples=2039`、`>=3s 沉默间隙 0 处`。
+  ⇒ 本机加 bundle **不会**拉长同步加载块，也仍复现不出「HTTP ready 之后的停顿」；设备侧 6 个第三方 bundle
+  （`dsh-skin-market`/`dsh-our-free-model`/`dshmarket`/`dsh-codearts-auth`/`dsh-context`/`dshm-dev-link`）本机全都不存在，
+  照搬不了设备 profile ⇒ 真机 60 s 只能靠真机档案定因。
+
+当前构建：`entry/build/default/outputs/default/entry-default-signed.hap` = **314,325,699 B**（含 patch6/7/8/9/10/11，
+备份 `dist/fallback/DSHM-patch11-314325699.hap`；另有 patch10 314,325,699 / patch9 314,321,604 / patch8 314,317,507 /
+patch6 314,317,511 / patch5 314,309,739 / patch4 314,309,738 / patch3 314,309,740 —— patch10 与 patch11 的
+signed 大小**同为 314,325,699 B，只是巧合**：两份 sha256 不同，`resfile/resources/app/main.js` 条目
+252,510 B 且含 `SYNC-COUNT`/`dshmSyncNote`，核对靠内容不靠体积）；resfile 里的 `main.js` 252,510 B，含上述全部埋点；
 设备离线（`hdc list targets` → `[Empty]`），**尚未安装**。
 
 > **hilog 取证纪律（血泪）**：缓冲区只有 4MB，**实测只覆盖约 8–10 秒**。

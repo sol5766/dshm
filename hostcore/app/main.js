@@ -910,6 +910,30 @@ let requestAppRestart = null; // 由 start() 内注册（那时才知道 HOME_DI
  */
 const dshmSyncRing = [];
 const dshmSyncSlowLog = [];
+/* 【诊断（E94/E95）】单次 >=200ms 的同步调用另存一份 + 按名字累计次数/总耗时。
+ * 环（dshmSyncRing）只留最后 24 条：一次巨型调用能被它和 SYNC-SLOW 抓住，但"一长串中等
+ * 调用"会被便宜的尾巴挤出环外、且单次都不足 1s ⇒ 必须另开这两个账本记形状。 */
+const dshmSyncWarnLog = [];
+const dshmSyncStat = new Map();
+let dshmSyncWarnLines = 0;
+const DSHM_SYNC_WARN_MS = 200;
+const DSHM_SYNC_WARN_LINES = 600;
+function dshmSyncNote(name, ms, a) {
+  try {
+    const s = dshmSyncStat.get(name) || { n: 0, ms: 0 };
+    s.n += 1;
+    s.ms += ms;
+    dshmSyncStat.set(name, s);
+    if (ms >= DSHM_SYNC_WARN_MS) {
+      dshmSyncWarnLog.push({ n: name, a: a, ms: ms });
+      if (dshmSyncWarnLog.length > 24) { dshmSyncWarnLog.shift(); }
+      if (dshmSyncWarnLines < DSHM_SYNC_WARN_LINES) {
+        dshmSyncWarnLines += 1;
+        try { diagSync(`SYNC-WARN ${ms}ms ${name} ${a}`); } catch (e) { /* ignore */ }
+      }
+    }
+  } catch (e) { /* 记账失败不影响主流程 */ }
+}
 function dshmRingPush(entry) {
   dshmSyncRing.push(entry);
   if (dshmSyncRing.length > 24) { dshmSyncRing.shift(); }
@@ -923,7 +947,18 @@ function dshmRingDump(tag) {
     /* 单次 >=1s 的调用另存一份，不会被便宜调用挤出环外 —— 它就是"挡住 loop 的那一个"。 */
     if (dshmSyncSlowLog.length > 0) {
       const slows = dshmSyncSlowLog.map((e) => `${e.ms}ms ${e.n} ${e.a}`).join(" ⏐ ");
-      diag(`${tag} SYNC-SLOW-LOG ${slows}`);
+    diag(`${tag} SYNC-SLOW-LOG ${slows}`);
+    }
+    if (dshmSyncWarnLog.length > 0) {
+      const warns = dshmSyncWarnLog.map((e) => `${e.ms}ms ${e.n} ${e.a}`).join(" ⏐ ");
+      diag(`${tag} SYNC-WARN-LOG ≥${DSHM_SYNC_WARN_MS}ms 共 ${dshmSyncWarnLines} 次，环里最近 ${dshmSyncWarnLog.length} 条：${warns}`);
+    }
+    if (dshmSyncStat.size > 0) {
+      let grand = 0;
+      for (const s of dshmSyncStat.values()) { grand += s.ms; }
+      const top = [...dshmSyncStat.entries()].sort((x, y) => y[1].ms - x[1].ms).slice(0, 12)
+        .map(([n, s]) => `${n}×${s.n}=${s.ms}ms`).join(" ⏐ ");
+      diag(`${tag} SYNC-COUNT 同步调用总耗时 ${grand}ms，按耗时 Top12：${top}`);
     }
   } catch (e) { /* 记账失败不影响主流程 */ }
 }
@@ -942,6 +977,7 @@ try {
       return fn.apply(this, args);
     } finally {
       entry.ms = Date.now() - t0;
+      dshmSyncNote(name, entry.ms, entry.a);
       if (entry.ms >= 1000) {
         try { diagSync(`SYNC-SLOW ${entry.ms}ms ${name} ${entry.a}`); } catch (e) { /* ignore */ }
         dshmSyncSlowLog.push({ n: name, a: entry.a, ms: entry.ms });
@@ -973,6 +1009,7 @@ try {
       dshmRingPush(entry);
       try { return dshmWait.apply(Atomics, args); } finally {
         entry.ms = Date.now() - t0;
+        dshmSyncNote("Atomics.wait", entry.ms, entry.a);
         if (entry.ms >= 1000) {
           try { diagSync(`SYNC-SLOW ${entry.ms}ms Atomics.wait ${entry.a}`); } catch (e) { /* ignore */ }
           dshmSyncSlowLog.push({ n: "Atomics.wait", a: entry.a, ms: entry.ms });
@@ -981,7 +1018,7 @@ try {
       }
     };
   } catch (e) { /* ignore */ }
-  diag("同步调用环已安装（进入即记账，单次 >=1s 记 SYNC-SLOW；停顿后随 LOOP-GAP 打 SYNC-RING）");
+diag("同步调用环已安装（进入即记账；单次 >=200ms 记 SYNC-WARN、>=1s 记 SYNC-SLOW；停顿后随 LOOP-GAP 打 SYNC-RING/SYNC-WARN-LOG/SYNC-COUNT）");
 } catch (e) {
   diag(`同步调用环安装失败（不阻塞）：${e && e.message}`);
 }
