@@ -98,6 +98,38 @@ function diag(line) {
   try { process.stdout.write(text); } catch (e) { /* ignore */ }
 }
 
+/*
+ * 【诊断（E88）】`diagSync`：**同步**落盘，专给「进程即将结束」这一类读数用。
+ *
+ * `diag()` 走 `fs.createWriteStream`（缓冲）+ stdout：进程结束时（`process.exit` 之后的
+ * `exit` 事件、loop 排空瞬间）排队中的写很可能整批丢掉。而「宿主为什么自己退出」恰恰只
+ * 发生在最后一瞬，必须保证落地。只用低频、退出相关的事件，不碰请求路径。
+ */
+function diagSync(line) {
+  const text = `[${new Date().toISOString()}] ${line}\n`;
+  try { fs.appendFileSync(DIAG_LOG, text); } catch (e) { /* ignore */ }
+  try { process.stdout.write(text); } catch (e) { /* ignore */ }
+}
+
+/** 句柄/请求的类型统计：用来解释「loop 为什么排空」。 */
+function dshmTallyHandles() {
+  try {
+    const hs = typeof process._getActiveHandles === 'function' ? process._getActiveHandles() : [];
+    const rs = typeof process._getActiveRequests === 'function' ? process._getActiveRequests() : [];
+    const tally = (list) => {
+      const m = new Map();
+      for (const h of list) {
+        const n = h && h.constructor && h.constructor.name ? h.constructor.name : typeof h;
+        m.set(n, (m.get(n) || 0) + 1);
+      }
+      return [...m.entries()].map(([k, v]) => `${k}x${v}`).join(',');
+    };
+    return `handles=${hs.length}[${tally(hs)}] requests=${rs.length}[${tally(rs)}]`;
+  } catch (e) {
+    return `handles=err(${String(e)})`;
+  }
+}
+
 diag(`--- boot pid=${process.pid} execPath=${process.execPath} argv=${JSON.stringify(process.argv)}`);
 diag(`userData=${USER_DATA} DSH_BASE=${DSH_BASE}`);
 // koffi 按 `${root}/build/koffi/${process.platform}_${process.arch}/koffi.node` 找原生模块
@@ -149,12 +181,12 @@ const realExit = process.exit.bind(process);
 let ALLOW_EXIT = false;
 process.exit = (code) => {
   if (ALLOW_EXIT) {
-    diag(`!! process.exit(${code})：停止路径放行，真正退出`);
+    diagSync(`!! process.exit(${code})：停止路径放行，真正退出`);
     return realExit(code);
   }
   const stack = new Error('process.exit intercepted').stack || '(no stack)';
-  diag(`!! process.exit(${code}) called -- intercepted, NOT exiting`);
-  diag(`!! stack: ${String(stack).split('\n').join(' | ')}`);
+  diagSync(`!! process.exit(${code}) called -- intercepted, NOT exiting`);
+  diagSync(`!! stack: ${String(stack).split('\n').join(' | ')}`);
   // 诊断期不退出：真退出在 OHOS 上会变成 SIGABRT，什么解释都留不下
   return undefined;
 };
@@ -193,8 +225,34 @@ process.on('unhandledRejection', (reason) => {
   }
   diag(`!! unhandledRejection: ${stack}`);
 });
+/*
+ * 【诊断（E88）】「宿主自己干净退出（code=0）」的成因取证。
+ *
+ * 三次现场都只留下 `!! process 'exit' event, code=0`：没有 `收到停止请求` / `收到应用重启请求`
+ * （它们走 `log()`，此前只进 stdout，见本文件 `log()` 的 E88 说明），也没有被拦下的
+ * `process.exit`。这套读数把可能性一次分完：
+ *   - `beforeExit`：loop 自己排空（= 某个句柄被关掉/取消引用），并打出当时的句柄快照；
+ *   - `SERVER-CLOSE/UNREF`（挂在 createServer 包装里）：谁关掉了监听句柄，带调用者栈；
+ *   - `signal`：平台发来的信号（SIGTERM 等）；
+ *   - `disconnect`：父进程通道断开（应用侧结束）。
+ * `process.exitCode` 是 `configurable:false` 的访问器，改不了，所以这里只记录它的值。
+ */
+process.on('beforeExit', (code) => {
+  diagSync(`!! beforeExit code=${code} exitCode=${process.exitCode}（loop 已排空） ${dshmTallyHandles()}`);
+});
+process.on('disconnect', () => {
+  diagSync(`!! process 'disconnect'（父进程通道断了） ${dshmTallyHandles()}`);
+});
+for (const dshmSignal of ['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGQUIT', 'SIGUSR1', 'SIGUSR2']) {
+  try {
+    process.on(dshmSignal, () => {
+      diagSync(`!! signal ${dshmSignal}（只记录；默认处置已被其它监听器取代） ${dshmTallyHandles()}`);
+    });
+  } catch (e) { /* 平台不支持该信号 */ }
+}
 process.on('exit', (code) => {
-  diag(`!! process 'exit' event, code=${code}`);
+  diag(`!! process 'exit' event, code=${code} exitCode=${process.exitCode}`);
+  diagSync(`!! EXIT-SNAPSHOT code=${code} exitCode=${process.exitCode} ${dshmTallyHandles()}`);
 });
 
 /*
@@ -272,7 +330,42 @@ try {
                 diag(`ACCEPT #${dshmAccepts} ${remote}`);
               }
             });
-          } catch (e) { /* 挂载失败不影响 accept */ }
+} catch (e) { /* 挂载失败不影响 accept */ }
+/*
+ * 【诊断（E88）】监听句柄的生命周期。
+ *
+ * 一个正在 listen 的 HTTP server 是唯一能撑住事件循环的句柄：它一旦被 `close()` 或
+ * `unref()`，loop 就会排空、进程以 `process.exitCode`（默认 0）**自然退出**——
+ * 这正是三次「点登录后宿主自己干净退出」的形态。这里记下**调用者栈**，把成因钉死。
+ * 纯被动：包住实例方法，不改任何行为。
+ */
+try {
+  let dshmAddr = '(pending)';
+  const dshmReadAddr = () => {
+    try {
+      const a = server.address();
+      dshmAddr = a && typeof a === 'object' ? `${a.address}:${a.port}` : '(closed)';
+    } catch (e) { dshmAddr = '(err)'; }
+    return dshmAddr;
+  };
+  const dshmWhoCalled = (what) => {
+    try {
+      return String((new Error(what)).stack || '').split('\n').slice(1, 7).map((s) => s.trim()).join(' | ');
+    } catch (e) { return '(no stack)'; }
+  };
+  for (const dshmMeth of ['close', 'unref', 'ref']) {
+    const dshmOrig = server[dshmMeth];
+    if (typeof dshmOrig !== 'function' || dshmOrig.__dshmLifeWrapped === true) continue;
+    const dshmFn = function (...a) {
+      diagSync(`SERVER-${String(dshmMeth).toUpperCase()} call ${dshmReadAddr()} :: ${dshmWhoCalled('srv.' + dshmMeth)}`);
+      return dshmOrig.apply(this, a);
+    };
+    dshmFn.__dshmLifeWrapped = true;
+    server[dshmMeth] = dshmFn;
+  }
+  server.on('listening', () => diag(`SERVER-LISTENING ${dshmReadAddr()}`));
+  server.on('close', () => { dshmReadAddr(); diagSync(`SERVER-CLOSE event ${dshmAddr}`); });
+} catch (e) { diag(`SERVER-LIFE 挂载失败：${String(e)}`); }
 server.on('request', (req, res) => {
 /*
  * 【诊断版（E86）】默认开启入站日志（`DSHM_IN_LOG=0` 显式关闭）。
@@ -756,6 +849,15 @@ const PROFILE = process.env.DSHM_PROFILE || 'ondevice';
 function log(msg) {
   // 统一前缀，便于 ArkTS / 诊断页从日志里认出我们的行
   console.log('[dshm-host] ' + msg);
+  /*
+   * 【诊断（E88）】镜像一份进 `dshm-host.log`。
+   *
+   * 原来 `log()` 只走 stdout ⇒ 只有 `node-output.log` 有，而它**每次冷启动被截断**；
+   * 于是「停止请求/应用重启请求」这种恰好在进程结束前一瞬的行，事后拉回的文件里永远看不到
+   * （三次「干净退出」的成因就是这样失去读数的）。用 `diagSync` 而不是 `diag`：
+   * 这几行常常就是进程的最后输出，缓冲写会丢。
+   */
+  try { diagSync('[dshm-host] ' + msg); } catch (e) { /* ignore */ }
 }
 
 /**
@@ -4410,10 +4512,17 @@ async function start() {
   if (stopFile.length > 0) {
     const poller = setInterval(() => {
       try {
-        if (fs.existsSync(stopFile)) {
-          fs.rmSync(stopFile, { force: true });
-          requestStop('host-stop-request 文件');
-        }
+if (fs.existsSync(stopFile)) {
+/*
+ * 【诊断（E88）】先读内容再删：ArkTS 侧 `DshHost.stop(reason)` 会写入
+ * `${Date.now()} <调用方签名>`，这一行就是「应用里哪条路径按了停止键」的唯一答案。
+ * 读失败不影响停止（内容只是诊断信息）。
+ */
+let dshmStopWhy = '';
+try { dshmStopWhy = String(fs.readFileSync(stopFile, 'utf8')).trim().slice(0, 240); } catch (e) { /* ignore */ }
+fs.rmSync(stopFile, { force: true });
+requestStop(`host-stop-request 文件${dshmStopWhy.length > 0 ? '：' + dshmStopWhy : ''}`);
+}
       } catch (e) {
         // 读/删失败下轮再试：这一环不该因为一次 IO 抖动就永久失效
       }

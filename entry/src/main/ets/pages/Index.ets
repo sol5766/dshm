@@ -3576,8 +3576,8 @@ struct Index {
     const ctx = getContext(this) as common.UIAbilityContext;
     const host: DshHost = this.coreHost(ctx.filesDir, ctx.resourceDir, ctx.cacheDir);
     const notes: string[] = [];
-    if (id === 'stop' || id === 'restart') {
-      const stopped: OpResult = await host.stop();
+if (id === 'stop' || id === 'restart') {
+const stopped: OpResult = await host.stop(`Index 核心操作：${id}`);
       notes.push(stopped.ok ? '核心已停止' : stopped.message);
     }
     if (id !== 'stop') {
