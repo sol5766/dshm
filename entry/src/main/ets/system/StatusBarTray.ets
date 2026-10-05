@@ -1,44 +1,46 @@
 /**
- * 系统托盘（PC 顶栏状态区图标）接入 —— 让「关闭窗口 = 切后台常驻」真正可用。
+ * 系统托盘（PC 顶栏 / 托盘区状态图标）接入 —— 运行时挂图标 + 左键唤回主窗。
  *
- * ## 为什么需要它
+ * ## 现在做什么（2026-10-05 定案的三条需求）
  *
- * `EntryAbility.onPrepareToTerminate` 已把右上角关闭改成「最小化到后台」，但窗口收起来之后
- * 用户就**没有回程入口**了：Dock 里虽然还留着本应用，用户的心理模型却是「我把它关掉了」。
- * 系统级的常驻载体是顶栏状态区的**托盘图标**（微信 / 文件管理等 PC 应用同款位置）。
+ *   ① `statusBarManager.addToStatusBar` 把图标挂到系统状态栏 —— 本文件 `install`。
+ *      显示在**顶栏**还是**右下角托盘区**由系统按桌面形态决定，本代码不做任何位置分支。
+ *   ② 左键单击唤回主窗 —— 订阅 `statusBarIconClick`（本文件 `onIconClick`，接线在
+ *      `EntryAbility.setupTray`）。SDK 明确 `iconClickType` 目前只返回 `leftClick`。
+ *   ③ **不注册任何自定义右键菜单项**（`statusBarGroupMenu` 不传）⇒ 也**不订阅** `rightMenuClick`：
+ *      SDK 文档写明该事件只在 `updateStatusBarMenu()` 加过带 `notifyOnly` 的菜单项后才可能触发。
+ *      右键菜单里是系统自带的项（含系统那个「退出」），我们不复制一份、也不自写退出链。
+ *   ④ 另起一个**绑定该图标的后台 Ability 进程**（`hold`，`NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM`），
+ *      使窗口不可见时进程不被系统挂起回收。①④ 顺序不能反：该 processMode 的 SDK 前提是
+ *      「应用必须已有状态栏图标」，所以先 install、再 hold（调用方延时 300ms 也是为此）。
  *
- * ## 官方三步（《PC应用通过系统托盘后台保活》）
+ * ## 幂等：**踩过一次真回归，别再改回去**
  *
- *   ① `statusBarManager.addToStatusBar` 把图标挂到顶栏状态区 —— 本文件 `install`；
- *   ② 另起一个**绑定该图标的后台 Ability 进程**，使应用在窗口不可见时不被系统挂起回收
- *      —— 本文件 `hold`（拉起的 BackGroundAbility）；
- *   ③ 图标交互：左键 / 右键「打开应用」都唤回主窗 —— 本文件 `onIconClick` / `onRightMenuClick`。
+ * `launchType=specified` 下同一 UIAbility 会被反复复用与重建（多窗），`onWindowStageCreate`
+ * 可能在**同一进程**里被第二次走到 ⇒ `install()` 会被调用两次。两条不变量必须同时成立：
+ *   · **重复调用必须先返回**（`installed` 早退），**绝不能先摘**；
+ *   · 「先摘残留再挂新图标」只属于**首次挂载**路径（覆盖安装/异常退出后系统侧可能残留旧注册，
+ *     表现为「应用没开、图标还挂着」）。
+ * 反面教材（2026-10-05 实测的真回归）：把「摘残留」放在早退**之前** ⇒ 第二次 `install()`
+ * 会先 `removeFromStatusBar` 摘掉**活着**的图标，再因 `installed === true` 直接 return
+ * ⇒ 图标永久消失（直到进程结束）。触发场景：会话窗还在（同进程存活）时关掉主窗，
+ * 再从 Dock/任务栏重开主窗（模块级 static 不重置，于是走第二次 install）。
  *
- * ①②的顺序不能反：`processMode = NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM` 的 SDK 前提是
- * 「应用必须已有状态栏图标」，所以必须先 install、再 hold（调用方延时 300ms 也是为此）。
+ * `bgHeld` 同理：不守卫就会重复拉起托盘进程（SDK：「Repeated adding is invalid」）。
  *
- * ## 右键菜单里为什么只有「打开应用」，没有「退出应用」
+ * ## 失败降级
  *
- * 系统托盘自带的右键菜单里**已经有「退出」**，且真机实测它确实会退出应用
- * （2026-09-29：点它之后主进程与 BackGroundAbility 进程全部消失）——它**不经过**
- * `EntryAbility.onPrepareToTerminate`，所以不会被「关闭=切后台」那条改写拦住。
- * 再挂一个自己的「退出应用」只会得到微信那儿一样的**两个退出项**，用户无从区分。
- * 所以真正的退出交给系统那一项，我们只补系统没有的：把窗口唤回来。
- * 左键本来就能唤回，右键菜单再放一项是为了让「在图标上动手」这件事有确定的落点
- * （用户右键点开菜单、只看到「退出」，很容易误以为只能退出）。
+ * `install()` 失败**抛出**，由调用方 `EntryAbility.setupTray` 捕获并记日志降级：
+ * 官方行为下「关闭窗口 = 退出应用」，图标挂不上只是少一个入口，不影响关闭与退出。
  *
- * ## 不变量
+ * ## 摘图标（`remove`）要在**还有前台窗口**时做
  *
- * - `installed` / `bgHeld` 幂等：`launchType=specified` 下同一 UIAbility 会被反复复用与重建，
- *   没有守卫就会重复挂图标（SDK：「Repeated adding is invalid」）与重复起进程。
- * - **install 失败必须让上层知道**（`isReady()`）：上层据此**不再拦截关闭**。没有回程入口
- *   却拦着不让关，用户会被彻底关在门外（窗口收进后台、托盘里找不到、只能去系统设置强停）。
- * - 摘图标（`remove`）要在**还有前台窗口**时做：SDK 对 `removeFromStatusBar` 明确
- *   无前台窗口时不可删除（错误码 1010710004）。
+ * SDK 对 `removeFromStatusBar` 明确：无前台窗口时不可删除（错误码 1010710004）。
+ * ⇒ **不要**在无窗口的进程（如 `BackGroundAbility`）里指望它能摘掉图标：那个进程连
+ * `installed` 都是自己的 `false`（模块级 static 不跨进程），第一行就早退了。
  */
 
 import { statusBarManager } from '@kit.DeskTopExtensionKit';
-import { fileIo as fs } from '@kit.CoreFileKit';
 import { common, contextConstant, StartOptions, Want } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { commonEventManager, emitter, BusinessError } from '@kit.BasicServicesKit';
@@ -63,8 +65,6 @@ const ICON_BLACK: string = 'tray_black.png';
 const QUICK_HEIGHT: number = 30;
 /** 摘图标到 `terminateSelf` 之间的缓冲：图标残留比多等一瞬更难接受 */
 const REMOVE_DELAY_MS: number = 120;
-/** 自定义右键项「打开应用」的唯一 menuCode（SDK 要求全局唯一） */
-const MENU_CODE_OPEN: string = 'dshm.tray.open';
 
 /**
  * 进程内退出请求（EntryAbility → BackGroundAbility）。
@@ -82,11 +82,6 @@ interface IconClickPayload {
   iconClickType?: string;
 }
 
-/** `rightMenuClick` 事件载荷 */
-interface RightMenuPayload {
-  menuCode?: string;
-}
-
 function errOf(e: Object): string {
   const err = e as BusinessError;
   return `${err.code}: ${err.message}`;
@@ -96,17 +91,7 @@ export class StatusBarTray {
   private static installed: boolean = false;
   private static bgHeld: boolean = false;
   private static iconClickCb: ((clickType: string) => void) | null = null;
-  private static rightMenuCb: (() => void) | null = null;
   private static subscribers: Array<commonEventManager.CommonEventSubscriber> = [];
-
-  /**
-   * 托盘图标是否真的挂上了。
-   *
-   * 【上层必须读它再决定拦不拦关闭】见文件头「不变量」。
-   */
-  static isReady(): boolean {
-    return StatusBarTray.installed;
-  }
 
   private static async pixelMapOf(context: common.UIAbilityContext, name: string): Promise<image.PixelMap> {
     const bytes: Uint8Array = context.resourceManager.getRawFileContentSync(name);
@@ -115,41 +100,38 @@ export class StatusBarTray {
   }
 
   /**
-   * 挂托盘图标（幂等）。失败会**抛出**，由调用方决定降级（见 isReady 的说明）。
+   * 挂托盘图标（幂等）。失败会**抛出**，由调用方 `EntryAbility.setupTray` 降级（见文件头）。
    */
   static async install(context: common.UIAbilityContext): Promise<void> {
     /*
-     * 【2026-10-05：先摘残留，再挂新图标】
-     * 系统侧的状态栏注册是按 bundle 保存的 —— 换版本/覆盖安装后，旧注册可能仍在，
-     * 表现为"应用没开、顶栏或右下角还挂着我们的图标"（今天实测过：宿主进程都已 force-stop
-     * 清掉，图标仍留着）。这里先无条件摘一次：没有旧注册时该调用可能抛（忽略即可），
-     * 摘完再挂新的，保证"运行时有图标、且只有一份"。
+     * 【幂等判据必须在最前 —— 这一行是修一个真回归】
+     *
+     * 同一进程里 `install()` 可能被调用第二次（见文件头「幂等」：会话窗存活时关主窗、
+     * 再从 Dock 重开主窗 ⇒ 新的主窗实例走第二次 setupTray）。此时图标**已经挂着**，
+     * 唯一正确的动作是**什么都不做**。
+     *
+     * 曾经的写法把「摘残留」放在这个早退之前 ⇒ 第二次调用会先 `removeFromStatusBar`
+     * 摘掉活着的图标，再 return ⇒ 图标永久消失。别把下面这个 if 挪到后面去。
+     */
+    if (StatusBarTray.installed) {
+      hilog.info(DOMAIN, TAG, '托盘图标已在位：幂等跳过（不摘、不重挂）');
+      return;
+    }
+    /*
+     * 【只在首次挂载时：先摘残留，再挂新图标】
+     * 系统侧的状态栏注册是按 bundle 保存的 —— 换版本/覆盖安装、异常退出后，旧注册可能仍在，
+     * 表现为「应用没开、顶栏/托盘区还挂着我们的图标」（实测过：宿主进程都已 force-stop，
+     * 图标仍留着）。首次挂载前无条件摘一次：没有旧注册时该调用可能抛（忽略即可），
+     * 摘完再挂新的，保证「运行时有图标、且只有一份」。
      * 显示在**顶栏**还是**右下角托盘区**由系统按桌面形态决定，本代码不做任何位置分支。
      */
     try {
       statusBarManager.removeFromStatusBar(context);
-      hilog.info(DOMAIN, TAG, '挂图标前先摘残留注册（无残留时也会成功）');
+      hilog.info(DOMAIN, TAG, '首次挂载：先摘残留注册（无残留时也会成功）');
     } catch (err) {
-      hilog.info(DOMAIN, TAG, '挂图标前摘残留注册失败（多半本来就没有，忽略）：%{public}s', errOf(err as Object));
+      hilog.info(DOMAIN, TAG, '首次挂载摘残留注册失败（多半本来就没有，忽略）：%{public}s', errOf(err as Object));
     }
 
-    /*
-     * 【2026-10-05 按用户要求：DSHM_TRAY_DISABLED —— 不再挂托盘图标】
-     *
-     * 真机实测两轮：即便恢复了官方终止行为、并在 onPrepareToTerminate（窗口尚在时）主动
-     * 调 removeFromStatusBar，托盘图标**仍然留着**。原因是结构性的：图标是挂在
-     * **托盘进程**（BackGroundAbility，NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM 拉起）身上的，
-     * 只有那个进程结束才会一并收走；而系统终止只结束主 Ability。
-     *
-     * 而托盘的存在意义本来只有一条：让"关闭窗口"后应用继续跑（关窗 ⇒ 最小化到后台）。
-     * 用户已明确要求**恢复官方行为**（关闭就是退出）⇒ 这条前提消失 ⇒ 托盘成了纯负担
-     * （退出后留一个摘不掉的图标）。故这里直接不挂：应用行为与普通鸿蒙应用一致。
-     *
-     * 要恢复托盘：把下面这行 return 注掉即可（其余实现原样保留）。
-     */
-    if (StatusBarTray.installed) {
-      return;
-    }
     const white: image.PixelMap = await StatusBarTray.pixelMapOf(context, ICON_WHITE);
     const black: image.PixelMap = await StatusBarTray.pixelMapOf(context, ICON_BLACK);
     const icons: statusBarManager.StatusBarIcon = { white: white, black: black };
@@ -167,45 +149,22 @@ export class StatusBarTray {
     const item: statusBarManager.StatusBarItem = {
       icons: icons,
       /*
-       * 【2026-10-05：quickOperation 是该接口的**必填**字段（去掉后编译失败 ERROR×2，实测），
-       * 故这里保留；系统菜单里那个「打开应用」项由它派生，要彻底去掉只能不用托盘图标。】
+       * 【quickOperation 是该接口的**必填**字段（去掉后编译失败 ERROR×2，实测）】故保留。
+       * 注意这里**不传** `statusBarGroupMenu` —— 需求③：不注册任何自定义右键菜单项。
+       * 代价：`rightMenuClick` 事件因此永不触发（SDK 要求先 updateStatusBarMenu 加带
+       * notifyOnly 的项），所以本类也不再订阅它。
        */
       quickOperation: quick,
       hoverTips: localizedOr(context, $r('app.string.tray_hover_tips'), 'DSHM 正在运行')
     };
     /*
-     * 带自定义右键菜单失败时**退回不带菜单再试一次**。
-     *
-     * 【为什么值得多这一步】`addToStatusBar` 是全有或全无的：菜单数据里任何一个字段不被当前
-     * 系统版本接受（如 `menuCode`、`notifyOnly` 的兼容性），整次挂图标就失败。而挂不上图标的
-     * 后果不是「少一个右键项」，是**连图标和入口一起没有**。宁可先拿到图标（左键唤回这条
-     * 主链路可用），右键项失败只降级成「退出改由系统自带项」。
+     * 一次调用、失败即抛出：没有自定义菜单之后，这里已经没有「退回不带菜单再试」的降级对象了
+     * （两次调用的实参完全相同 ⇒ 重试只会拿到同一个错）。降级归于上层：`setupTray` 捕获后
+     * 记日志，图标没挂上只等于少一个入口，不影响关闭与退出。
      */
-    try {
-      statusBarManager.addToStatusBar(context, item);
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, '挂托盘图标（含右键菜单）失败，退回不带菜单重试：%{public}s', errOf(err as Object));
-      const bare: statusBarManager.StatusBarItem = {
-        icons: icons,
-        quickOperation: quick,
-        hoverTips: item.hoverTips
-      };
-      statusBarManager.addToStatusBar(context, bare);
-    }
+    statusBarManager.addToStatusBar(context, item);
     StatusBarTray.installed = true;
     hilog.info(DOMAIN, TAG, '托盘图标已挂上');
-  }
-
-  /** 自定义右键菜单：一个分组，一组一项。分组是第一级（系统自带项在另一组）。 */
-  private static groupMenu(context: common.UIAbilityContext): Array<statusBarManager.StatusBarGroupMenu> {
-    const item: statusBarManager.StatusBarMenuItem = {
-      title: localizedOr(context, $r('app.string.tray_menu_open'), '打开应用'),
-      // notifyOnly：不启动任何 Ability，只把点击以 rightMenuClick 事件送回应用。
-      // abilityName 必填（接口定义如此），此处置空——notifyOnly 下它不被使用。
-      menuAction: { abilityName: '', notifyOnly: true },
-      menuCode: MENU_CODE_OPEN
-    };
-    return [[item]];
   }
 
   /**
@@ -250,26 +209,21 @@ export class StatusBarTray {
   /**
    * 标记托盘入口已失效（图标随后台进程一起被系统收走时调用）。
    *
-   * 【为什么不能只依赖 remove 的返回值】`removeFromStatusBar` 在无前台窗口时本就会失败
-   * （1010710004），而这条路径恰恰是"窗口可能已被最小化"的时候 ⇒ `installed` 会被留在 true。
-   * 那样 `onPrepareToTerminate` 会继续拦截关闭，用户就真的**关在门外**了（见文件头不变量）。
-   * 图标是否还在不可靠地可查，但"回程入口可能没了"这件事是确定的，就按确定的处理：
-   * 不再拦截关闭，让用户至少还能从右上角关掉应用。
+   * 【为什么需要它】`removeFromStatusBar` 在无前台窗口时必失败（1010710004）⇒ 那条路径上
+   * `installed` 会被留在 `true`，而图标其实可能已经不在了。图标是否还在**查不到**，
+   * 但「入口可能没了」这件事是确定的，就按确定的记：把 `installed` 归零。
+   * 效果是下一次 `install()` 会重新走「首次挂载」路径（先摘残留、再挂）——图标能回来。
    */
   static markUnavailable(): void {
     if (!StatusBarTray.installed) {
       return;
     }
     StatusBarTray.installed = false;
-    hilog.warn(DOMAIN, TAG, '托盘入口标记为失效：不再拦截关闭，保证用户还能退出');
+    hilog.warn(DOMAIN, TAG, '托盘入口标记为失效（图标可能已随后台进程消失）');
   }
 
-  /** 左键点击托盘图标（`iconClickType` 目前只会是 `leftClick`）。 */
+  /** 左键点击托盘图标（`iconClickType` 目前只会是 `leftClick`，见 SDK 声明）。 */
   static onIconClick(cb: (clickType: string) => void): void {
-    /*
-     * 【2026-10-05 说明】用户澄清：**左键单击打开应用是要保留的**（此前误删，这里原样恢复）；
-     * 要清除的是**右键菜单里那个"打开应用"项**及其功能（已通过不再传 statusBarGroupMenu 去掉）。
-     */
     StatusBarTray.iconClickCb = cb;
     // 先注销（不传 callback = 注销该事件的全部回调）再注册：本方法可能被多次调用，
     // 累积回调会让一次点击触发 N 次唤回。
@@ -284,25 +238,6 @@ export class StatusBarTray {
       const fn: ((clickType: string) => void) | null = StatusBarTray.iconClickCb;
       if (fn !== null) {
         fn(clickType);
-      }
-    });
-  }
-
-  /** 自定义右键菜单项被点击（只对我们自己的 menuCode 有反应；系统自带的「退出」不走这里）。 */
-  static onRightMenuClick(cb: () => void): void {
-    StatusBarTray.rightMenuCb = cb;
-    statusBarManager.off('rightMenuClick');
-    statusBarManager.on('rightMenuClick', (data: emitter.EventData) => {
-      const payload: RightMenuPayload | undefined = data.data as RightMenuPayload | undefined;
-      const code: string = payload === undefined || payload.menuCode === undefined ? '' : payload.menuCode;
-      hilog.info(DOMAIN, TAG, '托盘右键菜单被点击：code=%{public}s payload=%{public}s',
-        code, JSON.stringify(data.data));
-      if (code !== MENU_CODE_OPEN) {
-        return;
-      }
-      const fn: (() => void) | null = StatusBarTray.rightMenuCb;
-      if (fn !== null) {
-        fn();
       }
     });
   }

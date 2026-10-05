@@ -235,10 +235,6 @@
     {
       "name": "tray_hover_tips",
       "value": "DSHM 正在运行（左键打开窗口）"
-    },
-    {
-      "name": "tray_menu_open",
-      "value": "打开应用"
     }
   ]
 }

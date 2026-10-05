@@ -207,10 +207,6 @@
     {
       "name": "tray_hover_tips",
       "value": "DSHM is running (left-click to open the window)"
-    },
-    {
-      "name": "tray_menu_open",
-      "value": "Open DSHM"
     }
   ]
 }

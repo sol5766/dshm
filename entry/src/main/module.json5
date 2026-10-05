@@ -46,19 +46,18 @@
       },
       {
         /*
-         * 【为什么需要它】2in1（PC/平板自由窗口）上，用户点右上角「关闭」时，
-         * 我们要把"关闭窗口"改成"切到后台继续跑"——正在执行的任务与那条
-         * Host 长连接不能因为关窗就断。`onPrepareToTerminate` 正是这个
-         * 时机的回调，而它**必须**声明本权限才会被系统调用
-         * （SDK：`@permission ohos.permission.PREPARE_APP_TERMINATE`）。
+         * 【现在谁在用】`BackGroundAbility.onPrepareToTerminate()`（托盘后台进程被系统结束
+         * 时把事件送回主 Ability 做收尾）。**EntryAbility 已不再实现该回调** ——
+         * 2026-10-05 起系统「关闭窗口」回到官方行为（= 退出应用），不再拦成"最小化到后台"。
          *
-         * 【为什么能申请】该权限在 SDK 权限表里是
-         * `availableLevel: "normal"` + `grantMode: "system_grant"`
-         * ⇒ 普通应用可声明，安装时自动授予，无运行时弹窗。
+         * 该权限在 SDK 权限表里是 `availableLevel: "normal"` + `grantMode: "system_grant"`
+         * ⇒ 普通应用可声明，安装时自动授予，无运行时弹窗。声明仍在是因为下面那个回调需要它：
+         * 不声明时系统**不会调用** `onPrepareToTerminate`，失败形态是「事件永远不来」，
+         * 看起来像"这段逻辑没写"而不像"权限没声明"。
          *
          * 【不能与 windowStageClose 同时用】SDK 明确：
          * 「若应用注册了 `windowStageClose` 监听，本回调**不会执行**」。
-         * 本工程刻意**不**注册那个监听，只走这一条路径。
+         * 本工程刻意**不**注册那个监听。
          */
         "name": "ohos.permission.PREPARE_APP_TERMINATE",
         "reason": "$string:perm_prepare_terminate_reason",
