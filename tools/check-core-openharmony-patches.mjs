@@ -200,6 +200,31 @@ const ATTACH_LIB = 'node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js'
 const PRESET_DIR = 'node_modules/@deepseek-ai/dsh-web-app/presets';
 const PROFILE_DIR = 'profiles/ondevice';
 
+/* ── 撤除守卫（coreVersion +dshm.6，2026-10-05）：已**撤除**的无效补丁不得复活 ──
+ *
+ * `DSHM_DOC_LOAD_DEDUP`（面板自持 AbortController + 同键在飞去重）曾由 pack-core 的
+ * `dedupDocumentLoad()` 注入下面这个文件。它治的是**不存在的病**：`readBytes` 空响应的真根因是
+ * 宿主 undici 垫片不认 `new Response(FormData)`（`hostcore/app/fetch-shim.js`，见 `docs/97`），
+ * 且补丁里"失败后清去重键"一行落在 `if (started…) return` 之后是**死代码**。
+ * ⇒ 用户决定整段撤除（pack-core 的注入函数与调用点已删；升 `coreVersion` 让端侧换树）。
+ *
+ * 为什么仍要在门禁里登记：撤除**只在"这次 pack-core 没打它"时有意义** —— 树是增量复用/可回退的，
+ * 任何人把注入加回来、或拿旧树出包，仓库层都不会红。这里用与 `markers` 同一套机制的**期望 0 次**，
+ * 外加"上游原文形态已恢复"的正向判据（注入会把这三行里的 `signal` 换成 `dshmSignal`）。
+ */
+// 【路径基准是 scope（`<tree>/node_modules/@deepseek-ai`），与 ①②③ 段一致；④⑤ 组才用树根相对】
+const DEDUP_REL = 'dsh-client-ui-sidebar-documentpreview/lib/client.js';
+// 注入标记 + 它引入的三个标识符（注入后各出现；撤除后必须 0 次）。`dshmLoadKey` 是 `dshmLoadKeyRef` 的前缀，故不单列。
+const DEDUP_MARKERS = ['DSHM_DOC_LOAD_DEDUP', 'dshmLoadKeyRef', 'dshmAbortRef', 'dshmSignal'];
+// 上游原文形态（撤除后必须恢复）：effect 的 started 早退行 + 三个加载调用点用 owner 的 `signal`。
+// 这三条调用点**逐字**取自 pack-core 原 dedupDocumentLoad() 的 `callAnchors`（即"被 replace 掉的上游原文"）。
+const DEDUP_UPSTREAM_RESTORED = [
+  ['const started = current !== void 0;', 'effect 的 started 早退行（上游原文）'],
+  ['if (mode === "text-pages") loadPage(tab.id, file, 1, signal, meta.value?.version);', '加载调用点①（上游形态：用 owner 的 signal）'],
+  ['else if (mode === "bytes-complete") loadAll(tab.id, file, signal, meta.value?.version);', '加载调用点②（上游形态：整读用 owner 的 signal ⇒ 不再有面板自持 abort）'],
+  ['else prepareRenderer(tab.id, signal, selected.id, meta.value?.version);', '加载调用点③（上游形态）'],
+];
+
 /* ── 逐字抄自 pack-core 替换模板的"上游原文"（反向判据专用） ── */
 // pack-core.mjs:1961 —— patchLinkForSandbox 的 import 行（注入后多了 access/rename ⇒ 此串必消失）
 const SESSION_IMPORT_UPSTREAM = 'import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, truncate } from "node:fs/promises";';
@@ -1293,7 +1318,32 @@ function audit(scope) {
     }
   }
 
-  /* ── ④ 其余 10 个注入函数（清单门禁） ── */
+  /* ── ④ 撤除守卫：已撤除的无效补丁 `DSHM_DOC_LOAD_DEDUP` 不得复活（+dshm.6） ── */
+  {
+    const text = read(DEDUP_REL);
+    if (text === null) {
+      bad(`撤除守卫：缺文件 ${DEDUP_REL}`);
+    } else {
+      for (const marker of DEDUP_MARKERS) {
+        const n = countOf(text, marker);
+        if (n === 0) ok(`撤除守卫：${marker} ×0（撤除后未复活）`);
+        else {
+          bad(`撤除守卫：${marker} 出现 ${n} 次 —— 无效补丁 DSHM_DOC_LOAD_DEDUP（面板自持 abort + 同键去重）`
+            + '已在 coreVersion +dshm.6 撤除（真根因是宿主 undici 垫片，见 docs/97）；它复活会重新引入'
+            + '"整读被面板自持控制器劫持 + 失败后清键的死代码"');
+        }
+      }
+      for (const [lit, label] of DEDUP_UPSTREAM_RESTORED) {
+        if (text.includes(lit)) ok(`撤除守卫：上游原文已恢复 —— ${label}`);
+        else {
+          bad(`撤除守卫：找不到恢复后的上游原文（${label}）—— ${JSON.stringify(lit.slice(0, 70))}… `
+            + '撤除不干净（半截补丁：标记删了但调用点还指着 dshmSignal），或上游实现已变而门禁需同步复核');
+        }
+      }
+    }
+  }
+
+  /* ── ⑤ 其余注入函数（清单门禁） ── */
   auditInjectedPatches(TREE, ok, bad);
 
   return { notes, fails };
@@ -1308,7 +1358,7 @@ function runGuard() {
     process.exit(3);
   }
   const { notes, fails } = audit(CORE);
-  console.log('════════ 核心树端侧补丁门禁（19 处注入：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · fs-local link · attachment link · Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单） ════════');
+  console.log('════════ 核心树端侧补丁门禁（19 处注入 + 1 处撤除守卫：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · fs-local link · attachment link · Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单 · 撤除守卫[DSHM_DOC_LOAD_DEDUP 不得复活]） ════════');
   console.log(`核心树：${CORE}`);
   for (const n of notes) console.log(n);
   if (fails.length > 0) {
@@ -1318,6 +1368,7 @@ function runGuard() {
     process.exit(1);
   }
   console.log(`\nRESULT: ${notes.length} passed, 0 failed —— 19 处端侧注入补丁都在树里，且上游原文/未注入形态均已消失`
+    + '；另有 1 处**撤除守卫**（`DSHM_DOC_LOAD_DEDUP` 已于 coreVersion +dshm.6 撤除 ⇒ 标记必须 0 处、上游原文形态必须已恢复）。'
     + '（树内清单 dshm-core.json 是生成物，只按形状判：存在 + 字段/类型 + 配方一致 + 内部一致）。');
 }
 
@@ -1328,6 +1379,8 @@ const SELFTEST_FILES = [
   ...ARMOR_SITES.map((s) => s.rel),
   PDF_REL,
   `${SUBPROCESS_LIB}/index.js`,
+  // 撤除守卫（④ 段）：它的判据也走 scope 相对读取 ⇒ 临时副本里必须有这个文件
+  DEDUP_REL,
 ];
 
 /* ④/⑤ 段的自检素材：**核心树根相对**路径（文件或目录；目录用于 mirrors / treeMirrors 的逐字节比对）。 */
@@ -1511,6 +1564,14 @@ function selfTest() {
           (t) => t + '\nfunction dshmProbe(error, message) {\n\terror.message = message;\n}\n'),
         expect: /裸赋值未被 try\/catch 包住/,
         only: /裸赋值未被 try\/catch 包住/,
+      },
+      /* ── M9：撤除守卫（④ 段）—— 已撤除的无效补丁被重新注入 ⇒ 只该撤除守卫红 ── */
+      {
+        name: 'M9 已撤除的 DSHM_DOC_LOAD_DEDUP 被重新注入 → 撤除守卫红',
+        run: () => mutate(DEDUP_REL,
+          (t) => t + '\n/* DSHM_DOC_LOAD_DEDUP: 重新注入（自检变异体） */\nconst dshmAbortRef = (0, react.useRef)(null);\n'),
+        expect: /撤除守卫/,
+        only: /撤除守卫/,
       },
     ];
 
