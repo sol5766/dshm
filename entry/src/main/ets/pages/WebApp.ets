@@ -2072,8 +2072,14 @@ struct WebApp {
     // 故这里按 mode 同时更新自绘顶栏，保证状态栏与顶栏不会是两种观感。
     this.topBarBg = bg;
     this.topBarFg = contentColor;
+    // 【2026-10-05 回归修复】三键配色必须与顶栏底色**同一拍**设置。
+    // 见 applyDecorButtonMode 的完整注释：漏了这一步 ⇒ 深色外观下"黑底黑键、三键看不见"。
+    this.applyDecorButtonMode(mode);
     if (this.decorWin === undefined) {
       hilog.info(DOMAIN, TAG, '状态栏跟随外观：%{public}s（窗口未就绪，下次重试）', mode);
+      // 别把幂等闸门锁在"未真正应用"的状态上：清掉它，窗口就绪后的下一次调用才会补齐
+      // （与下面 catch 里失败时清闸门的处理保持一致）。
+      this.systemBarApplied = '';
       return;
     }
     try {
@@ -2108,24 +2114,45 @@ struct WebApp {
    * 保证"桥万一没装上"也能最终收敛）。两者都调 applySystemBarTheme(mode)，靠它内部的
    * 幂等闸门去重，不会来回抖动。
    */
+  /**
+   * 三键（全屏/最小化/关闭）配色跟随**顶栏底色**。
+   *
+   * 【为什么必须单独成方法（2026-10-05 真机回归，用户报"右上角三个按钮消失、只剩一个关闭"）】
+   * 自绘顶栏自 2026-09-26 起**跟随外观**：深色外观下顶栏是 `#151517`。而三键的颜色模式
+   * 原先只在两处被设置：
+   *   ① `EntryAbility` 创建窗口时**强制** `COLOR_MODE_LIGHT`（深色图标——那是给当年
+   *      "恒白底顶栏"配的）；
+   *   ② 本文件的 `applyTopBarTheme`，而它只是**探针兜底**（每 10s 一轮）。
+   * 主通道（web 的 THEME_SHIM_JS → themeBridge → `applySystemBarTheme`）**只翻顶栏、不碰三键**
+   * ⇒ 深色外观下顶栏变 `#151517`、三键仍是 ① 的深色图标 ⇒ **黑底黑键，三键整体不可见**，
+   * 只有「关闭」因 hover 有底色才现形（正是用户看到的现象）。
+   *
+   * ⇒ 结论：三键配色收进**同一个** `applySystemBarTheme`——顶栏是什么底色，三键就用配套明暗。
+   * 全屏/无装饰场景该调用会抛，吞掉即可（功能等价 no-op）。
+   */
+  private applyDecorButtonMode(mode: string): void {
+    if (this.decorWin === undefined) {
+      return;
+    }
+    try {
+      this.decorWin.setDecorButtonStyle({
+        colorMode: mode === 'dark'
+          ? ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+          : ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
+      });
+    } catch (e) {
+      // 手机全屏（无窗口装饰）等场景：忽略
+    }
+  }
+
   private applyTopBarTheme(r: number, g: number, b: number, dark: boolean): void {
     const mode: string = dark ? 'dark' : 'light';
     hilog.info(DOMAIN, TAG, '外观（探针兜底）：page_bg=%{public}s dark=%{public}s → %{public}s',
       '#' + [r, g, b].map((v: number): string => v.toString(16).padStart(2, '0')).join(''),
       String(dark), mode);
     this.applySystemBarTheme(mode);
-    // 三键跟随：浅底深键 / 深底浅键（与状态栏内容色同一套明暗）
-    if (this.decorWin !== undefined) {
-      try {
-        this.decorWin.setDecorButtonStyle({
-          colorMode: dark
-            ? ConfigurationConstant.ColorMode.COLOR_MODE_DARK
-            : ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT
-        });
-      } catch (e) {
-        // 手机全屏（无窗口装饰）等场景：忽略
-      }
-    }
+    // 三键跟随：浅底深键 / 深底浅键——与主通道共用同一个方法，避免两处口径漂移
+    this.applyDecorButtonMode(mode);
   }
 
   // ── 启动加载页品牌动效 ────────────────────────────────────────────────

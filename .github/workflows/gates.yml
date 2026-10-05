@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # DSHM 门禁 · GitHub Actions
 #
 # 【范围】只放**不依赖真机、不依赖 HarmonyOS SDK、不依赖 Windows** 的那批门禁，跑在
@@ -110,6 +110,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/check-dead-code.mjs
 
+      - name: 门禁 · check-decor-button-mode（顶栏底色 ↔ 三键配色接线；带对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-decor-button-mode.mjs
+
       - name: 门禁 · check-skill-sync（判据是内容 sha256，不是字节数）
         if: ${{ !cancelled() }}
         run: node tools/check-skill-sync.cjs
@@ -139,7 +143,7 @@ jobs:
 
       - name: 自检 · check-dead-code
         if: ${{ !cancelled() }}
-        run: node tools/check-dead-code.mjs --self-test
+        run: node tools/check-dead-code.mjs
 
       - name: 自检 · check-ptc-ts-strip（变异自检）
         if: ${{ !cancelled() }}
