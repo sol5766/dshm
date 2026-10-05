@@ -134,7 +134,7 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 | # | 发现（证据） | 状态 |
 |---|---|---|
 | 1 | **`assert-resfile-sync` 一度是红的**：改 `main.js` 未 `place-host-app` ⇒ 差额 849 B/15 行，下次构建会把旧 `main.js` 静默打进 HAP（该门禁存在的理由） | ✅ **已修**（跑 `place-host-app`，13 件同步；并已在 18/18 复跑中确认） |
-| 2 | **5 条必跑门禁 + 4 项资产未进 git**（3 个 `.cjs` + PTC 插件 + 5 条门禁）；`main.js:125` 无条件 require `jitless-env.cjs` ⇒ 不提交则新克隆宿主起不来、AGENTS 门禁成幽灵 | ⏳ **待提交**（HEAD 的 `main.js` 不引用这些文件，故公开 HEAD 自洽；但 10/05 的修复必须 commit 才能发布）——**待用户决定提交/推送** |
+| 2 | **5 条必跑门禁 + 4 项资产未进 git**（3 个 `.cjs` + PTC 插件 + 5 条门禁）；`main.js:125` 无条件 require `jitless-env.cjs` ⇒ 不提交则新克隆宿主起不来、AGENTS 门禁成幽灵 | ✅ **已提交（本地）**：`b4bdcb5`（host/ptc/pack-core 三主线 + 3 个 `.cjs` + PTC 插件 + 5 条门禁）、`7ff6f7f`（文档与台账）、`71c8cba`（工作区选择器反馈）。**未推送**（按用户决定；HEAD 的 `main.js` 不引用这些文件，故公开 HEAD 在此之前是自洽的） |
 | 3 | parity 变更记录**缺 10/01–10/03**（v1.44 直接跳 v1.45，而 `570cc2a` 是最大一次改动） | ✅ **已补** v1.44.1 |
 | 4 | issue #3 的 R3 只做一半（reason 被丢弃） | ✅ **已修**（`Index.ets` 的成功带提示分支） |
 | 5 | `device-validation.md:4333-4361` 判词与 issue #3 真机 EPERM 正面冲突 | ⏳ 待办（加"对未授权公共目录成立"限定） |
@@ -189,7 +189,7 @@ sha256 `d7d4797cb2137e155c76f21a83efdb5c86cc21413062f1261b0149d51bb13e61`（v6 �
 
 | # | 事项 | 方案 | 风险 |
 |---|---|---|---|
-| 1 | **提交并推送 10/05 的修复**（否则公开仓库拿不到 inspector/PTC/glob 这些修复；且 `main.js` 硬依赖未跟踪的 `jitless-env.cjs`） | `git add` 那 9 项未跟踪资产 + 本轮改动，按仓库既有提交风格（中文、`fix(...)`/`docs(...)` 前缀）分主题提交 | 推送是**对外动作**，需用户确认（是否同时推 GitHub 与 GitCode、是否先发 release） |
+| 1 | **推送 10/05 的修复**（本地已提交 `b4bdcb5`/`7ff6f7f`/`71c8cba`；未推送 ⇒ GitHub/GitCode 的新克隆仍拿不到 inspector/PTC/glob 这些修复） | `git push`（两个远端都是公开仓库；也可先发 release/侧载包再推） | 推送是**对外动作** ⇒ 已按用户决定"只提交到本地"，待另行择时 |
 | 2 | 三条端侧补丁的**独立门禁** | 新增 `tools/check-core-openharmony-patches.mjs`（照 `check-sidebar-tab-id-guard.mjs`：版本取自 `core-recipe.json`、缺树 exit 3、带 `--self-test`），断言 `DSHM_RESOURCE_ARMOR_PROTOCOL/PATH/SUBAGENT`、`DSHM_MAP_COMPAT`、`DSHM_OPENHARMONY_SUBPROCESS` 在树内且 PDF 两处各一次 | 低；纯只读断言 |
 | 3 | **phone 档工具链解包**（GitHub #2 §3） | 见 §1.2 的最小改法（进程内回退 + 分片让出） | 中高：4530 文件同步解卡事件循环；且"解包成功 ≠ 可 execve"。**建议先开 issue 记录，不在本轮改代码** |
 | 4 | `ohos-workspace.md` 补"手动选目录"一节 | 讲清：用户选公共目录 ⇒ 探写失败会**改用应用目录**，node 侧只认 `DSHM_PUBLIC_DOWNLOAD` | 低 |
