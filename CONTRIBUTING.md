@@ -60,6 +60,11 @@ node tools/assert-fs-search-fallback.mjs
 node tools/check-fetch-mirror.cjs
 ```
 
+> **权威清单是 `AGENTS.md` 的「必跑的回归门禁」块**（当前 15 项：14 条 node + `device-acceptance.ps1`，另含
+> `check-web-fetch-jitless` / `check-worker-jitless` / `check-internal-undici` / `check-skill-sync.cjs` /
+> 3 条 PTC 门禁）。上面这段是**给人类贡献者的最小集**（跑得快、覆盖面广）；两者若不一致，
+> **以 `AGENTS.md` 为准**（此处不再复制全清单，避免两处分叉——2026-10-05 审计发现过一次分叉）。
+
 `tools/` 下另有专项门禁（设计令牌棘轮、文档引用、布局断言、上架红线、协议往返、原生闭包等）。改动涉及哪个面就跑哪个；不确定时全跑一遍。
 
 其中 `check-sidebar-tab-id-guard.mjs` 守的是 `pack-core` 对核心树打的行为补丁（侧栏页签 id 守卫）：它把随包发布的源码原文抽出来放进壳里跑。前置是已跑过 `node tools/pack-core.mjs --skip-install`；未跑过时它以退出码 2 明确报「前置条件缺失」，不会伪装成通过。
