@@ -61,8 +61,31 @@ window.__ModuleLoader__.load({
 const NS = "dshmOfficeSystemPreview";
 const ID = "@deepseek-ai/dshm-office-system-preview/office";
 
-/** 本插件认领的后缀。**只这四个**：其余 Office 后缀归内置的纯客户端实现。 */
-const EXTENSIONS = ["doc", "docx", "ppt", "pptx"];
+/**
+ * 本插件认领的后缀。
+ *
+ * 【2026-10-05 扩围：从 4 个后缀扩到「所有端侧内联渲染器坏掉的后缀」】
+ * 起因：`workspaceFiles/readBytes` 被客户端 100% 取消（真机 `dshm-host.log`：
+ * 139 请求 / 3 成功（全在 10-04）/ 136 取消），而下列实现全部用 `loading:"bytes-complete"`
+ * ⇒ 它们的内联预览**全部打不开**（HTML / 图片 / PDF / 内置 Excel）。
+ * 本插件正文**不渲染文件内容**，只用 `text-pages`（走正常可用的 `workspaceFiles/read`）
+ * 落到上游"不支持/失败"空态，而**那两个分支都会渲染 `.actions` 槽**（上游
+ * `dsh-client-ui-sidebar-documentpreview/lib/client.js:798/953`）⇒ 我们的
+ * 「系统预览」按钮出现，点击走 ArkTS 桥弹系统预览窗（Office 侧已真机验收 7/7 ok）。
+ *
+ * 这是"把不可用变成可用"：等 `readBytes` 修好之后，若要回到内联渲染，
+ * 把下面这些后缀从清单里删掉即可（文档见 docs/95 §10）。
+ */
+const EXTENSIONS = [
+	// Office（原本就认领）
+	"doc", "docx", "ppt", "pptx",
+	// 图片（上游 image 渲染器是 bytes-complete）
+	"png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg",
+	// PDF / HTML（同为 bytes-complete）
+	"pdf", "html", "htm",
+	// 表格（上游内置 Excel 是 bytes-complete；纯客户端实现，但同样读不到字节）
+	"xlsx", "xls", "csv", "tsv"
+];
 
 /** 注入的样式：正文面板 + 两个工具栏按钮的外观（配色全部走设计 token）。 */
 const css = ".dshmOfficeSystemPreview_empty{box-sizing:border-box;height:100%;color:var(--dsw-alias-label-secondary);font-family:var(--dsw-font-family);font-size:var(--dsh-content-font-size-secondary,13px);text-align:center;white-space:normal;flex-direction:column;justify-content:center;align-items:center;gap:14px;padding:0 24px;line-height:1.6;display:flex}.dshmOfficeSystemPreview_icon{opacity:.6;filter:grayscale();flex:none}.dshmOfficeSystemPreview_name{margin:0;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size,14px);word-break:break-all}.dshmOfficeSystemPreview_hint{margin:0;max-width:34em}.dshmOfficeSystemPreview_meta{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px}.dshmOfficeSystemPreview_failure{margin:0;max-width:34em;color:var(--dsw-alias-state-warn-label)}";

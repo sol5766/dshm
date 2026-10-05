@@ -431,3 +431,19 @@ useEffect(() => { if (started || !canRead || mode === void 0 || selected === voi
 **修复方向**（下一轮）：在 effect 上做**同键在飞去重**（`tab.id|file|mode|version` 未变则不重发），
 或让 `signal`/`selected` 不参与依赖；两者都要走 `pack-core` 注入 + 门禁断言。
 
+
+
+### 10.4 方法论教训（2026-10-05，真机排障 30+ 轮换来的）
+
+1. **「以前是好的」就先 diff 那个能用的提交**，不要自己发明收尾逻辑。为排查「任务栏退出后托盘图标不消失」，
+   先后发明了 onDestroy 收尾、inBackground 判据、removeMissionAfterTerminate、心跳看门狗等多种「修复」，
+   最后发现：能用的那版（`826dc09` 入库的实现）**根本没有 `onPrepareToTerminate` 拦截** ——
+   靠「不拦截」让系统正常终止，图标自然随进程收走。
+2. **先看进程与系统注册，再改代码**。那个图标「一下午都没消失」，是因为它的宿主
+   （`com.dshm.dshclient:entry:BackGroundAbility`）是 12:11 就在跑的老进程；我一直在改新代码，没动那个老进程。
+3. **系统侧注册要由应用自己摘**：状态栏注册以 bundle 为单位保存，宿主进程没了图标仍可能在 ⇒ 需要应用自己
+   `removeFromStatusBar`（且 SDK 要求有前台窗口 ⇒ 挑时机：启动时先摘残留再挂新的；托盘进程 onDestroy 兜底再摘）。
+4. **改动要留可核对的旁证**：ArkTS 的 hilog 会被刷掉、跨 uid 读不到 ⇒ 写一个 `files/diag-*` 诊断文件
+   （应用自己写、shell 可读）比猜快得多。本次 `files/diag-tray` 一行 removeFromStatusBar ok 就定了案。
+5. **补丁脚本别依赖缩进/相邻文本**：两次编译失败（Duplicate function implementation、Cannot find name errOf）
+   都是补丁把签名/助手搬错位置所致；锚点要单行、校验唯一性、失败就 die()。

@@ -63,6 +63,17 @@ export default class BackGroundAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    /*
+     * 【2026-10-05 加：托盘进程销毁时兜底摘掉状态栏图标】
+     * 本进程就是图标的宿主（NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM）。退出路径上若
+     * 主 Ability 已来不及摘（例如被系统直接终止），这里补一次，避免"进程没了图标还在"。
+     */
+    try {
+      StatusBarTray.remove(this.context);
+      hilog.info(DOMAIN, TAG, '托盘进程销毁：已兜底摘掉状态栏图标');
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, '托盘进程销毁时摘图标失败（忽略）：%{public}s', (err as BusinessError).message);
+    }
     hilog.info(DOMAIN, TAG, '托盘后台 Ability 已销毁');
   }
 

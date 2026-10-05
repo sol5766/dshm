@@ -141,3 +141,20 @@ node tools/check-core-openharmony-patches.mjs  # 核心树里的 13 处端侧注
 - 所有沙箱内 ELF 必须**构建期自签名**（execve 受签名域管辖）
 - 改 `hostcore/**` 后必须跑 `node tools/place-host-app.mjs` 并确认
   `assert-resfile-sync` 通过
+
+
+---
+
+## 出包与核心树的三个坑（2026-10-05 实战，真机排障踩出来的）
+
+1. **出包必须带 `--place-in-app`**：`tools/pack-core.mjs` 只在带该参数时才把核心容器拷进
+   `entry/src/main/resources/resfile/`。只跑裸命令 ⇒ 新包留在 `dist/core/`，HAP 里带的还是
+   旧容器 ⇒ 所有核心树侧改动（插件、补丁、版本号）**全部不生效**，而链上自检只看设备树目录名，一路绿灯。
+   出包后请跑 `node tools/check-resfile-core-zip.mjs`：断言 resfile 里只有 1 份容器、且文件名/大小/
+   sha256 与配方、与本次产出三者一致.
+2. **`dist/core/work/<ver>` 复用会静默跳过补丁**：树是增量复用的，目录已存在（含上次打过的补丁）时，
+   新写的注入会命中 "已存在（跳过）" ⇒ 补丁没生效。改完 pack-core 的注入后，要么删该目录（构建产物，允许清理），
+   要么升 coreVersion（`hostcore/core-recipe.json`）——本次用 +dshm.1/+dshm.2/+dshm.3 递增，
+   顺带让端侧走新版本 ⇒ 直接解包的分支。
+3. **resfile 只允许 1 份核心容器**：`--place-in-app` 只增不删 ⇒ 多份 core 共存把 HAP 从 306 MiB 顶到
+   491 MiB（实测）。现已在 pack-core 里自动清掉非当前版本，并有门禁 `tools/check-resfile-core-zip.mjs` 兜底。
