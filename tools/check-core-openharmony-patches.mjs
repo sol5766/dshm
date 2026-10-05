@@ -49,6 +49,28 @@
  *   · `patchFsLocalLink()`（:2222-2277）→ `DSHM_FS_LOCAL_SANDBOX`
  *   · `patchAttachmentLocalLink()`（:2292-2360）→ `DSHM_ATTACHMENT_SANDBOX`
  *
+ * ---------------------------------------------------------------------------
+ * 【2026-10-05 第二轮扩容：再纳入 6 个"只有打包期 `die()` 兜底"的打包步骤】
+ * ---------------------------------------------------------------------------
+ * 与上一轮同一类洞，但这 6 个的**产物形态不同**，判据形态随之不同（详见 ⑤ 段注释）：
+ *   · `allowOriginList()`（tools/pack-core.mjs:1532-1581）→ `DSHM_ORIGIN_LIST`
+ *     —— 多值 Origin 放行的**行为**另有 `tools/check-origin-fence.mjs` 钉着，**不**断言树内标记 ⇒ 不重复
+ *   · `wrapSharp()`（:1603-1665）→ `0.0.0-dshm-dispatch`
+ *   · `addSystemAddonPackage()`（:1753-1798）→ `0.1.2-dshm-shim`
+ *     —— undici 垫片的**语义**另有 `tools/check-internal-undici.mjs` 钉着 ⇒ 不重复
+ *   · `addOnDevicePreset()`（:1065-1092）→ **当前布局下它不复制任何东西**（产物 = 官方 shipping 集）
+ *   · `addPlatformAliases()`（:1487-1502）→ 整目录复制的平台别名
+ *   · `embedTreeInfo()` / `verifyTreeInfoContract()`（:2689-2763）→ 树根 `dshm-core.json`
+ *
+ * 【"生成物只做形状断言"到底指哪几处】本轮新判据里有两种"生成物"：
+ *   · `dshm-core.json` 是**真生成物**：`builtAt` 是打包时刻的 `new Date().toISOString()`，
+ *     `plugins`/`pluginTotals`/`nativePackages` 由 `inventoryOf(树)` 现算 ⇒ **绝不**逐字节或精确值断言，
+ *     只判 存在 / JSON 可解析 / 字段名与类型 / 形状，以及**来自配方与代码常量的确定值**
+ *     （coreVersion·platform·profile·overrides 取自 `hostcore/core-recipe.json`；builtAt·nodeFloor 只判形态）。
+ *   · `node_modules/sharp/package.json` + `index.js` 与 `node-addon-system-linux-arm64/package.json`
+ *     也是 pack-core 写的，但它们**不含时间戳/随机值**（内容逐字节确定）⇒ 可以逐字断言。
+ *   区别只有一条：**内容会不会随打包时刻变化**。
+ *
  * 【反向判据的三种形态（要点）】注入分三类，反向（"上游原文已消失"）因此有三种写法，
  * 且**都不许泛化**：
  *   · 替换型（link/import/导出语句/link 发布块/约束项）：逐字否掉 `pack-core` 的
@@ -61,6 +83,13 @@
  *     条目必须带 `disabled: true`、app-boot 的每条裸赋值必须被 try/catch 包住。
  *   · 整目录拷贝型（profile、自带插件包）：没有"上游原文"，反向改判
  *     **树内副本与仓库源逐字节一致**（陈旧残留、被手改、多出/少文件都会红）。
+ *   · 新造包型（`node-addon-system-linux-arm64`）：仓库里**没有**上游副本可逐字否掉
+ *     （该平台包在 Windows 宿主的 npm 树里根本不存在），反向改判**产物形态** ——
+ *     manifest 键集必须恰好是 pack-core 写的那 4 个、`bin/<libc>/system.node` 必须是占位而不是 ELF 真件。
+ *   · 路径不得存在型（`wrapSharp()` 的真件 `lib/`、`addOnDevicePreset()` 的旧布局副本）：
+ *     反向 = "某个路径**不得**出现"（`absent`），必要时带 guard（legacy 源在时 pack-core 本来就会复制 ⇒ 不算红）。
+ *   · 树内互为副本型（`addPlatformAliases()` 的平台别名）：源也在树内 ⇒ 反向 = 别名目录与源目录
+ *     **树内逐字节一致**（`treeMirrors`）＋"必须是真副本而不是 symlink/junction"（链接能让逐字节比对全绿）。
  *
  * 判据分两类，缺一不可：
  *   · 正向：标记字符串在（补丁确实注入过）。
@@ -73,7 +102,8 @@
  * 退出码：0 通过 / 1 有真实问题 / 3 环境不具备（核心树未就位，不是失败）
  */
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -271,6 +301,258 @@ function nativeCaptureStructural(text) {
   }
   const n = countOf(text, 'const origStart = Recording.prototype.start;');
   if (n !== 1) fails.push(`覆盖段出现 ${n} 次（规定 1 次）—— 重复注入会出现两份 start/stop 覆盖`);
+  return fails;
+}
+
+/* ═══════════ ⑤ 第二轮扩容（2026-10-05）：6 个"只有 die() 兜底"的打包步骤 ═══════════
+ *
+ * 路径一律**树根相对**（`node_modules/...`、`profiles/...`、`dshm-core.json`），
+ * 与 ④ 段同一套取值规则（auditInjectedPatches 的 TREE）。
+ *
+ * 逐条说明"为什么判据长这样"：
+ *   · `allowOriginList()`（pack-core.mjs:1532-1581）—— 替换式，有逐字上游原文。
+ *   · `wrapSharp()`（:1603-1665）—— 替换式 + `renameSync`：两个产物都是 pack-core 写的
+ *     **确定性**内容（无时间戳）⇒ manifest 可逐字断言；反向用"上游真件的 lib/ 不得出现在
+ *     node_modules/sharp 下"（它只该在 sibling 包 sharp.impl/ 里）。
+ *   · `addSystemAddonPackage()`（:1753-1798）—— 新造包 + 真占位文件：**没有上游原文**（见上），
+ *     反向改判产物形态（manifest 键集 / 占位内容 / 不是 ELF）。
+ *     —— **以代码为准**：同一函数还整份重写了 `node-addon-system/lib/flock.js`（:1810-1882），
+ *     它同样只有 die() 兜底 ⇒ 一并纳入（反向 = 可执行代码里不得再有 `process.report`）。
+ *   · `addOnDevicePreset()`（:1065-1092）—— **当前布局下不复制任何东西**（以代码为准，见该组 note），
+ *     产物 = 官方 shipping 集 + "旧布局副本不得复活"。
+ *   · `addPlatformAliases()`（:1487-1502）—— 整目录复制：反向 = 树内逐字节一致 + 必须是真副本。
+ *   · `embedTreeInfo()` / `verifyTreeInfoContract()`（:2689-2763）—— `dshm-core.json` 是**生成物**
+ *     ⇒ 只做形状断言（唯一例外：配方给定的确定字段 coreVersion/platform/profile/overrides，
+ *     以及代码常量 nodeFloor 的**形态**；builtAt 只判 ISO-8601 形态、不判值）。
+ */
+
+// pack-core.mjs:1533-1535 —— allowOriginList() 的唯一目标文件
+const CONN_LIB = 'node_modules/@deepseek-ai/dsh-client-connection/lib/index.js';
+// pack-core.mjs:1553-1559 —— allowOriginList() 的 before：**整块 6 行**、含 tab 缩进，注入后必消失
+const ORIGIN_UPSTREAM = '\tconst origin = header$1(request.headers, "origin");\n\tif (origin === void 0) return true;\n\ttry {\n\t\treturn new URL(origin).host === hostUrl.host;\n\t} catch {\n\t\treturn false;\n\t}';
+// pack-core.mjs:1565 —— after 里的循环头（上游是整串 `new URL(origin).host === hostUrl.host`）
+const ORIGIN_SPLIT = 'for (const rawOrigin of String(origin).split(",")) {';
+// pack-core.mjs:1549 —— 旧标记：HDSH→DSHM 改名前的树会带它；pack-core 为增量重打包**仍认它**
+// ⇒ 它在 = 这棵树是旧版 pack-core 打的（不是"补丁没打"，但也不是当前形态）。
+const ORIGIN_MARKER_OLD = 'HDSH_ORIGIN_LIST';
+
+// pack-core.mjs:1605/1611/1634 —— wrapSharp() 的两个产物（树根相对）
+const SHARP_PKG = 'node_modules/sharp/package.json';
+const SHARP_INDEX = 'node_modules/sharp/index.js';
+// pack-core.mjs:1631 —— 调度器 manifest 全文（JSON.stringify 单行；**无时间戳 ⇒ 可逐字断言**）
+const SHARP_PKG_JSON = '{"name":"sharp","version":"0.0.0-dshm-dispatch","main":"index.js","private":true}';
+// pack-core.mjs:1647 —— 真件（sibling 包）的加载点
+const SHARP_IMPL_REQUIRE = "require('sharp.impl')";
+// pack-core.mjs:1623-1627 —— renameSync 之后真件的落点：manifest / 入口体 / 上游 lib 目录
+const SHARP_IMPL_PKG = 'node_modules/sharp.impl/package.json';
+const SHARP_IMPL_ENTRY = 'node_modules/sharp.impl/lib/index.js';
+const SHARP_UPSTREAM_LIB = 'node_modules/sharp/lib';
+
+// pack-core.mjs:1760-1797 —— addSystemAddonPackage() 的产物（树根相对）
+const ADDON_DIR = 'node_modules/@deepseek-ai/node-addon-system-linux-arm64';
+const ADDON_PKG = `${ADDON_DIR}/package.json`;
+const ADDON_PLACEHOLDER_MUSL = `${ADDON_DIR}/bin/musl/system.node`;
+const ADDON_PLACEHOLDER_GLIBC = `${ADDON_DIR}/bin/glibc/system.node`;
+// pack-core.mjs:1810-1882 —— **同一个函数**还整份重写了 base 包的 flock.js（平台门 + 去掉 process.report）。
+// 以代码为准：这也是 addSystemAddonPackage() 的真实产物，且同样只有打包期 die()（:1881）兜底 ⇒ 一并管。
+const ADDON_FLOCK = 'node_modules/@deepseek-ai/node-addon-system/lib/flock.js';
+// pack-core.mjs:1795 —— 占位内容（含结尾换行；`<abi>` 是模板字符串里的**字面量**，不是插值）
+const ADDON_PLACEHOLDER_TEXT = 'DSHM placeholder: real binary is loaded from HAP libs/<abi>/libsystem.so\n';
+// pack-core.mjs:1762 + 1777-1782 —— shim manifest 的版本标记，以及它**恰好**这 4 个键
+const ADDON_MARKER = '0.1.2-dshm-shim';
+const ADDON_MANIFEST_KEYS = ['description', 'name', 'private', 'version'];
+
+// pack-core.mjs:1084-1090 —— addOnDevicePreset() 的 legacy 兼容分支（只有 legacy 源在时才会复制）
+const LEGACY_PRESET_STANDARD = 'node_modules/@deepseek-ai/dsh-agent-presets/presets/standard';
+const LEGACY_PRESET_ONDEVICE = 'node_modules/@deepseek-ai/dsh-agent-presets/presets/ondevice';
+
+// pack-core.mjs:1490-1492 —— addPlatformAliases() 的三条别名（**源与目标都在树内**）
+const PLATFORM_ALIASES = [
+  ['node_modules/koffi/build/koffi/linux_arm64', 'node_modules/koffi/build/koffi/openharmony_arm64',
+    'koffi：linux_arm64 = openharmony_arm64 的真副本（koffi 加载器按 `platform_arch` 拼路径找它）'],
+  ['node_modules/koffi/build/koffi/musl_arm64', 'node_modules/koffi/build/koffi/openharmony_arm64',
+    'koffi：musl_arm64 = 同一份真件（两个 libc 变体目录都要在，上游换个判断分支也不会缺件）'],
+  ['node_modules/node-pty/prebuilds/linux-arm64', 'node_modules/node-pty/prebuilds/openharmony-arm64',
+    'node-pty：prebuilds/linux-arm64 = openharmony-arm64 的真副本'],
+];
+
+// pack-core.mjs:2689-2711 —— embedTreeInfo() 的产物（树根 `dshm-core.json`，TREE_INFO_FILE）
+const TREE_INFO = 'dshm-core.json';
+const TREE_INFO_TOTAL_KEYS = ['pluginRows', 'pureJs', 'native', 'unknown', 'disabled'];
+// pack-core.mjs:2700 —— `new Date().toISOString()` 的**形态**（每次打包都不同 ⇒ 只判形态，不判值）
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/** 键序无关的 JSON 序列化：用于与配方做**值**比较（不受书写顺序影响）。 */
+function sortedJson(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return JSON.stringify(value);
+  return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${sortedJson(value[k])}`).join(',')}}`;
+}
+
+/**
+ * `addSystemAddonPackage()` 的反向判据：manifest 必须是 pack-core 写的那个 shim，而不是 npm 装的真平台包。
+ *
+ * 为什么是"姿态"而不是"逐字否掉上游原文"：真平台包 `@deepseek-ai/node-addon-system-linux-arm64`
+ * 是 `optionalDependencies`，在 Windows 宿主上**根本没装**，仓库里也没有它的副本
+ * （`third_party/` 里只有 ripgrep/koffi 的 tgz）⇒ 拿不到可逐字否掉的原文。
+ * 但真清单与 shim 的差别是**可判别的**：真清单带 `main`/`os`/`cpu`/`exports`/`files`/`types` …
+ * 而 shim 恰好只有 4 个键。键集对不上 ⇒ 极可能是真包残留，而真 prebuilt 的 musl 变体
+ * 只 `DT_NEEDED libc.so`（E43/E44），dlopen 后 napi 符号解析不到 ⇒ 会话锁直接坏。
+ */
+function systemAddonManifestStructural(text) {
+  const fails = [];
+  let pkg;
+  try {
+    pkg = JSON.parse(text);
+  } catch (e) {
+    return [`manifest 不可解析（${e.message}）—— pack-core 写的是 JSON.stringify 产物，不可解析说明被换成了别的东西`];
+  }
+  if (pkg === null || typeof pkg !== 'object' || Array.isArray(pkg)) return ['manifest 顶层不是对象'];
+  const keys = Object.keys(pkg).sort();
+  if (keys.join(',') !== ADDON_MANIFEST_KEYS.join(',')) {
+    fails.push(`manifest 键集是 [${keys.join(', ')}]，规定恰好 [${ADDON_MANIFEST_KEYS.join(', ')}] —— `
+      + '多出的键通常意味着 **npm 装的真平台包清单残留**（真清单带 main/os/cpu/exports），'
+      + '那会让加载器走去 dlopen 真 prebuilt（musl 变体缺 napi 符号，E43/E44）');
+  }
+  if (pkg.version !== ADDON_MARKER) {
+    fails.push(`manifest version=${JSON.stringify(pkg.version)}，规定 ${JSON.stringify(ADDON_MARKER)}（pack-core:1762 的幂等标记）`);
+  }
+  if (pkg.private !== true) fails.push('manifest 缺 private: true（shim 是私有包，不该被当官方包解析）');
+  if (typeof pkg.name !== 'string' || !pkg.name.startsWith('@deepseek-ai/node-addon-system-linux-')) {
+    fails.push(`manifest name=${JSON.stringify(pkg.name)} 不是 @deepseek-ai/node-addon-system-linux-<abi>（加载器 require.resolve 的就是这个名字）`);
+  }
+  return fails;
+}
+
+/**
+ * `addSystemAddonPackage()` 的 `bin/<libc>/system.node` 判据：必须是 DSHM 占位，不能是 ELF 真件。
+ *
+ * 正向 = 内容逐字等于 pack-core:1795 的占位串（**确定性内容**，可以逐字比）；
+ * 反向 = 不得以 `\x7fELF` 开头（真 prebuilt 残留）。两条都要：占位被换成任何别的东西
+ * 都要红，而"别的 ELF"只靠"内容相等"也能红 —— 反过来"内容相等"却抓不到"文件根本不存在"
+ * （不存在由 audit 的缺文件分支管）。
+ */
+function systemAddonPlaceholderStructural(text) {
+  const fails = [];
+  if (text !== ADDON_PLACEHOLDER_TEXT) {
+    fails.push(`内容不是 pack-core:1795 写的占位（实际 ${JSON.stringify(text.slice(0, 90))}…）—— `
+      + '占位被换掉/手改；真加载走入口脚本的 `.node` 重定向，占位只负责让 Module._findPath 的内部 stat 通过');
+  }
+  if (text.startsWith('\x7fELF')) {
+    fails.push('是 ELF 原生件（真 prebuilt 残留）—— musl 变体只 DT_NEEDED libc.so，dlopen 后 napi 符号解析不到（E43/E44）');
+  }
+  return fails;
+}
+
+/**
+ * `embedTreeInfo()` / `verifyTreeInfoContract()` 的判据：**生成物 ⇒ 只做形状断言**。
+ *
+ * 绝不判的东西：`builtAt` 的**值**（打包时刻时间戳）、`plugins`/`pluginTotals`/`nativePackages`
+ * 的**具体内容**（由 `inventoryOf(树)` 现算，随树里装了什么变化）。
+ * 判的东西：① verifyTreeInfoContract 的同一套字段名/类型契约（pack-core.mjs:2741-2758）；
+ * ② 与 `hostcore/core-recipe.json` 一致的**确定**字段（coreVersion/platform/profile/overrides）；
+ * ③ 内部一致性（pluginTotals.pluginRows === plugins.length、pureJs+native+unknown === pluginRows）；
+ * ④ 形态：builtAt 是 ISO-8601、nodeFloor 是 x.y.z。
+ */
+function treeInfoStructural(text) {
+  const fails = [];
+  let info;
+  try {
+    info = JSON.parse(text);
+  } catch (e) {
+    return [`dshm-core.json 不可解析（${e.message}）—— 端侧 CoreStore.readTreeInfo 会静默退化成`
+      + '"未读取到插件清单"，而没有任何一处会告诉你是截断/拼写问题'];
+  }
+  if (info === null || typeof info !== 'object' || Array.isArray(info)) return ['dshm-core.json 顶层不是对象'];
+  // ① 与 verifyTreeInfoContract() 的 wantString 同源（pack-core.mjs:2741）
+  for (const k of ['coreVersion', 'platform', 'profile', 'builtAt', 'nodeFloor', 'producer']) {
+    if (typeof info[k] !== 'string') {
+      fails.push(`字段 ${k} 不是字符串（端侧按字符串读；verifyTreeInfoContract 的 wantString 同源）`);
+    }
+  }
+  // ② 配方给定的确定值（不是生成物：hostcore/core-recipe.json 是唯一事实来源）
+  if (typeof info.coreVersion === 'string' && info.coreVersion !== RECIPE.coreVersion) {
+    fails.push(`coreVersion=${JSON.stringify(info.coreVersion)} ≠ 配方 ${JSON.stringify(RECIPE.coreVersion)}`
+      + ' —— 树与配方不是同一版（拿旧树/半成品树出包的典型形态）');
+  }
+  const wantPlatform = `${RECIPE.platform.os}/${RECIPE.platform.cpu}`;
+  if (typeof info.platform === 'string' && info.platform !== wantPlatform) {
+    fails.push(`platform=${JSON.stringify(info.platform)} ≠ 配方 ${JSON.stringify(wantPlatform)}`);
+  }
+  if (typeof info.profile === 'string' && info.profile !== RECIPE.profile) {
+    fails.push(`profile=${JSON.stringify(info.profile)} ≠ 配方 ${JSON.stringify(RECIPE.profile)}`);
+  }
+  if (info.overrides === null || typeof info.overrides !== 'object' || Array.isArray(info.overrides)) {
+    fails.push('overrides 不是对象（端侧据此判断原生件是不是移植版）');
+  } else if (sortedJson(info.overrides) !== sortedJson(RECIPE.overrides)) {
+    fails.push(`overrides=${sortedJson(info.overrides)} ≠ 配方 ${sortedJson(RECIPE.overrides)}`);
+  }
+  // ③ 生成物的**形态**（值随打包时刻/上游变化 ⇒ 只判形态）
+  if (typeof info.builtAt === 'string' && !ISO_TIMESTAMP_RE.test(info.builtAt)) {
+    fails.push(`builtAt=${JSON.stringify(info.builtAt)} 不是 ISO-8601 形态（**只判形态不判值**：它是打包时刻的时间戳）`);
+  }
+  if (typeof info.nodeFloor === 'string' && !/^\d+\.\d+\.\d+$/.test(info.nodeFloor)) {
+    fails.push(`nodeFloor=${JSON.stringify(info.nodeFloor)} 不是 x.y.z 形态`);
+  }
+  // ④ pluginTotals / plugins / nativePackages：类型契约 + 两条内部一致性
+  const t = info.pluginTotals;
+  if (t === null || typeof t !== 'object' || Array.isArray(t)) {
+    fails.push('pluginTotals 不是对象');
+  } else {
+    for (const k of TREE_INFO_TOTAL_KEYS) {
+      if (typeof t[k] !== 'number') fails.push(`pluginTotals.${k} 不是数字（verifyTreeInfoContract 的硬断言）`);
+    }
+  }
+  if (!Array.isArray(info.plugins)) {
+    fails.push('plugins 不是数组（端侧插件页的数据源）');
+  } else {
+    for (const [i, r] of info.plugins.entries()) {
+      if (r === null || typeof r !== 'object' || Array.isArray(r)) { fails.push(`plugins[${i}] 不是对象`); continue; }
+      for (const k of ['id', 'name', 'bundle', 'nativeKind']) {
+        if (typeof r[k] !== 'string') fails.push(`plugins[${i}].${k} 不是字符串`);
+      }
+      if (typeof r.disabled !== 'boolean') fails.push(`plugins[${i}].disabled 不是布尔`);
+      if (!Array.isArray(r.nativeVia)) fails.push(`plugins[${i}].nativeVia 不是数组`);
+    }
+    if (t !== null && typeof t === 'object' && !Array.isArray(t) && typeof t.pluginRows === 'number') {
+      if (t.pluginRows !== info.plugins.length) {
+        fails.push(`pluginTotals.pluginRows=${t.pluginRows} 与 plugins 长度 ${info.plugins.length} 不一致`
+          + '（verifyTreeInfoContract 的硬断言）');
+      }
+      if (['pureJs', 'native', 'unknown'].every((k) => typeof t[k] === 'number')
+        && t.pureJs + t.native + t.unknown !== t.pluginRows) {
+        fails.push(`pluginTotals 分解和 ${t.pureJs}+${t.native}+${t.unknown}=`
+          + `${t.pureJs + t.native + t.unknown} ≠ pluginRows=${t.pluginRows}（core-inventory 的三分类互斥且穷尽）`);
+      }
+    }
+  }
+  if (!Array.isArray(info.nativePackages)) {
+    fails.push('nativePackages 不是数组');
+  } else {
+    for (const [i, n] of info.nativePackages.entries()) {
+      if (typeof n !== 'string') fails.push(`nativePackages[${i}] 不是字符串（端侧据此把"含原生件"的插件标成不可运行时安装）`);
+    }
+  }
+  return fails;
+}
+
+/**
+ * `addSystemAddonPackage()` 的另一半产物：`node-addon-system/lib/flock.js` 的整份重写。
+ *
+ * pack-core 用**整份模板**覆盖它（不是替换片段）⇒ 拿不到"被替换的上游原文"，
+ * 反向判据只能判**不变量**：可执行代码里不得再有 `process.report`。
+ *
+ * 【必须剥注释再判】pack-core 的模板注释里**故意**写着"**不要**用 process.report.getReport() 判 libc"，
+ * 直接对全文计数会把"注释里提到它"当成"代码里还在用它" ⇒ 恒红（这正是本文件反复强调的"恒真的摆设判据"的镜像错误）。
+ */
+function addonFlockStructural(text) {
+  const fails = [];
+  const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  if (code.includes('process.report')) {
+    fails.push('可执行代码里仍有 process.report（上游的 libc 判定）—— 端侧实测它同步枚举 CPU 并逐个打开 '
+      + 'sysfs cpufreq 做实时频率查询（55.8 s），正好落在会话写租约的热路径上（E388：冷启动后事件循环被挡 ~62 s）。'
+      + 'pack-core 的模板已把它换成 /proc/self/maps 的一次便宜读取；这里先剥掉注释再判，'
+      + '所以"注释里提到 process.report"是允许的（模板注释本来就在讲这个坑）');
+  }
   return fails;
 }
 
@@ -536,6 +818,195 @@ const INJECTED_PATCHES = [
       ],
     }],
   },
+
+  /* ── ⑫ Origin 列表放行（替换式：整块 6 行原文必须消失） ── */
+  {
+    key: 'Origin 列表',
+    fn: 'allowOriginList()',
+    note: 'pack-core.mjs:1532-1581；标记 `DSHM_ORIGIN_LIST`。'
+      + '注意 `tools/check-origin-fence.mjs` 钉的是**行为**（多值 Origin 的放行语义），'
+      + '**不**断言树内标记存在 ⇒ 两者不重复（一个管语义、一个管"这棵树里到底有没有这段改动"）。'
+      + `反向判据两条：pack-core:1553-1559 的整块 before（6 行，含 tab 缩进）逐字否掉；`
+      + `另否掉旧标记 ${ORIGIN_MARKER_OLD} —— 它是 HDSH→DSHM 改名前的形态，`
+      + 'pack-core 为增量重打包**仍然认它**（见 :1540-1548 的教训注释）⇒ 它在 = 这棵树是旧版 pack-core 打的。',
+    sites: [{
+      rel: CONN_LIB,
+      markers: [['DSHM_ORIGIN_LIST', 1], [ORIGIN_MARKER_OLD, 0]],
+      forward: [
+        [ORIGIN_SPLIT, '按逗号切分的多值 Origin 循环（上游是按**整串** `new URL(origin)` 解析）'],
+        ['if (new URL(candidate).host === hostUrl.host) return true;', '任一项同源即放行（跨源项仍然不认 ⇒ 没放宽安全边界）'],
+        ['/* 单个非法候选不足以否决整条请求，继续看下一项 */', '非法候选被吞掉继续看下一项（与上游 catch{return false} 正相反）'],
+      ],
+      reverse: [[ORIGIN_UPSTREAM, 'pack-core.mjs:1553-1559 的 before（整串同源判定，6 行含 tab 缩进）']],
+    }],
+  },
+
+  /* ── ⑬ sharp 调度器（替换式 + 真件改名，两个产物都确定性） ── */
+  {
+    key: 'sharp 调度器',
+    fn: 'wrapSharp()',
+    note: 'pack-core.mjs:1603-1665；标记 = manifest 版本号 `0.0.0-dshm-dispatch`。'
+      + '两个产物都由 pack-core 写出且**逐字节确定**（无时间戳/随机）⇒ manifest 可逐字断言、'
+      + 'index.js 只断关键形态（否则等于把整份生成脚本抄进门禁）。'
+      + '反向判据：上游真件的 `lib/` 只该出现在 sibling 包 `sharp.impl/` 下 —— '
+      + '`node_modules/sharp/lib` 存在即说明 `renameSync` 没做（或只改了一半），'
+      + '而调度器会 `require("sharp.impl")` 到不存在的东西（E79 的纯 stub 从未真正恢复图片能力）。',
+    sites: [
+      {
+        rel: SHARP_PKG,
+        markers: [['0.0.0-dshm-dispatch', 1]],
+        forward: [[SHARP_PKG_JSON, '调度器 manifest 全文（pack-core:1631 的 JSON.stringify，逐字）']],
+        reverse: [['"@ohos-ports/sharp"', '上游真件 manifest 的 name —— 它现在只该在 node_modules/sharp.impl/package.json 里']],
+      },
+      {
+        rel: SHARP_INDEX,
+        markers: [['dshmSharpLoadError', 2]],
+        forward: [
+          [SHARP_IMPL_REQUIRE, '真件（sibling 包）的加载点'],
+          ['impl = function dshmSharpUnavailable() {', '加载失败时"会报错但能挂载"的降级桩（不是静默的假可用）'],
+          ['impl.dshmSharpLoadError = reason;', '真实失败原因挂载点（入口脚本的运行时事实读它 ⇒ 界面显示真实结论）'],
+          ['module.exports.default = impl;', 'default 导出（CJS/ESM 两种取法都能拿到同一份）'],
+        ],
+        reverse: [],
+      },
+    ],
+    present: [
+      [SHARP_IMPL_PKG, '真件包 manifest（renameSync 之后的 sibling 目录）'],
+      [SHARP_IMPL_ENTRY, '真件 JS 入口体（证明整包被挪走，而不是只挪了 manifest）'],
+    ],
+    absent: [[SHARP_UPSTREAM_LIB,
+      '上游真件的 lib/ 目录（只该存在于 node_modules/sharp.impl/lib；node_modules/sharp 下只该有 pack-core 写的 package.json + index.js）']],
+  },
+
+  /* ── ⑭ node-addon-system 平台包（新造包：没有上游原文可逐字否掉） ── */
+  {
+    key: 'system 平台包',
+    fn: 'addSystemAddonPackage()',
+    note: 'pack-core.mjs:1753-1883；标记 = manifest 版本 `0.1.2-dshm-shim`。'
+      + '**以代码为准**：这个函数其实有 3 类产物 —— ① 占位平台包 manifest；'
+      + '② 两个 `bin/<libc>/system.node` 占位；③ base 包 `node-addon-system/lib/flock.js` 的**整份重写**'
+      + '（:1810-1882，die 在 :1881）。③ 没有独立门禁，因此本组连它一起管（见下第三个 site 的说明）。'
+      + '注意 `tools/check-internal-undici.mjs` 覆盖的是 undici 垫片的**语义**，'
+      + '与这个包的树副本无关 ⇒ 不重复。'
+      + '这个平台包是 `optionalDependencies`，在 Windows 宿主的 npm 树里**根本不存在**，'
+      + '仓库里也没有它的副本（third_party 只有 ripgrep/koffi 的 tgz）⇒ '
+      + '**没有可逐字否掉的"上游原文"**，反向判据改判**产物形态**：'
+      + `manifest 键集恰好 [${ADDON_MANIFEST_KEYS.join(', ')}]（真 npm 清单带 main/os/cpu/exports ⇒ 红）；`
+      + '`bin/<libc>/system.node` 必须是 DSHM 占位而不是 ELF 真件。'
+      + '占位文件本身就是"必须物理存在"的产物：Node 的模块解析走 Module._findPath 的**内部 stat**，'
+      + '不经过被 hook 的 fs.existsSync。',
+    sites: [
+      {
+        rel: ADDON_PKG,
+        markers: [[ADDON_MARKER, 1]],
+        forward: [
+          ['"name": "@deepseek-ai/node-addon-system-linux-arm64"', '平台包名（加载器 require.resolve 的就是它）'],
+          ['"private": true', '私有包：不是从 npm 装的真平台包'],
+        ],
+        reverse: [],
+        structural: systemAddonManifestStructural,
+      },
+      {
+        rel: ADDON_PLACEHOLDER_MUSL,
+        markers: [['DSHM placeholder', 1]],
+        forward: [[ADDON_PLACEHOLDER_TEXT, '占位内容（pack-core:1795；内容无关紧要，但文件必须物理存在）']],
+        reverse: [],
+        structural: systemAddonPlaceholderStructural,
+      },
+      {
+        rel: ADDON_PLACEHOLDER_GLIBC,
+        markers: [['DSHM placeholder', 1]],
+        forward: [[ADDON_PLACEHOLDER_TEXT, '占位内容（同上；两个 libc 变体目录都放 ⇒ 上游换判断分支也不会缺件）']],
+        reverse: [],
+        structural: systemAddonPlaceholderStructural,
+      },
+      {
+        /*
+         * 以代码为准：`addSystemAddonPackage()`（pack-core.mjs:1753-1883）除了上面那个占位包，
+         * 还会**整份重写** base 包的 `lib/flock.js`（:1810-1882，die 在 :1881）。
+         * 它没有"待替换片段"（整份模板覆盖）⇒ 反向判据是**不变量**（不得再有可执行的 process.report）。
+         */
+        rel: ADDON_FLOCK,
+        markers: [['DSHM 端侧修补', 2]],
+        forward: [
+          ["const platform = (platformRaw === 'win32' || platformRaw === 'darwin') ? platformRaw : 'linux';",
+            '平台门：非 win/darwin 一律当 linux（鸿蒙上报 openharmony ⇒ 命中上面的 -linux-<abi> 占位包）'],
+          ["let libc = 'musl';", 'libc 判定改成便宜的一次 /proc/self/maps 读取（E388 的 55.8 s 那个坑）'],
+          ['filename = join(libc, filename);', '按 libc 选 bin/<libc>/system.node（两个目录映射同一份 libsystem.so）'],
+          ['${platform}-${arch}/package.json', 'require.resolve 的目标仍是 …-linux-<arch>/package.json（与上面的占位包配套）'],
+        ],
+        reverse: [],
+        structural: addonFlockStructural,
+      },
+    ],
+  },
+
+  /* ── ⑮ 端侧 preset（当前布局：**不复制**，直接复用官方 shipping 集） ── */
+  {
+    key: '端侧 preset',
+    fn: 'addOnDevicePreset()',
+    note: 'pack-core.mjs:1065-1092；**与待纳入清单的表述不一致（以代码为准）**：'
+      + '当前布局下它**不往 `dsh-web-app/presets/` 插入任何东西** —— preset 早已改成 '
+      + '`dsh-web-app/presets/*.patch.yml` 平铺（每份文件自己 insert 一个 `@deepseek-ai/dsh-agent-preset`），'
+      + '函数只 `readdir` 后打一行日志（"端侧 agent preset 用官方 shipping 集（不复制）"）就返回；'
+      + '真正往 preset 里插入内容的是 `patchAgentPresetWorkflow()`（本文件 ⑧ 组）。'
+      + '所以这里断言的是**真实产物**：① shipping 集那 4 个 `.patch.yml` 都在'
+      + '（端侧 agent preset 的实体就是它们；`profiles/ondevice` 注释里说的 `default: standard` 指的就是它）；'
+      + '② 旧布局的复制产物 `dsh-agent-presets/presets/ondevice` 不得残留 —— '
+      + '但 pack-core 只在 legacy 源存在时才复制它，所以这条判据带 guard：'
+      + 'legacy 源也在时不判红（那是 pack-core 的兼容分支在正常工作，不是残留）。',
+    sites: [],
+    present: [
+      [`${PRESET_DIR}/standard.patch.yml`, 'shipping 集 · standard（端侧 agent preset 的实体；profile 的 default: standard 指向它）'],
+      [`${PRESET_DIR}/cordis.patch.yml`, 'shipping 集 · cordis（端侧默认 profile bundle 用的那份）'],
+      [`${PRESET_DIR}/ptc.patch.yml`, 'shipping 集 · ptc'],
+      [`${PRESET_DIR}/minimal.patch.yml`, 'shipping 集 · minimal'],
+    ],
+    absent: [[LEGACY_PRESET_ONDEVICE,
+      '旧布局的端侧 preset 副本（dsh-agent-presets 已从核心树消失；它若复活说明有人在用旧布局重新出包）',
+      LEGACY_PRESET_STANDARD]],
+  },
+
+  /* ── ⑯ 平台别名（整目录复制：必须与树内源逐字节一致，且必须是真副本） ── */
+  {
+    key: '平台别名',
+    fn: 'addPlatformAliases()',
+    note: 'pack-core.mjs:1487-1502；把 `@ohos-ports/*` 移植件放假件的 `openharmony_arm64` 目录'
+      + '复制成**加载器会去找**的 `linux_arm64` / `musl_arm64`（koffi）与 `linux-arm64`（node-pty）—— '
+      + '端侧自建 Node 的 `process.platform === "linux"` 而 `arch === "arm64"`，'
+      + '文件明明在包里、加载器却说找不到（D6 E39）。'
+      + '没有"上游原文"可否掉（是整目录复制），反向判据因此是两条：'
+      + '① 别名目录与**树内**源目录逐字节一致（`cpSync(recursive)` 不删目标里多出的文件 ⇒ 陈旧残留/手改会红）；'
+      + '② 别名必须是**真副本**而不是 symlink/junction —— 指向源目录的链接能让 ① 全绿，'
+      + '而鸿蒙沙箱禁止 symlink（13900012 Permission denied）、HAP 也不携带链接 ⇒ 这两条必须分开判。',
+    sites: [],
+    treeMirrors: PLATFORM_ALIASES,
+  },
+
+  /* ── ⑰ 树内清单 dshm-core.json（**生成物** ⇒ 只做形状断言） ── */
+  {
+    key: '树内清单',
+    fn: 'embedTreeInfo() / verifyTreeInfoContract()',
+    note: `pack-core.mjs:2689-2763；产物 = 树根 \`${TREE_INFO}\`（TREE_INFO_FILE）。`
+      + '**这是生成物**：`builtAt` 是 `new Date().toISOString()`（每次打包都不同）、'
+      + '`plugins`/`pluginTotals`/`nativePackages` 由 `inventoryOf(树)` 现算 ⇒ '
+      + '**不做逐字节/精确值断言**。判的是：'
+      + '① 文件在且 JSON 可解析；② 端侧要读的字段名/类型齐全（与 verifyTreeInfoContract 同一套契约 —— '
+      + '两端都是字符串键，任何一侧改名都不报错，只会静默退化成"未读取到插件清单"）；'
+      + '③ 与 `hostcore/core-recipe.json` 一致的**确定**字段（coreVersion/platform/profile/overrides）；'
+      + '④ 内部一致性（`pluginTotals.pluginRows === plugins.length`、`pureJs+native+unknown === pluginRows`）；'
+      + '⑤ 形态 —— `builtAt` 只判 ISO-8601、`nodeFloor` 只判 x.y.z，**都不判值**。',
+    sites: [{
+      rel: TREE_INFO,
+      markers: [['"pluginTotals"', 1], ['"nativePackages"', 1]],
+      forward: [
+        ['"producer": "tools/pack-core.mjs"', '生产者标记（换了出包脚本时能看出来）'],
+        ['"pluginRows"', '插件行计数字段名（端侧 CoreStore.readTreeInfo 按字符串键取）'],
+      ],
+      reverse: [],
+      structural: treeInfoStructural,
+    }],
+  },
 ];
 
 /**
@@ -598,6 +1069,15 @@ function listFilesUnderSafe(dir) {
   }
 }
 
+/** `lstatSync` 的容错版：目标不存在（或无法 lstat）时返回 null。注意必须用 lstat：stat 会跟穿链接。 */
+function lstatOf(p) {
+  try {
+    return lstatSync(p);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * ④ 的全部判据：逐组逐站点跑"标记次数 / 正向片段 / 反向原文 / 结构形态"，再跑 mirrors。
  * @param TREE 核心树根（`<tree>`，不是 `<tree>/node_modules/@deepseek-ai`）
@@ -648,12 +1128,49 @@ function auditInjectedPatches(TREE, ok, bad) {
     }
     for (const [rel, label] of group.present ?? []) {
       if (existsSync(join(TREE, ...rel.split('/')))) ok(`[${group.key}] ${group.fn}：${label}在（${rel}）`);
-      else bad(`[${group.key}] ${group.fn}：缺 ${label} —— ${rel} 不存在（cpSync 步骤没跑）`);
+      else bad(`[${group.key}] ${group.fn}：缺 ${label} —— ${rel} 不存在（对应打包步骤没跑，或上游形态已变）`);
+    }
+    /*
+     * `absent`：**路径不得存在**型反向判据（第五轮扩容新增）。
+     *   [rel, label] 或 [rel, label, guardRel] —— 带 guardRel 时，只有 guardRel 也不存在才判红：
+     *   例如 `addOnDevicePreset()` 的 legacy 分支在"legacy 源存在"时**本来就会**复制出
+     *   `presets/ondevice`，把它判红就是拿 pack-core 的正常行为当失败。
+     */
+    for (const [rel, label, guardRel] of group.absent ?? []) {
+      const p = join(TREE, ...rel.split('/'));
+      if (!existsSync(p)) {
+        ok(`[${group.key}] ${group.fn}：${label}不存在（反向判据）`);
+      } else if (guardRel !== undefined && existsSync(join(TREE, ...guardRel.split('/')))) {
+        ok(`[${group.key}] ${group.fn}：${rel} 存在，但 legacy 源 ${guardRel} 也在 ⇒ `
+          + 'pack-core 的兼容分支本来就会复制它，不算残留（guard 生效）');
+      } else {
+        bad(`[${group.key}] ${group.fn}：**${label}仍在** —— ${rel} 存在`
+          + '（打包步骤没做到位，或旧树/半成品的残留被当成了产物）');
+      }
     }
     for (const [treeRel, srcRel] of group.mirrors ?? []) {
       const fails = diffTreeAgainstSource(join(TREE, ...treeRel.split('/')), join(ROOT, ...srcRel.split('/')));
       if (fails.length === 0) ok(`[${group.key}] ${group.fn}：${treeRel} 与 ${srcRel} 逐字节一致（反向判据）`);
       else for (const f of fails) bad(`[${group.key}] ${group.fn}：树内副本与仓库源不一致 —— ${f}`);
+    }
+    /*
+     * `treeMirrors`：**源也在树内**的逐字节比对（第五轮扩容新增；用于平台别名）。
+     * 多加一条 lstat 判据：别名必须是真副本，不能是指向源目录的 symlink/junction ——
+     * 后者能让逐字节比对**全绿**，而鸿蒙沙箱禁 symlink、HAP 也不携带链接。
+     */
+    for (const [treeRel, srcRel, label] of group.treeMirrors ?? []) {
+      const dst = join(TREE, ...treeRel.split('/'));
+      const fails = diffTreeAgainstSource(dst, join(TREE, ...srcRel.split('/')));
+      const st = lstatOf(dst);
+      if (st !== null && st.isSymbolicLink()) {
+        fails.push(`${treeRel} 是指向别处的符号链接/junction —— 鸿蒙沙箱禁止 symlink`
+          + '（13900012 Permission denied）且 HAP 不携带链接，必须是真副本');
+      }
+      if (fails.length === 0) {
+        ok(`[${group.key}] ${group.fn}：${treeRel} ↔ 树内 ${srcRel} 逐字节一致且是真副本（反向判据）—— ${label}`);
+      } else {
+        for (const f of fails) bad(`[${group.key}] ${group.fn}：${treeRel} 与树内 ${srcRel} 不一致 —— ${f}`);
+      }
     }
   }
 }
@@ -791,7 +1308,7 @@ function runGuard() {
     process.exit(3);
   }
   const { notes, fails } = audit(CORE);
-  console.log('════════ 核心树端侧补丁门禁（13 处注入：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · fs-local link · attachment link） ════════');
+  console.log('════════ 核心树端侧补丁门禁（19 处注入：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · fs-local link · attachment link · Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单） ════════');
   console.log(`核心树：${CORE}`);
   for (const n of notes) console.log(n);
   if (fails.length > 0) {
@@ -800,7 +1317,8 @@ function runGuard() {
     console.log(`\nRESULT: ${notes.length} passed, ${fails.length} failed`);
     process.exit(1);
   }
-  console.log(`\nRESULT: ${notes.length} passed, 0 failed —— 13 处端侧注入补丁都在树里，且上游原文/未注入形态均已消失。`);
+  console.log(`\nRESULT: ${notes.length} passed, 0 failed —— 19 处端侧注入补丁都在树里，且上游原文/未注入形态均已消失`
+    + '（树内清单 dshm-core.json 是生成物，只按形状判：存在 + 字段/类型 + 配方一致 + 内部一致）。');
 }
 
 /* ───────────────────────── --self-test：变异副本，证明门禁真的会红 ───────────────────────── */
@@ -812,12 +1330,14 @@ const SELFTEST_FILES = [
   `${SUBPROCESS_LIB}/index.js`,
 ];
 
-/* ④ 段的自检素材：**核心树根相对**路径（文件或目录；目录用于 mirrors 的逐字节比对）。 */
+/* ④/⑤ 段的自检素材：**核心树根相对**路径（文件或目录；目录用于 mirrors / treeMirrors 的逐字节比对）。 */
 const CORE_TREE = join(CORE, '..', '..');
 const SELFTEST_TREE_ENTRIES = [...new Set([
   ...INJECTED_PATCHES.flatMap((g) => g.sites.map((s) => s.rel)),
   ...INJECTED_PATCHES.flatMap((g) => (g.present ?? []).map(([rel]) => rel)),
   ...INJECTED_PATCHES.flatMap((g) => (g.mirrors ?? []).map(([treeRel]) => treeRel)),
+  // treeMirrors 的**源与目标都在树内** ⇒ 两侧都要有，否则临时树里的别名比对会因"源不存在"而假红
+  ...INJECTED_PATCHES.flatMap((g) => (g.treeMirrors ?? []).flatMap(([treeRel, srcRel]) => [treeRel, srcRel])),
 ])];
 
 function copyInto(scope, rel) {
@@ -877,17 +1397,28 @@ function selfTest() {
     case_('基线：未变异的临时副本全绿（证明变异才是变红的原因）',
       base.fails.length === 0, `fails=${base.fails.length}${base.fails.length ? ' :: ' + base.fails[0] : ''}`);
 
-    const restore = new Map(); // path → 原始字节
+    const restore = new Map(); // path → 原始**字节**（Buffer：二进制件也要能原样还原）
     const mutate = (rel, fn) => {
       const p = join(scope, ...rel.split('/'));
-      if (!restore.has(p)) restore.set(p, readFileSync(p, 'utf8'));
+      if (!restore.has(p)) restore.set(p, readFileSync(p));
       writeFileSync(p, fn(readFileSync(p, 'utf8')), 'utf8');
       return p;
     };
     const mutateTree = (rel, fn) => {
       const p = join(tmp, ...rel.split('/'));
-      if (!restore.has(p)) restore.set(p, readFileSync(p, 'utf8'));
+      if (!restore.has(p)) restore.set(p, readFileSync(p));
       writeFileSync(p, fn(readFileSync(p, 'utf8')), 'utf8');
+      return p;
+    };
+    /*
+     * 二进制安全的变异：别名目录里有真 ELF（node-pty 的 pty.node / spawn-helper），
+     * 走 `readFileSync(..., 'utf8')` 往返会把它们毁掉（临时树随后所有比对都会红 ⇒
+     * 后续用例的红不能归因于它自己的变异）。这里按字节追加。
+     */
+    const mutateBytes = (rel, suffix) => {
+      const p = join(tmp, ...rel.split('/'));
+      if (!restore.has(p)) restore.set(p, readFileSync(p));
+      writeFileSync(p, Buffer.concat([readFileSync(p), Buffer.from(suffix, 'utf8')]));
       return p;
     };
     const removed = []; // 被删掉的文件（present 用例用），连内容一起记，便于还原
@@ -897,14 +1428,17 @@ function selfTest() {
       rmSync(p);
       return p;
     };
+    const created = []; // absent 用例**新造**出来的路径（反向判据的变异体），用完即删
     const restoreAll = () => {
-      for (const [p, text] of restore) writeFileSync(p, text, 'utf8');
+      for (const [p, buf] of restore) writeFileSync(p, buf); // Buffer ⇒ 原字节；string ⇒ utf8
       restore.clear();
       for (const [p, buf] of removed) {
         mkdirSync(dirname(p), { recursive: true });
         writeFileSync(p, buf);
       }
       removed.length = 0;
+      for (const p of created) rmSync(p, { recursive: true, force: true });
+      created.length = 0;
     };
 
     // 变异体：每个用例 mutate(scope) 后必须让 audit() 变红，且失败里含期望关键词。
@@ -1045,18 +1579,18 @@ function selfTest() {
         }
       }
     }
-    // (d) cpSync 产物：删掉文件 ⇒ 必须报缺
+    // (d) 打包产物：删掉文件 ⇒ 必须报缺（cpSync 的镜像产物、shipping 集、renameSync 的真件都在此列）
     for (const group of INJECTED_PATCHES) {
       for (const [rel, label] of group.present ?? []) {
         restoreAll();
         const p = removeTreeFile(rel);
         const res = audit(scope);
         const hit = res.fails.some((f) => f.includes(`缺 ${label}`));
-        case_(`自检·删掉 cpSync 产物即红：[${group.key}] ${label}`, hit,
+        case_(`自检·删掉打包产物即红：[${group.key}] ${label}`, hit,
           `path=${p} fails=${res.fails.length}${res.fails.length ? ' :: ' + res.fails[0].slice(0, 110) : '（没红 —— 恒真的摆设）'}`);
       }
     }
-    // (e) 逐字节比对（mirrors）：改动副本 ⇒ 必须报不一致
+    // (e) 逐字节比对（mirrors，源在仓库里）：改动副本 ⇒ 必须报不一致
     for (const group of INJECTED_PATCHES) {
       for (const [treeRel, srcRel] of group.mirrors ?? []) {
         restoreAll();
@@ -1068,6 +1602,177 @@ function selfTest() {
         case_(`自检·树内副本被改即红：[${group.key}] ${treeRel} ↔ ${srcRel}`, hit,
           `rel=${target} fails=${res.fails.length}${res.fails.length ? ' :: ' + res.fails[0].slice(0, 110) : '（没红 —— 恒真的摆设）'}`);
       }
+    }
+    // (f) 路径不得存在（absent）：把"本该消失的路径"造出来 ⇒ 必须报它仍在
+    for (const group of INJECTED_PATCHES) {
+      for (const [rel, label] of group.absent ?? []) {
+        restoreAll();
+        const p = join(tmp, ...rel.split('/'));
+        mkdirSync(p, { recursive: true });
+        created.push(p);
+        const res = audit(scope);
+        const hit = res.fails.some((f) => f.includes(`**${label}仍在**`));
+        case_(`自检·本该消失的路径复活即红：[${group.key}] ${label}`, hit,
+          `path=${p} fails=${res.fails.length}${res.fails.length ? ' :: ' + res.fails[0].slice(0, 110) : '（没红 —— 恒真的摆设）'}`);
+      }
+    }
+    // (g) 树内互为副本（treeMirrors，源也在树内 —— 平台别名）：改动别名里的文件 ⇒ 必须报不一致
+    // 【必须按字节追加】别名里有真 ELF（node-pty 的 pty.node / spawn-helper），
+    // 走 utf8 往返会把临时副本毁掉，后续用例的红就不能归因于它自己的变异了。
+    for (const group of INJECTED_PATCHES) {
+      for (const [treeRel, srcRel, label] of group.treeMirrors ?? []) {
+        restoreAll();
+        const under = listFilesUnderSafe(join(tmp, ...treeRel.split('/')));
+        const target = under === null || under.length === 0 ? treeRel : `${treeRel}/${under[0]}`;
+        mutateBytes(target, '\n/* 陈旧残留 */\n');
+        const res = audit(scope);
+        const hit = res.fails.some((f) => f.includes('与树内') && f.includes('不一致'));
+        case_(`自检·别名目录被手改即红：[${group.key}] ${treeRel} ↔ 树内 ${srcRel}（${label.split('：')[0]}）`, hit,
+          `rel=${target} fails=${res.fails.length}${res.fails.length ? ' :: ' + res.fails[0].slice(0, 110) : '（没红 —— 恒真的摆设）'}`);
+      }
+    }
+    restoreAll();
+
+    /* ═══ ⑤ 段新增判据的**定点变异** ═══
+     * 上面 (a)-(g) 是按判据表自动生成的反例（标记/片段/产物/路径）。但**形状判据**（structural）
+     * 不会被自动覆盖 —— 它只在别的判据被破坏时顺带触发。所以这里逐条把形状打坏，证明它会红：
+     *   · `dshm-core.json`（生成物）5 条：内部一致性 2 条 + 类型 1 条 + 形态 1 条 + 配方不一致 1 条；
+     *   · `addSystemAddonPackage()` 2 条：manifest 键集、占位不是 ELF；
+     *   · 平台别名 1 条：别名目录里多出陈旧文件（cpSync 不删目标里多出的文件）。
+     * 变异一律用 JSON.parse→改字段→JSON.stringify(info, null, 2) 的写法，**不写死任何数字**
+     * （写死 `296` 之类的当前值会在树升级后变成恒绿的摆设）。
+     */
+    const shapeCases = [
+      {
+        name: '自检·树内清单 pluginRows 与 plugins 长度不一致 ⇒ 红（生成物：只判内部一致性，不判值）',
+        run: () => mutateTree(TREE_INFO, (t) => {
+          const info = JSON.parse(t);
+          info.pluginTotals.pluginRows = info.plugins.length + 7;
+          return JSON.stringify(info, null, 2) + '\n';
+        }),
+        expect: /pluginRows=\d+ 与 plugins 长度/,
+      },
+      {
+        name: '自检·树内清单 pluginTotals 分解和不等于 pluginRows ⇒ 红',
+        run: () => mutateTree(TREE_INFO, (t) => {
+          const info = JSON.parse(t);
+          info.pluginTotals.native += 1;
+          return JSON.stringify(info, null, 2) + '\n';
+        }),
+        expect: /分解和/,
+      },
+      {
+        name: '自检·树内清单 nodeFloor 变成数字（端侧按字符串读）⇒ 红',
+        run: () => mutateTree(TREE_INFO, (t) => {
+          const info = JSON.parse(t);
+          info.nodeFloor = 22;
+          return JSON.stringify(info, null, 2) + '\n';
+        }),
+        expect: /字段 nodeFloor 不是字符串/,
+        only: /字段 nodeFloor 不是字符串/,
+      },
+      {
+        name: '自检·树内清单 builtAt 不再是 ISO-8601 形态 ⇒ 红（**只判形态不判值**：时间戳每次打包都不同）',
+        run: () => mutateTree(TREE_INFO, (t) => {
+          const info = JSON.parse(t);
+          info.builtAt = '2026-10-05';
+          return JSON.stringify(info, null, 2) + '\n';
+        }),
+        expect: /不是 ISO-8601 形态/,
+        only: /不是 ISO-8601 形态/,
+      },
+      {
+        name: '自检·树内清单 profile 与 hostcore/core-recipe.json 不一致 ⇒ 红（树与配方不是同一版）',
+        run: () => mutateTree(TREE_INFO, (t) => {
+          const info = JSON.parse(t);
+          info.profile = 'not-the-recipe-profile';
+          return JSON.stringify(info, null, 2) + '\n';
+        }),
+        expect: /profile=.*≠ 配方/,
+        only: /≠ 配方/,
+      },
+      {
+        name: '自检·树内清单 nativePackages 不是数组 ⇒ 红',
+        run: () => mutateTree(TREE_INFO, (t) => {
+          const info = JSON.parse(t);
+          info.nativePackages = 'oops';
+          return JSON.stringify(info, null, 2) + '\n';
+        }),
+        expect: /nativePackages 不是数组/,
+      },
+      {
+        name: '自检·system 平台包 manifest 多出一个真 npm 清单才有的键 ⇒ 红（键集判据）',
+        run: () => mutateTree(ADDON_PKG,
+          (t) => t.replace('"private": true', '"private": true,\n  "main": "index.js"')),
+        expect: /manifest 键集是/,
+        only: /manifest 键集是/,
+      },
+      {
+        name: '自检·system 平台包的 bin/system.node 变成 ELF 真件 ⇒ 红（占位判据 + 非 ELF 反向判据）',
+        run: () => mutateTree(ADDON_PLACEHOLDER_MUSL, () => '\x7fELF\x02\x01\x01\x00-prebuilt-residue'),
+        expect: /是 ELF 原生件/,
+      },
+      {
+        name: '自检·flock.js 的 libc 判定被换回可执行的 process.report ⇒ 红（注释里提到它不算，所以先剥注释）',
+        run: () => mutateTree(ADDON_FLOCK, (t) => t.replace("let libc = 'musl';",
+          "let libc = 'musl';\n        if (process.report && process.report.getReport) { libc = 'musl'; }")),
+        expect: /可执行代码里仍有 process\.report/,
+        only: /可执行代码里仍有 process\.report/,
+      },
+      {
+        name: '自检·别名目录里多出陈旧文件 ⇒ 红（cpSync 不删目标里多出的文件）',
+        run: () => {
+          const p = join(tmp, ...PLATFORM_ALIASES[0][0].split('/'), 'stale-leftover.txt');
+          writeFileSync(p, 'stale\n');
+          created.push(p);
+          return p;
+        },
+        expect: /树内多出 stale-leftover\.txt/,
+      },
+    ];
+    for (const c of shapeCases) {
+      restoreAll();
+      const rel = c.run();
+      const res = audit(scope);
+      const hit = res.fails.some((f) => c.expect.test(f));
+      const onlyOk = c.only === undefined || res.fails.every((f) => c.only.test(f));
+      case_(c.name, res.fails.length > 0 && hit && onlyOk,
+        `rel=${rel} fails=${res.fails.length}${res.fails.length ? ' :: ' + res.fails[0].slice(0, 130) : '（没红 —— 恒真的摆设）'}`);
+    }
+
+    /* (h) 平台别名必须是**真副本**而不是 symlink/junction：逐字节比对会全绿，只有 lstat 判据能抓。
+     *     变异体用 Windows 的 junction（目录联接不需要管理员/开发者模式；真 symlink 会 EPERM）。
+     *     清理必须 `rmSync(p, { force: true })`（**不带 recursive**）：带 recursive 有跟进目标
+     *     把源目录也删掉的风险；删掉后用真树重建别名目录。 */
+    {
+      restoreAll();
+      const [rel, srcRel] = PLATFORM_ALIASES[0];
+      const p = join(tmp, ...rel.split('/'));
+      let made = false;
+      let why = '';
+      try {
+        rmSync(p, { recursive: true, force: true });
+        symlinkSync(join(tmp, ...srcRel.split('/')), p, 'junction');
+        made = true;
+      } catch (e) {
+        why = `本机无法创建 junction（${e.code}）：${String(e.message).slice(0, 80)}`;
+      }
+      const caseName = '自检·别名目录被换成 junction 即红（逐字节比对全绿，只有 lstat 判据能抓）';
+      if (made) {
+        const res = audit(scope);
+        const hit = res.fails.some((f) => f.includes('符号链接/junction'));
+        const only = res.fails.every((f) => f.includes('符号链接/junction'));
+        case_(caseName, hit && only,
+          `rel=${rel} fails=${res.fails.length} :: ${res.fails[0] ?? ''}`);
+      } else {
+        case_(caseName, false, why);
+      }
+      try { rmSync(p, { force: true }); } catch { /* 不存在就算了 */ }
+      copyTreeEntry(tmp, rel);
+      const after = audit(scope);
+      case_('自检·junction 复原后基线重新全绿（证明上面那条红只可能来自 junction）',
+        after.fails.length === 0,
+        `fails=${after.fails.length}${after.fails.length ? ' :: ' + after.fails[0].slice(0, 130) : ''}`);
     }
     restoreAll();
   } finally {
