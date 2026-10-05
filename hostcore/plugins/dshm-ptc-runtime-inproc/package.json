@@ -1,0 +1,28 @@
+{
+  "name": "@deepseek-ai/dshm-ptc-runtime-inproc",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧的同进程、纯 JS PTC 运行时（ctx.ptcRuntime 实现），替换官方 @deepseek-ai/dsh-ptc-runtime-node。官方实现有两条结构性死路：类型擦除用 node:module 的 stripTypeScriptTypes（SWC 的 WASM 版），端侧 Node 以 --jitless 运行、WASM 不可用 ⇒ 解析那一刻就抛 ReferenceError: WASM 未定义；求值又要新建 Node 子进程，端侧起不了（EACCES）且可执行路径是系统的 appspawn。本包把两件事都换成端侧可行的做法：擦除走同目录交付的纯 JS 擦除器 ./ts-strip.cjs（接口 stripErasableTs/TypeStripError，包壳后擦除再切壳，与官方 index.js:755/930 同法），求值走 node:vm 新建 realm + 宿主 binding 直连。契约面如实收窄：sandboxMode 返回 undefined（不做文件封闭 ⇒ 消费者不传 sandboxPolicy、也不要求结果带 sandbox），language='typescript'（dsh-tools 按它选 run_code 的 SDK flavor，查不到直接抛），timeout 默认值与官方一致（defaultMs 120000 / maxMs 600000）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/vm-run.js",
+    "lib/ts-strip.cjs",
+    "lib/vendor/**"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5-alpha.1",
+    "@deepseek-ai/dsh-ptc-runtime": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-timeout": "0.2.1-alpha.1",
+    "@deepseek-ai/dsh-util-values": "0.2.1-alpha.1",
+    "@deepseek-ai/schemastery": "~3.18.5-alpha.1"
+  }
+}

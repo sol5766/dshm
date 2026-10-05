@@ -44,7 +44,23 @@ const DEST = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resourc
 //       skill 同步按内容 sha256 判等）。漏掉它 ⇒ 端侧 require 抛 MODULE_NOT_FOUND，
 //       被那个 try/catch 吞成一行 diag ⇒ **内置技能再也不更新**，与 P0-1 原来的
 //       症状（改了推不下去）一模一样，等于修复白做。同样必须进清单。
-const FILES = ['main.js', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'dshm-installer.js', 'dshm-user-rows.js', 'dshm-skills.js', 'dshm-compat.js'];
+//   · jitless-env.cjs —— jitless 运行期补齐层（**单份实现**：主线程与 worker 共用，
+//       原先内联在 main.js 的五段挂载点都指向它）。漏掉它 ⇒ main.js 第 281 行起
+//       每一处 `jitlessEnv.*` 全抛 MODULE_NOT_FOUND。
+//   · internal-undici-shim.cjs
+//       被 jitless-env.cjs 的 `installInternalUndiciShim()` **在 BuiltinModule 层**接管
+//       （预置 `BuiltinModule.map` 里 `internal/deps/undici/undici` 的 exports/loaded）。
+//       漏掉它 ⇒ 安装函数自己 require 时就抛 MODULE_NOT_FOUND（被调用点吞成一行 diag），
+//       而 Node 内部那条路径照旧炸（`internal/worker/io.js` 每投递一条 MessagePort 消息
+//       都会 require 它）⇒ 插件激活失败、`/bootstrap` 恒 404 —— **与完全不修一模一样**
+//       （2026-10-05 真机形态）。
+//   · worker-bootstrap.cjs —— worker 线程的 `--require` preload（由
+//       `jitlessEnv.wrapWorkerThreads()` 注入）。**漏掉它不会报错**，只会让每个 worker
+//       退回"没有补齐"的状态：`import("node-addon-require-builtin")` 又变成真 addon、
+//       worker 里的 `globalThis.fetch` 又是原生 undici ⇒ 插件自建 worker 激活失败
+//       （真机形态：开发者工具启用 experimental-inspector 报
+//       `dsh: warning: 1 entry did not activate … WebAssembly is not defined`）。
+const FILES = ['main.js', 'jitless-env.cjs', 'worker-bootstrap.cjs', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'internal-undici-shim.cjs', 'dshm-installer.js', 'dshm-user-rows.js', 'dshm-skills.js', 'dshm-compat.js'];
 
 mkdirSync(DEST, { recursive: true });
 

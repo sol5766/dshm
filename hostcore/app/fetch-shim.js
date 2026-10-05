@@ -693,13 +693,69 @@ class DshmRequest {
  * 在原生可用时才不覆盖。
  * @returns 是否安装了 `fetch` 本身（供入口脚本打日志）
  */
+/**
+ * 把一个全局接口**确实**换成垫片实现。
+ *
+ * 【为什么不能用 `globalThis.X = shim`】端侧 Node v24.2.0 里
+ * `Headers/Request/Response/FormData/MessageEvent/CloseEvent/WebSocket/EventSource`
+ * 是 `exposeLazyInterfaces()` 装的**惰性**属性；对"只有 getter、没有 setter"的属性赋值，
+ * 在严格模式下抛 `TypeError`、在非严格模式下静默失败（本文件第 43 行**是** `'use strict'`，
+ * 所以旧写法会抛错——两种行为都不该依赖）。
+ * 另外：**读属性描述符本身就会物化惰性 getter**（见 installFetchShim 里的实测注释），
+ * 所以这里统一用 `Object.defineProperty`，并逐个 try/catch。
+ *
+ * @returns {'installed'|'kept'|'failed'}
+ */
+function defineGlobalShim(name, value) {
+  try {
+    const d = Object.getOwnPropertyDescriptor(globalThis, name);
+    if (d && d.value === value) return 'kept';
+    Object.defineProperty(globalThis, name, {
+      value,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+    return 'installed';
+  } catch (e) {
+    return 'failed';
+  }
+}
+
 function installFetchShim() {
-  if (globalThis.Headers === undefined) globalThis.Headers = DshmHeaders;
-  if (globalThis.Request === undefined) globalThis.Request = DshmRequest;
-  if (globalThis.Response === undefined) globalThis.Response = DshmResponse;
-  if (globalThis.FormData === undefined) globalThis.FormData = DshmFormData;
-  if (globalThis.Blob === undefined) globalThis.Blob = DshmBlob;
-  if (globalThis.File === undefined) globalThis.File = DshmFile;
+  /*
+   * 六个 Web 接口：缺哪个补哪个。
+   *
+   * 【为什么逐个 try/catch 直接读，而不是先读属性描述符】Node 上这批名字是
+   * `exposeLazyInterfaces()` 装的**惰性**属性，而**读描述符这一步本身就会物化它**
+   * （本机实测：读 `getOwnPropertyDescriptor` 之前内建 undici 未加载、之后已加载）。
+   * 物化失败（jitless 且内建 undici 拦截没装上）时读取会**抛错**；若任其抛出，
+   * `installJitlessFetch()` 外层的 try/catch 会把整段吞成一行"fetch 垫片安装失败"
+   * ⇒ `globalThis.fetch` 完全不装 ⇒ 宿主连模型都调不了（2026-10-05 审核指出的潜在连锁）。
+   * 故逐个包 try/catch：读不到就当作"缺失"，补垫片。
+   * 调用顺序仍是承重的：`main.js` 里 `installInternalUndiciShim()` 必须先跑。
+   */
+  for (const [name, impl] of [
+    ['Headers', DshmHeaders],
+    ['Request', DshmRequest],
+    ['Response', DshmResponse],
+    ['FormData', DshmFormData],
+    ['Blob', DshmBlob],
+    ['File', DshmFile],
+  ]) {
+    let current;
+    try {
+      current = globalThis[name];
+    } catch {
+      current = undefined; // 惰性 getter 物化失败 ⇒ 视为缺失，改由垫片提供
+    }
+    if (current === undefined) {
+      const result = defineGlobalShim(name, impl);
+      if (result === 'failed') {
+        console.error(`[fetch-shim] 全局 ${name} 替换失败：原生取不到、垫片也装不上`);
+      }
+    }
+  }
   /*
    * 【为什么原生 fetch 存在也可能要垫】Node 24 起 fetch 转正，globalThis.fetch 启动即存在，
    * 且不再提供 --no-experimental-fetch（传了会死在 CLI 解析：invalid negation）。

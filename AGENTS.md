@@ -24,6 +24,34 @@ hdc shell "rm -rf .../haps/entry/files/dsh/home"                 # ← 禁止
 更严重的是事后在报告里把该操作写成"清理环境（连数据一起清）"的正常步骤，
 等于把破坏性操作固化成流程。
 
+### 绝对禁止：删除签名物料（它和真机数据同级——只此一份）
+
+```powershell
+Remove-Item -Recurse C:\Users\Sol\.ohos            # ← 禁止
+Remove-Item C:\Users\Sol\.ohos\config\*.p12        # ← 禁止
+```
+
+**原因（真实事故，2026-10-04→05）**：一次误删（`Remove-Item -Recurse -Force C:\Users\Sol`）
+把 `~/.ohos` 整个删掉，等于删掉了 DevEco 的调试签名物料
+（`~/.ohos/config/default_<proj>_<hash>={cer,p7b,p12,csr}` + `material/` 目录）。
+后果**不是"丢点配置"，而是再也签不出设备肯接受的包**：
+
+- `hvigor assembleHap` 死在 `SignHap`：`00303107 Invalid storeFile value …`
+- 还会报 `ENOENT: no such file or directory, stat '…\.ohos\config\material'`（`material` 是**目录**）
+- 私钥**没有第二份**（AGC 只有公钥、DevEco 不上传私钥）⇒ 换新身份 ⇒ 签名不一致 ⇒
+  不能 `install -r` ⇒ 只能卸载 ⇒ 直接走进真机数据不可逆丢失的那条路
+
+**正确做法**：
+
+- **签名物料永远不删。** "清理环境"只删构建产物（`entry/build/**`、`dist/core/work/**`、日志），
+  绝不动 `~/.ohos`、`~/.dsh`。
+- 保留一份**仓库外**备份：`D:\DSHM-signing-backup\`（2026-10-05 建立；含 `config/` 全量 + 校验和 + README
+  + 一键还原 `restore-signing.ps1` + 重拼原料 `reconstructed/`）。
+  ⚠️ **不要**把 `C:\Users\Sol\.ohos-restored\config` 整体拷回——那是卷影副本原件的暂存目录，
+  里面仍留着**全零**的 `ZEROED-*.cer` / `ZEROED-*.p7b` 留证。
+- 恢复/重拼方法见 `docs/80-真机更新与数据保全.md` §7
+  （卷影副本取回、从已签名 HAP 反解 `cer`/`p7b`、证书链必须排成"叶→中间→根"等实测细节）。
+
 ### 正确做法：一律覆盖安装
 
 ```powershell
@@ -66,6 +94,13 @@ node tools/compat-drift.mjs
 node tools/assert-exec-fix.mjs
 node tools/assert-python-bridge.mjs
 node tools/assert-fs-search-fallback.mjs
+node tools/check-web-fetch-jitless.mjs   # jitless 下 web_fetch 真的能抓网页（带对照臂）
+node tools/check-worker-jitless.mjs      # 插件自建 worker 线程也要拿到 jitless 补齐（带对照臂）
+node tools/check-internal-undici.mjs     # Node 内部 require 的内建 undici 必须被纯 JS 垫片接管（带对照臂）
+node tools/check-skill-sync.cjs          # 内置技能同步（判据是内容 sha256，不是字节数；带等长替换用例）
+node tools/check-ptc-ts-strip.mjs        # PTC 的纯 JS erasable-TS 擦除器（81 条断言 + wasm 陷阱 + 变异自检）
+node tools/check-ptc-runtime-inproc.mjs  # PTC 同进程运行时契约（在 --jitless 的临时舞台里跑真 run）
+node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pack-core ↔ 核心树 三处一致
 .\tools\device-acceptance.ps1        # 真机端侧验收
 ```
 
@@ -77,7 +112,7 @@ node tools/assert-fs-search-fallback.mjs
 |---|---|---|
 | 构建产物 | `entry/build/default/outputs/default/` | 会被 clean 覆盖，**不要当交付物留档** |
 | 交付/侧载包 | `dist/sideload/` | 不会被构建清掉，含 README + 校验 |
-| 文档 | `docs/` | 编号连续：`00-`…`80-` |
+| 文档 | `docs/` | 编号连续：`00-`…`95-`（当前最大编号 95；`95` 是收尾审计台账） |
 | 一次性排查脚本 | 用完即删 | 不要把临时诊断脚本留在 `tools/` |
 
 ---

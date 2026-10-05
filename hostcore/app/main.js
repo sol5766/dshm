@@ -111,6 +111,19 @@ function diagSync(line) {
   try { process.stdout.write(text); } catch (e) { /* ignore */ }
 }
 
+/*
+ * jitless 运行期补齐层（单份实现）。
+ *
+ * 【为什么抽出去】这些补齐原先内联在本文件里，只在**主线程**生效；而 worker 线程是
+ * 新线程、新 globalThis、新 module registry，一个 hook 都不过去。开发者工具里的
+ * `@deepseek-ai/dsh-experimental-inspector` 恰恰要起 worker（且显式写 `execArgv: []`），
+ * 于是在 worker 里 `WebAssembly is not defined` / 原生 fetch / 真 addon 全部复现，
+ * 插件激活失败。现在主线程与 worker 共用 ./jitless-env.cjs 一份实现，worker 由
+ * `wrapWorkerThreads()` 用 `--require` 注入 ./worker-bootstrap.cjs 来装。
+ * 下面每个调用点保留原有的"为什么"注释与调用时机，实现细节见该文件。
+ */
+const jitlessEnv = require('./jitless-env.cjs');
+
 /** 句柄/请求的类型统计：用来解释「loop 为什么排空」。 */
 function dshmTallyHandles() {
   try {
@@ -202,20 +215,35 @@ process.exit = (code) => {
  * 【为什么要降级这条已知噪声】`--jitless ⇒ WebAssembly === undefined`，而 Node 24
  * 的全局 fetch 引导会 require `node:internal/deps/undici/undici`，其 WASM 版 llhttp
  * 一初始化就抛 `WebAssembly is not defined`（栈含 `lazyllhttp` → `lib/global.js`）。
- * 触发者在 **Node 内部**（全树 grep 无 `node:internal/deps/…` 字符串），我们的
- * fetch 垫片（fetch-shim.js + undici-loader.mjs 解析钩子）只覆盖裸 undici 说明符，
- * 拦不到它；`--no-experimental-fetch` 又因 CLI 解析问题传不下去（见 RuntimePort.ets）。
- * 这条是**噪声不是故障**——web_fetch 实测 HTTP 200、模型调用链走的是我们的垫片
- * （见 fetch-shim.js 头注释）。真正的"消除"只能靠给 WASM 能力（平台没有）或改 Node
- * 引导，都不值得投入。故这里识别并降级为一行说明，不再打整段栈。
+ *
+ * 【2026-10-05 更新：这条噪声已从根上消除】`installInternalUndiciShim()` 现在在
+ * **BuiltinModule 层**接管该模块（见下面调用点的注释）。真机实测：启动期不再新增此噪声、
+ * 插件激活不再失败（`did not activate` 0 次、`/bootstrap` 200）。
+ * 这里的识别/降级分支**保留**，只用于兜其它来源的同类 WASM 噪声——但**不要**再据此
+ * 认为"这条根因修不了"（第一版就是这么误判的）。
  */
 function isKnownJitlessUndiciNoise(stackText) {
   return /WebAssembly is not defined/.test(stackText)
     && /lazyllhttp|internal\/deps\/undici/i.test(stackText);
 }
 
+/*
+ * 【栈深】Node 默认 `Error.stackTraceLimit = 10`：2026-10-04/05 两轮真机排障都被"栈只剩 10 帧"
+ * 卡住（真正有用的帧在下面，报告里只能看到表层）。抬到 50 只影响诊断文本长度，不改行为，
+ * 进程启动期设一次即可。
+ */
+Error.stackTraceLimit = 50;
+
 process.on('uncaughtException', (err) => {
-  diag(`!! uncaughtException: ${err && err.stack ? err.stack : String(err)}`);
+  const stack = err && err.stack ? err.stack : String(err);
+  // 【2026-10-05 补齐（登记在 parity §3.2 收尾表遗留 ③）】此前只有 `unhandledRejection` 走噪声
+  // 识别，而同一个 undici 初始化失败也可能以 `uncaughtException` 形态出现 ⇒ 那条会被当成真故障
+  // 打满日志。两个入口现在共用同一条判据。
+  if (isKnownJitlessUndiciNoise(stack)) {
+    diag('已知噪声：Node 内建 undici 在 --jitless 下初始化失败（无 WASM），已由垫片接管；忽略');
+    return;
+  }
+  diag(`!! uncaughtException: ${stack}`);
 });
 process.on('unhandledRejection', (reason) => {
   const stack = reason && reason.stack ? reason.stack : String(reason);
@@ -261,23 +289,11 @@ process.on('exit', (code) => {
  * `http.Agent`/`globalAgent` 等；只要在任何人访问之前把**所有惰性 getter** 定义掉，
  * 那条路径就不会被触发，也就不需要 WebAssembly（jitless 下它是 undefined）。
  * 不能先读原值（读一下就触发初始化）——只能用 getOwnPropertyDescriptor 看描述符。
+ * 【WASM 可用时不封】封了会反噬原生 undici（`http.maxHeaderSize` 变 `{}` ⇒
+ * `fetch failed / cause: http module not available or http.maxHeaderSize invalid`），
+ * 所以该函数自带这个条件，详见 jitless-env.cjs。
  */
-try {
-  for (const modName of ['node:http', 'node:https']) {
-    const mod = require(modName);
-    const getters = [];
-    for (const name of Object.getOwnPropertyNames(mod)) {
-      const desc = Object.getOwnPropertyDescriptor(mod, name);
-      if (desc !== undefined && desc.get !== undefined) {
-        getters.push(name);
-        Object.defineProperty(mod, name, { value: {}, writable: true, configurable: true });
-      }
-    }
-    diag(`${modName} 的惰性 getter（已全部封掉）：${getters.join(', ') || '(无)'}`);
-  }
-} catch (e) {
-  diag(`封掉惰性 getter 失败：${String(e)}`);
-}
+jitlessEnv.sealHttpLazyUndici(diag);
 
 /*
  * 【诊断（E81）】入站请求观测：把 WS 升级与普通请求的**原始事实**打出来。
@@ -608,70 +624,12 @@ const NATIVE_LIBS = (() => {
   }
 })();
 
-/** 沙箱内的 .node 路径 → libs/ 下的平铺文件名。约定：`lib<去掉扩展名的包名>.so` */
-function flatNativeName(basename) {
-  const stem = String(basename).replace(/\.node$/, '');
-  return `lib${stem}.so`;
-}
-
-(function installNativeRedirect() {
-  const fsMod = require('node:fs');
-  const pathMod = require('node:path');
-  const Module = require('node:module');
-  if (NATIVE_LIBS.length === 0 || !fsMod.existsSync(NATIVE_LIBS)) {
-    diag(`原生库重定向未启用（NATIVE_LIBS=${NATIVE_LIBS}）`);
-    return;
-  }
-  const realExists = fsMod.existsSync.bind(fsMod);
-  const redirect = (p) => {
-    try {
-      if (typeof p !== 'string' || !p.endsWith('.node')) return null;
-      const flat = pathMod.join(NATIVE_LIBS, flatNativeName(pathMod.basename(p)));
-      return realExists(flat) ? flat : null;
-    } catch (e) {
-      return null;
-    }
-  };
-  // 1) 让 loader 的"存在性检查"通过
-  fsMod.existsSync = function (p) {
-    return redirect(p) !== null ? true : realExists(p);
-  };
-  // 2) 真正加载时改写到 libs/ 下的合法位置
-  const loader = Module._extensions['.node'];
-  Module._extensions['.node'] = function (mod, filename) {
-    const flat = redirect(filename);
-    return loader.call(this, mod, flat !== null ? flat : filename);
-  };
-  // 3) 裸相对路径的 .node 请求（node-pty 的 utils.js：
-  //    require('prebuilds/openharmony-arm64/pty.node')，不带 './' 前缀）在 Node 里
-  //    按 node_modules 链当**包名**解析，`Module._findPath` 阶段就 MODULE_NOT_FOUND，
-  //    根本走不到 .node 扩展 hook——existsSync/dlopen 两层都接不住（真机实测：
-  //    sharp ok 而 node-pty 报 Cannot find module './prebuilds/openharmony-arm64//pty.node'）。
-  //    于是拦 _resolveFilename：凡是 .node 结尾的 request，只要 libs/ 里有对应平铺
-  //    文件就直接给出该路径。app-boot 的 installProfileResolution 之后会再包一层
-  //    _resolveFilename（profile 路由），它保存的"原函数"就是这个 hook，链不丢。
-  const realResolve = Module._resolveFilename;
-  Module._resolveFilename = function (request, parent, isMain, options) {
-    try {
-      if (typeof request === 'string' && request.endsWith('.node')) {
-        const flat = redirect(request);
-        if (flat !== null) return flat;
-      }
-    } catch {
-      /* fallthrough：按原逻辑解析 */
-    }
-    return realResolve.apply(this, arguments);
-  };
-  // 4) _resolveFilename 返回的 flat 以 .so 结尾，Node 按后缀找扩展处理器，
-  //    没有注册的会 fallback 到 '.js' 把 ELF 当源码读。补一个 '.so' 处理器
-  //    （= 原 .node loader，即 process.dlopen）。
-  if (!Module._extensions['.so']) {
-    Module._extensions['.so'] = function (mod, filename) {
-      return loader.call(this, mod, filename);
-    };
-  }
-  diag(`原生库重定向已启用：libs=${NATIVE_LIBS}（含 _resolveFilename/.so 处理器）`);
-})();
+/*
+ * 实现已抽到 ./jitless-env.cjs 的 `installNativeRedirect()`（同一份也装进 worker 线程：
+ * 插件自建 worker 里 `require('…/pty.node')` 这类加载原先在 worker 里必然失败）。
+ * 上面 NATIVE_LIBS 仍留在本文件——python 桥 / gitcompat / sharp 等别处要用它拼 libs/ 路径。
+ */
+jitlessEnv.installNativeRedirect({ libsDir: NATIVE_LIBS, log: diag });
 
 /*
  * `node-addon-require-builtin` → 端侧 JS shim（配合 RuntimePort 的 --expose-internals）。
@@ -689,16 +647,40 @@ function flatNativeName(basename) {
  * 容易被它卷进去；`_load` 不在其 patch 清单里，且 CJS require（含 createRequire）
  * 必经。树内该包的全部调用点都是 CJS require（已核对，无 ESM import）。
  */
-(function installRequireBuiltinShim() {
-  const Module = require('node:module');
-  const shim = require('./require-builtin-shim.cjs');
-  const realLoad = Module._load;
-  Module._load = function (request, parent, isMain) {
-    if (request === 'node-addon-require-builtin') return shim;
-    return realLoad.apply(this, arguments);
-  };
-  diag('node-addon-require-builtin → 端侧 JS shim（--expose-internals）');
-})();
+jitlessEnv.installRequireBuiltinShim(diag);
+
+/*
+ * 内建 undici 拦截：Node **内部**直接 require 的那条路径（2026-10-05 端侧报告定位）。
+ *
+ * 【现象】开发者工具启用 `@deepseek-ai/dsh-experimental-inspector` 仍报
+ * `1 entry did not activate` + `lazyllhttp … WebAssembly is not defined` —— 即使在
+ * worker 注入已经生效之后。栈底是 undici 的 `lib/global.js`（**模块初始化**帧），
+ * 说明触发者是"加载内建 undici"，而不是某次 fetch 调用。
+ *
+ * 【为什么】端侧 Node v24.2.0 的 `lib/internal/worker/io.js` 在**每条 MessagePort 消息
+ * 投递**时都 `require('internal/deps/undici/undici').createFastMessageEvent`；该模块初始化
+ * 即实例化 WASM 版 llhttp。inspector 的 Host 半身恰恰用 `new MessageChannel()`
+ * 做 Host↔Worker 通信（lib/index.js:1805）⇒ 第一条消息就抛。
+ * 同一模块还被 `globalThis` 上 `Headers/Request/Response/FormData/MessageEvent/
+ * CloseEvent/WebSocket/EventSource` 的惰性 getter 引用。
+ *
+ * 【为什么前四个入口拦不到】它们都在 `globalThis` / 裸说明符 / `node:http` 模块对象
+ * 这一层；而这里是 Node 内部**按完整路径**的 require。
+ *
+ * 【⚠️ 落点必须是 `BuiltinModule`，不是 `Module._load`】Node 内部模块走
+ * `requireBuiltin()` → `BuiltinModule.prototype.compileForInternalLoader()`，
+ * **完全不经过 `Module._load`**。2026-10-05 第一版就栽在这里：钩子挂在 `_load` 上，
+ * 日志说"已安装"、故障一模一样。`installInternalUndiciShim()` 因此改成预置
+ * `BuiltinModule.map.get(ID)` 的 `exports` 与 `loaded`；`Module._load` 那一路只作
+ * userland 直接 require 的兜底。
+ *
+ * 【顺序是承重的：本调用必须早于下面的 installJitlessFetch()】后者要判断
+ * `globalThis.Headers` 等惰性属性在不在，而**读属性描述符/读值这一步就会物化惰性
+ * getter**（本机实测：读之前内建 undici 未加载、读之后已加载）。顺序颠倒时，
+ * 一旦拦截没生效，物化抛错会被 fetch 垫片的 try/catch 吞掉 ⇒ `globalThis.fetch`
+ * 完全不装 ⇒ 宿主连模型都调不了。
+ */
+jitlessEnv.installInternalUndiciShim(diag);
 
 /*
  * jitless 下的 fetch 垫片（D6 E52）。
@@ -714,18 +696,7 @@ function flatNativeName(basename) {
  * 只在原生 fetch 不可用（缺失，或 WASM 不可用即 jitless）时覆盖：
  * 本机调试（有 WASM）时用的仍是原生实现。
  */
-(function installJitlessFetch() {
-  try {
-    // eslint-disable-next-line global-require
-    const shim = require('./fetch-shim.js');
-    const installed = shim.installFetchShim();
-    diag(installed
-      ? 'jitless fetch 垫片已安装（基于 node:http/https；原生 fetch 不可用）'
-      : '原生 fetch 可用，未安装 jitless 垫片');
-  } catch (e) {
-    diag(`fetch 垫片安装失败：${e && e.message}`);
-  }
-})();
+jitlessEnv.installJitlessFetch(diag);
 
 /*
  * jitless 下的 `undici` **模块名**解析钩子（与上面的 fetch 垫片是同一件事的另一半）。
@@ -750,21 +721,32 @@ function flatNativeName(basename) {
  * 允许起线程，属真机待验收项（docs/parity-matrix.md §3.2）。故失败时只降级、不阻断
  * 启动——web_fetch 坏掉不该拖垮整个 Host。
  */
-(function installUndiciNameHook() {
-  if (typeof WebAssembly !== 'undefined') {
-    diag('WASM 可用，保留原生 undici（未注册解析钩子）');
-    return;
-  }
-  try {
-    // eslint-disable-next-line global-require
-    const { register } = require('node:module');
-    register(pathToFileURL(path.join(__dirname, 'undici-loader.mjs')).href,
-      pathToFileURL(__filename).href);
-    diag('undici 解析钩子已注册（web_fetch 走本仓垫片，绕开 WASM）');
-  } catch (e) {
-    diag(`undici 解析钩子注册失败（web_fetch 将不可用）：${e && e.message}`);
-  }
-})();
+jitlessEnv.installUndiciNameHook(diag);
+
+/*
+ * ── 把 jitless 补齐**注入每个 worker 线程**（插件自建 worker 的救命绳）──────
+ *
+ * 【真机证据（2026-10-04）】开发者工具里启用 `@deepseek-ai/dsh-experimental-inspector`
+ * 报 `启用失败: dsh: warning: 1 entry did not activate`，栈是
+ * `lazyllhttp … ReferenceError: WebAssembly is not defined`。
+ *
+ * 【根因】worker 是**新线程**：全新的 globalThis、全新的 module registry。上面这些
+ * hook（以及 installJitlessFetch 对 `globalThis.fetch` 的覆盖）**一个都不过去**；
+ * 而这个插件的 worker（lib/worker.js）第一行就是
+ *   `import "@deepseek-ai/dsh-app-boot/worker/profile-resolution-bootstrap"`
+ * （那个模块 `createRequire(...)("node-addon-require-builtin")`，在 worker 里就是真
+ * addon），它自己又完全可能碰到原生 fetch / `node:http` 的惰性 undici getter。
+ * 更糟的是上游起 worker 时**显式**写了 `execArgv: []`（lib/index.js:1904）——连
+ * `--expose-internals` 都不会继承，所以 plug-in 侧的 worker 必然踩坑。
+ *
+ * 【为什么这里拦 Worker】worker 的创建点全在插件里（`new Worker(...)`），我们不碰
+ * 核心树 ⇒ 只能在 `node:worker_threads` 这一层统一注入
+ * `--expose-internals --require worker-bootstrap.cjs`（`--require` 保证早于 worker
+ * 的任何 import）。包装同时做 `syncBuiltinESMExports()`：本插件用的是
+ * **ESM** 具名导入 `import { Worker } from "node:worker_threads"`，只改 `require()`
+ * 上的属性它看不见（已用对照实验确认）。
+ */
+jitlessEnv.wrapWorkerThreads({ preloadPath: path.join(__dirname, 'worker-bootstrap.cjs'), log: diag });
 
 /*
  * ── `process.execPath` 兜底（2026-09-26 报告 3 ④）─────────────────────────
@@ -1705,7 +1687,8 @@ function rewriteExecutable(dst, write, label) {
  *  报 `bash: applet not found`（exit 127），bash 工具通道整体回归。
  *  bash/hush 改由下面的 `ensureBashShim()` 写成**文本垫片**；
  *  不再参与 busybox 多合一复制。
- *  【注】垫片在**手机档内不生效**（真机 `ash=denied`）——保留理由见 `bashShimLines()`
+ *  【注】垫片在**手机档内不生效**（该档真机 `ash=denied`；PC/2in1 档实测 `ash=ok`、
+ *  垫片可用）——保留理由见 `bashShimLines()`
  *  的"手机档内不生效"一节：无害 + 为 tablet/2in1 档预留 + 提供 `ash` exec 探针。 */
 const BUSYBOX_APPLETS = ['ash', 'bzip2', 'xz', 'hexdump', 'less', 'nc', 'unzip', 'vi'];
 
@@ -1744,11 +1727,15 @@ const BUSYBOX_APPLETS = ['ash', 'bzip2', 'xz', 'hexdump', 'less', 'nc', 'unzip',
  * 【为什么不是 ELF 而是脚本】脚本由**内核 + 构造期自签名的 ash**执行；本体仍是
  * 宿主进程写出的普通文件（hmfs 上可执行），不引入原生代码/CMake/新权限。
  *
- * 【⚠ 手机档内**不生效**（明确的已知边界，不要把它当可用能力）】
- * 本机（手机档）的真机探针读数是 `ash=denied`：随包 `ash` 副本**同样**被
- * 签名域/MAC 策略拒绝 execve（与 `rg`/`git`/python 真身同一类拒绝）。
- * ⇒ 两个形态在这台设备上都起不来，`bash` 工具通道**在手机档仍是不可用**的。
- * 那为什么保留它：
+ * 【⚠ 可用性**取决于设备档位**（2026-10-05 更正措辞）】
+ *   · **手机档**：早前探针（Mate 70 Pro+ / API 26）读数是 `ash=denied` —— 随包 `ash` 副本
+ *     同样被签名域/MAC 策略拒绝 execve（与 `rg`/`git`/python 真身同一类拒绝）
+ *     ⇒ `bash` 工具通道**在该档不可用**；
+ *   · **PC / 2in1 档（本机当前档位）**：`ash=ok`（真机 `exec 探测 8/8`，含 `ash`）⇒ 垫片**可用**。
+ * 本节原先只写"本机（手机档）…两个形态在这台设备上都起不来"——**把两台设备的读数混成了一台**
+ * （"本机"指代漂移；正确口径见 `dist/sideload/README.md` 的"已知边界"与
+ * `docs/device-validation.md` 的 2in1 更正）。
+ * 两种档位都保留它的理由：
  *   · **无害**：它只写两个文本文件到我们自己的 bin 目录（`bash`/`hush` 两个名字），
  *     不改任何系统文件、不新增权限、不影响其它工具；
  *   · **为 tablet / 2in1 档保留可能性**：那两个档位的签名域/MAC 策略与手机档不同，
@@ -1756,7 +1743,7 @@ const BUSYBOX_APPLETS = ['ash', 'bzip2', 'xz', 'hexdump', 'less', 'nc', 'unzip',
  *   · **诊断价值**：`execProbeTargets()` 里的 `ash` 探针是判断"随包自签名 ELF
  *     能不能 exec"的**唯一**机器可读读数 —— 它给出 `ash=denied` 本身就是结论
  *     （失败点在解释器可执行性，而不是 argv[0] 派发或沙箱）。
- * 换句话说：它现在的价值是**探针 + 未来档位的预留**，不是"手机档能跑 bash"。
+ * 换句话说：它的价值是**探针 + 档位适配**（2in1 档实测可用），不是"手机档能跑 bash"。
  */
 const BASH_SHIM_INTERPRETER = 'ash';
 
