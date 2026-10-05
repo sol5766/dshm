@@ -3748,7 +3748,7 @@ node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pa
 | `check-arkts-entry.mjs` | **3 → 0（2026-09-28 已修）** | 原因**不是**"缺 DevEco CLT"（CLT 本机就在 `<IDE>\tools`），而是脚本里**四处 Linux 布局写死**；修后 exit 0，日志含 `CompileArkTS` + `BUILD SUCCESSFUL`（§2.4）|
 | `check-layout-fixtures.mjs` | **3 → 0**（2026-09-30 已把回退写进脚本，**不再需要 junction**） | 设 `DEVECO_CLI_CLT_PATH` 后仍找不到 tsc：`<CLT>\codelinter\node_modules\typescript\bin\tsc` 不存在；当时用 junction 指向 `<IDE>\tools\hvigor\hvigor\node_modules\typescript` 后 **768 条断言 / 0 失败**。**现已根治**：`findTsc()` 自己找 `<IDE>\tools\hvigor\{hvigor,hvigor-ohos-plugin}\...\typescript` 与 `<IDE>\tools\ohpm\...\typescript`（§2.4）|
 | `check-fetch-shim.cjs` | **1 → 0（2026-09-28 已修）** | 修前：① 前提断言建在 `--no-experimental-fetch` 上，而 Node 24.19.0 **已移除该 flag**（传了死在 CLI 解析）⇒ 不带 flag 时 ① 报"原生 fetch 竟然可用"、带上 flag 时进程起不来，**两条路都红**；② 取证探针打在 `127.0.0.1:9`，**9 是 fetch 规范禁用端口** ⇒ 入口就返回 `bad port`，探不出 WASM 因果；③ 判据含 `fetch failed` 太宽。修后：前提改为 **WASM 不可用**、探针改用活着的本地 server、判据收紧为 `/WebAssembly\|not defined/`；**并且这一修顺带暴露一个产品真 bug**（见 §3.6 末段）|
-| `check-model-roundtrip.mjs`（默认带 prompt）| **1** | `session/page -> connect ECONNREFUSED`（等待窗口到了就绪超时）⇒ 用 `--no-prompt` 复跑通过；**这是可复现的失败（连续两次同形），不是环境缺件，应单独排查** |
+| `check-model-roundtrip.mjs`（默认带 prompt）| **1 —— 环境依赖，不是产品缺陷** | **2026-10-05 复核更正**：默认模式的失败点是 `turn/end` 的 `reason.kind=error`，错误原文 `Cannot find the native Koffi module; did you bundle it correctly?` —— **本机缺 koffi**（它只随 HAP 分发、不在仓库里），属**环境缺件**；`--no-prompt` 复跑 **exit 0**。本节原先写"这是可复现的失败（连续两次同形），**不是环境缺件**，应单独排查"——**口径有误**（当时看到的 `ECONNREFUSED` 是更早一次运行的另一种形态，现已不复现）。⇒ 在无 koffi 的机器上，这条门禁的**正确跑法是 `--no-prompt`**；把它当红项会误导"仓库有缺陷" |
 | `check-dshm-installer.cjs` | **1 → 0（2026-09-28 已修）** | 两处陈旧断言：① 期望依赖值带 `^`（`^4.3.4`），而实现自 2026-09-26 起优先写**请求 spec** ⇒ 实为 `4.3.4`；② 断言 installer 写 `.dshm-plugin-rows.yml`，而 `appendUserRow` 已于 2026-09-25 有意删除 ⇒ ENOENT 恒红。两处已重写（改为锁**不再写用户行**），并补 P1-2 双向用例（5a 真幂等 / 5b 版本漂移必重装 / 5c 一次追平后回幂等）⇒ `RESULT: 24 passed, 0 failed`（**2026-09-29 随 GitHub 安装修复增至 43 passed**，见 §2.5）|
 | `check-web-fetch-jitless.mjs` | **1 → 0（2026-09-28 已修）** | 两处硬缺陷：① flag 写死 `--no-experimental-fetch` 在 Node 24.19.0 下无效 ⇒ **两臂同时哑火**；② loader 传裸盘符路径 ⇒ 默认 ESM 加载器拒收 ⇒ **B 臂从未跑成过**。修后 A 臂 4/4 按预期失败（`WebAssembly is not defined`）、B 臂 8/8 全过、`PASS：对照实验成立`（§3.6）|
 
@@ -3760,9 +3760,13 @@ node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pa
 > 内部藏着的**产品真 bug**（原生 `FormData` 被编成 `"[object FormData]"`，直接砸 dsh 附属的附件上传）
 > 一直没人看见（§3.6 末段）。
 > `check-dshm-installer.cjs` 的两处陈旧断言同期重写（原来它一直是红的，见 §2.5）。
-> **`check-model-roundtrip.mjs` 默认参数那条红不在既有登记里**，本章如实登记为待查：
-> 它在 `mux open` 之后、`session/page` 之前失去连接，属"Host 在 60 秒内已就绪但随后不可达"，
-> 需要单独复现并定位（可能是 Host 提前退出，也可能是等待窗口与 Host 冷启动时长不匹配）。
+> **【2026-10-05 结案】`check-model-roundtrip.mjs` 默认参数那条红已定位、且不是缺陷**：现在的失败点
+> 不再是 `ECONNREFUSED`，而是 `turn/end` 的 `reason.kind=error`，原文
+> `Cannot find the native Koffi module; did you bundle it correctly?` ⇒ **本机缺 koffi**
+> （它只随 HAP 分发、不在仓库里）。属**环境缺件**：`--no-prompt` 复跑 **exit 0**。
+> 本节原先"待查 / 不是环境缺件"的措辞已在上表就地更正。
+> 同一次普查（2026-10-05）把仓库 **43 个门禁脚本**逐个跑了一遍：**42 exit 0 / 1 exit 1**
+> （唯一那条就是本节这条，且已定性为环境依赖）。
 
 ### 2.4 真机端侧验收：`tools/device-acceptance.ps1`
 
@@ -4639,7 +4643,7 @@ node tools/check-arkts-entry.mjs; echo "exit=$?"     # 0（真实编译：Compil
 | `check-fetch-shim.cjs` | **1 → 0（2026-09-28 已修）** | 修前：需 `node --jitless --no-experimental-fetch`，而该 flag **在 Node 22+ 已被移除**。不带 flag 直跑则第一句断言就失败（`AssertionError: 原生 fetch 竟然可用…`）。**但真因不止于此**：① 前提建在错误的 flag 语义上；② 取证探针打在 `127.0.0.1:9`（**fetch 规范禁用端口，入口即返回 `bad port`**）⇒ 探不出 WASM 因果；③ 取证引用在装垫片**之后**才取 ⇒ 探的是自己。修后 exit 0，且**修的过程挖出一个产品真 bug**（原生 `FormData` 被编成字面量 `"[object FormData]"`，见 §3.6 末段） | **脚本缺陷（已修），且原先那个"环境"标签掩盖了产品真 bug** |
 | `check-web-fetch-jitless.mjs` | **1 → 0（2026-09-28 已修）** | 原先判成"环境"：它用 `process.execPath` 起子进程并传 `FLAGS = ['--jitless','--no-experimental-fetch']`（`tools/check-web-fetch-jitless.mjs:308`）⇒ 子进程启动即失败，两臂都"没有产出断言汇总"。**真因不是环境，是两处硬缺陷**：① 该 flag 的**否定形态**在 Node 24 无效 ⇒ **两臂同时哑火**；② loader 传**裸盘符路径** ⇒ 默认 ESM 加载器拒收（`ERR_UNSUPPORTED_ESM_URL_SCHEME`）⇒ **B 臂从未跑成过**。修后 A 臂 4/4 按预期失败、B 臂 8/8 全过（见 §3.6） | **脚本缺陷（已修）** |
 | `check-dshm-installer.cjs` | **1 → 0（2026-09-28 已修）** | 两处叠加：① `[FAIL] package.json top-level row only -- {"debug":"4.3.4"}`，而断言期望 `^4.3.4`（`tools/check-dshm-installer.cjs:102`）⇒ **语义前缀期望已漂移**；② 随后 `ENOENT: ...profiles/ondevice/.dshm-plugin-rows.yml`（`:104`）——该门禁仍在断言 `appendUserRow` 写用户行，**而该函数已于 2026-09-25 有意删除**（`tools/assert-cli-shim.mjs:110-111` 正是在锁"不再写用户行"）。两处已重写并补 P1-2 双向用例（5a/5b/5c），现 `RESULT: 43 passed, 0 failed`、exit 0（2026-09-28 修后为 24 passed；**2026-09-29 随 GitHub→npm 回退与 monorepo 子包判定用例新增 19 例**） | **门禁设计失配**（已修：两条门禁曾对同一件事的方向相反） |
-| `check-model-roundtrip.mjs` | **1** | 本机两次运行得到**两种不同**失败：① `FAIL: session/page -> 0 connect ECONNREFUSED 127.0.0.1:3252`；② `assistant (none after 150485ms)`，mux 帧里 `turn/end reason=error`：`Cannot find the native Koffi module; did you bundle it correctly?` | **环境 + 待查**：koffi 是 HAP 专属（自编 `libkoffi.so` 放 `entry/libs/arm64/`），本机 PC 侧离线跑必然缺它；但两种失败模式不同，说明结果还依赖时序 |
+| `check-model-roundtrip.mjs` | **1（环境依赖，已定性）** | 本机两次运行得到**两种不同**失败：① `FAIL: session/page -> 0 connect ECONNREFUSED 127.0.0.1:3252`；② `assistant (none after 150485ms)`，mux 帧里 `turn/end reason=error`：`Cannot find the native Koffi module; did you bundle it correctly?` | **环境（2026-10-05 复核定论）**：koffi 是 HAP 专属（自编 `libkoffi.so` 放 `entry/libs/arm64/`），本机 PC 侧离线跑必然缺它；**2026-10-05 复跑只复现第 ② 种**（第 ① 种已不复现），`--no-prompt` **exit 0** ⇒ 在无 koffi 的机器上这就是**正确跑法**，不该记成"仓库有缺陷" |
 | `neg-test-piai.mjs` | **1 → 0（2026-09-30 随上游解除）** | 依赖 `check-layout-fixtures.mjs`，后者 exit 3 ⇒ 四个变异全部 `[A]/[B]/[C]/[D] FAIL — (no summary)`。`findTsc()` 修好后：**exit 0**，"负测试总体：全部按预期（新断言确实会红）"——**现在不需要 junction 也不需要 `DEVECO_CLI_CLT_PATH`** | 环境（**级联，已随根因修掉**） |
 | `scan-core-plugins.mjs` | **1 → 修（2026-09-28）** | 原：`FATAL: no node_modules under dist\core\work\dsh-core-0.1.5-rc.2`——**默认 coreDir 写死旧版本**（`tools/scan-core-plugins.mjs:20`），而当前核心树是 `0.2.0-rc.1`。**已改为读 recipe**：`join(ROOT,'dist','core','work', \`dsh-core-${RECIPE.coreVersion}\`)` | **脚本硬编码版本**（与 `check-fs-search-fallback` 曾经"写死旧版本路径"同型，见 `docs/70-鸿蒙移植踩坑与修复总览.md:795`）。2026-09-28 收尾清理一并修掉（本章 §5.3） |
 
@@ -4647,8 +4651,10 @@ node tools/check-arkts-entry.mjs; echo "exit=$?"     # 0（真实编译：Compil
 > "环境不足 / 需特定 flag"。**`check-dshm-installer.cjs` 的两处陈旧断言已于 2026-09-28 重写**，
 > 其语义前缀漂移（期望 `^4.3.4` 而实现写 `4.3.4`）与"断言 `appendUserRow` 写用户行"都已成为历史；
 > 它此前**自首次提交起就一直是红的**（两条门禁曾对同一件事方向相反），现 exit 0。
-> **剩下的 `check-model-roundtrip.mjs` 两种失败模式不在既有登记里**，本章如实登记为待查，
-> **不写成通过，也不写成"代码坏了"**。
+> **【2026-10-05 结案】`check-model-roundtrip.mjs` 的"待查"到此为止**：复跑只复现 koffi 缺失那一种
+> （`Cannot find the native Koffi module…`），属**环境缺件**；`--no-prompt` **exit 0**。
+> 同一次普查把仓库 **43 个门禁脚本**逐个跑完：**42 exit 0 / 1 exit 1**（就是这一条，且已定性为环境）。
+> 那张"红项定性表"里其余条目都是历史记录，保留原样。
 
 ```bash
 # 一键复现本节的退出码分布（2026-09-30 重测，本机实测：22×0 / 1×1）

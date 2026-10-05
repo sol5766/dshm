@@ -143,11 +143,11 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 | 8 | `docs/90` §2.3 的"本次实测读数"多处过期（35→38、39→58、10→13 件、138/138→140/140…） | ✅ **已修**：加**时效声明 + 当前复核值**（历史快照故意不改，避免篡改取证） |
 | 9 | 两份"权威门禁清单"分叉（`AGENTS.md` 15 项 vs `CONTRIBUTING.md` 8 项） | ✅ **已修**（CONTRIBUTING 改为"以 AGENTS 为准"的人类最小集） |
 | 10 | 4 个自带插件 + PTC 运行时**没进 parity 台账**（§4.6 仍"端侧独有 11 行"，且 `check-parity` 只按官方 39 个 id 判定 ⇒ 新端侧能力永远无人要求登记） | ⏳ 待办（需给 parity 增"端侧独有"登记规则） |
-| 11 | `fetch-shim.js:687-708` 孤儿 JSDoc（`installFetchShim` 的旧文档块现在"属于" `defineGlobalShim`） | ⏳ 待办（小） |
+| 11 | `fetch-shim.js:687-708` 孤儿 JSDoc（`installFetchShim` 的旧文档块现在"属于" `defineGlobalShim`） | ✅ **已修**（第三轮：文档块移回它描述的函数上方 + `@returns {boolean}` 写准，见 §8.3） |
 | 12 | `ts-strip.cjs:414-417` 写"真机尚未验证"，与 changelog"真机验收通过"矛盾 | ✅ **已修**（端侧已验收，注释改为事实 + 残留边界） |
 | 13 | `parity-matrix.md:334` 写插件 `index.js` 37,227 B，实际 38,518 B | ✅ **已修** |
 | 14 | `dist/_*` 清理口径与事实不符（自述"只留 32 个被引用"，实测 37 个里 6 个零引用） | ✅ **已修**（删 6 个，现 32 个） |
-| 15 | 零散：AGENTS"编号连续 `00-`…`80-`"而 `docs/90` 存在；`pack-core.mjs` 拼写 `pristinMeta`；原生库路径两份实现（`main.js:613-625` vs `jitless-env.cjs:90-100`）；`main.js:243`/`:251` 同一噪声两种措辞 | ✅ 部分（编号范围与拼写已修）；⏳ 待办（原生库路径合并、噪声措辞统一） |
+| 15 | 零散：AGENTS"编号连续 `00-`…`80-`"而 `docs/90` 存在；`pack-core.mjs` 拼写 `pristinMeta`；原生库路径两份实现（`main.js:613-625` vs `jitless-env.cjs:90-100`）；`main.js:243`/`:251` 同一噪声两种措辞 | ✅ **已全部修**（编号范围→`95-`、拼写→`pristineMeta`、原生库路径合并为 `jitlessEnv.resolveNativeLibsDir()`、噪声文案抽成 `diagKnownJitlessUndiciNoise()`；另修 `pack-core.mjs:2149` 的"4 处"→"6 处"）。见 §8.3/§8.1 |
 
 ### 3.3 口径一致性修复（本轮已落地，12 处）
 
@@ -198,10 +198,10 @@ sha256 `d7d4797cb2137e155c76f21a83efdb5c86cc21413062f1261b0149d51bb13e61`（v6 �
 | 5 | `device-validation.md:4333-4361` 判词加限定 | 改为"对**未授权**公共目录成立"，交叉引用 issue #3 + `diag-picker-*` 标记 | 低 |
 | 6 | `WebApp.ets` 换路径原因上报壳层 | 经 `emitter`（`HostEvents.ets` 已定义事件 id 契约）发事件、壳层用现有提示状态位显示 | 低-中（需 ArkTS 编译 + 真机 UI 验证） |
 | 7 | parity 增"端侧独有"登记规则 | 让 `check-parity.mjs` 也要求 5 个 `dshm-*` 能力面在台账里有行 | 中（改门禁判定面） |
-| 8 | `fetch-shim.js:687-708` 孤儿 JSDoc / 原生库路径两份实现 / `main.js` 噪声措辞统一 | 搬迁注释、抽单一来源 | 低 |
+| 8 | `fetch-shim.js:687-708` 孤儿 JSDoc / 原生库路径两份实现 / `main.js` 噪声措辞统一 | ✅ **第三轮已全部落实**（见 §8.3） | 低 |
 | 9 | CI 与社区文件 | 新增 `.github/workflows`（在 ubuntu 上跑**不依赖设备与 SDK** 的那批门禁：`check-parity`/`check-doc-refs`/`check-ptc-*`/`assert-resfile-sync` 等）+ `CODE_OF_CONDUCT.md` | 低；但 CI 首次运行可能暴露平台相关的门禁不可移植 |
 | 10 | 真机 UI 验收（issue #3 关单前） | 让端侧会话跑：选 `Documents` 看 `diag-picker-public-fallback`、`diag-picker-public-path`；并在工作区选择流程里确认新的提示浮层可见 | 需设备交互 |
-| 11 | 仍未复核的门禁（约 19 条） | `check-origin-fence` / `check-model-roundtrip` / `check-arkts-entry` / `check-layout-fixtures` / `check-design-tokens` / `check-feature-wiring` / `check-builder-recursion` / `check-dshm-installer` / `check-fetch-shim` / `check-custom-api-*` 等 | 低（按改动面选跑） |
+| 11 | 仍未复核的门禁（约 19 条） | ✅ **第三轮已全量普查**：仓库 **43 个**门禁脚本逐个实跑 ⇒ **42 exit 0 / 1 exit 1**；唯一红的是 `check-model-roundtrip.mjs`（默认带 prompt 需 koffi，HAP 专属 ⇒ **环境依赖**；`--no-prompt` exit 0）。见 §8.2 | 无（已定性） |
 
 ---
 
@@ -248,13 +248,11 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 | **`tools/update-device.ps1` 的"数据保全"校验是结构性假通过** | 基线用 `ls $filesDir/dsh/home \| wc -l`，而 `dsh/home` 是 **0700**、`hdc shell` 是另一个 uid ⇒ `ls` 被拒、计数**恒 0** ⇒ 每次打"home 为空（可能是全新设备，或数据已被清）"、第 7 步必然 `SKIP 本次无法证明「数据被保留」`。这台设备其实**数据完好**（同一时刻 `stat` 给 `links=13 size=3440`）。**后果**：唯一"证明覆盖安装没删数据"的检查等于不存在，还会误导人以为"数据被清了" | 改用 **stat 指纹**（`links=%h size=%s`）作判据：`links` **减少**才判失败，相等/增加算保留；`ls` 那条降级为"预期不可读"的说明（不再当判据）。已实测新脚本输出 `home 指纹：links=13 size=3440` |
 | **`emitter.off` 与 `emitter.on`/`emit` 的 API 不对称** | `on`/`emit` 收 `InnerEvent`（`{ eventId }`），而 `off` 的重载只收**裸 number/string**（`@ohos.events.emitter.d.ts:115/129/147/166`）⇒ 照抄 `on` 的形状写 `off({ eventId })` 编译失败（实测 **9 个级联错误**全出自这一行，`Argument of type '{ eventId: any; }' is not assignable to parameter of type 'string'`） | `Index.ets` 改为 `emitter.off(EVENT_PICKER_SUBSTITUTED, cb)`，并把这条不对称写进代码注释 |
 
-### 7.2 新发现的门禁缺口（未做，登记）
+### 7.2 门禁缺口 → **已落实**（第三轮扩容，见 §8.1）
 
-`check-core-openharmony-patches.mjs` 的产出顺带做了一次**文本级筛查**：**还有 10 处端侧补丁只有打包期 `die()` 兜底、没有独立门禁**——
-`patchVoiceInputNativeCapture`（`tools/pack-core.mjs:421`）、`patchVoiceInputNoiseSuppression`（:568）、`patchSensevoiceForHms`（:725）、
-`patchLinkForSandbox`（:1904）、`patchCredentialsOwnerCheck`（:2003）、`patchAgentPresetWorkflow`（:2052）、
-`patchAppBootReadonlyStack`（:2154）、`patchFsLocalLink`（:2222）、`patchAttachmentLocalLink`（:2292）、`embedProfile`（:797）。
-**建议**：按同一形状把新门禁扩成"**全部注入标记**"的清单门禁（一次覆盖，而不是每个补丁一条命令）。
+`check-core-openharmony-patches.mjs` 已从"只覆盖 3 处补丁"扩成**"全部注入标记"清单门禁**。
+原先列出的 10 处全部纳入，另发现并纳入源码里的 `embedDshmToolPackages()`（原清单**漏了它**，
+而真正读 `DSHM_PUBLIC_DOWNLOAD` 的代码在它装的插件里，不在 `embedProfile` 里）。
 
 ### 7.3 CI 与行为准则
 
@@ -278,6 +276,56 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 1. **②的 issue 需要你发**（草稿已就绪）。
 2. **③与⑤的真机 UI 验收**：Web 端目录选择器选一个不可写目录（如 `Documents`）⇒ 应看到浮层提示；
    并复核 `diag-picker-public-fallback` / `diag-picker-public-path` 两个标记（这也是 issue #3 关单前的两问）。
-3. §7.2 的 10 处补丁门禁扩展。
-4. §5 剩余的 8/11 项（原生库路径两份实现、`main.js` 噪声措辞统一、约 19 条未复核门禁等）。
+3. §7.2 的 10 处补丁门禁扩展 → **已在第三轮完成**（见 §8.1）。
+4. §5 剩余的 8/11 项（原生库路径两份实现、`main.js` 噪声措辞统一、约 19 条未复核门禁等）→ **第三轮完成**。
 5. **推送**（本地已提交/将提交，远端仍未更新）。
+
+---
+
+## 8. 第三轮（2026-10-05 傍晚）
+
+### 8.1 门禁扩容：13 处注入 / 94 条断言 / 85 个自检用例
+
+`tools/check-core-openharmony-patches.mjs`：382 → **1084 行**（`RESULT: 94 passed, 0 failed`）。
+- **覆盖 13 处注入**：资源地址装甲（3 文件）· PDF `Map` · 终端 openharmony · 语音原生采集 ·
+  录音约束（AEC/NS）· HMS provider（+2 个 cpSync 产物）· `embedProfile`（整目录逐字节）·
+  **`embedDshmToolPackages`（5 个 `dshm-*` 目录逐字节）** · session link · 凭据 660 · preset workflow ·
+  app-boot 只读 stack（两份副本）· fs-local link · attachment link
+- **94 条 = 正向 61（标记计数 17 + 注入片段 34 + cpSync 产物 2 + 树内副本逐字节 8）+ 反向 20（逐字否上游原文 13 + 结构反向 7）**；
+  同一批另有 7 条反向判据只在失败时发声
+- **`--self-test` 85 个用例**：除手写 M1–M8 外，对**每一条**判据做变异扫射（反向原文逐条塞回、
+  标记逐条改名/插入、正向片段逐条抠掉**全部**出现、产物逐条删除、mirrors 逐条改动），
+  并断言"这次红**只能**来自这条判据" ⇒ 防"恒真/恒假的摆设判据"
+- 缺树 **exit 3**（实测：改名 → 门禁与自检都 3；改回 → 复绿）
+
+**两个只有扩展才暴露的坑**（都写进了代码注释）：
+1. **看不见的恒真**：`profiles/ondevice/cordis.patch.yml` 是 **CRLF**（实测 667 个 CRLF），
+   而 `pack-core` 的替换模板一律 `\n` ⇒ 多行反向判据不做归一化就会**恒绿**（摆设判据）。
+   门禁现在读取时把 `\r\n` 折成 `\n`（逐字节判据仍读原始字节）。
+2. **注释与实现不符**：`tools/pack-core.mjs:2149` 原写"这 **4** 处"，实际是"两份副本 × 各 3 处 = **6**"；
+   门禁按树内实际钉死，注释已就地更正。
+
+**仍未纳入的 6 处**（同为打包期 `die()` 兜底、无独立门禁）：`allowOriginList`（`DSHM_ORIGIN_LIST`）、
+`wrapSharp`（`0.0.0-dshm-dispatch`）、`addSystemAddonPackage`（`0.1.2-dshm-shim`）、`addOnDevicePreset`、
+`addPlatformAliases`、`embedTreeInfo`。下一轮按同一形状纳入，或明确记为"由行为门禁覆盖"。
+
+### 8.2 全量门禁普查：43 个脚本，42 绿 / 1 红（且已定性为环境）
+
+2026-10-05 把仓库里**所有** `check-*` / `assert-*` / `audit-*` / `neg-test-*` / `arch-check` 脚本逐个跑了一遍
+（`dist/_gate-sweep.json` 留了明细）：**42 exit 0 / 1 exit 1**。此前文档里"未复核"的那 19 条
+（`check-arkts-entry` / `check-layout-fixtures` / `check-origin-fence` / `check-dshm-installer` /
+`check-store-readiness` / `check-toolchain-sign` / `check-user-rows-preflight` / `neg-test-piai` / …）
+**全部 exit 0**。
+
+唯一红的 `check-model-roundtrip.mjs`（默认带 prompt）：失败点是 `turn/end` 的 `reason.kind=error`，
+原文 `Cannot find the native Koffi module; did you bundle it correctly?` ⇒ **本机缺 koffi**
+（HAP 专属、不入库）⇒ **环境依赖，不是产品缺陷**；`--no-prompt` **exit 0**。
+`docs/90` 里"待查 / 不是环境缺件"的两处措辞已就地更正（§2.3 的读数表与"红项定性表"）。
+
+### 8.3 三处小收口（§5 的零散项）
+
+| 项 | 状态 |
+|---|---|
+| `fetch-shim.js` 的**孤儿 JSDoc** | ✅ 已修：`installFetchShim` 的文档块此前紧贴在 `defineGlobalShim` 上方（`@returns` 与实际函数对不上）⇒ 移回它描述的函数上方，并把返回值写成 `{boolean}` |
+| `main.js` 同一噪声**两种措辞** | ✅ 已修：抽成 `diagKnownJitlessUndiciNoise()`，两个进程级入口共用（此前"已由垫片接管" vs "已由 fetch 垫片接管"两种写法会让日志检索漏项） |
+| 原生库路径**两份实现** | ✅ 已修：`main.js` 的 `NATIVE_LIBS` IIFE 与 `jitless-env.cjs:resolveNativeLibsDir()` 各写一份 ⇒ 改为调用同一份实现（`NATIVE_LIBS` 名字保留，另有 5 处用它拼路径）；漂移的后果本来是"垫片按 A 找库、python 桥按 B 拼路径"，只在真机 `dlopen` 失败时才暴露 |
