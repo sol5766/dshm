@@ -140,7 +140,7 @@ T1 点开系统选择器后若未关净，后续测试全跑在弹窗上（首�
 | `tools/func_test_final.py` | A/B 级自动化套件（36 项）+ C 级清单 |
 
 > **2026-09-28 清理**：本表原有另外三行（`verify_t1_clean.py`、`show_ui.py`、`close_picker2.py`）。
-> 其中 `verify_t1_clean.py` 与 `close_picker2.py` 属一次性脚本，已按 `AGENTS.md:81` 的
+> 其中 `verify_t1_clean.py` 与 `close_picker2.py` 属一次性脚本，已按 `AGENTS.md` 的
 > 「一次性排查脚本用完即删」`git rm`（正文里的复验读数已留档）；`show_ui.py` 登记时**文件即不存在**，
 > 属"文档与实物不符"（`docs/90` §5.6 例③），登记一并移除。
 

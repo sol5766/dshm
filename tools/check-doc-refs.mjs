@@ -30,6 +30,11 @@
  *   C 界内：行号不得超过被引文件行数。
  *   D 次序：`N-M` 必须 N ≤ M。
  *   E 编号：`docs/NN` 必须唯一对应一个文档（短式引用才可解析）。
+ *   F 不可核对：**不得**对"不在判定集内"的文档写行号 —— `` `AGENTS.md:N` `` / `` `README.md:N` ``。
+ *     理由：这类引用既不是 `docs/` 内的互引、也不在被引判定集内 ⇒ **行号无人核对、必然无声腐烂**。
+ *     实测事故（2026-10-05 收尾审计）：`AGENTS.md` 一次增行 35 行，`docs/90` 里 **16 处**
+ *     `AGENTS.md:N` 引用**全部指错**，而当时没有任何门禁能挡（本条是那次审计补的）。
+ *     处置：去掉行号（推荐 —— `AGENTS.md` 的节标题就是稳定锚点），或把该文件纳入判定集。
  *
  * ## 认哪些写法（其余一律不看 ⇒ 不会误报）
  *   引用目标：`docs/70:878`（短式）｜`docs/70-…md:878`｜`70-…md:878`（全名）
@@ -270,6 +275,15 @@ export function scanSources(sources) {
       const at = i + 1;
       if (!/§|:\d/.test(line)) return;
       LINE = line;
+      // 判据 F：不许对"不在判定集内"的文档写行号（见文件头「F 不可核对」）。
+      // 【为什么必须在 scanSources 内】自检也走这条路径 ⇒ 否则这条判据没有变异用例证明它会红。
+      for (const m of line.matchAll(/`((?:AGENTS|README)\.md):(\d+)(?:-(\d+))?`/g)) {
+        issues.push({
+          where: `${src.name}:${at}  引用 ${m[1]}:${m[2]}`,
+          kind: 'F 不可核对',
+          detail: `${m[1]} 不参与行号判定 ⇒ 该行号无人核对、必然腐烂；请去掉行号，或改引它的节标题`,
+        });
+      }
       const items = parseLine(line);
       for (const r of recordsOf(items, line)) {
         const res = resolve(r.raw);
@@ -323,6 +337,9 @@ function selfTest() {
     '前置对：§2（`docs/10:6`）',
     '前置错：§1.1（`docs/10:6`）',
     '远处声称不算：`docs/10:3` 这一节的内容在本文档里另见 §9.9',
+    // 【为什么新样例必须加在**末尾**】本数组的下标 = 行号，上面所有用例都按 `90-乙.md:N` 断言；
+    // 插在中间会让后面每个断言的"N"整体位移 —— 本次加样例时就踩过一次（3 个用例转红）。
+    '不可核对：`AGENTS.md:29-34`（§1）',
   ].map((s, i) => (i === 0 ? s : `- ${s}`));
   const cases = [
     ['后置声称（FILE:N（§X））落点对 ⇒ 不报', (is) => !is.some((i) => i.where.startsWith('90-乙.md:2'))],
@@ -334,7 +351,9 @@ function selfTest() {
     ['起止反序 ⇒ 报 D', (is) => is.some((i) => i.kind === 'D 次序' && i.where.startsWith('90-乙.md:8'))],
     ['省略 docs/ 的全名要认出来', (is) => is.some((i) => i.where.startsWith('90-乙.md:9') && i.kind === 'A 落点')],
     ['紧接续写 :6 归同一目标并判落点', (is) => is.some((i) => i.kind === 'A 落点' && i.where.includes('90-乙.md:10'))],
-    ['docs/ 之外的 .md 不参与判定', (is) => !is.some((i) => i.where.includes('README'))],
+    ['docs/ 之外的 .md 不参与**落点**判定（只可能报 F）', (is) => !is.some((i) => i.where.includes('README') && i.kind !== 'F 不可核对')],
+    ['对 README.md 写行号 ⇒ 报 F 不可核对', (is) => is.some((i) => i.kind === 'F 不可核对' && i.where.includes('README.md:36'))],
+    ['对 AGENTS.md 写行号 ⇒ 报 F 不可核对（含区间写法）', (is) => is.some((i) => i.kind === 'F 不可核对' && i.where.includes('AGENTS.md:29'))],
     ['跨节的区间（3-6）算通过', (is) => !is.some((i) => i.where.startsWith('90-乙.md:12'))],
     ['前置声称（§X（FILE:N））落点对 ⇒ 不报', (is) => !is.some((i) => i.where.startsWith('90-乙.md:13'))],
     ['前置声称落点错 ⇒ 必须报 A', (is) => is.some((i) => i.kind === 'A 落点' && i.where.startsWith('90-乙.md:14'))],
@@ -379,6 +398,17 @@ function main(argv) {
   const sources = names
     .filter((f) => f.endsWith('.md'))
     .map((f) => ({ name: f, lines: readFileSync(join(ROOT, 'docs', f), 'utf8').split(/\r?\n/) }));
+
+  // 【2026-10-05 收尾审计补】把仓库根的 `AGENTS.md` / `README.md` 也作为**源**纳入扫描：
+  //   它们同样会引用 `docs/NN-*.md`，而此前"既不是 docs/ 内互引、也不在被引判定集内" ⇒ 没人核对。
+  //   注意它们**不是被引目标**（`byName` 里没有 `AGENTS.md`/`README.md`）⇒ 对它们写行号由判据 F 拦下。
+  for (const extra of ['AGENTS.md', 'README.md']) {
+    try {
+      sources.push({ name: extra, lines: readFileSync(join(ROOT, extra), 'utf8').split(/\r?\n/) });
+    } catch {
+      // 缺文件不算错：两者属可选；门禁只保证"存在时其引用要被核对"。
+    }
+  }
 
   const { issues, records } = scanSources(sources);
   console.log('# 文档引用门禁：docs/ 内的「文件:行号」引用要落在它声称的那一节上\n');

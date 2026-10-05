@@ -85,7 +85,7 @@ ls entry/libs/arm64-v8a/ | grep libnode     # → libnode.so.137  126,809,264 B
 把官方**面向桌面（Electron）**的 dsh（DeepSeek Harness）Node 运行时，搬进一个 HarmonyOS/OpenHarmony
 arm64 的 HAP 里**自足运行**：应用内自带 Node 运行时与 dsh 核心树，核心在本机 `127.0.0.1` 上起 Host，
 界面是这个本地 Host 的客户端。**装上即用，不需要电脑上常驻任何服务**
-（`README.md:11-19`；同一句话的任务书表述见 `docs/00-开发任务书.md:53`）。
+（`README.md`；同一句话的任务书表述见 `docs/00-开发任务书.md:53`）。
 
 包名 `com.dshm.dshclient`（`AppScope/app.json5:3`），设备形态 phone / tablet / 2in1
 （`entry/src/main/module.json5:7-11`）。
@@ -193,7 +193,7 @@ node --jitless -e "console.log(typeof WebAssembly)"  # undefined
 已实证的受害者是 `web_fetch`（`dsh-web-fetch-http` 自建 `Agent` 并把 `dispatcher` 传进 fetch），
 而 `web_search` 正常，因为它走的是全局 `fetch`（我们自己的纯 JS 垫片）。
 **同一核心树、同一个本地 HTTP 服务，只有 `--jitless` 一个变量就能复现两组结果**
-（`README.md:54-68`、`docs/parity-matrix.md:233-247`）。
+（`README.md`、`docs/parity-matrix.md:233-247`）。
 
 #### 2.1.4 怎么绕过：**两层**垫片（缺一层就会出现"Host 起来了、模型也能回话，但某个工具静默坏掉"）
 
@@ -230,7 +230,7 @@ node tools/check-web-fetch-jitless.mjs
 #### 2.1.5 上游升级时必须重做的事
 
 **搜一遍核心树里对 `undici` 的直接依赖，并把垫片覆盖率当作一项验收项**
-（`README.md:68`；同一要求以"升级后必须重搜 undici 直接依赖"的形式登记在
+（`README.md`；同一要求以"升级后必须重搜 undici 直接依赖"的形式登记在
 `docs/README.md:53`，并指向 `docs/70` §0.1）。理由：垫片覆盖的是"名字被显式 `import`"的那条路，
 上游换一个 HTTP 实现（或换包名）就会静默绕过它。
 
@@ -320,7 +320,7 @@ exec 探测：… rg=denied，rg-real=denied，bash=ok
    git-core 里 180+ 个指向 git 本体的链接）。Windows 上
    `bsdtar` **丢条目**（不可逆地损坏归档）、`7z` 把 symlink **物化**（git-core 8 MB → 1.3 GB）；
    **只有 Python `tarfile` 能逐条目读出来再原样写回去**（`tools/sign-tar-elf.py:1-22`；
-   `docs/70:241-250`）。这是 `README.md:83-86` 把 Python 3 列为构建前置的唯一原因。
+   `docs/70:241-250`）。这是 `README.md` 把 Python 3 列为构建前置的唯一原因。
 
 3. **签名命令是 `selfSign`，不需要 keystore 密码**：
    `binary-sign-tool sign -mode localSign -selfSign 1 -signAlg SHA256withECDSA`
@@ -503,7 +503,7 @@ appspawn 侧日志 `SetForkDenied success, cgroup's owner:<pid>`
 （`main.js:809-816`；两次 `cppcrash` 记录）。所以 `libnode.so` + NAPI 引导是**四条形态
 唯一共同可行的路径**（`dshhost.cc:8-10`）。同进程还带来一个安全语义上的简化：
 Host 与客户端走回环，不需要绑 `0.0.0.0`、不需要伪造 `Host`/`Origin`
-（`README.md:52`、`docs/50:75-79`）——这正是与社区 Electron-on-鸿蒙方案的**结构性差别**。
+（`README.md`、`docs/50:75-79`）——这正是与社区 Electron-on-鸿蒙方案的**结构性差别**。
 
 ### 3.2 两个存储域（判据不可混淆）
 
@@ -515,7 +515,7 @@ Host 与客户端走回环，不需要绑 `0.0.0.0`、不需要伪造 `Host`/`Or
 **纪律**：一律 `hdc install -r <hap>`，**禁止** `hdc uninstall`。唯一例外是换签名导致覆盖安装失败时的
 `hdc uninstall -k <bundle>`，且卸载后**立即验证数据仍在**。这条纪律的起因是一次真实事故：
 一次排障中的裸 `hdc uninstall` 删掉了 **6 个会话、7 个插件、2 个工作区**，
-系统备份为空、**不可恢复**（`AGENTS.md:7-48`、`docs/80-真机更新与数据保全.md:8-46`）。
+系统备份为空、**不可恢复**（`AGENTS.md`、`docs/80-真机更新与数据保全.md:8-46`）。
 唯一允许的装机入口是 `tools/update-device.ps1`（它第 0 步会**自检脚本自身不含卸载调用**，
 `tools/update-device.ps1:46-70`）。
 
@@ -554,7 +554,7 @@ aa start
 | 8 | 插件安装 | **进程内纯 JS 安装器**（HTTPS 拉 tarball + `zlib.gunzipSync` + 纯 JS ustar 解包） | 端侧没有 pnpm/npm/git，也没有独立 node 可执行文件；spawn 在端侧始终带平台级不确定性（执行位/权限策略），纯 JS 是零依赖的确定性路径 | `hostcore/app/dshm-installer.js:1-33`、`docs/70:370-394` |
 | 9 | 语音模型存放 | **沙箱目录（启动后在线下载）**，不放 HAP `rawfile` | 模型 228 MB 量级，放 rawfile 会让 HAP 暴涨；而 sherpa-onnx 的鸿蒙实现**不传 `resourceManager` 时走通用文件路径**（源码级确认：`use_resource_manager` 为假时调 `SherpaOnnxCreateOfflineRecognizer`），⇒ 沙箱绝对路径可行。**当前 `entry/src/main/resources/rawfile/` 实测为空（0 个文件）** | `docs/device-validation.md:3413-3415`、`:3487-3508`；`entry/src/main/ets/speech/SenseVoiceRecognizer.ets:64-73,90,124` |
 | 10 | 语音识别后端 | **sherpa-onnx 端侧离线**（`sherpa_onnx@1.13.3` HAR） | HMS `speechRecognizer` 是**流式听写引擎**，单会话只处理**开头 4~5 秒**且端点检测不可关（七轮真机实测）⇒ 长语音此路线无法稳定实现。sherpa-onnx **官方已有鸿蒙移植**（源码内置 6 个示例、官方 `build-ohos-arm64-v8a.sh`、预编译件零 glibc 依赖） | `docs/70:892-946`、`:976-987` |
-| 11 | 权限面 | **10 项普通权限，不申请任何 ACL 特殊权限** | 需 JIT 的方案一律不进入选型，以保证可正常上架；代价（WASM 不可用）由 §2.1.4 的两层垫片吸收 | `README.md:36`、`module.json5:17-119`、`tools/check-store-readiness.mjs`（本机 PASS） |
+| 11 | 权限面 | **10 项普通权限，不申请任何 ACL 特殊权限** | 需 JIT 的方案一律不进入选型，以保证可正常上架；代价（WASM 不可用）由 §2.1.4 的两层垫片吸收 | `README.md`、`module.json5:17-119`、`tools/check-store-readiness.mjs`（本机 PASS） |
 | 12 | 其它 JS 引擎（QuickJS / Hermes / Bun / Deno 等） | **无选型记录** | `README.md`、`AGENTS.md`、`docs/*.md` 全库检索 `QuickJS`/`Hermes`/`JerryScript`/`Bun`/`Deno` **零命中**（唯一的 `quickjs` 命中在**上游核心树**里：`dsh-client-ui-sidebar-documentpreview` 的 pdf.js 自带一个 **WASM 版** QuickJS 沙箱，与运行时选型无关，而且在 `--jitless` 下必然不可用 —— 顺带印证约束一）。⇒ **不作论断**：不是评估后否决，而是从未进入候选 | `grep -rn "QuickJS\|Hermes\|JerryScript" README.md AGENTS.md docs/` → 0；核心树命中见 `dist/core/work/dsh-core-0.2.0-rc.1/node_modules/@deepseek-ai/dsh-client-ui-sidebar-documentpreview/lib/client.pdf.js` |
 
 ---
@@ -1527,7 +1527,7 @@ node tools/check-icon-assets.mjs       # 必须 exit 0
 ### 7.1 命令
 
 仓库里**唯一能照着跑通的命令**是 `tools/update-device.ps1:93-108` 里那一段
-（`README.md:106` 写的是 `devecocli build`，但**本机 PATH 里没有 `devecocli`**——
+（`README.md` 写的是 `devecocli build`，但**本机 PATH 里没有 `devecocli`**——
 `where.exe devecocli` 返回 "Could not find files"；`devecocli` 由 DevEco Command Line Tools 提供，
 本机只有 `C:\Program Files\Huawei\DevEco Studio\tools\{hvigor,node,ohpm,...}`）：
 
@@ -1666,7 +1666,7 @@ entry/build/default/outputs/default/
 ⇒ 两个 HAP 的差异**只有签名块与 `.pages.info`**，内容零差异。
 这条对"签名没改内容"是个有用的断言。
 
-⚠️ **该目录会被 `clean` 覆盖**（`AGENTS.md:79`）⇒ **不要当交付物留档**。留档去 `dist/sideload/`。
+⚠️ **该目录会被 `clean` 覆盖**（`AGENTS.md`）⇒ **不要当交付物留档**。留档去 `dist/sideload/`。
 
 ### 8.1 装机（唯一的允许入口）
 
@@ -1726,7 +1726,7 @@ hdc install -r entry\build\default\outputs\default\entry-default-signed.hap
 > **根因（顺序错）**：先刷新了交付包，之后 `check-dead-code` 抓出死代码 → 删掉 → 重新构建。
 > **交付包漏掉了最后一次改动。**
 
-**这条的危险性**：`dist/sideload/` 按 `AGENTS.md:79` 是**交付物**，
+**这条的危险性**：`dist/sideload/` 按 `AGENTS.md` 是**交付物**，
 照它装机等于装旧版；而它比 build 只小 0.8 MB，肉眼与体积都看不出来。
 
 ### 9.2 现在的强制顺序（四步，前两步是断言）
@@ -2545,7 +2545,7 @@ node tools/check-dshm-installer.cjs       # 43 passed（含版本漂移双向用
 | **el1 = 代码与资源** | `/data/storage/el1/bundle/libs/arm64/`（`docs/70:73` 的 `原生库重定向已启用：libs=…` 读数）、`/data/storage/el1/bundle/entry/resources/resfile/…`（`docs/50` E32 的入口脚本路径） | `libs/*.so`、核心 zip、工具链归档、入口脚本、ArkTS 字节码 | **被替换**（这正是要更新的） |
 | **el2 = 用户数据** | `/data/storage/el2/base/haps/entry/files/…`（`docs/device-validation.md:1028`）；`/data/app/el2/100/base/<bundle>/haps/entry/files/…` 是同一处的另一条访问路径（`docs/80:61`） | `dsh/home`（会话/插件/凭据/工作区注册）、`dsh/cores`、`toolchain`、`workspace`、`bin` | **保留** |
 
-**判据与纪律（不可逆，务必遵守）**：`el1` = 代码（可换），`el2` = **用户数据（不可删）**。一律 `hdc install -r <hap>` 覆盖安装，**禁止** `hdc uninstall`。唯一例外是换签名导致覆盖安装失败时的 `hdc uninstall -k <bundle>`，且卸载后**立即验证数据仍在**（`-k` 未在真机验证过）。这条纪律的起因是真实事故：一次排障中的裸 `hdc uninstall` 删掉了 6 个会话、7 个插件、2 个工作区，系统备份为空、**不可恢复**（`docs/80-真机更新与数据保全.md:8-46`、`AGENTS.md:21-25`）。
+**判据与纪律（不可逆，务必遵守）**：`el1` = 代码（可换），`el2` = **用户数据（不可删）**。一律 `hdc install -r <hap>` 覆盖安装，**禁止** `hdc uninstall`。唯一例外是换签名导致覆盖安装失败时的 `hdc uninstall -k <bundle>`，且卸载后**立即验证数据仍在**（`-k` 未在真机验证过）。这条纪律的起因是真实事故：一次排障中的裸 `hdc uninstall` 删掉了 6 个会话、7 个插件、2 个工作区，系统备份为空、**不可恢复**（`docs/80-真机更新与数据保全.md:8-46`、`AGENTS.md`）。
 
 **唯一允许的装机入口**：`tools/update-device.ps1`（它第 0 步会自检脚本自身不含卸载调用，`tools/update-device.ps1:46-70`）。注意它有一个**已知盲点**：装前 `home` 就是空的时候（`ls home | wc -l` 在权限受限的真机上恒返回 0），前后都是 0，检查无法发现丢失，脚本会如实打印 SKIP 而不是 OK（`docs/80:113-116`、`docs/device-validation.md:2244-2253`）。
 
@@ -3292,7 +3292,7 @@ tar -tf <hap> | grep -E "media/(startIcon|logo_dark|foreground|background).png"
 
 **`WEB_TOKEN_MAP` 是一张可枚举的数据表**（`HarmonyTheme.ets:273-295`，21 条）：把官方 Web 的 `--dsw-*` 语义 token 名映射到本层的视觉令牌，每条带一句 `note` 说明"为什么这样对应"（尤其是非 1:1 的地方）。**为什么做成数据而不是注释**：官方 Web 的主题**会变**；写成可枚举的数据，升级时"改了哪几条"是可核对、可测试的（fixture 会检查每条映射都填齐），写在注释里则一定会随代码漂移。
 
-**`HarmonyMaterial.IMMERSIVE_ENABLED = false` 是一个已决策项，不是待办**（`HarmonyTheme.ets:194-216`）：官方「沉浸光感」材质明确要求 `targetAPIVersion >= 26`，而本仓 `compatibleSdkVersion` 固定 `6.1.1(24)`（`README.md:88-90`）。写进代码而不是只写文档的理由：否则半年后总有人问"为什么不用沉浸光感"，或者更糟 —— 有人顺手开一下，写出一个在目标设备上**不生效**的材质。升级路径与要动的三处也写在同处注释里。
+**`HarmonyMaterial.IMMERSIVE_ENABLED = false` 是一个已决策项，不是待办**（`HarmonyTheme.ets:194-216`）：官方「沉浸光感」材质明确要求 `targetAPIVersion >= 26`，而本仓 `compatibleSdkVersion` 固定 `6.1.1(24)`（`README.md`）。写进代码而不是只写文档的理由：否则半年后总有人问"为什么不用沉浸光感"，或者更糟 —— 有人顺手开一下，写出一个在目标设备上**不生效**的材质。升级路径与要动的三处也写在同处注释里。
 
 ### 设计令牌门禁：棘轮，不是一刀切
 
@@ -3338,7 +3338,7 @@ tar -tf <hap> | grep -E "media/(startIcon|logo_dark|foreground|background).png"
 
 **为什么单独一个文件**（`ShellTracks.ets:1-13`）：它回答的是几何/呈现问题，**不是**导航问题 —— 导航状态关心"选中了哪个面板"，这里关心"这条轨道摆在哪"。分开之后 `NavigationState` 不必依赖 `LayoutMode`，两个模型各自都能在最扁平的编译环境里被测。**要紧的一条语义**：这里**只**回答"轨道怎么摆"，**绝不**回答"这个形态要显示哪些栏目"—— 后者若随设备变，四形态就成了四套 UI，而官方 `ui-layout` 是同一套 AppFrame + 面板选择跨设备。
 
-**用户偏好叠在形态默认之上**（`ShellTracks.ets:59-126`）：`sidebarPresentationOf(mode, expanded)`（单栏一律浮层：那个档位没有"展开的侧栏"，按钮也不给）、`sidebarExpandedForMode(mode, stored)`（"没存过"必须按形态给默认）、`sidebarTrackWidthOf(mode, stored)`（panel 240 / rail 56 / 浮层 0）。**为什么要有"没存过"这一档**：侧栏默认展开，而"偏好里没有记录"若直接读成 `false`，就会把"从没设置过"变成"收起"，用户第一次启动只看到一条 rail（`README.md:219` 记录了这条三态问题的处置）。
+**用户偏好叠在形态默认之上**（`ShellTracks.ets:59-126`）：`sidebarPresentationOf(mode, expanded)`（单栏一律浮层：那个档位没有"展开的侧栏"，按钮也不给）、`sidebarExpandedForMode(mode, stored)`（"没存过"必须按形态给默认）、`sidebarTrackWidthOf(mode, stored)`（panel 240 / rail 56 / 浮层 0）。**为什么要有"没存过"这一档**：侧栏默认展开，而"偏好里没有记录"若直接读成 `false`，就会把"从没设置过"变成"收起"，用户第一次启动只看到一条 rail（`README.md` 记录了这条三态问题的处置）。
 
 `LayoutController.ets`（281 行）承担形态 → 几何决策：`decideLayout`（`:239`）/ `decideLayoutWithDetail`（`:248`）/ `concedeDetail`（`:207`，让步链）/ `detailPresentationOf`（`:103`，三值枚举：三栏真右栏 / 双栏侧边浅层面板 / 单栏整页下钻）。**"详情栏呈现"为什么是三值枚举而不是一个布尔**：此前是一个 `detailOverlay: boolean`，语义只覆盖了"单栏下详情不是并排的栏"，**而且没有任何消费点**；于是一个布尔表达不了三种呈现（`LayoutController.ets:83-86`）。
 
@@ -3358,7 +3358,7 @@ tar -tf <hap> | grep -E "media/(startIcon|logo_dark|foreground|background).png"
 
 **响应式：读到非 `@State` 的字段 ⇒ 改它不触发重渲染**（E379，`WebApp.ets:725-735`）：现象是"状态栏变了、鲸鱼不变"。根因是 `fishMarkColor()` 读的是普通 `private` 字段（非响应式），而顶栏底色 `topBarBg` 是 `@State` 所以跟着变 —— "两个值一个响应式、一个不是"的典型症状。修法是引入 `@State themeMode`，与 `systemBarApplied`（幂等闸门，用于"设置失败可重试"）**分成两个字段**。
 
-**浮层用系统形态、遮罩交给系统**（`README.md:135-142`）：半模态一律 `bindSheet`（参数统一由 `harmonySheetOptions` 给），不再手写"整屏 Column + 自制遮罩"。`bindSheet` 是**组件属性**、同一节点只能绑一个 ⇒ 本项目用**单一浮层宿主**：全应用只在根节点挂一次 `bindSheet`，由 `sheetKind()`（**从既有状态派生**，不另立字段）决定显示哪个浮层、`closeSheet()` 一处复位。且**门户必须挂在页面根而不是单栏根节点** —— 那会导致双栏/三栏下浮层够不着（E292，`docs/70:685-691`）。同理**图标只用系统符号**（`SymbolGlyph` 只支持系统预置资源，不引入 Web SVG）—— 这条是 API 约束，不是偏好。
+**浮层用系统形态、遮罩交给系统**（`README.md`）：半模态一律 `bindSheet`（参数统一由 `harmonySheetOptions` 给），不再手写"整屏 Column + 自制遮罩"。`bindSheet` 是**组件属性**、同一节点只能绑一个 ⇒ 本项目用**单一浮层宿主**：全应用只在根节点挂一次 `bindSheet`，由 `sheetKind()`（**从既有状态派生**，不另立字段）决定显示哪个浮层、`closeSheet()` 一处复位。且**门户必须挂在页面根而不是单栏根节点** —— 那会导致双栏/三栏下浮层够不着（E292，`docs/70:685-691`）。同理**图标只用系统符号**（`SymbolGlyph` 只支持系统预置资源，不引入 Web SVG）—— 这条是 API 约束，不是偏好。
 
 ### 本节的验证命令
 
@@ -3424,7 +3424,7 @@ node tools/place-host-app.mjs && node tools/assert-resfile-sync.mjs
 
 ### 1.1 一次真实事故：2026-09-25，不可恢复的数据丢失
 
-**发生了什么**：为"清理环境准备重装"，执行了裸卸载（`AGENTS.md:14`、`docs/80-真机更新与数据保全.md:14`）：
+**发生了什么**：为"清理环境准备重装"，执行了裸卸载（`AGENTS.md`、`docs/80-真机更新与数据保全.md:14`）：
 
 ```powershell
 hdc uninstall com.dshm.dshclient     # ← 裸卸载，默认连数据一起删
@@ -3455,7 +3455,7 @@ hdc uninstall com.dshm.dshclient     # ← 裸卸载，默认连数据一起删
 
 ### 1.2 绝对禁止的命令清单
 
-除非用户**明确说**"全部清掉"，以下命令一律禁止（`AGENTS.md:13-19`、`docs/80:73-77`）：
+除非用户**明确说**"全部清掉"，以下命令一律禁止（`AGENTS.md`、`docs/80:73-77`）：
 
 ```powershell
 hdc uninstall com.dshm.dshclient                    # ✗ 禁止：默认连数据一起删
@@ -3465,11 +3465,11 @@ hdc shell "rm -rf /data/app/el2/100/base/com.dshm.dshclient/*"   # ✗ 禁止
 hdc shell "rm -rf .../haps/entry/files/dsh/home"                 # ✗ 禁止
 ```
 
-`AGENTS.md:18` 那条要特别留意：**删 `files/dsh/home` 与卸载等价**——那下面就是会话、插件行与配置。
+`AGENTS.md` 那条要特别留意：**删 `files/dsh/home` 与卸载等价**——那下面就是会话、插件行与配置。
 
 ### 1.3 判断依据：这条命令会不会碰 el2
 
-这条判据记住就不会犯错（`AGENTS.md:45-48`、`docs/80:56-67`）：
+这条判据记住就不会犯错（`AGENTS.md`、`docs/80:56-67`）：
 
 | 路径 | 内容 | 覆盖安装（`install -r`）后 |
 |---|---|---|
@@ -3492,7 +3492,7 @@ hdc shell "rm -rf .../haps/entry/files/dsh/home"                 # ✗ 禁止
 hdc install -r <hap 路径>
 ```
 
-`-r` = replace。同签名覆盖安装只替换 el1 的代码与资源，不动 el2 的用户数据（`AGENTS.md:29-34`）。
+`-r` = replace。同签名覆盖安装只替换 el1 的代码与资源，不动 el2 的用户数据（`AGENTS.md`）。
 
 **兼容性边界**（"保留会话与插件"的前提是插件与核心版本不冲突，`docs/80:137-143`）：
 
@@ -3550,13 +3550,13 @@ hdc install -r <hap 路径>
 | 用户明确说"全部清掉"/"重新装" | 可卸载 | **先复述确认** |
 | 换签名（调试证书 → 发布证书）导致覆盖安装失败 | `hdc uninstall -k <bundle>` | 卸载**立即验证数据仍在**，不可假定 `-k` 生效 |
 
-（`AGENTS.md:36-43`、`docs/80:79-87`）
+（`AGENTS.md`、`docs/80:79-87`）
 
 两点必须说清：
 
 - `-k`（`--keep-data`）**确实存在**（`hdc uninstall -h` 可见，`docs/80:86`），
   但**未在真机上验证过** ⇒ 不能假定它一定保留成功（`docs/80:86-87`）。**本章未复验**这一点。
-- 即使落在例外里，也要**先问用户**，不自行决定（`AGENTS.md:43`）。
+- 即使落在例外里，也要**先问用户**，不自行决定（`AGENTS.md`）。
   `update-device.ps1` 在安装失败时也是这么做的——它打印"若报签名冲突：先问用户，不要自行卸载"
   （`tools/update-device.ps1:129-131`）。
 
@@ -3589,7 +3589,7 @@ hdc shell "grep -E 'exec 探测：' /data/app/el2/100/base/com.dshm.dshclient/ha
 > **为什么第 3 步不能省**：本项目反复出现"门禁全绿但某个工具静默坏掉"的形态。
 > 例如 `web_fetch` 一度打不开任何网页、`web_search` 却正常——同一条核心树、
 > 同一个本地 HTTP 服务，只有 `--jitless` 一个变量不同
-> （`README.md:63-66`、`docs/70:24-30`）。
+> （`README.md`、`docs/70:24-30`）。
 
 ### 1.8 数据保全的"反例识别"能力
 
@@ -3864,7 +3864,7 @@ dist/acceptance/20260930-120131/
 
 ### 2.5 回归纪律：不允许"修好后面、前面又坏"
 
-三条（`AGENTS.md:52-57`、`docs/80:150-176`）：
+三条（`AGENTS.md`、`docs/80:150-176`）：
 
 1. **改动前**先跑基线并记录结果；
 2. **改动后**跑同一批，逐项对比；**任何 ok → fail 必须当场修，不许延后**；
@@ -4348,7 +4348,7 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 
 | 类别 | 含义 | 判据 |
 |---|---|---|
-| **必跑（AGENTS.md）** | `AGENTS.md:59-70` 明文列出的回归链 | 任何改动后都要跑 |
+| **必跑（AGENTS.md）** | `AGENTS.md` 明文列出的回归链 | 任何改动后都要跑 |
 | **本轮新增 / 本轮收紧** | 本轮（2026-09-27 收尾批）引入或改判据的门禁 | 按引入批次标注 |
 | **环境受限（exit 3）** | **"没跑成"不是"通过"**——脚本以退出码 3 明确区分 | 见 §2.4 |
 | **既有红项** | 本机/本环境下稳定非 0，且已在文档登记 | 见 §2.5，**不许写成通过** |
@@ -4371,7 +4371,7 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 | `assert-python-bridge.mjs` | 内嵌 Python 桥（`entry/src/main/cpp/python_runner.cpp` + el1 `libpython` + `main.js` 自检 + 垫片文案）的结构锁，含 `pipMode` 不再生成 `-V\|--version` 分支 | 改 Python 桥或垫片 | `python3` / `pip3` 在端侧整条链不可用（长链中任一环被平台拒绝的表现都是"工具失败"） | **必须** |
 | `assert-fs-search-fallback.mjs` | fs-search 降级 patch（rg 被拒 ⇒ 切 `find`/`grep`）的**三层防线**：结构（五个注入函数 + 两段替换 + 旧段已消失）、语法（`vm.SourceTextModule` 全文 ESM 解析）、行为（从注入块提纯函数跑参数转换 / 花括号展开 / NDJSON 转换） | 改 `pack-core.mjs` 的 `patchFsSearchFallback` 之后（须在 pack 之后跑） | `glob`/`grep` 工具恒 `SEARCH_FAILED`（曾是长期症状），而"Host 起来了、模型能回话"完全掩盖这条路径 | **必须** |
 
-> `AGENTS.md:69` 另列 `.\tools\device-acceptance.ps1`（真机端侧验收）。它采集设备侧持久日志、各页面布局
+> `AGENTS.md` 另列 `.\tools\device-acceptance.ps1`（真机端侧验收）。它采集设备侧持久日志、各页面布局
 > dump 与截图，生成报告骨架，并**自动判定 5 项可脚本化的读数**（设备在线 / 核心已启动并读出运行核心版本 /
 > 客户端已接入 / 平台标识 = ohos / 本次启动后无异常退出，`tools/device-acceptance.ps1:237-244`）；
 > **界面行为类项不做判定**，留给人按 `docs/50-端侧核心运行架构.md` §12.9 / §14 勾选。
@@ -4429,7 +4429,7 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 ### 2.3 分类小结
 
 - **AGENTS.md 明文必跑：15 条 node + 真机 `device-acceptance.ps1`**（权威清单始终是 `AGENTS.md` 的
-  「必跑的回归门禁」块；本条**不再钉行号**——2026-10-05 复核时发现旧写法把 `AGENTS.md:62-68` 写死，
+  「必跑的回归门禁」块；本条**不再钉行号**——2026-10-05 复核时发现旧写法把 `AGENTS.md` 写死，
   清单每加一条就过期一次，而审核方无法分辨"过期"与"漏写"）。
 - **本轮新增：5 条**——`check-icon-assets`、`check-toolchain-sign`（更早批次），以及 2026-09-28 收尾批的
   `check-skill-sync.cjs`（P0-1）、`check-compat-exemption.cjs`（P1-3）、`check-doc-refs.mjs`（文档引用）；
@@ -5212,11 +5212,11 @@ grep -n "isPropDefault" tools/check-dead-handlers.mjs            # E-DH1
 
 | # | 纪律 | 位置 | 为什么是硬约束 |
 |---|---|---|---|
-| 1 | **真机数据保全**：绝对禁止任何会删设备用户数据的命令；一律 `hdc install -r` | `AGENTS.md:7-48` | **真实事故，不可逆**：一次裸 `hdc uninstall` 删掉 6 个历史会话 / 7 个插件 / 2 个工作区，系统备份为空、**不可恢复**。更严重的是事后把它写成了正常步骤（`docs/80-真机更新与数据保全.md:8-44`） |
-| 2 | **回归纪律**：改动前跑基线并记录；改动后跑同一批、逐项对比；**任何 ok → fail 必须当场修，不许延后** | `AGENTS.md:52-57` | 不允许"修好后面、前面又坏" |
-| 3 | **临时实验必须在同一次改动内还原**，并把验证到的结论写进**代码注释**，而不是留下实验代码 | `AGENTS.md:56-57`、`docs/80:155-159` | 曾差点留下实验残留（定位 `javaScriptProxy` 双桥覆盖时交换过注册顺序） |
-| 4 | **产物归置**：构建产物不给留档、交付包落 `dist/sideload/`、文档编号连续、**一次性排查脚本用完即删** | `AGENTS.md:74-81` | 见 §5.3 的现状 |
-| 5 | **判据以 el1/el2 为界**：`/data/app/el1/…` = 代码资源（可换）；`/data/app/el2/…` = **用户数据**（任何删除都不可逆） | `AGENTS.md:45-48` | 这是"这条命令安不安全"的唯一判据 |
+| 1 | **真机数据保全**：绝对禁止任何会删设备用户数据的命令；一律 `hdc install -r` | `AGENTS.md` | **真实事故，不可逆**：一次裸 `hdc uninstall` 删掉 6 个历史会话 / 7 个插件 / 2 个工作区，系统备份为空、**不可恢复**。更严重的是事后把它写成了正常步骤（`docs/80-真机更新与数据保全.md:8-44`） |
+| 2 | **回归纪律**：改动前跑基线并记录；改动后跑同一批、逐项对比；**任何 ok → fail 必须当场修，不许延后** | `AGENTS.md` | 不允许"修好后面、前面又坏" |
+| 3 | **临时实验必须在同一次改动内还原**，并把验证到的结论写进**代码注释**，而不是留下实验代码 | `AGENTS.md`、`docs/80:155-159` | 曾差点留下实验残留（定位 `javaScriptProxy` 双桥覆盖时交换过注册顺序） |
+| 4 | **产物归置**：构建产物不给留档、交付包落 `dist/sideload/`、文档编号连续、**一次性排查脚本用完即删** | `AGENTS.md` | 见 §5.3 的现状 |
+| 5 | **判据以 el1/el2 为界**：`/data/app/el1/…` = 代码资源（可换）；`/data/app/el2/…` = **用户数据**（任何删除都不可逆） | `AGENTS.md` | 这是"这条命令安不安全"的唯一判据 |
 
 ### 5.2 来自 `docs/README.md` 的 9 条纪律
 
@@ -5240,7 +5240,7 @@ grep -n "isPropDefault" tools/check-dead-handlers.mjs            # E-DH1
 
 ### 5.3 专项纪律一：一次性排查脚本"用完即删"
 
-**AGENTS.md 原文**：`| 一次性排查脚本 | 用完即删 | 不要把临时诊断脚本留在 tools/ |`（`AGENTS.md:81`）。
+**AGENTS.md 原文**：`| 一次性排查脚本 | 用完即删 | 不要把临时诊断脚本留在 tools/ |`（`AGENTS.md`）。
 
 **现状核查（2026-09-27）**——以下脚本按此条纪律属于"用完即删"或"来源存疑"：
 （计数口径：`tools/` **顶层文件 64 个**；递归含 `lib/`、`electron-runtime/`、`node-runtime/` 三个子目录共 **92 条** git 跟踪文件。2026-09-27 那次记的"89"未注明口径、事后不可复核，已按 `git ls-tree -r --name-only HEAD tools` 的数替换。）
@@ -5264,7 +5264,7 @@ grep -n "isPropDefault" tools/check-dead-handlers.mjs            # E-DH1
 
 ### 5.4 专项纪律二：产物归置表
 
-`AGENTS.md:74-81` 的归置表（判据同样写在 `README.md:92-102` 与 `.gitignore:13-45`）：
+`AGENTS.md` 的归置表（判据同样写在 `README.md` 与 `.gitignore:13-45`）：
 
 | 类型 | 位置 | 说明 |
 |---|---|---|
@@ -5388,7 +5388,7 @@ grep -c "DSHM_ORIGIN_LIST\|HDSH_ORIGIN_LIST" tools/pack-core.mjs
 | `tmp/`（仓库根） | **检查时点为空** | `Get-ChildItem tmp -Force -Recurse \| Measure-Object` ⇒ 0 |
 | `workspace/`（仓库根） | **不存在**（从未在根下建过；端侧工作区在**设备沙箱**里，见第三章 §7「沙箱布局」= `docs/90:2477`） | `Test-Path workspace` ⇒ False |
 | 本轮门禁探针产物 | 全部落在 **`dist/gate-probe/`**（退出码读数、旧版检测器、注入脚本） | 符合"临时过程产物一律只落 `dist/`"（`docs/README.md:29`） |
-| `dist/clt-shim/`（§2.4 的 junction shim） | **已删**（用完即删，`AGENTS.md:81`） | `Test-Path dist/clt-shim` ⇒ False |
+| `dist/clt-shim/`（§2.4 的 junction shim） | **已删**（用完即删，`AGENTS.md`） | `Test-Path dist/clt-shim` ⇒ False |
 | `dist/localtest/*` 脚手架 | 各门禁自己的 scratch HOME/sandbox（`model-sandbox` 等 13 个） | 属**可再生**产物，随 `dist/` 一起被 `.gitignore` 忽略 |
 
 **⚠️ 两点如实说明**：
@@ -5447,7 +5447,7 @@ grep -c "DSHM_ORIGIN_LIST\|HDSH_ORIGIN_LIST" tools/pack-core.mjs
 
 `tools/check-layout-fixtures.mjs.bak`（2026-09-25，124824 B）曾在
 `docs/device-validation.md:4289` 与 `:4545` **两次**被登记为"来源存疑、无引用、是否删由项目方定"。
-它不属于一次性排查脚本，而是**被取代的检测器快照**；按 `AGENTS.md:81`
+它不属于一次性排查脚本，而是**被取代的检测器快照**；按 `AGENTS.md`
 （"一次性排查脚本用完即删，不要把临时诊断脚本留在 `tools/`"）它**不该**留在 `tools/` 里——
 留在那里的最差后果是**被后来者当成"门禁"**。
 

@@ -533,8 +533,8 @@
 - **2026-09-30 已修**（本轮改动，非审核动作）：脚本重写为 307 行，头部注释如实写明判据与坑（`tools/device-acceptance.ps1:13-25`），自动判定由 6 项改为 **5 项**（`tools/device-acceptance.ps1:240-244`）——`DSHM-AUTH connect` 与 `files changes opened` 两条因产出点结构性不可达/无稳定信号而**撤销或降级为人工项**；`docs/50` 对应表行同步（§15.3）。本报告其余条目仍按"只审不改"保留。
 
 **6-L2 功能接线计数的三处互斥数字（`docs/50` 17、README 16→17，实测 18）**
-- 位置：`docs/50-端侧核心运行架构.md:1338`；`README.md:208`、`:216`、`:228`
-- 实测 `node tools/check-feature-wiring.mjs` → exit 0，`# 功能接线回归（扫描 135 个文件，18 个功能，1 条反面规则）`；而 `docs/50:1338` 写「对 **17 个**已实现功能检查」，`README.md:216` 写「16 → 17」、`:208` 写「第 16 条」、`:228` 又写「**第 18 项**」⇒ README **内部自相矛盾**，两文档都停在 17。
+- 位置：`docs/50-端侧核心运行架构.md:1338`；`README.md`、`:216`、`:228`
+- 实测 `node tools/check-feature-wiring.mjs` → exit 0，`# 功能接线回归（扫描 135 个文件，18 个功能，1 条反面规则）`；而 `docs/50:1338` 写「对 **17 个**已实现功能检查」，`README.md` 写「16 → 17」、`:208` 写「第 16 条」、`:228` 又写「**第 18 项**」⇒ README **内部自相矛盾**，两文档都停在 17。
 - 建议：三处改为"以 `check-feature-wiring.mjs` 输出为准（当前 18）"，或把计数从文档里去掉，只留命令。
 
 **6-L3 `tools/dshtest.py` 的 `clear()` 是全仓唯一会删 el2 路径下文件的 helper（无护栏）**
@@ -734,7 +734,7 @@ grep `runReplayProbe|runTruncateProbe|runMicProbe|runHmsProbe|runTtsProbe|selfTe
 **10.2.1 官方桌面壳注册并处理 `dsh://` 深链，端侧完全没有任何深链注册**
 - 位置：`entry/src/main/module.json5:183-192`（EntryAbility 的 `skills` 只有 `entities:["entity.system.home"]` + `actions:["ohos.want.action.home"]`，无 `uris`/scheme）
 - 证据：全仓 grep `dsh://|setAsDefaultProtocolClient` 共 72 命中，**无一处是深链**（命中全是 `color-scheme`（`entry/src/main/ets/pages/WebApp.ets:334-403`）与 URL scheme 解析：`connection/src/main/ets/protocol/HostAddress.ets:59-64`、`platform/src/main/ets/system/OpenLink.ets:23` 只放行 http/https）；端侧核心树 grep `dsh://open` **零命中** ⇒ 代偿路径也不存在；`entry/src/main/ets/pages/WebApp.ets:205-221` 注释自述登录只能在系统浏览器完成、`loginSource=desktop` 时 loopback callback 只回 HTTP 204
-- 官方对照：`apps/desktop/src/main.ts:1228` `if (app.isPackaged || DSH_DESKTOP_DEV_APP==='1') app.setAsDefaultProtocolClient('dsh')`、`:1229-1232` `app.on('open-url')` 仅在 `url === 'dsh://open' || 'dsh://open/'` 时 `focusPrimaryWindow()`；官方 README（`README.md:473` / `README.zh.md:475`）明写完成页的 `dsh://open` 负责把客户端置前
+- 官方对照：`apps/desktop/src/main.ts:1228` `if (app.isPackaged || DSH_DESKTOP_DEV_APP==='1') app.setAsDefaultProtocolClient('dsh')`、`:1229-1232` `app.on('open-url')` 仅在 `url === 'dsh://open' || 'dsh://open/'` 时 `focusPrimaryWindow()`；官方 README（`README.md` / `README.zh.md:475`）明写完成页的 `dsh://open` 负责把客户端置前
 - 为什么算问题：登录闭环少最后一环（回调后把应用置前）。鸿蒙并非无对应 API（`skills.uris` + `want.uri` 即可实现）⇒ **是能力缺口，不是平台边界**
 - confidence：confirmed
 - 验证方法：`module.json5` 的 `EntryAbility.skills` 加 `uris`（scheme=`dsh`），`onNewWant`/`onCreate` 读 `want.uri === 'dsh://open'` 复用已有 `ensureWindowShown()`/`restoreMainWindow()`；先验鸿蒙 2in1 是否允许注册自定义 scheme、浏览器侧能否唤起

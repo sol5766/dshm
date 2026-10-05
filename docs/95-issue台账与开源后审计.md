@@ -153,7 +153,7 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 
 1. `cordis.patch.yml` ⑦/⑩：删掉"不用 `rename`（未证实）/ 就地写**非原子**"——实现是 `.partial` + `rename`（**原子**）。
 2. `main.js:1690`/`:1729-1741` + profile `:156-158`："本机（手机档）`ash=denied`"是**档位指代漂移** ⇒ 改为档位相关（手机档不可用 / PC·2in1 档实测可用）。
-3. `README.md:47`/`:68`/`:202`：权限声明由"10 项普通、不申请任何 ACL"改为事实——**11 项 = 6 普通 + 5 ACL**（`module.json5` 实测）。
+3. `README.md`/`:68`/`:202`：权限声明由"10 项普通、不申请任何 ACL"改为事实——**11 项 = 6 普通 + 5 ACL**（`module.json5` 实测）。
 4. `parity-matrix.md:53`：设备验证轴由 `PENDING`（"本环境无真机"）改为 `PASS` + 逐条口径说明。
 5. `parity-matrix.md:197`/`:199`/`:200`：核心包由 `0.2.0-rc.2`/78,081,448 B/29351 条目 → **`0.2.1-alpha.1`/84,696,776 B/30,462 条目**；"29006 个文件" → **27,041 个文件**；协议契约示例版本同步。
 6. `docs/90`：见 §3.2 的 6/7/8。
@@ -329,3 +329,29 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 | `fetch-shim.js` 的**孤儿 JSDoc** | ✅ 已修：`installFetchShim` 的文档块此前紧贴在 `defineGlobalShim` 上方（`@returns` 与实际函数对不上）⇒ 移回它描述的函数上方，并把返回值写成 `{boolean}` |
 | `main.js` 同一噪声**两种措辞** | ✅ 已修：抽成 `diagKnownJitlessUndiciNoise()`，两个进程级入口共用（此前"已由垫片接管" vs "已由 fetch 垫片接管"两种写法会让日志检索漏项） |
 | 原生库路径**两份实现** | ✅ 已修：`main.js` 的 `NATIVE_LIBS` IIFE 与 `jitless-env.cjs:resolveNativeLibsDir()` 各写一份 ⇒ 改为调用同一份实现（`NATIVE_LIBS` 名字保留，另有 5 处用它拼路径）；漂移的后果本来是"垫片按 A 找库、python 桥按 B 拼路径"，只在真机 `dlopen` 失败时才暴露 |
+
+---
+
+## 9. 第四轮（2026-10-05 夜）
+
+### 9.1 文档引用门禁补判据 F：不许对 `AGENTS.md`/`README.md` 写行号
+
+审计 §3.2 第 6 项的后半（"`check-doc-refs.mjs` 明文排除 `AGENTS.md`/`README.md` ⇒ 那 16 处失效引用
+无门禁可挡"）**已堵上根因**：
+
+- **新判据 F「不可核对」**：出现 `` `AGENTS.md:N` `` / `` `AGENTS.md:N-M` `` / `` `README.md:N` `` 即报错
+  —— 这类引用既不是 `docs/` 内互引、也不在被引判定集内 ⇒ 行号无人核对、必然无声腐烂。
+- 同时把 `AGENTS.md` / `README.md` 作为**源**纳入扫描（它们引用 `docs/NN-*.md` 从此也要核对）；
+  两者仍**不是被引目标**，所以对它们写行号由判据 F 拦下。
+- **存量 42 处已清**：`docs/90` **36** 处 · `docs/review-report-2026-09-29.md` 3 处 ·
+  `docs/parity-matrix.md` 1 处 · `docs/functional-test-report.md` 1 处 · `docs/95` 1 处。
+  清理用 **Node 一次性脚本**（刻意不用 PowerShell 做文本往返：PS 5.1 按 GBK 解码 UTF-8，
+  上一轮有过"把一个 .mjs 毁成单行双重编码"的实例）；脚本用完即删。
+- 自检加 3 个用例。**附带踩坑**：自检样例数组的**下标 = 行号**，新样例必须加在**末尾**
+  —— 插在中间会让后面每个断言整体位移（本次踩过一次，3 个用例转红），这条已写进代码注释。
+- 验证：门禁 exit 0（扫描 **25** 个文档 / **254** 条带行号引用）；`--self-test` 16 个样例全过。
+
+### 9.2 全量门禁普查（第二次）：43 个脚本，42 绿 / 1 非零
+
+第四轮改动后复跑（明细 `dist/_gate-sweep2.json`）：**42 exit 0 / 1 exit 1**，与第三轮读数**一致**
+⇒ 无回归。唯一非零仍是 `check-model-roundtrip.mjs`（缺 koffi 的环境依赖，`--no-prompt` exit 0）。
