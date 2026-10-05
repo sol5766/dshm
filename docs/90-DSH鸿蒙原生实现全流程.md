@@ -3633,7 +3633,7 @@ hdc shell "ls /data/app/el2/100/base/com.dshm.dshclient/haps/entry/files/dsh/hom
 ### 2.1 AGENTS.md 规定的必跑门禁（逐个说明它在守什么）
 
 **清单的权威位置是 `AGENTS.md` 的「必跑的回归门禁」块**（本节只转抄并逐条解释；
-2026-10-05 更新为 14 条 node + `device-acceptance.ps1`）：
+2026-10-05 更新为 15 条 node + `device-acceptance.ps1`）：
 
 ```powershell
 node tools/assert-cli-shim.mjs
@@ -3715,7 +3715,7 @@ node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pa
 > （本文件 §8.13 已总结过这个教训）。**2026-10-05 复核的当前值**：`assert-exec-fix` **38** 项、
 > `assert-fs-search-fallback` **58** 项、`assert-resfile-sync` **13** 件快照、`check-dead-code`
 > **101 文件 / 2275 处声明**、`compat-drift` **140** 端点；`AGENTS.md` 的必跑清单现为
-> **15 项 = 14 条 node + `device-acceptance.ps1`**（本次 18 条实测全绿）。
+> **16 项 = 15 条 node + `device-acceptance.ps1`**（本次 19 条实测全绿）。
 
 | 脚本 | 退出码 | 读数摘要 |
 |---|---|---|
@@ -3892,7 +3892,7 @@ dist/acceptance/20260930-120131/
 ### 2.7 本节验证方式
 
 ```powershell
-# 1) 门禁清单（以 AGENTS.md 的「必跑的回归门禁」为准，当前 15 项 + 结构性守卫），逐条记退出码
+# 1) 门禁清单（以 AGENTS.md 的「必跑的回归门禁」为准，当前 16 项 + 结构性守卫），逐条记退出码
 foreach ($g in @('assert-cli-shim.mjs','assert-resfile-sync.mjs','check-parity.mjs','compat-drift.mjs',
                  'assert-exec-fix.mjs','assert-python-bridge.mjs','assert-fs-search-fallback.mjs')) {
   node "tools/$g"; "  -> $g exit=$LASTEXITCODE"
@@ -4252,7 +4252,7 @@ hdc fport tcp:3120 tcp:3120 && curl -s -o /dev/null -w '%{http_code}\n' http://1
 grep -n "install -r" tools/update-device.ps1            # 装机只有覆盖安装
 grep -cn "uninstall" tools/update-device.ps1            # 期望：仅注释/自检模式串
 
-# ② 门禁（AGENTS.md 清单，当前 15 项）
+# ② 门禁（AGENTS.md 清单，当前 16 项）
 node tools/assert-cli-shim.mjs
 node tools/assert-resfile-sync.mjs
 node tools/check-parity.mjs
@@ -4355,7 +4355,7 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 以及与之同族的 `arch-check.mjs` / `compat-drift.mjs` / `neg-test-piai.mjs`。
 **"是否必须绿"一列**取三值：**必须**（改动后即须为 0）、**条件**（只在特定改动面或特定设备上必须绿）、**否**（是审计/工具，不是门禁）。
 
-#### 2.2.1 AGENTS.md 强制必跑（**当前 15 条** = 14 条 node + `device-acceptance.ps1`；下表只逐条解释了最早的 7 条）
+#### 2.2.1 AGENTS.md 强制必跑（**当前 16 条** = 15 条 node + `device-acceptance.ps1`；下表只逐条解释了最早的 7 条）
 
 | 文件名 | 守什么 | 触发条件 | 失败意味着什么 | 是否必须绿 |
 |---|---|---|---|---|
@@ -4424,7 +4424,7 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 
 ### 2.3 分类小结
 
-- **AGENTS.md 明文必跑：14 条 node + 真机 `device-acceptance.ps1`**（权威清单始终是 `AGENTS.md` 的
+- **AGENTS.md 明文必跑：15 条 node + 真机 `device-acceptance.ps1`**（权威清单始终是 `AGENTS.md` 的
   「必跑的回归门禁」块；本条**不再钉行号**——2026-10-05 复核时发现旧写法把 `AGENTS.md:62-68` 写死，
   清单每加一条就过期一次，而审核方无法分辨"过期"与"漏写"）。
 - **本轮新增：5 条**——`check-icon-assets`、`check-toolchain-sign`（更早批次），以及 2026-09-28 收尾批的
@@ -5348,7 +5348,7 @@ grep -n "includes('HDSH_.*')" tools/pack-core.mjs      # 期望：每处新名�
 ### 5.7 本节验证方式
 
 ```bash
-# ① AGENTS.md 必跑链是否完整（14 条 node + 真机）
+# ① AGENTS.md 必跑链是否完整（15 条 node + 真机）
 grep -n "node tools/\|device-acceptance" AGENTS.md
 
 # ② 文档与配置对账：纪律里说的每一条都要能在配置里找到

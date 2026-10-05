@@ -449,6 +449,11 @@ devecocli build（全量）                                                     
 | `dshm-window` 窗口记忆 | 无 | `platform/window/WindowMemory.ets` | 由 `EntryAbility` 驱动 | 无 | DONE | DONE | DONE | DONE | DONE |
 | `dshm-shortcuts` 快捷键 | 无（Web 用浏览器快捷键） | `ui/Shortcuts.ets`（13 个规格，含不可绑定项标记） | `view/ShortcutKeys.ets` + `Index` 分派 | 无 | BOUNDARY | DONE | DONE | DONE | PARTIAL |
 | `dshm-a11y` 无障碍 | 无（Web 走 ARIA） | `accessibilityText` + `Sz.TOUCH_MIN` | 各 Pane | 无 | PARTIAL | PARTIAL | PARTIAL | PARTIAL | PARTIAL |
+| `dshm-tool-fs-remove` 删除 / 移动 / 发布 | 无（官方 `tool` 面没有 `remove`/`move`/`publish`；端侧也没有可用的 shell 兜底） | `hostcore/plugins/dshm-tool-fs-remove`：`.partial` + `rename` **原子发布**、`displayPath` 与 `processPath` 分离（不给模型看进程路径）、删目录需 `recursive`、`publish` 目标根只认 `DSHM_PUBLIC_DOWNLOAD`（空则如实报错） | 官方工具卡片（无自带界面） | `ctx.fs` 工具契约（`tool-fs-remove` 三个工具） | DONE | DONE | DONE | DONE | DONE |
+| `dshm-fs-write-nonchmod` 去 chmod 写入后端 | 无（上游 `dsh-fs-local` 的 `writeFileAtomic()` 三步都 `chmod`，在鸿蒙 hmdfs 的用户可见目录上必 `EPERM`） | `hostcore/plugins/dshm-fs-write-nonchmod`：`extends SandboxedFileSystem`、**只重写 `writeText`/`editText` 的落盘一步**（同目录 `.partial` → `writeFile` → `close` → `rename`，全程不 `chmod`）；其余方法与返回结构与上游逐字同形 | 无（透传官方） | `ctx.fs` 契约（对照表见 `docs/44`） | DONE | DONE | DONE | DONE | DONE |
+| `dshm-workspace-claim` 启动期工作区认领 | 无（官方 `recentWorkspace` 由用户在 UI 里显式选择驱动；端侧首启没有任何工作区 ⇒ "新建会话"无处可落） | `hostcore/plugins/dshm-workspace-claim`：把 ArkTS 认领的 `Download/<包名>/` 登记进工作区注册表（进程内幂等 + 每次启动重认）；**已知局限**（官方 `recentWorkspace` 会覆盖显示值）登记在 `cordis.patch.yml:477-487` | 无 | 工作区注册表 | DONE | DONE | DONE | DONE | DONE |
+| `dshm-office-system-preview` Office 预览（系统预览窗） | 有（官方侧栏用**内置**渲染器预览 `doc/docx/ppt/pptx`） | `hostcore/plugins/dshm-office-system-preview`：`priority:"extension"` + `loading:"bytes-complete"`，把文件交给**系统 PreviewKit 弹窗** | 系统预览窗（`platform/system/FilePreview.ets`） | 侧栏 `open-in-app` 契约 | PARTIAL | PARTIAL | PARTIAL | PARTIAL | PARTIAL |
+| `dshm-ptc-runtime-inproc` 同进程 PTC 运行时 | 有（官方 `@deepseek-ai/dsh-ptc-runtime-node`） | 官方实现在端侧**结构性不可用**（`stripTypeScriptTypes` 走 SWC **wasm**；`spawn` 子 Node 必 `EACCES`——`process.execPath` 是 `/system/bin/appspawn`）⇒ `hostcore/plugins/dshm-ptc-runtime-inproc`：`ctx.ptcRuntime` 服务 + `node:vm` 舞台（日志/超时/输出上限）+ **纯 JS** erasable-TS 擦除（vendor `@babel/standalone@7.28.4` 3,069,546 B，带 sha256 溯源） | 无（`run_code` 的工具卡片复用官方渲染） | `ctx.ptcRuntime` 契约（`resolve`/`run`） | DONE | DONE | DONE | DONE | DONE |
 
 ---
 
@@ -456,15 +461,18 @@ devecocli build（全量）                                                     
 
 | 状态 | 行数 |
 |---|---|
-| `DONE` | 14 |
-| `PARTIAL` | 31 |
+| `DONE` | 18 |
+| `PARTIAL` | 32 |
 | `BOUNDARY` | 3 |
 | `TODO` | 2 |
-| **合计** | **50** |
+| **合计** | **55** |
 
-> 统计口径：**矩阵 §4 各行 `Status` 列的计数**（50 行 = 39 个官方能力面 id + 11 个 `dshm-` 端侧独有行）。
+> 统计口径：**矩阵 §4 各行 `Status` 列的计数**（55 行 = 39 个官方能力面 id + **16 个 `dshm-` 端侧独有行**）。
 > **纪律（docs/README 第 8 条）：统计前先定口径，并把口径写出来。** 本节数字由 `node tools/check-parity.mjs` 实算核对——
 > 首版手写的统计（18/22/4/2）与实算不符，正是这条纪律要防的错误；门禁现在会直接报出差额。
+> **2026-10-05 补**：`dshm-` 行由 11 增到 16（补登 10/03 起的五个端侧能力面），同时给门禁加了
+> **不变式 A2**——`REQUIRED_LOCAL_SURFACE` 里列出的端侧能力面必须各有行，否则红。此前"新增端侧能力"
+> 没有任何门禁要求登记，这五行全是审计时才补上的。
 
 ---
 
@@ -492,6 +500,7 @@ devecocli build（全量）                                                     
 
 | id | 缺什么（对等差距） | 下一步（归属） |
 |---|---|---|
+| `dshm-office-system-preview` | 端侧**没有 Office 渲染器**，`doc/docx/ppt/pptx` 交**系统预览窗**（PreviewKit 的 `openFilePreview`）⇒ **系统不支持的类型 / 没有可用预览器时只能如实报"不可用"**，这不是本应用的渲染实现；预览窗是系统 UI，工具栏与返回行为不受应用控制。`xls/xlsx/csv/tsv` 仍走内置 Excel 预览（纯客户端，无此限制） | 不追平（端侧不自建 Office 渲染器）；随平台预览器覆盖范围演进自动受益。已写进 `dist/sideload/README.md` 的「已知边界」 |
 | `layout` | ⓪ **右栏面板体系已落地（P3-1）**：`selectedRightPanel` 此前在模型里躺了好几轮没有消费者（右栏无条件渲染 `DetailPane`）——现在 `RightbarShell` 按**面板 id** 分派、标题取 descriptor 的 `label`，选择经注册表校验。**同时如实登记了缺口的真实位置**：官方那六个候选（文件/轨迹/工具/子代理/交付物/预览）**席位在、内容视图没做**，按 E110 的口径一律 `available: () => false`（不能填的入口不进选择集，避免"点进去是空面板"）；**右栏面板体系已收口（P3-2…P3-6）**：官方六个候选**全部接上**——**「文件」**（`FileTreePane`，与工作区页签共用）、**「轨迹」（P3-6）**（`TimelineOverview`，与主区轨迹视图共用；右栏只放总览，见模型注释）、**「工具」**（`ToolCard`，与过程流共用）、**「子代理」**（`SubagentCard`）、**「交付物」**（`DeliverableCard`）与 **「预览」**（`FilePreviewPane`）；另有本仓特有的 **「详情」**（`right.detail` = 已投影的 sections 清单，属官方 `conversation.detail` 那一类，**不冒充**「文件」）⇒ 共七个可用面板。可用面板 ≥2 ⇒ 标题行出现**切换器**（只有一个可用面板时不画）。**仍缺**：侧边面板滑入动画、面板自身拖拽调宽、单栏 Sheet 里的切换器。⇒ 后续把某个候选的内容视图做出来，只需把它的 `available` 改成 true，面板体系不用动① **拖拽调宽手柄已落地**（P3）：此前 `decideLayoutWithDetail` 那条"用户想要的宽度"路径在模型里做好、也有 fixture，**却没有 UI 去产生这个宽度**（`decideLayout()` 直接用常量）。现在三栏下栏间把手可拖，宽度存进 `detailWidthDesired`；拖拽策略（可用空间 `detailRoomOf`、夹取不跳变、**左拖变宽**的方向规则、记忆值收窄）全在纯模型里，25 条断言覆盖 ② **宽度记忆已落地**：`platform/LocalPrefs` 只存/取一个数字（平台层**不许**依赖 appstate，判定规则留在模型 `detailWidthOf`），启动读回、拖拽结束落盘；落盘失败给一句轻提示而不是静默失效 ③ **平板侧边浅层面板已落地**（P3 §12）：此前双栏与手机一样弹半模态 Sheet，把列表整个盖住，"边看列表边看详情"这件事就没了。现在详情呈现由模型的三值枚举决定并**真的被视图消费**——`DetailPresentation`：三栏=真右栏 / 双栏=侧边浅层面板 / 单栏=整页（顺带**删掉了此前那个`detailOverlay: boolean`：它算了却没有任何消费点，视图用自己的 `sheetKind()` 判断）。**仍缺**：侧边面板的**滑入动画**（transition 必须挂在面板自身的根上，而它与三栏右栏共用同一个builder，值得专门做而不是顺手加）、侧边面板**自身的拖拽调宽**（目前只沿用记住的宽度）、把手的**键盘调整**（聚焦后用方向键） ④ **待决（需真机）**：D3 §2 只按宽度判定 ⇒ **手机横屏（800vp 宽）会落成双栏**；要不要加高度/方向子句，看真机效果后定。另有一条**已实测的边界事实**：详情栏只在 TRIPLE（≥840vp）并排，而该档可用空间最小 320vp > `DETAIL_MIN`(260vp) ⇒ 让步链的 `DETAIL_CLOSED` 分支**当前不可达**（防御性保留，已钉成断言，将来调阈值时会**有意识地**让这条分支复活） | P3 已做：输入模态真实接入 + 拖拽把手 + 宽度记忆。下一步：平板侧边浅层面板；把手键盘调整；手机横屏档位子句（需真机） |
 | `primitives` | ① 原语已落 `NativeChip` / `NativeSectionTitle` / `NativeCard` / `NativeButton` / `NativeActionBar`（+Sheet 参数助手）；**弹层/Dialog/导航**仍未原语化 ② **浮层已全部改原生、且宿主已提到页面根**：六类浮层（详情 / 枚举选择 / 目录 / 凭据 / 文本设置 / 整值设置）统一由**单一浮层宿主**承载——全应用只在**页面根**挂一次 `bindSheet`，`sheetKind()` 从既有状态**派生**当前该显示哪个（不另立字段，避免两个真值来源），`closeSheet()` 一处复位；手写遮罩与"整屏居中卡片"全部删除（遮罩由原生 Sheet 提供）。**修法说明（P0 收尾时发现）**：门户原先挂在**单栏布局的根节点**上，而四类浮层的触发点都在主区内容里（主区三形态都可见）⇒ **双栏/三栏下这些浮层根本打不开**（"不是没做，是够不着"）。提到页面根后与形态无关——这正是官方 Web「portal 挂在 `App` 根、不属于任何 pane」的语义（E292）③ `deliverableItem` 的保存/分享是**禁用+写明原因**（平台无文件保存能力） ④ `WEB_TOKEN_MAP` 目前是**文档化数据 + fixture 可校验**，但还没有"视图必须经映射取色"的强制门禁（现有棘轮只管裸 fontSize/圆角/描边/颜色字面量） | P1.5 已做：HarmonyTheme 语义层 + 前两个原语 + 两处接入（消息操作条、Composer 工具行）。下一步按 P1.5 清单推进（Surface/Button/Card/Popup/Sheet/Dialog/ActionBar/Navigation），每个原语都**当时就接一个真实消费者**，不落没人用的空构件 |
 | `slots` / `renderer` | ① 官方是 React + 槽位插件化渲染；ArkUI 无槽位系统，第三方不能贡献 UI ② 但**「页面级 panel 选择」这层必须自建**（官方 `ui-layout` 正是用 panel selection 做统一框架）：`PanelRegistry` 属 `docs/ia-parity-plan.md` 的 P0/P3，与「第三方贡献 UI」是两件事，不要混为一谈 | 架构边界：**不追平**，能力由"构建期装配 + 设置页开关"替代；本条登记以免被当作缺陷反复讨论 |

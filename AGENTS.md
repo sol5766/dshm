@@ -101,8 +101,23 @@ node tools/check-skill-sync.cjs          # 内置技能同步（判据是内容 
 node tools/check-ptc-ts-strip.mjs        # PTC 的纯 JS erasable-TS 擦除器（81 条断言 + wasm 陷阱 + 变异自检）
 node tools/check-ptc-runtime-inproc.mjs  # PTC 同进程运行时契约（在 --jitless 的临时舞台里跑真 run）
 node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pack-core ↔ 核心树 三处一致
+node tools/check-core-openharmony-patches.mjs  # 核心树里的三处端侧补丁（资源地址装甲 / PDF Map / 终端平台白名单）都在，且上游原文已消失
 .\tools\device-acceptance.ps1        # 真机端侧验收
 ```
+
+> **哪些门禁需要核心树 / 设备？**（干净克隆里 `entry/src/main/resources/resfile/*.zip` **不入库**，
+> 见 `.gitignore:42` ⇒ 没有核心树；需要它的门禁会以 exit 2/3 结束，**不是**"通过"）
+>
+> - **只需仓库内文件**（CI 跑这 11 条，见 `.github/workflows/gates.yml`）：`assert-cli-shim`、
+>   `assert-resfile-sync`（先跑 `tools/place-host-app.mjs`）、`check-parity`、`assert-exec-fix`、
+>   `assert-python-bridge`、`check-doc-refs`、`check-dead-code`、`check-skill-sync.cjs`、
+>   `check-ptc-ts-strip`、`check-internal-undici`、`check-worker-jitless`
+> - **需要核心树**（`dist/core/work/dsh-core-<ver>/`，由随包 zip 解出）：`compat-drift`（还要 `.research/`）、
+>   `assert-fs-search-fallback`、`check-web-fetch-jitless`、`check-ptc-runtime-inproc`、`check-ptc-wiring`、
+>   `check-core-openharmony-patches`、`check-plugin-toggle`、`check-native-closure`（还要 `entry/libs`）
+> - **需要真机 / DevEco**：`device-acceptance.ps1`
+>
+> ⇒ **"CI 绿"不等于"全绿"**：核心树与设备相关的那几条必须在有产物的环境里另跑。
 
 ---
 

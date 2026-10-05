@@ -60,9 +60,9 @@ node tools/assert-fs-search-fallback.mjs
 node tools/check-fetch-mirror.cjs
 ```
 
-> **权威清单是 `AGENTS.md` 的「必跑的回归门禁」块**（当前 15 项：14 条 node + `device-acceptance.ps1`，另含
+> **权威清单是 `AGENTS.md` 的「必跑的回归门禁」块**（当前 16 项：15 条 node + `device-acceptance.ps1`，另含
 > `check-web-fetch-jitless` / `check-worker-jitless` / `check-internal-undici` / `check-skill-sync.cjs` /
-> 3 条 PTC 门禁）。上面这段是**给人类贡献者的最小集**（跑得快、覆盖面广）；两者若不一致，
+> 3 条 PTC 门禁 / `check-core-openharmony-patches.mjs`）。上面这段是**给人类贡献者的最小集**（跑得快、覆盖面广）；两者若不一致，
 > **以 `AGENTS.md` 为准**（此处不再复制全清单，避免两处分叉——2026-10-05 审计发现过一次分叉）。
 
 `tools/` 下另有专项门禁（设计令牌棘轮、文档引用、布局断言、上架红线、协议往返、原生闭包等）。改动涉及哪个面就跑哪个；不确定时全跑一遍。
