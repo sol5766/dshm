@@ -10,6 +10,11 @@
  * 强制四条不变式（对应矩阵 §1.4）：
  *   A 覆盖：行集必须**恰好**等于官方能力面清单（39 个 id：38 个 dsh-client-ui-* + client-locale），
  *           外加允许的 `dshm-` 端侧独有行——不允许漏、不允许重复。
+ *   A2 端侧独有登记：`REQUIRED_LOCAL_SURFACE` 里列出的端侧能力面**必须各有行**。
+ *           这是 2026-10-05 收尾审计补的规则：此前"新增一个端侧能力"**永远没有门禁要求登记**
+ *           （`dshm-tool-fs-remove` / `dshm-fs-write-nonchmod` / `dshm-workspace-claim` /
+ *           `dshm-office-system-preview` / `dshm-ptc-runtime-inproc` 五个能力面当时在矩阵里
+ *           一个都没有，全仓只有一处顺带提及）。
  *   B 单调：任一形态列不是 DONE 时，整体 Status **不得**是 DONE（不许用整体 DONE 盖住某个形态的缺口）。
  *   C 登记：任何非 DONE 的行必须在 §6 缺口登记里有对应行（不许只留结论不留原因）。
  *   D 统计：§5 统计表必须与矩阵实际计数**逐项相等**（口径见矩阵 §5；本项目曾因口径不明差点得出错误结论）。
@@ -57,6 +62,28 @@ export const OFFICIAL_SURFACE = [
 
 /** 端侧独有行的 id 前缀（无 Web 对应，允许存在于矩阵但不在官方清单里） */
 const LOCAL_PREFIX = 'dshm-';
+
+/**
+ * **必须登记的端侧独有能力面**（矩阵 §4.6 的行集）。
+ *
+ * 【为什么要有这份清单】官方能力面有 `OFFICIAL_SURFACE` 兜着——上游新增一个面而矩阵没跟上，
+ * 门禁会红。但**端侧自建的能力面此前无人兜底**：新增一个插件（例如三个文件能力插件 + PTC
+ * 同进程运行时 + office 系统预览）在矩阵里可以一行都没有，门禁照样全绿（2026-10-05 审计实证）。
+ * 这份清单把"新增端侧能力必须登记"变成**会失败的判据**：能力面一旦落地并入 profile/打包清单，
+ * 就把它加到这里，矩阵 §4.6 必须有对应行。
+ *
+ * 【维护约定】只列"端侧自建的能力面"（有自己的插件/子系统），不列"对官方能力面的补丁/替换实现"
+ * （那些归官方行，状态写在对应行里）。
+ */
+export const REQUIRED_LOCAL_SURFACE = [
+  // 框架与宿主（批次一~三）
+  'dshm-core', 'dshm-host', 'dshm-diag', 'dshm-notify', 'dshm-hosttrust',
+  'dshm-multiwindow', 'dshm-share', 'dshm-clipboard', 'dshm-window',
+  'dshm-shortcuts', 'dshm-a11y',
+  // 2026-10-03 起的端侧文件能力与运行时（此前从未被要求登记）
+  'dshm-tool-fs-remove', 'dshm-fs-write-nonchmod', 'dshm-workspace-claim',
+  'dshm-office-system-preview', 'dshm-ptc-runtime-inproc'
+];
 
 /** 期望的矩阵列数：Feature + 4（Web/状态/界面/协议）+ 4 形态 + Status */
 const EXPECTED_COLUMNS = 1 + 4 + DEVICE_COLUMNS + 1;
@@ -189,6 +216,13 @@ export function checkMatrix(parsed) {
   for (const m of missing) problems.push(`  ✗ 覆盖缺失：官方能力面 \`${m}\` 在矩阵里没有行`);
   for (const e of extra) {
     problems.push(`  ✗ 覆盖越界：\`${e}\` 既不是官方能力面（${OFFICIAL_SURFACE.length} 个 id）也没有 ${LOCAL_PREFIX} 前缀`);
+  }
+
+  // 不变式 A2：端侧独有能力面必须登记（见 REQUIRED_LOCAL_SURFACE 的注释）
+  for (const r of REQUIRED_LOCAL_SURFACE) {
+    if (!seen.has(r)) {
+      problems.push(`  ✗ 端侧独有覆盖缺失：\`${r}\` 在矩阵 §4.6 里没有行（新增端侧能力必须登记）`);
+    }
   }
 
   // 不变式 C：非 DONE 必须登记
