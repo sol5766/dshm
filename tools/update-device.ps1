@@ -85,12 +85,20 @@ Ok "设备 $dev"
 
 # ── 2) 记录安装前的数据基线（用于装后比对）───────────────────────────────
 Step 2 '记录安装前的用户数据基线'
-$beforeHome = Shell "ls $filesDir/dsh/home 2>/dev/null | wc -l"
+$beforeHomeStat = Shell "stat -c 'links=%h size=%s' $filesDir/dsh/home 2>/dev/null"
+$beforeHomeCount = Shell "ls $filesDir/dsh/home 2>/dev/null | wc -l"
 $beforeCores = Shell "ls $filesDir/dsh/cores 2>/dev/null"
-Info "home 条目数：$beforeHome"
+# 【为什么用 stat 而不是 `ls | wc -l`（2026-10-05 修）】`dsh/home` 是 **0700**、`hdc shell` 是另一个 uid
+# ⇒ `ls` 被拒、`| wc -l` **恒 0**，于是这里每次打"home 为空"、第 7 步必然 SKIP ——
+# 那个"数据保全"校验是**结构性假通过**，还会把人误导成"数据被清了"。
+# 实测：同一时刻 `stat` 给出 `links=13 size=3440`（数据完好）。`stat` 读目录本身可用 ⇒ 改用它做判据。
+$beforeHomeLinks = if ($beforeHomeStat -match 'links=(\d+)') { [int]$Matches[1] } else { -1 }
+Info "home 指纹：$beforeHomeStat"
 Info "核心树：$($beforeCores -replace "`n", ', ')"
-if ($beforeHome -eq '0') {
-    Write-Host '  NOTE 当前 home 为空（可能是全新设备，或数据已被清）' -ForegroundColor Yellow
+if ($beforeHomeLinks -lt 0) {
+    Write-Host '  NOTE 拿不到 home 指纹（路径不存在或权限受限）——本次无法比对数据保全' -ForegroundColor Yellow
+} elseif ([int]$beforeHomeCount -eq 0) {
+    Info "（`ls` 读不到条目是**预期**：home 是 0700、shell 是另一个 uid；以指纹为准，不要据此判断「数据被清」）"
 }
 
 # ── 3) 构建 ──────────────────────────────────────────────────────────────
@@ -162,28 +170,28 @@ Start-Sleep -Seconds $BootWaitSec
 
 # ── 7) 验证：数据是否保留 ────────────────────────────────────────────────
 Step 7 '验证用户数据仍在（这是关键一步）'
-$afterHome = Shell "ls $filesDir/dsh/home 2>/dev/null | wc -l"
+$afterHomeStat = Shell "stat -c 'links=%h size=%s' $filesDir/dsh/home 2>/dev/null"
 $afterCores = Shell "ls $filesDir/dsh/cores 2>/dev/null"
-Info "home 条目数：$beforeHome → $afterHome"
+$afterHomeLinks = if ($afterHomeStat -match 'links=(\d+)') { [int]$Matches[1] } else { -1 }
+Info "home 指纹：$beforeHomeStat → $afterHomeStat"
 Info "核心树：$($afterCores -replace "`n", ', ')"
 
 $dataOk = $true
 $dataChecked = $false
-if ([int]$beforeHome -eq 0) {
-    # 【必须区分「没有数据」与「数据被保留」】
-    # 第一版在这里直接判 OK，是**假通过**：home 本来就是空的，前后都是 0，
-    # 检查发现不了丢失，却会打印 OK 让人以为验证过了。
-    Write-Host '  SKIP home 基线为 0 —— 本次无法证明「数据被保留」（没有数据可验）' -ForegroundColor Yellow
-    Write-Host '       如果这台设备本该有会话/插件，说明数据此前已丢失。' -ForegroundColor Yellow
+if ($beforeHomeLinks -lt 0 -or $afterHomeLinks -lt 0) {
+    Write-Host '  SKIP 拿不到 home 指纹（路径不存在或权限受限）——本次无法比对' -ForegroundColor Yellow
 } else {
+    # 【判据：子目录数（links）不得减少】目录的 `size` 会随目录项增减而变、也可能因实现而异
+    # ⇒ 只把它当参考值打印；**减少**才是数据丢失的信号（相等/增加都算保留）。
     $dataChecked = $true
-    if ([int]$afterHome -lt [int]$beforeHome) {
-        Bad "home 条目减少（$beforeHome → $afterHome）—— 数据可能丢失"
+    if ($afterHomeLinks -lt $beforeHomeLinks) {
+        Bad "home 子目录数减少（links $beforeHomeLinks → $afterHomeLinks）—— 数据可能丢失"
         $dataOk = $false
     } else {
-        Ok "home 条目保留（$beforeHome → $afterHome）"
+        Ok "home 指纹：子目录数未减少（links $beforeHomeLinks → $afterHomeLinks；$afterHomeStat）"
     }
 }
+
 # 【2026-09-28 升级 0.2.0-rc.1】此处的版本判据从 core-recipe.json 读取，不再写死：
 # 写死的那一版在升级后会报 FAIL 并把结论置为"更新未完全通过"（:203-204 exit 1），
 # 见 docs/90 §8.1 的"两处版本硬编码"表。核心树按版本各存一份、且旧树并存是**预期**
