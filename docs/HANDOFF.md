@@ -682,7 +682,7 @@ DeepSeek Harness 的主机上启用文档预览服务」。
 | 关键点 | 事实 |
 |---|---|
 | 为什么非 builtin 就赢 | `matchingDocumentPreviews` rank = `priority === "builtin" ? 0 : 1`；`candidates` 只返回 matched、不追加 fallback ⇒ 后缀命中的非 builtin 必为 `candidates[0]` |
-| **必须** `loading: "bytes-complete"` | 它由宿主读完整个文件后把 `content = {kind:"bytes", data}` 交给正文；写 `"renderer"` 则要求正文自行结束加载，否则永远转圈（这正是上游坏掉的一半原因） |
+| ~~**必须** `loading: "bytes-complete"`~~ → **2026-10-05 改为 `"text-pages"`** | 原判据（10/04 验证时成立）：它由宿主读完整个文件后把 `content = {kind:"bytes", data}` 交给正文；写 `"renderer"` 则要求正文自行结束加载，否则永远转圈。**10/05 新事实**：`workspaceFiles/readBytes` 被客户端**每次立刻取消**（宿主不轮转日志 `dshm-host.log`：10/04 = 3/3 成功；10/05 = 78/78 取消、0 成功，耗时 3–13 ms；同期 `stat`/`read` 200）⇒ `bytes-complete` 永远拿不到 content、入口也不出现。本插件正文**不渲染文件内容**，故改用 `"text-pages"`（走可用的 `workspaceFiles/read`；二进制落到上游 "unsupported" 分支，**该分支与失败分支都会渲染 `.actions` 槽** `lib/client.js:798/953` ⇒ 「系统预览」按钮照常出现） |
 | **不要**认领 `xls/xlsx/csv/tsv` | 内置 Excel 实现是纯客户端的、本来就正常（`LazyExcelBody` + `client.excel.js`），认领它 = 回退可用预览 |
 | 读上限 | 整文件 `readBytes` 走 `maxFileBytes` = **32 MB**（`dsh-api-workspace-files/lib/index.js:385`），不是分页的 2 MB（`:384`）⇒ 3–4.6 MB 的测试 ppt 安全 |
 | locale ns | 必须用自有 ns（`dshmOfficeSystemPreview`）；复用上游 `sidebarOffice` 会抛 `locale namespace "…" already has locale` |

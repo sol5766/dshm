@@ -82,7 +82,7 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 | 装甲 | `dsh-client-resources/lib/client.js:23-31`：`hostname === ""` 时用正则从原串重取协议/主机/路径 |
 | 三处落地 | 侧栏 `dsh-client-ui-sidebar-right/lib/client.js:8647-8650`；subagent `dsh-client-ui-subagent/lib/client.js:722-731`（host/path/query 三件都取回） |
 | PDF 双 realm | `dsh-client-ui-sidebar-documentpreview/lib/client.pdf.js:980`（chunk 工厂）与 `:24740`（内联 worker Blob）；实测 `DSHM_MAP_COMPAT` 2 次、`install(Map.prototype` 4 次 |
-| Office docx/pptx | 走 `hostcore/plugins/dshm-office-system-preview/lib/client.js:65`（EXTENSIONS）、`:281-291`（`priority:"extension"`、`loading:"bytes-complete"`）；接线 `cordis.patch.yml:657-659` + `pack-core.mjs` 清单 |
+| Office docx/pptx | 走 `hostcore/plugins/dshm-office-system-preview/lib/client.js:65`（EXTENSIONS）、`:281-291`（`priority:"extension"`）；接线 `cordis.patch.yml:657-659` + `pack-core.mjs` 清单。**2026-10-05 改**：`loading` 由 `"bytes-complete"` 改为 `"text-pages"`（正文本来就不渲染内容，只需一个能落地的状态）——因为 `workspaceFiles/readBytes` 从 10/05 起**每次都被客户端立刻取消**（宿主不轮转日志 `dshm-host.log`：10/04 = 3 请求/3 成功/0 取消；10/05 = 78 请求/78 取消/0 成功，耗时 3–13 ms；同期 `stat`/`read` 一直 200），`bytes-complete` 因此永远拿不到 content，工具栏入口也不出现 |
 | 注入点 | `tools/pack-core.mjs:2427-2535`（资源地址）、`:2599-2632`（PDF）、调用点 `:3003-3004` |
 
 ### 1.5 GitCode #2 —— 端侧终端打不开（已 closed）
@@ -374,3 +374,60 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 | `embedTreeInfo()` / `verifyTreeInfoContract()` :2689/:2728 | 树根 `dshm-core.json` | **真生成物**（`builtAt` 是打包时刻的 ISO 时间戳）⇒ **只做形状断言**：存在 + JSON 可解析 + 字段名/类型 + 来自配方与代码常量的**确定值**（`coreVersion`/`platform`/`profile`/`overrides`）+ 内部一致 |
 
 ⇒ §8.1 结尾列的"仍未纳入的 6 处"**全部清零**：端侧注入补丁门禁现在覆盖**全部**已知注入点。
+
+---
+
+## 10. 2026-10-05 侧边栏预览事故：根因、修复与遗留
+
+### 10.1 真根因一：**新核心树从未进过安装包**（`pack-core` 少了 `--place-in-app`）
+
+`tools/pack-core.mjs:2924` 只有在 `process.argv.includes('--place-in-app')` 时才把容器拷进
+`entry/src/main/resources/resfile/`。本轮排障期间多次只跑裸 `node tools/pack-core.mjs`
+⇒ 新包一直停在 `dist/core/`，**HAP 里带的始终是 10-05 11:35 那份旧容器**（84,696,776 B）
+⇒ 期间所有**核心树侧**改动（office 插件加固、`loading` 改 `text-pages`、版本号）**全部没有生效**，
+而链上自检只看"树目录名"⇒ 一路绿灯、"改了却毫无变化"。
+
+**已修**：改用 `node tools/pack-core.mjs --place-in-app` 出包（本轮实测 resfile 内变为
+`dsh-core-0.2.1-alpha.1+dshm.1-openharmony-arm64.zip` 85,124,971 B ⇒ HAP 387.3 MiB ⇒
+安装后自检 `OK 核心树 0.2.1-alpha.1+dshm.1 在`，宿主导入路径随之切到新树）。
+
+> ⚠️ **待补的判据**：出包后应断言 `resfile/` 内容器的**大小与 sha256** 等于本次产出，
+> 否则"以为装上了、其实一直跑旧树"会再次发生。
+
+### 10.2 已修并真机验收：Office/ODF 的**系统预览**通路
+
+`loading` 由 `bytes-complete` 改为 `text-pages`（插件正文本来不渲染文件内容）+ 认领提前 +
+每步独立 try/catch。真机 `diag-file-preview` 新增 7 条 `ok`（含用户原始的
+`报行合一对保险业的影响(动画版).pptx`）：docx/pptx 走插件认领，odt/ods/odp 走上游
+"不支持空态"——**两条路都会渲染 `.actions` 槽** ⇒ 按钮可用 ⇒ 桥 ok。
+
+### 10.3 真根因二（**未修**）：`bytes-complete` 渲染器被自身的 abort 循环取消
+
+`dsh-client-ui-sidebar-documentpreview/lib/client.js:660-678`：
+
+```js
+const started = current !== void 0;
+useEffect(() => { if (started || !canRead || mode === void 0 || selected === void 0) return;
+  if (mode === "text-pages") loadPage(tab.id, file, 1, signal, meta.value?.version);
+  else if (mode === "bytes-complete") loadAll(tab.id, file, signal, meta.value?.version);
+  else prepareRenderer(tab.id, signal, selected.id, meta.value?.version); },
+  [started, tab.id, file, signal, loadPage, loadAll, prepareRenderer, canRead, mode, selected, meta.value?.version]);
+```
+
+依赖里含 `signal` / `selected` / `file` / `meta.value?.version` —— 任一新引用即重跑 effect，
+**上一次请求被 abort**。`text-pages` 之所以正常：`read` 回得快 ⇒ `current` 有值 ⇒
+`started = true` ⇒ effect 不再重跑；`bytes-complete` 要等整读（base64 膨胀后更大）⇒
+**在完成前就被下一轮渲染取消**。
+
+真机读数（`dshm-host.log`）：`workspaceFiles/readBytes` 104 请求 / 3 成功 / **101 取消**，
+取消耗时 3–26 ms；同期 `stat`/`canAccessWorkspacePath`/`read` 全部 200。链路后果：
+客户端关连接 → 宿主 `bridge()`（`dsh-client-connection/lib/index.js:36-38`）`abort.abort()`
+→ 响应流 chunk 被 `:95 continue` 跳过 → `:106 res.end()` 空写 → ArkWeb
+`ERR_EMPTY_RESPONSE(-324)` → 前端「读取失败：… Failed to fetch」。
+
+**影响面**（对齐官方矩阵）：HTML / 图片 / PDF / Excel 四类内联预览**全部打不开**；
+文本 / Markdown / 代码不受影响（`text-pages`）；Office/ODF 可用系统预览按钮（见 §10.2）。
+
+**修复方向**（下一轮）：在 effect 上做**同键在飞去重**（`tab.id|file|mode|version` 未变则不重发），
+或让 `signal`/`selected` 不参与依赖；两者都要走 `pack-core` 注入 + 门禁断言。
+

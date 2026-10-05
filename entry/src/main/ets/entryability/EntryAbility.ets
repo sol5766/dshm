@@ -512,6 +512,41 @@ export default class EntryAbility extends UIAbility {
       this.keepAlive.forceRelease().catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, '释放后台保活失败（任务可能残留）：%{public}s', err.message);
       });
+
+      /*
+       * 【2026-10-05 补：任何终止路径都要把应用收干净】
+       *
+       * 症状：**任务栏右键「退出」不生效** —— 应用像是还在跑。
+       *
+       * 根因：主动退出只走 `exitApp()`（托盘右键「退出」/ 后台事件），它才会
+       * 「停核心 → 摘托盘图标 → 通知托盘进程退出 → terminateSelf」。而**系统发起的终止**
+       * （任务栏右键「退出」、系统清理）不经过 `exitApp()`，直接走到本回调：
+       *   · 宿主（同进程 Node 线程）没人停 ⇒ 仍占着回环端口；
+       *   · 托盘图标没人摘、托盘后台 Ability（**另一个进程**）没人通知 ⇒ 留下孤儿进程；
+       * ⇒ 用户看到的正是"点了退出，应用还在"。
+       *
+       * 修法：把收尾补在**销毁路径**上。关闭窗口那条路（`onPrepareToTerminate` 拦成最小化）
+       * 不会走到这里，所以"关闭 = 收进后台继续跑"的既有行为不受影响。
+       * 顺序与 `exitApp()` 一致：先停核心（协作式、幂等，成本一次文件写入），再摘图标、再通知托盘。
+       */
+      if (!this.exiting) {
+        this.exiting = true;
+        AppStorage.setOrCreate<boolean>('dshQuitRequested', true);
+        hilog.info(DOMAIN, TAG, '销毁路径收尾：停核心 + 摘托盘 + 通知托盘进程退出');
+        try {
+          StatusBarTray.remove(this.context);
+        } catch (err) {
+          hilog.warn(DOMAIN, TAG, '销毁路径摘托盘图标失败（继续）：%{public}s', (err as BusinessError).message);
+        }
+        try {
+          StatusBarTray.publishExitRequest();
+        } catch (err) {
+          hilog.warn(DOMAIN, TAG, '销毁路径通知托盘进程失败（继续）：%{public}s', (err as BusinessError).message);
+        }
+        this.stopHostThenExit().catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, '销毁路径停核心异常（进程即将结束）：%{public}s', err.message);
+        });
+      }
     }
   }
 

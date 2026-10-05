@@ -273,38 +273,89 @@ const inject = ["slots", "locale", "documentPreviews"];
  * @param ctx - 客户端根上下文。
  */
 function apply(ctx) {
-	ctx.effect(() => ctx.locale.register(NS, {
-		zh,
-		en
-	}), "dshm-office-system-preview: dictionaries");
-	const t = ctx.locale.bind(NS);
-	ctx.effect(() => ctx.documentPreviews.register({
-		id: ID,
-		extensions: EXTENSIONS,
-		// binaryExtensions 必须是 extensions 的子集（registry 会校验），这里相等：
-		// 这四个后缀的字节从来不是可读文本。
-		binaryExtensions: EXTENSIONS,
-		// 非 "builtin" ⇒ 排序 rank 1，一定排在 rank 0 的内置 office 实现之前。
-		priority: "extension",
-		title: () => t("viewer.label"),
-		loading: "bytes-complete",
-		wrap: false
-	}), "dshm-office-system-preview: metadata");
-	ctx.effect(() => ctx.slots.inject("sidebar.right.tab.document", () => ctx.slots.register({
-		name: "sidebar.right.tab.document",
-		key: ID,
-		locale: NS
-	}, OfficeBody)), "dshm-office-system-preview: body");
-	ctx.effect(() => ctx.slots.inject("sidebar.right.tab.document.actions", () => ctx.slots.register({
-		name: "sidebar.right.tab.document.actions",
-		id: "dshm-office-system-preview",
-		locale: NS
-	}, HeaderAction)), "dshm-office-system-preview: header action");
-	ctx.effect(() => ctx.slots.inject("sidebar.right.tab.document.unpreviewable", () => ctx.slots.register({
-		name: "sidebar.right.tab.document.unpreviewable",
-		id: "dshm-office-system-preview",
-		locale: NS
-	}, EmptyAction)), "dshm-office-system-preview: empty action");
+	/*
+	 * 【2026-10-05 加固：每一步各自隔离 + 认领后缀提到最前】
+	 *
+	 * 原实现把四个 `ctx.effect(...)` 顺序排下来。`ctx.effect` 是**同步立即执行**的，
+	 * 所以其中任何一步抛错都会让整个 `apply()` 中断，后面的注册全部不生效——而
+	 * 「认领 doc/docx/ppt/pptx」恰好排在第二步（文案之后）。一旦前两步里任一处抛错，
+	 * 用户看到的就是内置 office 实现的
+	 * 「Office 预览不可用。请在运行 DeepSeek Harness 的主机上启用文档预览服务。」
+	 * 而且浏览器里没有任何会被 ArkTS 侧 `.onConsole` 抓到的痕迹（未捕获异常不走那条路），
+	 * 真机上表现为"点开 PPT 没反应、也查不出原因"。
+	 *
+	 * 现在：
+	 *   ① `documentPreviews.register` 提到最前（决定用哪个实现，最关键）；
+	 *   ② 每一段独立 try/catch，互不连坐；
+	 *   ③ 文案用闭包变量兜底，`locale` 失败也照样能认领（title 退化为静态字符串）。
+	 */
+	let titleText = "系统预览";
+	try {
+		ctx.effect(() => ctx.locale.register(NS, {
+			zh,
+			en
+		}), "dshm-office-system-preview: dictionaries");
+		titleText = ctx.locale.bind(NS)("viewer.label");
+	} catch (error) {
+		// 文案失败不影响认领：title 退化成下面的静态字符串
+	}
+	try {
+		ctx.effect(() => ctx.documentPreviews.register({
+			id: ID,
+			extensions: EXTENSIONS,
+			// binaryExtensions 必须是 extensions 的子集（registry 会校验），这里相等：
+			// 这四个后缀的字节从来不是可读文本。
+			binaryExtensions: EXTENSIONS,
+			// 非 "builtin" ⇒ 排序 rank 1，一定排在 rank 0 的内置 office 实现之前。
+			priority: "extension",
+			title: () => titleText,
+			// 【2026-10-05 改：bytes-complete → text-pages】
+			// 原为 "bytes-complete"（由宿主整读文件后把 content 交给正文）。真机实测：
+			// `workspaceFiles/readBytes` 从 10/05 起**每次都被客户端立刻取消**
+			// ——宿主日志（dshm-host.log，不轮转）里 10/04 是 3 请求 / 3 成功 / 0 取消，
+			// 10/05 变成 78 请求 / 78 取消 / 0 成功，取消耗时只有 3–13 ms；同期
+			// `workspaceFiles/stat`、`workspaceFiles/read` 一直 200。取消 ⇒ 宿主的
+			// `bridge()`（dsh-client-connection/lib/index.js:36-38）见连接关闭就 abort，
+			// 响应流里每个 chunk 被 `continue` 跳过、最后 `res.end()` 什么都不写 ⇒
+			// ArkWeb 记 ERR_EMPTY_RESPONSE ⇒ 前端显示 "读取失败：… Failed to fetch"。
+			// 结果：正文永远拿不到 content，一直停在空态，工具栏入口也不出现。
+			//
+			// 本插件的正文**不渲染文件内容**（只显示文件名 + 「系统预览」按钮），
+			// 所以根本不需要整读。改用 "text-pages" ⇒ 走的是**正常可用**的
+			// `workspaceFiles/read`（10/05 实测 200）；二进制文件会被判为不支持 ⇒
+			// 落到侧栏的 "unsupported" 分支，而**那个分支会渲染 `.actions` 槽**
+			// （上游 `lib/client.js:798` 的 `renderSlot("sidebar.right.tab.document.actions", fileOwner)`）
+			// ⇒ 我们的「系统预览」按钮得以出现并可用。
+			// ⚠️ 若哪天 readBytes 恢复（宿主侧那 78/78 的取消消失），可以再评估换回 bytes-complete。
+			loading: "text-pages",
+			wrap: false
+		}), "dshm-office-system-preview: metadata");
+	} catch (error) {
+		// 认领失败 ⇒ 内置实现继续接管（用户会看到"Office 预览不可用"），
+		// 但仍然把下面的槽位注册完，工具栏/空态按钮至少还有机会出现。
+	}
+	/**
+	 * 注册一个槽位，**单个失败不影响其它**。
+	 * @param name - 槽位名。
+	 * @param field - 该槽位用来对齐的字段名（正文槽是 `key`，两个按钮槽是 `id`）。
+	 * @param value - 字段值（一律是本插件标识）。
+	 * @param component - 槽位组件。
+	 * @param label - cordis effect 标签。
+	 */
+	const registerSlot = (name, field, value, component, label) => {
+		try {
+			ctx.effect(() => ctx.slots.inject(name, () => ctx.slots.register({
+				name,
+				[field]: value,
+				locale: NS
+			}, component)), label);
+		} catch (error) {
+			// 单个槽位失败（例如槽位已被别人声明）不影响其它槽位
+		}
+	};
+	registerSlot("sidebar.right.tab.document", "key", ID, OfficeBody, "dshm-office-system-preview: body");
+	registerSlot("sidebar.right.tab.document.actions", "id", "dshm-office-system-preview", HeaderAction, "dshm-office-system-preview: header action");
+	registerSlot("sidebar.right.tab.document.unpreviewable", "id", "dshm-office-system-preview", EmptyAction, "dshm-office-system-preview: empty action");
 }
 
 exports.apply = apply;
