@@ -1573,6 +1573,25 @@ function selfTest() {
         expect: /撤除守卫/,
         only: /撤除守卫/,
       },
+      /*
+       * ── M10：撤除守卫的**正向**判据（`DEDUP_UPSTREAM_RESTORED` 那 4 条）──
+       *
+       * 为什么必须单独有这一条：M9 只注入**标记**，命中的是 4 条"标记 ×0"判据；
+       * 而"上游原文已恢复"那 4 条正向判据**一条都不会被 M9 碰到** —— 它们写成恒真
+       * （比如字面量与树里的换行/缩进对不上、或 `read()` 读错文件）也照样全绿。
+       * 这里把 4 条上游原文**逐条改写**（注意：用的是 `ownerSignal` 这种**非标记**词，
+       * 所以"标记 ×0"那 4 条仍应全绿）⇒ 只该正向判据红，且 4 条要**各自**都红。
+       */
+      {
+        name: 'M10 撤除守卫的 4 条正向判据：上游原文被逐条改写（标记一个都不加）→ 4 条各自红',
+        run: () => mutate(DEDUP_REL, (t) => t
+          .replace(DEDUP_UPSTREAM_RESTORED[0][0], 'const started = current !== void 0, dshmKeepLocal = started;')
+          .replace(DEDUP_UPSTREAM_RESTORED[1][0], DEDUP_UPSTREAM_RESTORED[1][0].replace(', signal,', ', ownerSignal,'))
+          .replace(DEDUP_UPSTREAM_RESTORED[2][0], DEDUP_UPSTREAM_RESTORED[2][0].replace(', signal,', ', ownerSignal,'))
+          .replace(DEDUP_UPSTREAM_RESTORED[3][0], DEDUP_UPSTREAM_RESTORED[3][0].replace('tab.id, signal,', 'tab.id, ownerSignal,'))),
+        expect: /找不到恢复后的上游原文/,
+        only: /撤除守卫/,
+      },
     ];
 
     for (const c of handCases) {
@@ -1588,6 +1607,24 @@ function selfTest() {
         case_('M5 前提复核：M5 之后正向标记断言仍为 ok（所以这次红只可能来自反向断言）',
           markerNotes.length >= 2, `markerNotes=${markerNotes.length}`);
       }
+    }
+
+    /* M10 复核（比上面那条 handCase 更硬）：4 条正向判据必须**逐条**都红，
+     * 且"标记 ×0"那 4 条仍为 ok —— 否则"只该正向判据红"这句话只是恰好成立。 */
+    {
+      restoreAll();
+      mutate(DEDUP_REL, (t) => t
+        .replace(DEDUP_UPSTREAM_RESTORED[0][0], 'const started = current !== void 0, dshmKeepLocal = started;')
+        .replace(DEDUP_UPSTREAM_RESTORED[1][0], DEDUP_UPSTREAM_RESTORED[1][0].replace(', signal,', ', ownerSignal,'))
+        .replace(DEDUP_UPSTREAM_RESTORED[2][0], DEDUP_UPSTREAM_RESTORED[2][0].replace(', signal,', ', ownerSignal,'))
+        .replace(DEDUP_UPSTREAM_RESTORED[3][0], DEDUP_UPSTREAM_RESTORED[3][0].replace('tab.id, signal,', 'tab.id, ownerSignal,')));
+      const res = audit(scope);
+      const positives = res.fails.filter((f) => /找不到恢复后的上游原文/.test(f));
+      const markerOk = res.notes.filter((n) => /撤除守卫：.* ×0（撤除后未复活）/.test(n)).length;
+      case_('M10 复核：4 条正向判据逐条都红（不是只红 1 条就算过）',
+        positives.length === DEDUP_UPSTREAM_RESTORED.length, `positives=${positives.length}/${DEDUP_UPSTREAM_RESTORED.length}`);
+      case_('M10 复核：4 条"标记 ×0"判据仍为 ok（证明这次红只可能来自正向判据）',
+        markerOk === DEDUP_MARKERS.length, `markerOk=${markerOk}/${DEDUP_MARKERS.length}`);
     }
 
     /* ═══ ④ 段的系统性反恒真自检 ═══

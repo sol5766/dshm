@@ -6,8 +6,11 @@
  * `startupVisibility = STARTUP_HIDE`
  * 拉起：独立进程、无窗口、不进 Dock、不触发 onForeground。这是 HarmonyOS PC 允许应用在
  * 窗口隐藏后**继续后台运行**的官方做法（官方《PC应用通过系统托盘后台保活》第 2 步）：
- * 没有它，窗口一收起来进程就可能被系统挂起/回收，与 Host 的长连接断掉、正在跑的任务停摆 ——
- * 与用户诉求「关掉别停任务」正好相反。
+ * 没有它，窗口最小化 / 切到别的应用后进程就可能被系统挂起回收，与 Host 的长连接断掉、
+ * 正在跑的任务停摆。
+ *
+ * 注：系统「关闭窗口」在本应用是**官方行为 = 退出应用**（2026-10-05 起不再拦截），
+ * 所以本 Ability 服务的是「窗口还在、只是不可见」的场景，而不是"关了窗口还常驻"。
  *
  * 设计取舍：本 Ability **不承载任何业务**。它不认识 DSH，也不碰 Host；一旦把状态放进来，
  * 就会出现「主 Ability 一份、后台 Ability 又一份」的双份真相，而这层进程本来就是短命的。
@@ -64,16 +67,16 @@ export default class BackGroundAbility extends UIAbility {
 
   onDestroy(): void {
     /*
-     * 【2026-10-05 加：托盘进程销毁时兜底摘掉状态栏图标】
-     * 本进程就是图标的宿主（NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM）。退出路径上若
-     * 主 Ability 已来不及摘（例如被系统直接终止），这里补一次，避免"进程没了图标还在"。
+     * 【2026-10-05 撤除：这里曾"兜底摘状态栏图标"，但它**不可能生效**】
+     *
+     *   · `StatusBarTray.installed` 是**模块级 static**，而本 Ability 跑在**独立进程**
+     *     （`NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM`）⇒ 这个进程里它恒为 `false`，
+     *     `StatusBarTray.remove()` 第一行 `if (!installed) return` 就返回了：一次系统调用都不会发。
+     *   · 即便绕过它，SDK 对 `removeFromStatusBar` 明确「无前台窗口时不可删除」
+     *     （错误码 1010710004），而本 Ability 本来就没有前台窗口 —— 只会拿到这条错误。
+     *   ⇒ 摘图标只能在**有前台窗口的主 Ability** 侧做（`EntryAbility.exitApp`）；
+     *     真机实测也表明图标是随后台进程结束被系统一并收走的。
      */
-    try {
-      StatusBarTray.remove(this.context);
-      hilog.info(DOMAIN, TAG, '托盘进程销毁：已兜底摘掉状态栏图标');
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, '托盘进程销毁时摘图标失败（忽略）：%{public}s', (err as BusinessError).message);
-    }
     hilog.info(DOMAIN, TAG, '托盘后台 Ability 已销毁');
   }
 

@@ -42,7 +42,7 @@ import { DshHost, OpResult } from 'hostruntime';
 import { NodeRuntime } from '../runtime/NodeRuntime';
 // HMS 语音识别桥（ArkTS 侧）：轮询 Host 写的请求文件并调 speechRecognizer
 import { startHmsSpeechBridge } from '../speech/HmsSpeechBridge';
-// 系统托盘（PC 顶栏状态区）：关闭=切后台之后的**回程入口**，也是真正的退出路径
+// 系统托盘（PC 顶栏 / 托盘区状态图标）：运行时挂图标 + 左键唤回主窗（退出用系统自带菜单项）
 import { StatusBarTray } from '../system/StatusBarTray';
 import { emitter } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
@@ -174,9 +174,10 @@ export default class EntryAbility extends UIAbility {
    *
    * 【为什么能力层必须持有并真正调用它】`platform/notify/KeepAlive.ets` 早就写好了
    * 申请/释放的完整实现，但**全仓无人调用**（只有 `platform/Index.ets` 的 re-export）。
-   * 后果：应用退到后台后会被系统挂起，与 Host 的长连接随之中断 ——
-   * 而「关闭窗口 = 切后台继续跑任务」这条诉求正建立在"后台仍活着"之上。
-   * 没有它，`onPrepareToTerminate` 的最小化只是把窗口收起来，任务照样停。
+   * 后果：应用退到后台（最小化 / 切到别的应用 / 关掉主窗但会话窗仍开着）后会被系统挂起，
+   * 与 Host 的长连接随之中断，正在跑的任务也停摆。
+   * 注：系统「关闭窗口」在本应用是**官方行为 = 退出应用**（2026-10-05 起不再拦截），
+   * 长时任务服务的是「窗口还在、只是不可见」的那些场景。
    *
    * 申请时机：主窗窗口就绪后（此时 context 可用、且确认是主窗）。
    * 释放时机：`onDestroy`。申请失败只降级（日志警告），不阻断任何功能。
@@ -194,8 +195,7 @@ export default class EntryAbility extends UIAbility {
   /**
    * 用户已请求「真正退出应用」。
    *
-   * 【为什么两个标记都要】`dshQuitRequested` 走 AppStorage，是**页面 → 能力层**的通道；
-   * 本字段是**能力层内部**的一次性闩：`exitApp` 会被多处触发（托盘后台进程被系统结束等），
+   * 这是一次性闩：`exitApp` 会被多处触发（托盘后台进程被系统结束等），
    * 没有它就会并发走两遍「停核心 → 摘图标 → terminateSelf」。
    */
   private exiting: boolean = false;
@@ -556,11 +556,10 @@ export default class EntryAbility extends UIAbility {
       this.setupNotifications();
 
       /*
-       * 申请长时任务（后台保活）——这是「关闭窗口 = 切后台继续跑」能成立的**前提**。
-       *
-       * 不申请的话，应用退到后台会被系统挂起：与 Host 的那条长连接断掉、
-       * 正在执行的任务也随之停摆。那样 `onPrepareToTerminate` 的最小化
-       * 就只是"把窗口收起来"，任务照样丢 —— 与用户诉求相反。
+       * 申请长时任务（后台保活）：窗口**还在、只是不可见**时（最小化 / 切到别的应用 /
+       * 只关了会话窗而主窗仍在后台）不让系统挂起本进程 —— 与 Host 的那条长连接与正在跑的
+       * 任务都要靠它活着。系统「关闭窗口」本身是官方行为 = 退出应用（不再拦截），
+       * 那种情况下进程会整体结束，不需要这条保活。
        *
        * 只在主窗申请：与会话窗共享同一进程，一个长时任务就够；
        * 每个实例各申请一次会让引用计数虚高、且系统侧重复登记。
@@ -568,17 +567,17 @@ export default class EntryAbility extends UIAbility {
       this.keepAlive.attach(this.context);
       this.keepAlive.acquire().then((active: boolean) => {
         if (active) {
-          hilog.info(DOMAIN, TAG, '后台保活已就绪：关闭窗口后任务与连接继续');
+          hilog.info(DOMAIN, TAG, '后台保活已就绪：窗口不可见时任务与连接继续');
         } else {
           // 申请失败属**降级**而非错误：回到前台时仍会补拉状态。
-          // 如实记日志，不假装成功（用户若发现关窗后任务停了，这条日志是判据）。
-          hilog.warn(DOMAIN, TAG, '后台保活未授予，关闭窗口可能中断任务（降级运行）');
+          // 如实记日志，不假装成功（用户若发现切后台后任务停了，这条日志是判据）。
+          hilog.warn(DOMAIN, TAG, '后台保活未授予，窗口不可见时任务可能中断（降级运行）');
         }
       }).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, '后台保活申请异常（降级运行）：%{public}s', err.message);
       });
 
-      // 托盘常驻图标：关闭切后台之后的**回程入口**，也是真正的退出路径（见 setupTray）
+      // 托盘常驻图标：运行时挂上，左键唤回主窗（见 setupTray；退出用系统自带菜单项）
       this.setupTray();
     }
 
@@ -621,9 +620,9 @@ export default class EntryAbility extends UIAbility {
 
     // 回到前台时确保主窗真的在屏上。
     //
-    // 【为什么需要在 onForeground 里做】从托盘图标/Dock 唤回本应用时，系统只是把任务切到前台，
-    // 并不一定撤销窗口的**最小化**状态：`onPrepareToTerminate` 那条路径把窗口 minimize 了，
-    // 仅"回到前台"可能仍然是一个最小化窗口。这里补一次恢复，用户点图标才能真正看到界面。
+    // 【为什么需要在 onForeground 里做】从托盘图标 / Dock / 任务栏唤回本应用时，系统只是把任务
+    // 切到前台，并不一定撤销窗口的**最小化**状态（用户可能自己最小化过，或窗口停在别的虚拟桌面）。
+    // 这里补一次恢复，点图标才真的看得到界面。
     if (this.launchParams.kind === WindowKind.MAIN) {
       this.ensureWindowShown();
     }
@@ -656,22 +655,21 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 挂托盘常驻图标并接线三条交互（仅主窗调用）。
+   * 挂托盘常驻图标并接线（仅主窗调用）。
    *
-   * 失败必须**降级而不抛**：托盘是「关闭=切后台」的回程入口，挂不上只是回到旧行为
-   * （点关闭照旧退出应用），不该连带影响启动。所以这里把失败收敛成
-   * 「托盘未就绪」这一个可判定状态——`onPrepareToTerminate` 会读它并放行关闭。
+   * 失败**降级而不抛**：图标挂不上只等于少一个「左键唤回」入口，不该连带影响启动。
+   * （「关闭窗口」自 2026-10-05 起回到系统官方行为 = 退出应用，不再依赖托盘做拦截判据。）
    */
   private setupTray(): void {
     const ctx: common.UIAbilityContext = this.context;
     StatusBarTray.install(ctx).then(() => {
-      hilog.info(DOMAIN, TAG, '托盘图标已就绪，关闭窗口后可从托盘唤回');
+      hilog.info(DOMAIN, TAG, '托盘图标已就绪，左键可唤回主窗');
       // 顺序不能反：`NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM` 的前提是"应用已有状态栏图标"
       setTimeout(() => {
         StatusBarTray.hold(ctx);
       }, 300);
     }).catch((err: BusinessError) => {
-      hilog.warn(DOMAIN, TAG, '托盘图标初始化失败（降级：关闭仍会退出应用）：%{public}s', err.message);
+      hilog.warn(DOMAIN, TAG, '托盘图标初始化失败（降级：少一个唤回入口）：%{public}s', err.message);
     });
 
     // 左键唤回主窗：系统把任务切到前台 + onForeground 里补一次 restore
@@ -683,22 +681,15 @@ export default class EntryAbility extends UIAbility {
       this.restoreMainWindow();
     });
 
-    // 右键菜单「打开应用」：与左键同一条唤回路径
-    // （真正的「退出」用系统自带的那一项，见 StatusBarTray 文件头）
-    StatusBarTray.onRightMenuClick(() => {
-      hilog.info(DOMAIN, TAG, '托盘右键「打开应用」：唤回主窗');
-      this.restoreMainWindow();
-    });
-
-    // 托盘后台 Ability 被系统结束 ⇒ 图标很可能已随之消失，先让关闭不再被拦截（否则
-    // 用户会关在门外），再走退出收尾，避免「主 Ability 已死、图标还在」的半死状态。
+    // 托盘后台 Ability 被系统结束 ⇒ 图标很可能已随之消失，走退出收尾，避免
+    // 「主 Ability 已死、图标还在」的半死状态。
     StatusBarTray.subscribeBgTerminating(() => {
       StatusBarTray.markUnavailable();
       this.exitApp('托盘后台进程被系统结束');
     });
   }
 
-  /** 把应用（连同最小化的主窗）唤到前台。托盘左键、托盘右键「打开应用」共用。 */
+  /** 把应用（连同最小化的主窗）唤到前台。托盘左键用。 */
   private restoreMainWindow(): void {
     this.context.showAbility().catch((err: BusinessError) => {
       hilog.warn(DOMAIN, TAG, 'showAbility 唤回失败：%{public}s', err.message);
@@ -708,23 +699,23 @@ export default class EntryAbility extends UIAbility {
   /**
    * 真正退出应用：停核心 → 摘托盘图标 → 结束 Ability。
    *
+   * 触发点只剩一个：**托盘后台进程被系统结束**（`subscribeBgTerminating`）。用户点关闭窗口、
+   * 点任务栏右键「退出」、点托盘系统自带「退出」都是系统直接终止，不经过本方法——那种情况下
+   * 进程整体消失，下面的收尾本来就没有执行者。
+   *
    * 【为什么要先停核心】官方不保证 `terminateSelf()` 会清理应用自己拉起的 Node 线程。
    * 宿主是同进程线程（见 runtime/NodeRuntime.ets 文件头），进程真死时它自然一起死，
    * 但只要存在"进程没立刻死"的时序，残留的宿主就会占着回环端口，下次启动撞"端口已占用"。
    * 停一次是协作式且幂等的（`DshHost.stop()`），成本一个文件写入，收益是确定的下次启动。
    *
-   * 【为什么先置 `dshQuitRequested`】`terminateSelf()` 若仍走 `onPrepareToTerminate`，
-   * 回调见到标记会放行；若不走，标记也无害（进程即将结束）。两种 SDK 行为下都能退出。
-   *
    * 【顺序】摘图标要在**还有前台窗口**时做（SDK：无前台窗口时 removeFromStatusBar 报
-   * 1010710004）。本方法由托盘右键/后台事件触发时窗口恰好还在，所以先 remove 再 terminate。
+   * 1010710004）。本方法由后台事件触发时窗口通常还在，所以先 remove 再 terminate。
    */
   private exitApp(reason: string): void {
     if (this.exiting) {
       return;
     }
     this.exiting = true;
-    AppStorage.setOrCreate<boolean>('dshQuitRequested', true);
     hilog.info(DOMAIN, TAG, '开始退出应用：%{public}s', reason);
 
     this.stopHostThenExit().then(() => {

@@ -403,15 +403,24 @@ class DshmResponse {
       // 已是 ReadableStream（我们自己的 fetch 走这条）
       this._buffer = null;
       this.body = body;
-    } else {
+    } else if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
       /*
-       * 【兜底：绝不把"非字节流"交给 bridge】`bridge` 无条件把 `response.body` 当字节流
-       * `for await` + `res.write(chunk)`。任何既不是上面的形态、又不是 ReadableStream 的
-       * body（例如误传一个普通对象/Map）以前会直接走到 `this.body = body`，把故障推迟到
-       * 桥层、表现成"连接被断 + 什么日志都没有"。这里按标准 Fetch 的做法退化为
-       * UTF-8 文本体：可见、可诊断，且不会破坏响应生命周期。
+       * 【BufferSource 体（ArrayBuffer / TypedArray / DataView）也要按**字节**走】
+       *
+       * 请求方向早就认这两种（`encodeRequestBody`：`body instanceof ArrayBuffer` /
+       * `ArrayBuffer.isView(body)`），**响应方向原先没有** ⇒ 它们落到下面那个兜底分支，
+       * 被 `Buffer.from(String(body))` 变成 `"137,80,78,71,…"` 这种**十进制文本**：
+       * 200 OK、体是错的 —— 比"连接被断"更难查（前端只看到内容不对，日志里一片正常）。
+       *
+       * 真实调用点：`dsh-api-session-controller/lib/index.js` 的媒体路由
+       * `new Response(bytes.slice(), { headers })`（`fs.readBytes()` 回来的是 Uint8Array，
+       * `.slice()` 仍是 Uint8Array）⇒ 会话里的图片/音频会被这样送出去。
+       *
+       * 标准 Fetch 的语义就是"BufferSource 体 = 它的字节"，这里与请求方向对齐。
        */
-      this._buffer = Buffer.from(String(body), 'utf8');
+      this._buffer = body instanceof ArrayBuffer
+        ? Buffer.from(body)
+        : Buffer.from(body.buffer, body.byteOffset, body.byteLength);
       const bytes = this._buffer;
       this.body = new ReadableStream({
         start(controller) {
@@ -419,6 +428,23 @@ class DshmResponse {
           controller.close();
         },
       });
+    } else {
+      /*
+       * 【兜底：既不认形态、就**大声失败**，绝不悄悄换内容】
+       *
+       * 历史：旧实现把任何未识别的 body 原样交给 `this.body`，故障被推迟到桥层
+       * （`res.write()` 抛 `ERR_INVALID_ARG_TYPE` ⇒ 连接被断、响应空体）；
+       * 2026-10-05 的初版兜底改成"退化为 UTF-8 文本体"，但那样 ArrayBuffer/TypedArray
+       * 会**静默变成十进制文本**（200 OK + 错内容，见上一个分支的注释）。
+       *
+       * 标准 Fetch 对非法 BodyInit 的做法是**构造时抛 TypeError** ——就照它办：
+       * 报错栈直接指到调用方，而不是把一个坏响应交给下游去猜。
+       * 注意：这里只覆盖"连字节源都不是"的形态（普通对象 / Map / 数字 / 布尔 …）。
+       */
+      throw new TypeError(
+        `fetch shim: 不支持的 Response body 类型 —— ${Object.prototype.toString.call(body)}`
+        + '（支持 string / Buffer / ArrayBuffer / TypedArray / Blob / FormData / ReadableStream）',
+      );
     }
   }
   /** 读全文并缓存：`text()/json()/arrayBuffer()` 共享同一份，符合 bodyUsed 语义。 */
