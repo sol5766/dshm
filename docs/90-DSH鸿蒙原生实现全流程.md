@@ -601,10 +601,10 @@ print([ (n, b'.codesign' in z.read(n)) for n in ['libs/arm64-v8a/libnode.so.137'
 
 # ── 宿主侧结构性门禁（AGENTS.md 必跑链 + 断言计数）─────────────────────
 node tools/assert-cli-shim.mjs            # 实跑：40 项
-node tools/assert-resfile-sync.mjs        # 实跑：10 件快照同步
+node tools/assert-resfile-sync.mjs        # 实跑：13 件快照同步（2026-10-05 复核）
 node tools/assert-exec-fix.mjs            # 实跑：35 项
 node tools/assert-python-bridge.mjs       # 实跑：69 项
-node tools/assert-fs-search-fallback.mjs  # 实跑：39 通过 / 0 失败
+node tools/assert-fs-search-fallback.mjs  # 实跑：58 通过 / 0 失败（2026-10-05 复核）
 node tools/check-native-closure.mjs       # 实跑：PASS
 node tools/check-parity.mjs               # 实跑：通过
 node tools/compat-drift.mjs               # 实跑：140/140 无漂移（核心 0.2.0-rc.2）
@@ -1123,7 +1123,7 @@ sha256        45836d8a34b0b6d40e4d8b3997492b557cc87853c19813e2df4e070173fff3b3
 
 ```bash
 node tools/place-host-app.mjs
-node tools/assert-resfile-sync.mjs     # 必须「10 件快照全部同步」
+node tools/assert-resfile-sync.mjs     # 必须「全部快照同步」（**别写死件数**：清单加文件时它会变，2026-10-05 已是 13 件）
 
 # 源与快照逐字节比对（本机实测 9/9 相同 + package.json 语义锁）
 ```
@@ -1137,7 +1137,7 @@ ok  ：undici-shim.mjs 一致（5530B）  ok  ：dshm-skills.js 一致（4995B�
 ok  ：undici-loader.mjs 一致（1223B）ok  ：dshm-compat.js 一致（10154B）
 ok  ：require-builtin-shim.cjs 一致（2453B）
 ok  ：package.json 语义锁（main=main.js，无 type 字段 ⇒ CommonJS）
-assert-resfile-sync：10 件快照全部同步
+assert-resfile-sync：13 件快照全部同步
 ```
 
 ---
@@ -2476,7 +2476,7 @@ grep -m1 "BOOT_00" node-output.log   # 期望 jitless=true node=<版本>
 ```bash
 # 改 hostcore/** 之后的固定三步（缺一步都可能"改了、构建绿、设备上没生效"）
 node tools/place-host-app.mjs
-node tools/assert-resfile-sync.mjs      # 10 件快照必须全一致（9 个 FILES + package.json 语义锁）
+node tools/assert-resfile-sync.mjs      # 全部快照必须一致（`FILES` 清单 + package.json 语义锁；件数看清单，别写死）
 devecocli build
 ```
 
@@ -3632,7 +3632,8 @@ hdc shell "ls /data/app/el2/100/base/com.dshm.dshclient/haps/entry/files/dsh/hom
 
 ### 2.1 AGENTS.md 规定的必跑门禁（逐个说明它在守什么）
 
-`AGENTS.md:59-70` 列出的清单（顺序照抄）：
+**清单的权威位置是 `AGENTS.md` 的「必跑的回归门禁」块**（本节只转抄并逐条解释；
+2026-10-05 更新为 14 条 node + `device-acceptance.ps1`）：
 
 ```powershell
 node tools/assert-cli-shim.mjs
@@ -3642,23 +3643,33 @@ node tools/compat-drift.mjs
 node tools/assert-exec-fix.mjs
 node tools/assert-python-bridge.mjs
 node tools/assert-fs-search-fallback.mjs
+node tools/check-web-fetch-jitless.mjs   # jitless 下 web_fetch 真能抓网页（带对照臂）
+node tools/check-worker-jitless.mjs      # worker 线程也要拿到 jitless 补齐（带对照臂）
+node tools/check-internal-undici.mjs     # Node 内部 require 的内建 undici 必须被纯 JS 垫片接管（带对照臂）
+node tools/check-skill-sync.cjs          # 内置技能同步（判据是内容 sha256，不是字节数）
+node tools/check-ptc-ts-strip.mjs        # PTC 的纯 JS erasable-TS 擦除器（81 条 + wasm 陷阱 + 变异自检）
+node tools/check-ptc-runtime-inproc.mjs  # PTC 同进程运行时契约（在 --jitless 的临时舞台里跑真 run）
+node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pack-core ↔ 核心树 三处一致
 .\tools\device-acceptance.ps1        # 真机端侧验收
 ```
 
 | 门禁 | 守什么 | 本次实跑 |
 |---|---|---|
 | `assert-cli-shim.mjs` | `pnpm`/`npm`/`npx`/`dsh` 四个 CLI 假壳：队列路径**生成期写死**（不再运行时读 `$DSH_HOME`）、`--dir` 取值与跳过口径、不写死总数而逐壳断言 | `exit 0`，**40 项断言全过** |
-| `assert-resfile-sync.mjs` | `hostcore/app/**` 与 `entry/src/main/resources/resfile/resources/app/**` **逐字节一致**（快照漂移是静默的：改了源码忘了 `place-host-app`，构建照打旧文件）| `exit 0`，**10 件快照全部同步** |
+| `assert-resfile-sync.mjs` | `hostcore/app/**` 与 `entry/src/main/resources/resfile/resources/app/**` **逐字节一致**（快照漂移是静默的：改了源码忘了 `place-host-app`，构建照打旧文件）| `exit 0`，**13 件快照全部同步**（2026-10-05 复核；此前写"10 件"是 main.js 那次漂移修复前的数） |
 | `check-parity.mjs` | `docs/parity-matrix.md` 不能注水、不能悄悄漂移（覆盖 39 个官方能力面 / token 合法 / 不许整体 DONE 盖住某形态缺口 / 非 DONE 必须有缺口登记 / 统计与实算逐项相等）| `exit 0`，§6 缺口登记 36 个 id |
-| `compat-drift.mjs` | 上游漂移：对当前 checkout 的上游重新提取端点表，与仓库里已提交的 `dshcompat/.../Endpoints.ets` 逐条比对 | `exit 0`，**期望 138 / 基线 138，无漂移** |
+| `compat-drift.mjs` | 上游漂移：对当前 checkout 的上游重新提取端点表，与仓库里已提交的 `dshcompat/.../Endpoints.ets` 逐条比对 | `exit 0`，**期望 140 / 基线 140，无漂移**（2026-10-05 复核；138 是 `0.2.0-rc.2` 时代的数） |
 | `assert-exec-fix.mjs` | exec 探测链（`probeExec` / `ensureExecutables` / rg wrapper）的结构与**语义锁**：`denied` 只映射 `EACCES`、`so-fail` 正则覆盖 musl+glibc、Phase 5 已拆除的实验代码**不得复存** | `exit 0`，**35 项断言全过** |
 | `assert-python-bridge.mjs` | 内嵌 Python 桥（`python_runner.cpp` + el1 `libpython` + `main.js` 自检）的结构锁，含 `pipMode` 不再生成 `-V\|--version` 分支 | `exit 0`，**69 项断言全过** |
 | `assert-fs-search-fallback.mjs` | fs-search 降级 patch（rg 被拒时切 `find`/`grep`）的**三层防线**：结构（五个注入函数、两段替换、旧段已消失）、语法（`vm.SourceTextModule` 全文解析）、行为（从注入块提纯函数跑参数转换与 NDJSON 转换） | `exit 0`，**39 通过 / 0 失败** |
 | `device-acceptance.ps1` | 真机端侧验收：装机 + **冷启动** + 抓日志/布局/截图 + 生成 `dist/acceptance/<ts>/report.md`，**自动判定 5 项**（设备在线 / 核心已启动并读出运行核心版本 / 客户端已接入 / 平台标识=ohos / 本次启动后无异常退出），另逐个点开设置九个分区并记 `nav.md` | 需真机；用法与首跑踩到的坑见 §2.4 |
 
-> **"必跑"为什么只有 7 条**：这七条覆盖的是**最容易被静默破坏**的接线点（假壳、快照、台账、上游契约、
-> exec 链、Python 桥、fs-search）。更完整的门禁清单在 `docs/50-端侧核心运行架构.md` §15.1（该文件在演化，
-> 行号未固定），本章 §2.3 给出的是一份**可复跑的全量清单与本次实测读数**。
+> **为什么表里只解释这些条**：这张表逐条解释的是**最早那 7 条**——它们覆盖最容易被静默破坏的接线点
+> （假壳、快照、台账、上游契约、exec 链、Python 桥、fs-search）。后续新增的必跑项
+> （`check-web-fetch-jitless` / `check-worker-jitless` / `check-internal-undici` / `check-skill-sync` /
+> 3 条 PTC 门禁）只在上面的清单里列出、**未逐条解释**（每个文件头都有"为什么存在"一节）。
+> **权威清单与条数始终是 `AGENTS.md` 的「必跑的回归门禁」块**；"按改动面选跑"的分组见本章 §2.2，
+> 更完整的历史清单见 `docs/50-端侧核心运行架构.md` §15.1（该文件在演化，行号未固定）。
 
 ### 2.2 门禁以外的"结构性守卫"
 
@@ -3698,6 +3709,13 @@ node tools/assert-fs-search-fallback.mjs
 > 三条新增门禁的读数：`check-skill-sync.cjs` ⇒ `RESULT: 32 passed, 0 failed`；
 > `check-compat-exemption.cjs` ⇒ `RESULT: 48 passed, 0 failed`；`check-doc-refs.mjs` ⇒ **21 个文档 / 247 条引用 / 0 问题**（2026-09-30 读数；引用数随文档增改漂移）。
 > `assert-resfile-sync.mjs` 的快照数已由 8 件增至 **10 件**（9 个 `FILES` + `package.json` 语义锁）。
+
+> ⚠ **下表是 2026-09-28 / 09-30 的读数快照，不是当前值**（历史留档，故意不改）。判断"今天是否为绿"
+> 请直接跑 `AGENTS.md` 清单里的命令、读它自己的输出；**条数会随实现增长**，写死在文档里必然过期
+> （本文件 §8.13 已总结过这个教训）。**2026-10-05 复核的当前值**：`assert-exec-fix` **38** 项、
+> `assert-fs-search-fallback` **58** 项、`assert-resfile-sync` **13** 件快照、`check-dead-code`
+> **101 文件 / 2275 处声明**、`compat-drift` **140** 端点；`AGENTS.md` 的必跑清单现为
+> **15 项 = 14 条 node + `device-acceptance.ps1`**（本次 18 条实测全绿）。
 
 | 脚本 | 退出码 | 读数摘要 |
 |---|---|---|
@@ -3874,7 +3892,7 @@ dist/acceptance/20260930-120131/
 ### 2.7 本节验证方式
 
 ```powershell
-# 1) 门禁清单（AGENTS.md 的 7 条 + 结构性守卫），逐条记退出码
+# 1) 门禁清单（以 AGENTS.md 的「必跑的回归门禁」为准，当前 15 项 + 结构性守卫），逐条记退出码
 foreach ($g in @('assert-cli-shim.mjs','assert-resfile-sync.mjs','check-parity.mjs','compat-drift.mjs',
                  'assert-exec-fix.mjs','assert-python-bridge.mjs','assert-fs-search-fallback.mjs')) {
   node "tools/$g"; "  -> $g exit=$LASTEXITCODE"
@@ -4234,7 +4252,7 @@ hdc fport tcp:3120 tcp:3120 && curl -s -o /dev/null -w '%{http_code}\n' http://1
 grep -n "install -r" tools/update-device.ps1            # 装机只有覆盖安装
 grep -cn "uninstall" tools/update-device.ps1            # 期望：仅注释/自检模式串
 
-# ② 门禁（AGENTS.md 7 条）
+# ② 门禁（AGENTS.md 清单，当前 15 项）
 node tools/assert-cli-shim.mjs
 node tools/assert-resfile-sync.mjs
 node tools/check-parity.mjs
@@ -4305,7 +4323,7 @@ hdc shell "ls -la .../files/diag-*"
 ### 1.4 本节验证方式
 
 ```bash
-# ① 门禁链是否完整（AGENTS.md 规定的 7 条 + 真机验收）
+# ① 门禁链是否完整（AGENTS.md 规定的必跑清单 + 真机验收；**别写死条数**，见该文件）
 grep -n "node tools/" AGENTS.md
 
 # ② ②号例子：make-icon.py 的启动画面守卫现在是真断言还是 print
@@ -4337,7 +4355,7 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 以及与之同族的 `arch-check.mjs` / `compat-drift.mjs` / `neg-test-piai.mjs`。
 **"是否必须绿"一列**取三值：**必须**（改动后即须为 0）、**条件**（只在特定改动面或特定设备上必须绿）、**否**（是审计/工具，不是门禁）。
 
-#### 2.2.1 AGENTS.md 强制必跑（7 条）
+#### 2.2.1 AGENTS.md 强制必跑（**当前 15 条** = 14 条 node + `device-acceptance.ps1`；下表只逐条解释了最早的 7 条）
 
 | 文件名 | 守什么 | 触发条件 | 失败意味着什么 | 是否必须绿 |
 |---|---|---|---|---|
@@ -4354,6 +4372,12 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 > 客户端已接入 / 平台标识 = ohos / 本次启动后无异常退出，`tools/device-acceptance.ps1:237-244`）；
 > **界面行为类项不做判定**，留给人按 `docs/50-端侧核心运行架构.md` §12.9 / §14 勾选。
 > **因此它是"条件"而非"必须"**：没设备时它跑不了。用法与首跑踩到的坑见 §2.4。
+
+> **本表只逐条解释了最早的 7 条**（2026-10-05 复核确认，避免读者把"表里没有"误读成"不必跑"）。
+> 之后陆续加入的必跑项**未逐条进表**：`check-web-fetch-jitless.mjs`、`check-worker-jitless.mjs`、
+> `check-internal-undici.mjs`、`check-skill-sync.cjs`，以及 2026-10-05 为 PTC 加的三条
+> （`check-ptc-ts-strip.mjs` / `check-ptc-runtime-inproc.mjs` / `check-ptc-wiring.mjs`）。
+> **权威清单与条数以 `AGENTS.md` 的「必跑的回归门禁」块为准**，本节不再复制一份会过期的名单。
 
 #### 2.2.2 结构性守卫（按改动面选跑；全部 exit 0）
 
@@ -4400,7 +4424,9 @@ node tools/check-dead-handlers.mjs; echo "exit=$?"
 
 ### 2.3 分类小结
 
-- **AGENTS.md 明文必跑：7 条**（`AGENTS.md:62-68`）+ 真机 `device-acceptance.ps1`（`:69`）。
+- **AGENTS.md 明文必跑：14 条 node + 真机 `device-acceptance.ps1`**（权威清单始终是 `AGENTS.md` 的
+  「必跑的回归门禁」块；本条**不再钉行号**——2026-10-05 复核时发现旧写法把 `AGENTS.md:62-68` 写死，
+  清单每加一条就过期一次，而审核方无法分辨"过期"与"漏写"）。
 - **本轮新增：5 条**——`check-icon-assets`、`check-toolchain-sign`（更早批次），以及 2026-09-28 收尾批的
   `check-skill-sync.cjs`（P0-1）、`check-compat-exemption.cjs`（P1-3）、`check-doc-refs.mjs`（文档引用）；
   **本轮收紧判据：3 条**（`check-dead-code`、`check-dead-handlers`，以及 `check-dshm-installer.cjs` 的两处陈旧断言重写）。
@@ -5322,7 +5348,7 @@ grep -n "includes('HDSH_.*')" tools/pack-core.mjs      # 期望：每处新名�
 ### 5.7 本节验证方式
 
 ```bash
-# ① AGENTS.md 必跑链是否完整（7 条 + 真机）
+# ① AGENTS.md 必跑链是否完整（14 条 node + 真机）
 grep -n "node tools/\|device-acceptance" AGENTS.md
 
 # ② 文档与配置对账：纪律里说的每一条都要能在配置里找到

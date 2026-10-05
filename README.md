@@ -44,7 +44,7 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 - **运行时不依赖系统，随包分发。** HAP 内自带 Node 运行时与全部原生库，构建期完成自签名以进入应用签名域。代价是包体（约 300 MiB），换来"装上就能跑，不必先配环境"。
 - **核心树可切换、可回滚。** dsh 核心树以归档形式随包分发，首次启动解包进应用数据目录下的版本仓库（`dsh/cores/<version>`），通过激活事务切换版本，失败可回滚 ⇒ **升级上游 = 换一个核心归档**，App 代码不动。
 - **宿主重写，界面不重写。** 界面内容仍是官方 Web 前端；ArkUI 侧只承担平台宿主职责，设计令牌从官方 `--dsw-*` 映射到鸿蒙语义色与系统符号，不做 Web CSS 的像素级翻译——官方主题更新时不需要重做整套界面。
-- **上架友好、数据保全优先。** 只申请 10 项普通权限，不申请任何 ACL 特殊权限，无 JIT、无 `ALLOW_WRITABLE_CODE_MEMORY`；装机一律 `hdc install -r` 覆盖安装，应用数据原地保留（详见下文「真机数据保全」）。
+- **上架友好、数据保全优先。** 权限共 **11 项**（6 项普通 + 5 项 ACL 受限，逐项见 `entry/src/main/module.json5`），**不含** JIT / 可写可执行内存一类（无 `ohos.permission.kernel.*`、无 `ALLOW_WRITABLE_CODE_MEMORY`）；装机一律 `hdc install -r` 覆盖安装，应用数据原地保留（详见下文「真机数据保全」）。
 
 端侧与官方的逐项对照（哪些对齐、哪些存在边界）登记在 [`docs/parity-matrix.md`](docs/parity-matrix.md)，由 `tools/check-parity.mjs` 强制维护；移植过程中踩到的坑按主题汇总在 [`docs/70-鸿蒙移植踩坑与修复总览.md`](docs/70-鸿蒙移植踩坑与修复总览.md)。
 
@@ -65,7 +65,7 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 | **插件** | 查看随包插件清单与运行阶段；按行启用/禁用，并可恢复部署默认 |
 | **核心版本** | 同时安装多个核心版本，一键**切换 / 回滚**（停旧起新，逐版本校验后激活） |
 | **多语言** | 界面文案跟随系统语言，默认中文 |
-| **上架友好** | 不申请 JIT 等特殊权限，全部按 `jitless` 运行；权限为 10 项**普通权限**（含网络、麦克风、文件读写、自定义沙箱等），**不申请任何 ACL 类特殊权限**（无 JIT、无 `ALLOW_WRITABLE_CODE_MEMORY`） |
+| **上架友好** | 全部按 `jitless` 运行，**不申请** JIT / 可写可执行内存（无 `ohos.permission.kernel.*`、无 `ALLOW_WRITABLE_CODE_MEMORY`）；权限共 **11 项** = 6 项普通（网络、网络信息、后台保活、终止前回调、持久化数据、麦克风）+ **5 项 ACL 受限**（用户文件读写、文件访问持久化、全盘访问、自定义沙箱、外部原生代码加载）——ACL 这 5 项都服务于"用户可见目录读写 + 自定义沙箱"，随签名 profile 的 `acls` 声明，上架时按 ACL 清单在应用市场申请（逐项见 `entry/src/main/module.json5`） |
 
 ## 架构
 
@@ -199,7 +199,7 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 ## 设计原则
 
 1. **不 fork、不魔改 dsh**：端侧差异只通过 dsh 自己的组合面（profile / `cordis.patch.yml` / bundle）表达。
-2. **不申请特殊权限**：需要 JIT、ACL 之类前提的方案一律不进入选型，以保证可正常上架。
+2. **不申请 JIT / 可写可执行内存**：需要它们作前提的方案一律不进入选型（这是 `--jitless` 的由来）。**ACL 受限权限只在文件访问与自定义沙箱必需处申请**——当前 5 项（用户文件读写、文件访问持久化、全盘访问、自定义沙箱、外部原生代码加载），随签名 profile 的 `acls` 声明，逐项见 `entry/src/main/module.json5`。
 3. **界面不撒谎**：失败必须给出下一步；空态说明"可以做什么"；不可用的动作把原因写在旁边，而不是给一个点了没反应的入口。
 4. **上游知识只出现在 `dshcompat`**：字段名、端点形状、事件类型集中一处，升级上游时改一个地方。
 5. **产品语义跟 Web，视觉与交互用鸿蒙原生**：信息架构与行为对齐官方 Web（对等矩阵逐行登记），

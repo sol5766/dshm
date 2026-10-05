@@ -57,7 +57,11 @@ echo "超时：Host 未回报结果（180s）"
 
 ## 边界（如实告知用户，不给会失败的承诺）
 
-- 含原生模块（.node）的插件装不了：沙箱禁 symlink/hardlink，tar 里的链接条目会被跳过并写进结果
+- 含原生模块（`.node`）的插件装不了：预编译产物是 win/mac/linux 平台的，鸿蒙需要专门的
+  `openharmony-arm64` 移植版；且沙箱内的 ELF 受**代码签名**管辖，未经构建期自签名的 `.node`
+  即便装上也 `dlopen` 失败。**注意不要把这条归因于"沙箱禁 symlink"** —— 2026-10-05 真机实测：
+  PC/2in1 档 symlink/hardlink **允许**（`ln -s` 成功、hardlink inode 相同），tar 里的链接条目
+  在该档不会因权限被拒；手机档才被拒。跨档位脚本仍按"可能禁止"兜底（复制本体而非建链）。
 - 声明 `dsh.bundle` 的插件：主包会装上，但 bundle 里的子插件组需按其 README 逐个安装/启用
 - 安装成功后插件行已写入 profile，但**必须重启 DSHM 应用才挂载生效**——
   重启前 `pluginInventory` 里看不到它，这不是失败
