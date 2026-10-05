@@ -76,11 +76,22 @@ const ID = "@deepseek-ai/dshm-office-system-preview/office";
  * 这是"把不可用变成可用"：等 `readBytes` 修好之后，若要回到内联渲染，
  * 把下面这些后缀从清单里删掉即可（文档见 docs/95 §10）。
  */
-const EXTENSIONS = [// Office（原本就认领）
-	"doc", "docx", "ppt", "pptx", // 图片（上游 image 渲染器是 bytes-complete）
-	"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", // PDF / HTML（同为 bytes-complete）
-	"pdf", "html", "htm", // 表格（上游内置 Excel 是 bytes-complete；纯客户端实现，但同样读不到字节）
-	"xlsx", "xls", "csv", "tsv"];
+const EXTENSIONS = [
+  // 【2026-10-05 认领收窄为 Office-only（9 项）】
+  // 只认领端侧**没有引擎、必须借系统预览**的类型。图片/PDF/HTML/表格/SVG 交回上游：
+  // 上游对它们有内联渲染器（走 bytes-complete ⇒ workspaceFiles/readBytes），若被我们认领成
+  // text-pages，那条"跨进程取字节"的路就永远不被走到 —— 既拿不到内联，也测不出它的真实现状。
+  // 注：md 不在内（系统预览不支持 markdown），走内置文本渲染。
+  "doc",
+  "docx",
+  "ppt",
+  "pptx",
+  "xls",
+  "xlsx",
+  "odt",
+  "ods",
+  "odp"
+];
 
 /** 注入的样式：正文面板 + 两个工具栏按钮的外观（配色全部走设计 token）。 */
 const css = ".dshmOfficeSystemPreview_empty{box-sizing:border-box;height:100%;color:var(--dsw-alias-label-secondary);font-family:var(--dsw-font-family);font-size:var(--dsh-content-font-size-secondary,13px);text-align:center;white-space:normal;flex-direction:column;justify-content:center;align-items:center;gap:14px;padding:0 24px;line-height:1.6;display:flex}.dshmOfficeSystemPreview_icon{opacity:.6;filter:grayscale();flex:none}.dshmOfficeSystemPreview_name{margin:0;color:var(--dsw-alias-label-primary);font-size:var(--dsh-content-font-size,14px);word-break:break-all}.dshmOfficeSystemPreview_hint{margin:0;max-width:34em}.dshmOfficeSystemPreview_meta{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px}.dshmOfficeSystemPreview_failure{margin:0;max-width:34em;color:var(--dsw-alias-state-warn-label)}";
