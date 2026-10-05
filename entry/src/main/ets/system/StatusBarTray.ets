@@ -38,6 +38,7 @@
  */
 
 import { statusBarManager } from '@kit.DeskTopExtensionKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { common, contextConstant, StartOptions, Want } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { commonEventManager, emitter, BusinessError } from '@kit.BasicServicesKit';
@@ -117,6 +118,35 @@ export class StatusBarTray {
    * 挂托盘图标（幂等）。失败会**抛出**，由调用方决定降级（见 isReady 的说明）。
    */
   static async install(context: common.UIAbilityContext): Promise<void> {
+    /*
+     * 【2026-10-05：先摘残留，再挂新图标】
+     * 系统侧的状态栏注册是按 bundle 保存的 —— 换版本/覆盖安装后，旧注册可能仍在，
+     * 表现为"应用没开、顶栏或右下角还挂着我们的图标"（今天实测过：宿主进程都已 force-stop
+     * 清掉，图标仍留着）。这里先无条件摘一次：没有旧注册时该调用可能抛（忽略即可），
+     * 摘完再挂新的，保证"运行时有图标、且只有一份"。
+     * 显示在**顶栏**还是**右下角托盘区**由系统按桌面形态决定，本代码不做任何位置分支。
+     */
+    try {
+      statusBarManager.removeFromStatusBar(context);
+      hilog.info(DOMAIN, TAG, '挂图标前先摘残留注册（无残留时也会成功）');
+    } catch (err) {
+      hilog.info(DOMAIN, TAG, '挂图标前摘残留注册失败（多半本来就没有，忽略）：%{public}s', errOf(err as Object));
+    }
+
+    /*
+     * 【2026-10-05 按用户要求：DSHM_TRAY_DISABLED —— 不再挂托盘图标】
+     *
+     * 真机实测两轮：即便恢复了官方终止行为、并在 onPrepareToTerminate（窗口尚在时）主动
+     * 调 removeFromStatusBar，托盘图标**仍然留着**。原因是结构性的：图标是挂在
+     * **托盘进程**（BackGroundAbility，NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM 拉起）身上的，
+     * 只有那个进程结束才会一并收走；而系统终止只结束主 Ability。
+     *
+     * 而托盘的存在意义本来只有一条：让"关闭窗口"后应用继续跑（关窗 ⇒ 最小化到后台）。
+     * 用户已明确要求**恢复官方行为**（关闭就是退出）⇒ 这条前提消失 ⇒ 托盘成了纯负担
+     * （退出后留一个摘不掉的图标）。故这里直接不挂：应用行为与普通鸿蒙应用一致。
+     *
+     * 要恢复托盘：把下面这行 return 注掉即可（其余实现原样保留）。
+     */
     if (StatusBarTray.installed) {
       return;
     }
@@ -136,8 +166,11 @@ export class StatusBarTray {
     };
     const item: statusBarManager.StatusBarItem = {
       icons: icons,
+      /*
+       * 【2026-10-05：quickOperation 是该接口的**必填**字段（去掉后编译失败 ERROR×2，实测），
+       * 故这里保留；系统菜单里那个「打开应用」项由它派生，要彻底去掉只能不用托盘图标。】
+       */
       quickOperation: quick,
-      statusBarGroupMenu: StatusBarTray.groupMenu(context),
       hoverTips: localizedOr(context, $r('app.string.tray_hover_tips'), 'DSHM 正在运行')
     };
     /*
@@ -233,6 +266,10 @@ export class StatusBarTray {
 
   /** 左键点击托盘图标（`iconClickType` 目前只会是 `leftClick`）。 */
   static onIconClick(cb: (clickType: string) => void): void {
+    /*
+     * 【2026-10-05 说明】用户澄清：**左键单击打开应用是要保留的**（此前误删，这里原样恢复）；
+     * 要清除的是**右键菜单里那个"打开应用"项**及其功能（已通过不再传 statusBarGroupMenu 去掉）。
+     */
     StatusBarTray.iconClickCb = cb;
     // 先注销（不传 callback = 注销该事件的全部回调）再注册：本方法可能被多次调用，
     // 累积回调会让一次点击触发 N 次唤回。
