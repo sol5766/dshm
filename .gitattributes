@@ -1,0 +1,36 @@
+# 行尾与二进制归属（2026-10-05 新增）
+#
+# 【为什么必须有这个文件】Windows 上 `core.autocrlf=true`（本机默认）会把 LF 检出成 CRLF，
+# 而 `tools/check-ptc-ts-strip.mjs` 断言 vendor 包 `lib/vendor/babel-standalone/babel.min.cjs`
+# 的**字节数** = 3,069,546 ⇒ 被检出成 CRLF 后变 3,069,550，门禁**假红**
+# （2026-10-05 独立作业在 `core.autocrlf=true` 的干净克隆里实测到 `exit 1`；同一克隆加
+# `-c core.autocrlf=false` 则 18/18 全绿）。凡"按字节数或 sha256 断言"的文件，都必须在
+# 所有平台上得到**同一份字节** —— 统一 LF 是最简单的口径。
+#
+# 【口径】文本一律**存 LF、检出 LF**。当前 `git ls-files --eol` 显示 index 侧全部是 `lf`
+# （259 个文件的工作区是 `w/crlf`，但按本文件的归一规则它们仍是 clean 的）⇒ 加本文件
+# **不会**产生任何行尾改动，只是把"靠机器默认配置"变成"靠仓库约定"。
+* text=auto eol=lf
+
+# PowerShell 脚本：行尾同样 LF（PS 5.1 与 7 都吃 LF），但要按仓库约定保留 **UTF-8 BOM**
+# ——BOM 是内容不是行尾，本文件不影响它；BOM 的必要性见 AGENTS.md 的编码约定。
+*.ps1 text eol=lf
+
+# 二进制：显式标注，免得被 `text=auto` 误判成文本后在检出时损坏。
+# （多数路径已被 .gitignore 挡在库外，这里是防御性声明。）
+*.zip   binary
+*.hap   binary
+*.so    binary
+*.so.*  binary
+*.p12   binary
+*.cer   binary
+*.p7b   binary
+*.csr   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ttf   binary
+*.otf   binary
+busybox binary
