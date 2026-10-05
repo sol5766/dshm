@@ -33,7 +33,7 @@ import { AboutInfo } from './Settings';
 export function aboutInfo(): AboutInfo {
   const stats: TableStats = tableStats();
   return {
-    appVersion: '1.0.0 (1000000)',
+    appVersion: '1.1.0 (1010000)',
     supportedUpstream: supportedVersionsText(),
     compatCapturedAt: upstreamCapturedAt(),
     endpointStats: `${stats.endpoints} 个端点 / ${stats.streamEndpoints} 个流式 / ${stats.capabilities} 个能力`

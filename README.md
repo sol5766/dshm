@@ -210,10 +210,10 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 
 ### 只想装上用
 
-到本仓库 **Releases** 下载最新的 `DSHM-1.0.0-arm64-signed.hap`，然后：
+到本仓库 **Releases** 下载最新的 `DSHM-1.1.0-arm64-signed.hap`，然后：
 
 ```bash
-hdc install -r DSHM-1.0.0-arm64-signed.hap
+hdc install -r DSHM-1.1.0-arm64-signed.hap
 ```
 
 首次启动会解包核心树（约 60–90 秒），期间停在启动页，属正常。
