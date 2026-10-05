@@ -33,7 +33,10 @@ export type { RememberedHost, RememberedToken } from './system/HostStore';
 export {
   EVENT_HOST_CONNECTED,
   EVENT_KEY_HOST_TOKEN,
-  EVENT_KEY_HOST_URL
+  EVENT_KEY_HOST_URL,
+  EVENT_PICKER_SUBSTITUTED,
+  EVENT_KEY_PICKER_REASON,
+  EVENT_KEY_PICKER_PATH
 } from './system/HostEvents';
 export { FormFactor, readDeviceFacts } from './system/DeviceFacts';
 export type { DeviceFacts } from './system/DeviceFacts';

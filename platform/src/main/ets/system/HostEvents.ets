@@ -34,3 +34,21 @@ export const EVENT_KEY_HOST_URL: string = 'url';
  * 事件总线不落盘，这条路径上没有明文文件产生。
  */
 export const EVENT_KEY_HOST_TOKEN: string = 'token';
+
+/**
+ * 「目录选择器已改用应用公共目录」的事件 id。
+ *
+ * 【为什么需要这条通道】用户在 Web 端选了一个**公共目录**（如 `Documents`）时，node（Host）侧
+ * 不一定可写 —— picker 的 URI 授权**不跨进程**（详见 GitHub issue #3）。`WebApp` 会探写，
+ * 失败就改用应用自己认领的 `Download/<包名>/`。**"换路径"这件事必须让用户知道**
+ * （issue #3 的 R3 原文："UI 显示已授权、产出为零、无提示"），而换路径发生在 `WebApp`（Web 侧）、
+ * 提示要由壳层（`Index`）显示 ⇒ 走这条进程内通道（与 `EVENT_HOST_CONNECTED` 同一套机制）。
+ *
+ * 载荷：`EVENT_KEY_PICKER_REASON`（为什么换）+ `EVENT_KEY_PICKER_PATH`（换成了哪个路径）。
+ */
+export const EVENT_PICKER_SUBSTITUTED: number = 0xD5A2;
+
+/** 事件载荷：换路径的原因（一句给人看的中文说明） */
+export const EVENT_KEY_PICKER_REASON: string = 'reason';
+/** 事件载荷：换成的最终路径（应用公共目录的绝对路径；拿不到时为空串） */
+export const EVENT_KEY_PICKER_PATH: string = 'path';
