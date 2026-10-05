@@ -179,3 +179,23 @@ node tools/check-core-openharmony-patches.mjs  # 核心树里的 19 处端侧注
    stderr 空、退出码 0。必须在**宿主侧**捕获（Node `spawnSync` 拿 Buffer，避免 PowerShell 的 GBK 往返）。
    另：持久 hilog（`/data/log/hilog/hilog.*.gz`，shell 可读）里 tag 首段就是**进程名**，
    是查"某应用跑过没、跑在哪个进程"的低成本台账；`hilog -x` 是 dump，`hilog -d` 需参数。
+
+
+---
+
+## 收尾期新踩的三个坑（2026-10-05 夜）
+
+1. **Node 里读 git 历史不要用 `execSync('git show HEAD^:…')`**：Windows 上它经 `cmd.exe`，而 `^` 是 cmd 的转义符 ⇒ `HEAD^:` 会被吃成 `HEAD:`（**索引版**），
+   **静默返回删除后/暂存后的内容**，让人误判"引用本来就对"。正确写法：
+   `execFileSync('git', ['show', 'HEAD~1:path'])`（或先 `spawnSync` 拿 Buffer 再解码）——本次行号重算就因此绕过一次误判。
+2. **代理的通/不通是动态的，别把结论写死**：2026-10-05 傍晚实测同一个远端先后出现两种相反结果 ——
+   · 梯子没开时：`git push github …` 走 `http.proxy=http://127.0.0.1:7897` 必失败，须 `git -c http.proxy= …` 绕开；
+   · 梯子开启后：绕代理反而 `Recv failure: Connection was reset`，走已配置代理才成功。
+   ⇒ 推送失败时**两种都试一次**并贴原始报错，不要照着上一次的结论硬套；也不要把临时结论写进 git 配置（只在命令行覆盖）。
+3. **清理 `dist/core/work/<old>` 后，`entry/.cxx` 里的 ninja 缓存会引用已删路径** ⇒ 下一次 builds 首次失败；
+   删掉 `entry/.cxx`（构建缓存，允许清理）即可。这条属于清理口径：
+   **清 `dist/core/work` 旧版本时，顺手清 `entry/.cxx`**。
+
+> 另记（提交卫生）：`docs/90` 的一次"等长替换"（行号重算）因**文件 size 不变**，被 git 的 stat 缓存当成"未改"，
+> 结果随另一个只 `git add docs/90` 的提交一起落库 —— 内容正确但提交归属与 message 不符。
+> ⇒ 提交前用 `git status` + `git diff --cached --stat` 核对**暂存内容**，别只信 `git status` 的"已暂存"三字。
