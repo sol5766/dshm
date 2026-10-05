@@ -4360,6 +4360,22 @@ Error Code:10106102  The device screen is locked during the application launch
 引入文件服务会**多一层间接**且改变上游（项目纪律是对上游零 patch），
 因此**不做**。若后续实测发现某形态（如纯手机）确不可读，再按报告方案实现。
 
+> **【2026-10-05 限定与交叉引用（收尾审计补）】本节结论的适用范围必须收紧。**
+> 它证明的是：**在已声明的那 5 条 ACL 权限、且设备是 2in1 的前提下**，ArkTS 侧拿到的是
+> **用户真实路径**（上面三条证据）。它**不能**推出"**node（Host）侧**能读用户选中的任意公共目录"——
+> GitHub issue #3 的真机逐条对照显示 `Documents` / `Download` / `Desktop` 三条路径在 node 侧
+> **全部 `EPERM`**：picker 的 URI 授权**不跨进程**继承给 node 子进程（Host）。
+> 上面第 3 条"日志里 `EPERM|EACCES` = 0"只说明**当时那条链路没走到被拒的分支**
+> （当时选中的是应用自己认领的公共目录，不是 `Documents`），**不是**"node 侧读用户目录不会失败"的证据。
+>
+> 两件事并行成立、不矛盾：① 路径**是**用户选的真路径（本节结论）；
+> ② 该路径在 **node 侧不一定可写**（issue #3 的根因）。
+> 现行处置：外壳侧**探写失败就改用应用认领的 `Download/<包名>/`**（`FilePicker.ets` 的公共目录兜底
+> + `WebApp.ets:985-996`），并在拿到"PICKED + reason"时由壳层给出提示（`Index.ets` 的
+> `openFolderPicker`，2026-10-05 修）；宿主侧的唯一合法来源是 `DSHM_PUBLIC_DOWNLOAD`。
+> **复核方式**（issue #3 关单前需要）：选 `Documents` 时看有没有 `diag-picker-public-fallback`，
+> 以及 `diag-picker-public-path` 指向哪里。
+
 > **未验证项（如实登记）**：**2026-09-29 更正设备形态** —— 本机是 **2in1**
 > （`const.product.devicetype = 2in1`、`model = MNTXM-24B`、`name = HUAWEI MateBook 14`、
 > `OpenHarmony-7.0.0.105`），**此前误记为"手机形态"**。

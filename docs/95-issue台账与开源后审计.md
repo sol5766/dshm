@@ -165,7 +165,9 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 
 ## 4. 门禁与真机读数（2026-10-05 11:37 收尾版）
 
-**本机门禁：18/18 全绿**（`AGENTS.md` 清单 15 项 + `check-native-closure` / `check-plugin-toggle` / `check-dead-code`）。
+**本机门禁：19/19 全绿**（`AGENTS.md` 清单 16 项 = 15 条 node + `device-acceptance.ps1`，再加
+`check-native-closure` / `check-plugin-toggle` / `check-doc-refs` / `check-dead-code`；其中
+`check-core-openharmony-patches.mjs` 是 2026-10-05 下午新增的第 15 条 node 门禁）。
 关键条数：`assert-cli-shim` 40、`assert-exec-fix` 38、`assert-python-bridge` 69、`assert-fs-search-fallback` **58**、
 `check-skill-sync` 32、`check-ptc-ts-strip` **81**（wasm 陷阱 0 触发）、`check-ptc-runtime-inproc` **166**、
 `check-ptc-wiring` **10 项一致**、`compat-drift` **140/140**、`assert-resfile-sync` **13 件同步**、
@@ -223,3 +225,59 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 # 侧载包
 (Get-FileHash dist\sideload\DSHM-1.0.0-core0.2.1-alpha.1-arm64-signed.hap).Hash  # 见 §4 的 sha256
 ```
+
+---
+
+## 7. 第二轮（2026-10-05 下午）落实记录
+
+用户从 §5 的 11 项待办里选定 6 项，本轮逐项落实（②因本机缺工具只能交付草稿）。
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| ① 新增"三条端侧补丁"的独立门禁 | ✅ | 新增 `tools/check-core-openharmony-patches.mjs`（348 行 / **13 条断言**）：正常 exit 0、`--self-test` 5 个变异用例全红（M5 专门证明**反向断言单独**能红）、缺树 exit 3（实测：树改名 → exit 3，改回 → 复绿）。已加进 `AGENTS.md` 必跑清单 ⇒ 现 **16 项 = 15 条 node + `device-acceptance.ps1`**（`CONTRIBUTING.md` 与 `docs/90` 的条数口径同步改齐）。**核实到的真实标记**：资源装甲三处各 ×1；PDF `DSHM_MAP_COMPAT` **恰好 2 次**（主线程 chunk 工厂 / 内联 worker 的 Blob 字面量，两处形态可区分）；终端标记 **3 处**（`runner-launch-*.js:670`、`index.js:1164`、`index.js:856`）。⚠ 踩坑：反向断言**不能**写成"文件里不许再有 `platform === \"linux\"`"——树里还有 2 处**无关**上游判定（`runner-launch-B2zsQ1Dz.js:811`、`index.js:1387`），那样会恒红；门禁改为逐字否掉被替换的 3 条上游语句 |
+| ② phone 档工具链解包（GitHub #2 §3） | ⏳ **草稿就绪，待你发** | 本机**没有 `gh` CLI、没有任何 GitHub token**（已实测）⇒ 无法代开。可直接粘贴的正文在 `dist/_issues/DRAFT-github-2-sec3-phone-toolchain.md`：现象、`文件:行` 证据、最小改法（复用 `dshm-installer.js:157 extractTar()` + 分片让出）、风险（4530 文件同步解卡事件循环、hmfs 的 `utimensat`/`symlink` 语义）、以及**必须写死的边界**"解包成功 ≠ 工具链可用" |
+| ③ WebApp 换路径原因上报壳层 | ✅（待真机点一次） | `platform/src/main/ets/system/HostEvents.ets` 新增 `EVENT_PICKER_SUBSTITUTED`（`0xD5A2`）+ 两个载荷键（沿用"id 与键只在 platform 定义一处"的既有契约）；`WebApp.ets` 在"探写失败 ⇒ 改用应用公共目录"处分发事件（此前**只落 diag 标记** ⇒ 用户看不到）；`Index.ets` 在 `aboutToAppear` 订阅、`aboutToDisappear` 退订，收到后打开已有目录浮层、把原因与实际路径写在顶部。**仍未做**：真机跑一次这条交互（需要 Web 端目录选择器） |
+| ④ CI + `CODE_OF_CONDUCT.md` | ✅ | 见 §7.3 |
+| ⑤ parity 增"端侧独有"登记规则 | ✅ | `tools/check-parity.mjs` 新增 `REQUIRED_LOCAL_SURFACE`（16 个 id）+ **不变式 A2**：列出的端侧能力面**必须各有行**，否则红。矩阵 §4.6 补登 **5 行**（`dshm-tool-fs-remove` / `dshm-fs-write-nonchmod` / `dshm-workspace-claim` / `dshm-office-system-preview` / `dshm-ptc-runtime-inproc`）；统计 50 → **55 行**（DONE 18 · PARTIAL 32 · BOUNDARY 3 · TODO 2），§6 补 `dshm-office-system-preview` 的缺口登记。**负测试**：改掉某行 id ⇒ 门禁红并点名该 id；还原后复绿且文件**逐字节一致**（无残留） |
+| ⑥ UI 提示与技能文档收口 | ✅ | ① 技能 `entry/src/main/resources/resfile/ohos-skills/ohos-workspace.md` 新增「用户手动选目录」一节：写明"选中的路径会成为工作区，**但目录选择器的授权不跨进程** ⇒ node 侧可能 `EPERM`；外壳会改用应用认领的 `Download/<包名>/` 并显示原因；**模型不得假定用户选的路径可写**，判断工作区只认会话 cwd / 启动日志的 `默认工作区：…`"。② `docs/device-validation.md` 的「批次三十二」判词加**范围限定 + 交叉引用 issue #3**：那条"不是 DSHM 原生缺陷"只对"ArkTS 侧拿到的是不是用户真路径"成立，**不能**推出"node 侧可读用户选中的公共目录"；`EPERM/EACCES = 0` 只说明当时没走到被拒分支。门禁复核：`check-skill-sync` **32/32**、`check-doc-refs` **254 条引用全过**、`check-dead-code` 无死代码、`check-parity` 通过 |
+
+### 7.1 顺带发现并修掉的真缺陷
+
+| 发现 | 影响 | 修法 |
+|---|---|---|
+| **`tools/update-device.ps1` 的"数据保全"校验是结构性假通过** | 基线用 `ls $filesDir/dsh/home \| wc -l`，而 `dsh/home` 是 **0700**、`hdc shell` 是另一个 uid ⇒ `ls` 被拒、计数**恒 0** ⇒ 每次打"home 为空（可能是全新设备，或数据已被清）"、第 7 步必然 `SKIP 本次无法证明「数据被保留」`。这台设备其实**数据完好**（同一时刻 `stat` 给 `links=13 size=3440`）。**后果**：唯一"证明覆盖安装没删数据"的检查等于不存在，还会误导人以为"数据被清了" | 改用 **stat 指纹**（`links=%h size=%s`）作判据：`links` **减少**才判失败，相等/增加算保留；`ls` 那条降级为"预期不可读"的说明（不再当判据）。已实测新脚本输出 `home 指纹：links=13 size=3440` |
+| **`emitter.off` 与 `emitter.on`/`emit` 的 API 不对称** | `on`/`emit` 收 `InnerEvent`（`{ eventId }`），而 `off` 的重载只收**裸 number/string**（`@ohos.events.emitter.d.ts:115/129/147/166`）⇒ 照抄 `on` 的形状写 `off({ eventId })` 编译失败（实测 **9 个级联错误**全出自这一行，`Argument of type '{ eventId: any; }' is not assignable to parameter of type 'string'`） | `Index.ets` 改为 `emitter.off(EVENT_PICKER_SUBSTITUTED, cb)`，并把这条不对称写进代码注释 |
+
+### 7.2 新发现的门禁缺口（未做，登记）
+
+`check-core-openharmony-patches.mjs` 的产出顺带做了一次**文本级筛查**：**还有 10 处端侧补丁只有打包期 `die()` 兜底、没有独立门禁**——
+`patchVoiceInputNativeCapture`（`tools/pack-core.mjs:421`）、`patchVoiceInputNoiseSuppression`（:568）、`patchSensevoiceForHms`（:725）、
+`patchLinkForSandbox`（:1904）、`patchCredentialsOwnerCheck`（:2003）、`patchAgentPresetWorkflow`（:2052）、
+`patchAppBootReadonlyStack`（:2154）、`patchFsLocalLink`（:2222）、`patchAttachmentLocalLink`（:2292）、`embedProfile`（:797）。
+**建议**：按同一形状把新门禁扩成"**全部注入标记**"的清单门禁（一次覆盖，而不是每个补丁一条命令）。
+
+### 7.3 CI 与行为准则
+
+- 新增 `.github/workflows/gates.yml`（ubuntu-latest + `setup-node`）：只入列**干净克隆可跑**的 **11 条**门禁
+  （另加 6 条 `--self-test` 证明检测器真会红），排除 **9 条**并在 YAML 注释里逐条写明依据。
+- 新增 `CODE_OF_CONDUCT.md`（Contributor Covenant 2.1 中文结构；联系方式＝GitHub Issue/Discussions 三个链接，**无邮箱**）。
+- ⚠ **纠正我先前的错误前提**：`entry/src/main/resources/resfile/*.zip` **不入库**（`.gitignore:42`）⇒
+  干净克隆里**没有核心树**，需要它的门禁会 `exit 2/3`（独立作业实测：`assert-fs-search-fallback` exit 1；
+  `check-web-fetch-jitless` / `check-ptc-runtime-inproc` / `check-ptc-wiring` / `check-core-openharmony-patches` exit 3；
+  `compat-drift` / `check-plugin-toggle` / `check-native-closure` exit 2）⇒ CI **不能**包含它们。
+  `AGENTS.md` 已按"哪些门禁需要核心树/设备"补了一段，避免把"CI 绿"读成"全绿"。
+- 顺带修掉一个**跨平台假红**（同一独立作业在 `core.autocrlf=true` 的干净克隆里实测到）：
+  `check-ptc-ts-strip.mjs` 断言 vendor `babel.min.cjs` 的字节数 = 3,069,546，而 Windows 默认把 LF 检出成
+  CRLF ⇒ 3,069,550 ⇒ 门禁**假红**。⇒ 新增 **`.gitattributes`**（`* text=auto eol=lf` + 二进制声明），
+  与当前 index（`git ls-files --eol` 全为 `lf`）一致 ⇒ **不产生任何行尾改动**。
+- **未验证**：CI 从未真跑过（本机没有 GitHub Actions 环境）；入列的 11 条是在**本地等价克隆**
+  （`git -c core.autocrlf=false clone`）里按 YAML 步骤逐条实跑、18/18 exit 0 得出的。
+
+### 7.4 本轮之后剩下的
+
+1. **②的 issue 需要你发**（草稿已就绪）。
+2. **③与⑤的真机 UI 验收**：Web 端目录选择器选一个不可写目录（如 `Documents`）⇒ 应看到浮层提示；
+   并复核 `diag-picker-public-fallback` / `diag-picker-public-path` 两个标记（这也是 issue #3 关单前的两问）。
+3. §7.2 的 10 处补丁门禁扩展。
+4. §5 剩余的 8/11 项（原生库路径两份实现、`main.js` 噪声措辞统一、约 19 条未复核门禁等）。
+5. **推送**（本地已提交/将提交，远端仍未更新）。
