@@ -155,6 +155,18 @@ class DshmFile extends DshmBlob {
   }
 }
 
+/**
+ * 生成一个 multipart/form-data 的 boundary。
+ *
+ * 【为什么要单独抽出来】响应方向（`DshmResponse`）必须**先**定 content-type、**后**编体：
+ * `bridge()` 是 `writeHead(...)` → 再 `for await` 写体（`dsh-client-connection/lib/index.js:85-105`），
+ * 而 multipart 的边界就写在 content-type 里 ⇒ 边界只能由构造 Response 的那一方生成、
+ * 再传给编码器。请求方向（`dshmFetch`）仍然自生成，行为不变。
+ */
+function makeMultipartBoundary() {
+  return `----dshm${Date.now().toString(16)}${Math.floor(Math.random() * 1e9).toString(16)}`;
+}
+
 class DshmFormData {
   constructor() { this._entries = []; }
   append(name, value, filename) { this._entries.push({ name: String(name), value, filename }); }
@@ -171,9 +183,9 @@ class DshmFormData {
   keys() { return this._entries.map((e) => e.name); }
   values() { return this._entries.map((e) => e.value); }
   [Symbol.iterator]() { return this.entries()[Symbol.iterator](); }
-  /** 编成 multipart/form-data 的字节流 + boundary（够 dsh 上传附件用）。异步：原生 Blob 取字节是异步的。 */
-  async _encode() {
-    const boundary = `----dshm${Date.now().toString(16)}${Math.floor(Math.random() * 1e9).toString(16)}`;
+  /** 编成 multipart/form-data 的字节流 + boundary（够 dsh 上传附件用）。异步：原生 Blob 取字节是异步的。
+   *  `boundary` 可由调用方给定（响应方向要求 content-type 先于体确定，见 makeMultipartBoundary）。 */
+  async _encode(boundary = makeMultipartBoundary()) {
     const chunks = [];
     const crlf = Buffer.from('\r\n');
     for (const entry of this._entries) {
@@ -232,10 +244,60 @@ function isForeignFormData(value) {
 }
 
 /** 把外来 FormData 的条目搬进自家实现再编码——复用 `_encode()`，不复制一份 multipart 逻辑。 */
-async function encodeForeignFormData(form) {
+async function encodeForeignFormData(form, boundary) {
   const copy = new DshmFormData();
   for (const [name, value] of form.entries()) copy.append(name, value);
-  return await copy._encode();
+  return await copy._encode(boundary);
+}
+
+/**
+ * 是不是 FormData——**自家的与原生的一并算**（两种都在本仓出现，见 `isForeignFormData`）。
+ *
+ * 【为什么还要 `instanceof DshmFormData` 这一条】`isForeignFormData` 靠
+ * `Object.prototype.toString.call(value) === '[object FormData]'` 精确识别原生实例；
+ * 而 `DshmFormData` **没有** `Symbol.toStringTag`，它的 `Object.prototype.toString`
+ * 是 `[object Object]` ⇒ 只认后者会把自家的漏掉。
+ */
+function isFormDataLike(value) {
+  return value instanceof DshmFormData || isForeignFormData(value);
+}
+
+/**
+ * 把任意 FormData（自家 / 原生）编成 multipart 字节，**用调用方给定的 boundary**。
+ * 响应与请求两个方向共用同一条编码路径。
+ *
+ * @param {DshmFormData|FormData} form
+ * @param {string} boundary 已写进 content-type 的那个边界
+ * @returns {Promise<{data: Buffer, type: string}>}
+ */
+async function encodeFormDataBody(form, boundary) {
+  return form instanceof DshmFormData
+    ? await form._encode(boundary)
+    : await encodeForeignFormData(form, boundary);
+}
+
+/**
+ * 把一个**可能异步**的字节来源包成 ReadableStream。
+ *
+ * 【为什么不能同步取】`new Response(blobLike)` 里原生的 `Blob` 只能 `await arrayBuffer()`
+ * （见 `blobBytes`），而 ReadableStream 的 `start` 可以是 async ⇒ 让流"等字节"，
+ * 构造本身仍然是同步的（Fetch 的 `new Response(...)` 就是同步签名）。
+ *
+ * @param {() => Promise<Buffer>} load 惰性取字节（流被读时才执行）
+ * @returns {ReadableStream}
+ */
+function byteStreamFrom(load) {
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        const data = await load();
+        if (data.length > 0) controller.enqueue(new Uint8Array(data));
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+  });
 }
 
 // ── body 编码（异步：原生 Blob 的字节只能异步取）─────────────────────────────
@@ -292,10 +354,71 @@ class DshmResponse {
           controller.close();
         },
       });
-    } else {
+    } else if (isFormDataLike(body)) {
+      /*
+       * 【DSHM_FORMDATA_RESPONSE / 2026-10-05：读字节的 RPC 全挂的真因】
+       *
+       * 上游 `dsh-client-connection/lib/index.js:747-761` 的 `fullResponse()` 在 RPC 结果
+       * 含 `Uint8Array` 时**不再走 JSON**，而是：
+       *     const parts = new FormData();
+       *     parts.set("bytes-0", new Blob([new Uint8Array(attachment.bytes)]));
+       *     parts.set("metadata", JSON.stringify({...}));
+       *     return new Response(parts);            // ← 体是 **FormData**，不是 ReadableStream
+       * 而 `encodeRpcResult`（`dsh-api-gateway/lib/types/index.js:695-705`）对结果里
+       * **任何** `Uint8Array` 一律转成 attachment（无大小阈值）⇒ 凡是回字节的 RPC
+       * （`workspaceFiles/readBytes` 是侧边栏图片/PDF/HTML 唯一的那条）**必然**走这里。
+       *
+       * 旧实现只认 string/Buffer/DshmBlob/"已是 ReadableStream"，FormData 落到最后的
+       * `else` ⇒ `this.body = <FormData>`、headers 为空。随后 `bridge()` 的
+       * `for await (const chunk of response.body)`（`dsh-client-connection/lib/index.js:94`）
+       * 拿到的是 `Symbol.iterator` 产出的 `["bytes-0", Blob]` **数组** ⇒ `res.write(数组)`
+       * 抛 `ERR_INVALID_ARG_TYPE` ⇒ `dsh-host-webserver/lib/index.js:246-257` 的 catch-all
+       * 见 `res.headersSent === true` 就 `res.destroy()`（一个字节都没 flushed）
+       * ⇒ ArkWeb `net::ERR_EMPTY_RESPONSE(-324)` / 前端 "Failed to fetch"，宿主侧只留
+       * `IN-ABORT`。真机读数与本地对照见 `tools/check-internal-undici.mjs` 的
+       * `responseBody` 断言。
+       *
+       * 这里补上标准 Fetch 的语义：编成 multipart 字节流，并把带 boundary 的
+       * `content-type` 一起给出（客户端 `parseBinaryResponse` 正是按它分流到
+       * `response.formData()`，见 `dsh-client-connection/lib/client.js:1228/1240-1287`）。
+       */
+      const boundary = makeMultipartBoundary();
+      if (!this.headers.has('content-type')) {
+        this.headers.set('content-type', `multipart/form-data; boundary=${boundary}`);
+      }
+      this._buffer = null;
+      this.body = byteStreamFrom(async () => (await encodeFormDataBody(body, boundary)).data);
+    } else if (isBlobLike(body)) {
+      /*
+       * 【同一族缺陷】`new Response(blob)`（原生 Blob/File）旧实现也落到最后的 `else`
+       * ⇒ 同样让 `bridge` 的 `res.write()` 炸。标准语义：体是 Blob 的字节，content-type
+       * 取 `blob.type`（为空则不带）。
+       */
+      if (typeof body.type === 'string' && body.type !== '' && !this.headers.has('content-type')) {
+        this.headers.set('content-type', body.type);
+      }
+      this._buffer = null;
+      this.body = byteStreamFrom(() => blobBytes(body));
+    } else if (typeof body.getReader === 'function') {
       // 已是 ReadableStream（我们自己的 fetch 走这条）
       this._buffer = null;
       this.body = body;
+    } else {
+      /*
+       * 【兜底：绝不把"非字节流"交给 bridge】`bridge` 无条件把 `response.body` 当字节流
+       * `for await` + `res.write(chunk)`。任何既不是上面的形态、又不是 ReadableStream 的
+       * body（例如误传一个普通对象/Map）以前会直接走到 `this.body = body`，把故障推迟到
+       * 桥层、表现成"连接被断 + 什么日志都没有"。这里按标准 Fetch 的做法退化为
+       * UTF-8 文本体：可见、可诊断，且不会破坏响应生命周期。
+       */
+      this._buffer = Buffer.from(String(body), 'utf8');
+      const bytes = this._buffer;
+      this.body = new ReadableStream({
+        start(controller) {
+          if (bytes.length > 0) controller.enqueue(new Uint8Array(bytes));
+          controller.close();
+        },
+      });
     }
   }
   /** 读全文并缓存：`text()/json()/arrayBuffer()` 共享同一份，符合 bodyUsed 语义。 */
