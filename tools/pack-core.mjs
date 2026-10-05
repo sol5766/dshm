@@ -2146,8 +2146,13 @@ function patchAgentPresetWorkflow() {
  * 走到"元信息回退 name/description"的正常分支。
  *
  * 【为什么放在打包层】core 树跨重置存活（HAP 不重建它），与 fs-local/attachment-local
- * 等补丁同一机制；且这 4 处是**上游同一段逻辑的两份副本**（lib/index.js +
+ * 等补丁同一机制；且这是**上游同一段逻辑的两份副本**（lib/index.js +
  * lib/worker/profile-resolution-bootstrap.js），必须在两处都改，否则 worker 侧照崩。
+ *
+ * 【2026-10-05 更正计数】本节原写"这 **4** 处"，与实现/树内实际不符：每份副本是 **3** 处
+ * （`error.message = …` / `if (stack !== void 0) error.stack = …` / 其紧邻的 try-catch 结构），
+ * 两份共 **6** 处。`tools/check-core-openharmony-patches.mjs` 现在按"每份各 3 处"钉死
+ * （该门禁 2026-10-05 扩成"全部注入标记"清单时实测所得）。
  *
  * 上游若改了这段，**报错退出**——静默跳过的后果是"红字照旧"，比打包失败难查。
  */
