@@ -127,7 +127,7 @@ node tools/check-core-openharmony-patches.mjs  # 核心树里的 19 处端侧注
 |---|---|---|
 | 构建产物 | `entry/build/default/outputs/default/` | 会被 clean 覆盖，**不要当交付物留档** |
 | 交付/侧载包 | `dist/sideload/` | 不会被构建清掉，含 README + 校验 |
-| 文档 | `docs/` | 编号连续：`00-`…`97-`（当前最大编号 **97**；`95` 收尾审计台账、`96` 侧栏预览竞品调研、`97` `readBytes` 空响应根因与修复），索引见 `docs/README.md` |
+| 文档 | `docs/` | 编号连续：`00-`…`98-`（当前最大编号 **98**；`95` 收尾审计台账、`96` 侧栏预览竞品调研、`97` `readBytes` 空响应根因与修复、`98` 收尾审核与修复（托盘幂等回归 / 垫片字节对称 / 自检扩围）），索引见 `docs/README.md` |
 | 一次性排查脚本 | 用完即删 | 不要把临时诊断脚本留在 `tools/` |
 
 ---
