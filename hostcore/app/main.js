@@ -234,13 +234,25 @@ function isKnownJitlessUndiciNoise(stackText) {
  */
 Error.stackTraceLimit = 50;
 
+/**
+ * 已知 jitless 噪声的统一诊断文案（两个进程级入口共用）。
+ *
+ * 【为什么抽出来（2026-10-05 收尾审计）】`uncaughtException` 与 `unhandledRejection` 两个入口
+ * 各自硬编码了一句几乎相同但**措辞不同**的文案（"已由垫片接管" vs "已由 fetch 垫片接管"），
+ * 同一件事在日志里出现两种写法 ⇒ 检索/统计时会漏。判据（`isKnownJitlessUndiciNoise`）本来
+ * 就是共用的，文案也应共用。
+ */
+function diagKnownJitlessUndiciNoise() {
+  diag('已知噪声：Node 内建 undici 在 --jitless 下初始化失败（无 WASM），已由 jitless 垫片接管；忽略');
+}
+
 process.on('uncaughtException', (err) => {
   const stack = err && err.stack ? err.stack : String(err);
   // 【2026-10-05 补齐（登记在 parity §3.2 收尾表遗留 ③）】此前只有 `unhandledRejection` 走噪声
   // 识别，而同一个 undici 初始化失败也可能以 `uncaughtException` 形态出现 ⇒ 那条会被当成真故障
-  // 打满日志。两个入口现在共用同一条判据。
+  // 打满日志。两个入口现在共用同一条判据（与同一句文案）。
   if (isKnownJitlessUndiciNoise(stack)) {
-    diag('已知噪声：Node 内建 undici 在 --jitless 下初始化失败（无 WASM），已由垫片接管；忽略');
+    diagKnownJitlessUndiciNoise();
     return;
   }
   diag(`!! uncaughtException: ${stack}`);
@@ -248,7 +260,7 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   const stack = reason && reason.stack ? reason.stack : String(reason);
   if (isKnownJitlessUndiciNoise(stack)) {
-    diag('已知噪声：Node 内建 undici 在 --jitless 下初始化失败（无 WASM），已由 fetch 垫片接管；忽略');
+    diagKnownJitlessUndiciNoise();
     return;
   }
   diag(`!! unhandledRejection: ${stack}`);
@@ -610,19 +622,14 @@ try {
  *   - `.node` 扩展加载器把实际路径改写成 libs/ 下的平铺文件。
  * 这样 koffi / node-pty / sharp 的**原样查找逻辑**就能走到 HAP 里的合法位置。
  */
-const NATIVE_LIBS = (() => {
-  if (process.env.DSHM_NATIVE_LIBS && process.env.DSHM_NATIVE_LIBS.length > 0) {
-    return process.env.DSHM_NATIVE_LIBS;
-  }
-  // 入口脚本在 <bundle>/entry/resources/resfile/resources/app/main.js，
-  // 而原生库在 <bundle>/libs/arm64/（见真机崩溃日志里的 libelectron.so 路径）。
-  try {
-    const bundleRoot = require('node:path').resolve(__dirname, '../../../../../');
-    return require('node:path').join(bundleRoot, 'libs', 'arm64');
-  } catch (e) {
-    return '';
-  }
-})();
+/*
+ * 【2026-10-05 收尾审计：单一来源】本常量的**实现**原先与 `./jitless-env.cjs` 的
+ * `resolveNativeLibsDir()` 各写一份（同样的 env 覆盖 + 同样的 `<bundle>/libs/arm64` 推导），
+ * 两处一旦漂移就会出现"垫片按 A 找库、python 桥按 B 拼路径"这种隐性不一致（而它只在
+ * 真机 `dlopen` 失败时才暴露）。现改为调用**同一份实现**。
+ * `NATIVE_LIBS` 这个名字保留：下面 python 桥 / gitcompat / sharp 等 5 处仍用它拼 libs/ 路径。
+ */
+const NATIVE_LIBS = jitlessEnv.resolveNativeLibsDir(__dirname);
 
 /*
  * 实现已抽到 ./jitless-env.cjs 的 `installNativeRedirect()`（同一份也装进 worker 线程：
