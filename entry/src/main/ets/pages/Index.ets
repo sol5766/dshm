@@ -2629,7 +2629,19 @@ struct Index {
     const ctx = getContext(this) as common.UIAbilityContext;
     pickFolder(ctx).then((picked: PickedFolder) => {
       if (picked.outcome === PickOutcome.PICKED && picked.path.length > 0) {
+        // 【issue #3 / R3：成功但有代价时也必须说出来（2026-10-05 补）】
+        // `pickFolder()` 在"所选目录 Host **只能读、不能写**"时会返回 **PICKED + 非空 reason**
+        // ——它已自动改用本应用的公共目录（见 `platform/src/main/ets/system/FilePicker.ets` 的
+        // 公共目录兜底分支）。原实现只看 outcome 就 `return` ⇒ 用户以为选中的目录生效了、
+        // 实际路径已被换掉，**全程没有任何提示**（issue #3 报的正是这个："UI 显示已授权、产出为零"）。
+        // 这里把 reason 交给**已有的选择器浮层**呈现：壳里没有 toast 通道（见 `platform/notify`
+        // 的分层说明与 `MarkdownRenderer.ets` 的同类注释），而该浮层的 `reason` 参数本就是
+        // "为什么弹出这一层"的提示位 —— 用户读完可直接关掉（路径已按上一步生效）。
         this.folderUsePath(picked.path);
+        if (picked.reason.length > 0) {
+          this.folderPicker.open(picked.reason);
+          this.folderPickerOpen = true;
+        }
         return;
       }
       if (picked.outcome === PickOutcome.CANCELLED) {
