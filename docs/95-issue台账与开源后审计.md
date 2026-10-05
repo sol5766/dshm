@@ -355,3 +355,22 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 
 第四轮改动后复跑（明细 `dist/_gate-sweep2.json`）：**42 exit 0 / 1 exit 1**，与第三轮读数**一致**
 ⇒ 无回归。唯一非零仍是 `check-model-roundtrip.mjs`（缺 koffi 的环境依赖，`--no-prompt` exit 0）。
+
+### 9.3 门禁再扩：19 处注入 / 140 条断言 / 138 个自检用例（§8.1 的"仍未纳入 6 处"已清零）
+
+`tools/check-core-openharmony-patches.mjs`：1084 → **1535 行**；`RESULT: 140 passed, 0 failed`
+（**19 处注入**）；`--self-test` **138 个用例 PASS**；缺树仍 **exit 3**（实测：改名 ⇒ 门禁与自检都 3，
+改回 ⇒ exit 0）。
+
+新增 6 个打包步骤，**判据形态按代码实情分别处理**（这是本轮最值得记的一点 —— 不是所有产物都能"逐字节断言"）：
+
+| 步骤（`tools/pack-core.mjs`） | 目标 | 判据形态 |
+|---|---|---|
+| `allowOriginList()` :1532 | `DSHM_ORIGIN_LIST` | **替换式**，有逐字上游原文 ⇒ 正向标记 + 反向上游原文消失 |
+| `wrapSharp()` :1603 | `0.0.0-dshm-dispatch` | 替换式 + `renameSync` ⇒ 另断言"真件 `lib/` **不得存在**"（路径不得存在型） |
+| `addSystemAddonPackage()` :1753 | `0.1.2-dshm-shim` | **新造包、没有上游原文** ⇒ 只能断言产物存在 + 完整性（如实说明，不编造反向判据） |
+| `addOnDevicePreset()` :1065 | 端侧 preset | **当前布局下它一个字节都不复制**（产物 = 官方 shipping 集）⇒ 按代码为准**不设内容判据**，只记这一事实 |
+| `addPlatformAliases()` :1487 | `@ohos-ports` 平台别名 | 整目录复制 ⇒ 反向 = 别名目录与**树内**源目录逐字节一致（源也在树内 ⇒"真副本"型） |
+| `embedTreeInfo()` / `verifyTreeInfoContract()` :2689/:2728 | 树根 `dshm-core.json` | **真生成物**（`builtAt` 是打包时刻的 ISO 时间戳）⇒ **只做形状断言**：存在 + JSON 可解析 + 字段名/类型 + 来自配方与代码常量的**确定值**（`coreVersion`/`platform`/`profile`/`overrides`）+ 内部一致 |
+
+⇒ §8.1 结尾列的"仍未纳入的 6 处"**全部清零**：端侧注入补丁门禁现在覆盖**全部**已知注入点。
