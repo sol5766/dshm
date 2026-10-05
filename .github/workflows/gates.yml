@@ -1,0 +1,154 @@
+# =============================================================================
+# DSHM 门禁 · GitHub Actions
+#
+# 【范围】只放**不依赖真机、不依赖 HarmonyOS SDK、不依赖 Windows** 的那批门禁，跑在
+#   ubuntu-latest 上。入列判据 = 「干净克隆 + 本文件里的显式准备步骤之后，真的能绿」。
+#
+# 【显式准备步骤只有一步】tools/place-host-app.mjs —— resfile/resources/app/ 是生成物
+#   （见 .gitignore:46），assert-resfile-sync 少了它就是红，所以先同步一次。
+#
+# 【没有"解包核心树"这一步，因为无包可解】entry/src/main/resources/resfile/ 下：
+#   · 入库的只有 busybox/ 与 ohos-skills/（`git ls-tree HEAD -- entry/src/main/resources/resfile`
+#     只有 6 个文件）；
+#   · 核心树 zip 见 .gitignore:42、toolchain/ 见 .gitignore:44、resources/app/ 见 .gitignore:46。
+#   干净克隆里 dist/core/work/ 也不存在（/dist/ 见 .gitignore:14）。"先从 zip 解出核心树"
+#   这类前置要求 zip 入库 —— 它没有。所以**需要核心树的门禁在本 workflow 里不可能变绿**，
+#   只能排除（逐条依据见下），而不是加一个注定失败的解包步骤。
+#
+# 【排除清单与依据】（依据全部来自代码，不是推测）
+#   · compat-drift.mjs
+#       tools/compat-drift.mjs:32-33 读 .research/protocol/contracts.json；/.research/ 见
+#       .gitignore:75 ⇒ 干净克隆没有 ⇒ 同文件 :40-44 直接 exit 2。
+#   · assert-fs-search-fallback.mjs
+#       tools/assert-fs-search-fallback.mjs:26-27 拼出 dist/core/work/dsh-core-<ver>/…/dsh-tool-fs-search；
+#       :44 readFileSync 该路径 ⇒ 干净克隆 ENOENT 崩（实测 exit 1）。
+#   · check-web-fetch-jitless.mjs
+#       tools/check-web-fetch-jitless.mjs:170-178 在核心树里找 @deepseek-ai/dsh-web-fetch-http；
+#       :181-186 找不到即 exit 3（SKIP）—— 非零码，不能当绿。
+#   · check-ptc-runtime-inproc.mjs
+#       tools/check-ptc-runtime-inproc.mjs:116-128 findCoreTree()；:158-162 找不到即 exit 3。
+#   · check-ptc-wiring.mjs
+#       tools/check-ptc-wiring.mjs:57 需要核心树；:59-62 即 exit 3。
+#   · check-core-openharmony-patches.mjs
+#       tools/check-core-openharmony-patches.mjs:57 需要核心树；:235-238 即 exit 3。
+#   · check-native-closure.mjs
+#       tools/check-native-closure.mjs:43-47 只看 entry/build/…/libs 与 entry/libs；后者见
+#       .gitignore:52 ⇒ 干净克隆两者皆无 ⇒ 同文件 :80-84 exit 2。
+#   · check-plugin-toggle.mjs
+#       tools/check-plugin-toggle.mjs:36 需要核心树才能起 Host ⇒ :45-48 exit 2。
+#   · tools/device-acceptance.ps1（真机 / SDK / Windows 专属）
+#       :27-31 是 PowerShell param 开关；:38-59 探测 hdc.exe（含 D:\Huawei\DevEco …）；
+#       :25 全文只用 hdc install -r / aa force-stop / aa start —— 要真机，且是 PS 脚本。
+#   · 另按同族排除：check-arkts-entry.mjs / check-layout-fixtures.mjs 等需要 DevEco / oh_modules
+#     的项 —— 它们本来就不在 AGENTS.md「必跑的回归门禁」清单里。
+#
+# 【行尾风险，如实记录】check-ptc-ts-strip.mjs 有一条"vendor 字节数/sha256 与声明一致"的断言，
+#   对象是 hostcore/plugins/dshm-ptc-runtime-inproc/lib/vendor/babel-standalone/babel.min.cjs
+#   （含 4 个裸 LF）。检出时一旦发生 CRLF 转换（Windows 上 core.autocrlf=true 就会），该文件
+#   变长 4 字节 ⇒ 门禁假红。ubuntu-latest 默认 core.autocrlf=false，实测检出为 3069546 B，
+#   与断言声明一致。本文件**不**加"先 git config 再 checkout"的花招：同一 job 内 checkout
+#   早已完成，加了也是空转。
+#
+# 【工作目录】check-parity / check-dead-code 用 process.cwd() 当仓库根。GitHub Actions 的
+#   run 步骤默认工作目录就是仓库根（$GITHUB_WORKSPACE），因此不需要额外 cd。
+# =============================================================================
+name: gates
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: 门禁（Linux · 无真机 · 无 HarmonyOS SDK）
+    runs-on: ubuntu-latest
+    steps:
+      # ── 检出与运行时 ─────────────────────────────────────────────────────
+      # 这些脚本只用 Node 内建模块（根目录没有 package.json），不需要 npm ci。
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          # 与端侧运行时同大版本（libnode v24）：--jitless 语义、fetch 已转正等前提一致。
+          node-version: '24'
+
+      # ── 显式准备步骤（唯一一步）──────────────────────────────────────────
+      - name: 准备 · 同步 Host 入口到 resfile
+        run: node tools/place-host-app.mjs
+
+      # ── 门禁 01-11：AGENTS.md「必跑的回归门禁」里 CI 能跑的那些 ──────────
+      # 每个门禁单独一步，便于在 Actions 界面上 1:1 对应到清单里的名字。
+      # if: !cancelled() ⇒ 前一项红也继续跑完，一次看清全部红项；job 整体仍然失败。
+      - name: 门禁 · assert-cli-shim
+        if: ${{ !cancelled() }}
+        run: node tools/assert-cli-shim.mjs
+
+      - name: 门禁 · assert-resfile-sync（依赖上面的准备步骤）
+        if: ${{ !cancelled() }}
+        run: node tools/assert-resfile-sync.mjs
+
+      - name: 门禁 · check-parity
+        if: ${{ !cancelled() }}
+        run: node tools/check-parity.mjs
+
+      - name: 门禁 · assert-exec-fix
+        if: ${{ !cancelled() }}
+        run: node tools/assert-exec-fix.mjs
+
+      - name: 门禁 · assert-python-bridge
+        if: ${{ !cancelled() }}
+        run: node tools/assert-python-bridge.mjs
+
+      - name: 门禁 · check-doc-refs
+        if: ${{ !cancelled() }}
+        run: node tools/check-doc-refs.mjs
+
+      - name: 门禁 · check-dead-code
+        if: ${{ !cancelled() }}
+        run: node tools/check-dead-code.mjs
+
+      - name: 门禁 · check-skill-sync（判据是内容 sha256，不是字节数）
+        if: ${{ !cancelled() }}
+        run: node tools/check-skill-sync.cjs
+
+      - name: 门禁 · check-ptc-ts-strip（纯 JS erasable-TS 擦除器 · 自带 wasm 陷阱）
+        if: ${{ !cancelled() }}
+        run: node tools/check-ptc-ts-strip.mjs
+
+      - name: 门禁 · check-internal-undici（Node 内建 undici 必须被纯 JS 垫片接管 · 带对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-internal-undici.mjs
+
+      - name: 门禁 · check-worker-jitless（worker 线程也要拿到 jitless 补齐 · 带对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-worker-jitless.mjs
+
+      # ── 门禁自检：证明这些检测器**真的会红** ─────────────────────────────
+      # 只跑支持 --self-test（注入式负测试 / 变异自检）的那几条；未提供该开关的
+      # 门禁（assert-cli-shim 等）本身就是纯断言，不重复跑。
+      - name: 自检 · check-parity
+        if: ${{ !cancelled() }}
+        run: node tools/check-parity.mjs --self-test
+
+      - name: 自检 · check-doc-refs
+        if: ${{ !cancelled() }}
+        run: node tools/check-doc-refs.mjs --self-test
+
+      - name: 自检 · check-dead-code
+        if: ${{ !cancelled() }}
+        run: node tools/check-dead-code.mjs --self-test
+
+      - name: 自检 · check-ptc-ts-strip（变异自检）
+        if: ${{ !cancelled() }}
+        run: node tools/check-ptc-ts-strip.mjs --self-test
+
+      - name: 自检 · check-internal-undici
+        if: ${{ !cancelled() }}
+        run: node tools/check-internal-undici.mjs --self-test
+
+      - name: 自检 · check-worker-jitless
+        if: ${{ !cancelled() }}
+        run: node tools/check-worker-jitless.mjs --self-test
