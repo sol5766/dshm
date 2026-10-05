@@ -33,7 +33,7 @@ body:
     id: hap-version
     attributes:
       label: 安装包版本
-      description: Release 的 tag，或 HAP 文件名（如 `DSHM-1.1.0-arm64-signed.hap`）。
+      description: Release 的 tag，或 HAP 文件名（如 `DSHM-1.1.0-core0.2.1-alpha.1+dshm.6-arm64-signed.hap`）。
     validations:
       required: true
 
