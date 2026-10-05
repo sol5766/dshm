@@ -158,3 +158,16 @@ node tools/check-core-openharmony-patches.mjs  # 核心树里的 13 处端侧注
    顺带让端侧走新版本 ⇒ 直接解包的分支。
 3. **resfile 只允许 1 份核心容器**：`--place-in-app` 只增不删 ⇒ 多份 core 共存把 HAP 从 306 MiB 顶到
    491 MiB（实测）。现已在 pack-core 里自动清掉非当前版本，并有门禁 `tools/check-resfile-core-zip.mjs` 兜底。
+
+
+---
+
+## 真机读数的两个坑（2026-10-05 实测）
+
+1. **`ps` 的 STIME 不可信**：本机实测比真实本地时间**慢 3h52m45s**（同一进程：
+   `stat -c %y /proc/<pid>` 得 16:30:41，`ps -ef` 的 STIME 显示 12:37:56）。
+   凡"进程何时启动"一律用 `stat -c '%y' /proc/<pid>`，不要读 `ps` 的 STIME。
+2. **`bm dump` 的 stdout 不能在设备侧重定向**：`bm dump -n X > f` 得到 0 字节、
+   stderr 空、退出码 0。必须在**宿主侧**捕获（Node `spawnSync` 拿 Buffer，避免 PowerShell 的 GBK 往返）。
+   另：持久 hilog（`/data/log/hilog/hilog.*.gz`，shell 可读）里 tag 首段就是**进程名**，
+   是查"某应用跑过没、跑在哪个进程"的低成本台账；`hilog -x` 是 dump，`hilog -d` 需参数。
