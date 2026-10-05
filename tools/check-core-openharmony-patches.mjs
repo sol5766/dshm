@@ -8,17 +8,17 @@
  * `tools/pack-core.mjs` 里有三组"端侧（鸿蒙）运行时补丁"，它们唯一的兜底是
  * **打包那一刻的 `die()`**：
  *
- *   ① `patchResourceAddressArmor()`（tools/pack-core.mjs:2427-2535）
+ *   ① `patchResourceAddressArmor()`（tools/pack-core.mjs:2432-2540）
  *      ArkWeb 把未注册的 `dsh-resource:` 当 opaque URL（hostname === ""、authority 被并进
  *      path、query 被并进 path），三处 client 侧解析各打一个标记：
  *        · `DSHM_RESOURCE_ARMOR_PROTOCOL` → dsh-client-resources/lib/client.js（protocolOf）
  *        · `DSHM_RESOURCE_ARMOR_PATH`     → dsh-client-ui-sidebar-right/lib/client.js（pathOf）
  *        · `DSHM_RESOURCE_ARMOR_SUBAGENT` → dsh-client-ui-subagent/lib/client.js（parseSubagentChatAddress）
- *   ② `patchPdfMapCompat()`（tools/pack-core.mjs:2599-2632）
+ *   ② `patchPdfMapCompat()`（tools/pack-core.mjs:2604-2637）
  *      `Map/WeakMap.getOrInsert(Computed)` 在 ArkWeb 上缺失 ⇒ PDF 预览挂。主线程 chunk 工厂
  *      （`factory: (require) => {`）注入一次，内联 pdf worker 的 Blob 分片数组最前面再注入一次
  *      （worker 是独立 realm，不继承主线程原型补丁）⇒ `DSHM_MAP_COMPAT` **总共恰好 2 处**。
- *   ③ `patchSubprocessOpenharmony()`（tools/pack-core.mjs:2634-2682）
+ *   ③ `patchSubprocessOpenharmony()`（tools/pack-core.mjs:2639-2687）
  *      终端巡检器在鸿蒙上"unsupported on platform openharmony" ⇒
  *        · `runner-launch-*.js` 的 createProcessInspector：`platform === "linux"` → 加 `|| "openharmony"`
  *        · `index.js` prepareShellActivity()：鸿蒙上跳过 shellActivity 注入
@@ -45,9 +45,9 @@
  *   · `patchLinkForSandbox()`（:1904-1983）→ `DSHM_LINK_SANDBOX`
  *   · `patchCredentialsOwnerCheck()`（:2003-2027）→ `DSHM_CREDENTIALS_MODE_EXEMPT`
  *   · `patchAgentPresetWorkflow()`（:2052-2129）→ `DSHM_WORKFLOW_DISABLED`
- *   · `patchAppBootReadonlyStack()`（:2154-2207）→ `DSHM_READONLY_STACK_GUARD`
- *   · `patchFsLocalLink()`（:2222-2277）→ `DSHM_FS_LOCAL_SANDBOX`
- *   · `patchAttachmentLocalLink()`（:2292-2360）→ `DSHM_ATTACHMENT_SANDBOX`
+ *   · `patchAppBootReadonlyStack()`（:2159-2212）→ `DSHM_READONLY_STACK_GUARD`
+ *   · `patchFsLocalLink()`（:2227-2282）→ `DSHM_FS_LOCAL_SANDBOX`
+ *   · `patchAttachmentLocalLink()`（:2297-2365）→ `DSHM_ATTACHMENT_SANDBOX`
  *
  * ---------------------------------------------------------------------------
  * 【2026-10-05 第二轮扩容：再纳入 6 个"只有打包期 `die()` 兜底"的打包步骤】
@@ -56,7 +56,7 @@
  *   · `allowOriginList()`（tools/pack-core.mjs:1532-1581）→ `DSHM_ORIGIN_LIST`
  *     —— 多值 Origin 放行的**行为**另有 `tools/check-origin-fence.mjs` 钉着，**不**断言树内标记 ⇒ 不重复
  *   · `wrapSharp()`（:1603-1665）→ `0.0.0-dshm-dispatch`
- *   · `addSystemAddonPackage()`（:1753-1798）→ `0.1.2-dshm-shim`
+ *   · `addSystemAddonPackage()`（:1753-1883）→ `0.1.2-dshm-shim`
  *     —— undici 垫片的**语义**另有 `tools/check-internal-undici.mjs` 钉着 ⇒ 不重复
  *   · `addOnDevicePreset()`（:1065-1092）→ **当前布局下它不复制任何东西**（产物 = 官方 shipping 集）
  *   · `addPlatformAliases()`（:1487-1502）→ 整目录复制的平台别名
@@ -129,16 +129,16 @@ const ARMOR_SITES = [
     rel: 'dsh-client-resources/lib/client.js',
     marker: 'DSHM_RESOURCE_ARMOR_PROTOCOL',
     name: '资源地址装甲 · client-resources protocolOf() 的 opaque-URL authority 兜底',
-    // pack-core.mjs:2438-2439 的 before（注入后必须整体消失）
+    // pack-core.mjs:2443-2444 的 before（注入后必须整体消失）
     upstream: 'return parsed.hostname === "" ? void 0 : parsed.hostname.toLowerCase();',
-    // pack-core.mjs:2449-2451 的 after 里的可判据片段
+    // pack-core.mjs:2454-2456 的 after 里的可判据片段
     patched: 'const armor = parsed.hostname === "" ? /^[a-z][a-z\\d+.-]*:\\/\\/([^/?#]*)/iu.exec(address) : null;',
   },
   {
     rel: 'dsh-client-ui-sidebar-right/lib/client.js',
     marker: 'DSHM_RESOURCE_ARMOR_PATH',
     name: '资源地址装甲 · sidebar-right pathOf() 剥掉被并进 path 的 authority',
-    // pack-core.mjs:2468 的 before
+    // pack-core.mjs:2473 的 before
     upstream: 'return new URL(address).pathname;',
     patched: 'if (parsed.hostname === "" && parsed.pathname.startsWith("//")) {',
   },
@@ -146,7 +146,7 @@ const ARMOR_SITES = [
     rel: 'dsh-client-ui-subagent/lib/client.js',
     marker: 'DSHM_RESOURCE_ARMOR_SUBAGENT',
     name: '资源地址装甲 · subagent parseSubagentChatAddress() 的 host/path/query 兜底',
-    // pack-core.mjs:2507 的 before 里的判定（注入后改成用兜底出来的 host）
+    // pack-core.mjs:2512 的 before 里的判定（注入后改成用兜底出来的 host）
     upstream: 'url.hostname.toLowerCase() !== "subagentchat"',
     patched: 'const searchParams = new URLSearchParams(query);',
   },
@@ -155,12 +155,12 @@ const ARMOR_SITES = [
 // ② PDF：`DSHM_MAP_COMPAT` 恰好两处注入，且两处形态可区分
 const PDF_REL = 'dsh-client-ui-sidebar-documentpreview/lib/client.pdf.js';
 const PDF_MARKER = 'DSHM_MAP_COMPAT';
-// 主线程：MAP_COMPAT_SOURCE 每行加 `\t\t` 前缀（pack-core.mjs:2615-2617）⇒ 标记独占一行、前缀是真 tab
+// 主线程：MAP_COMPAT_SOURCE 每行加 `\t\t` 前缀（pack-core.mjs:2620-2621）⇒ 标记独占一行、前缀是真 tab
 const PDF_MAIN_SITE_RE = /(^|\n)\t\t\/\* DSHM_MAP_COMPAT \*\//g;
-// worker：同一份源码被 JSON.stringify 塞进 Blob 分片数组（pack-core.mjs:2621-2628）⇒ 标记被 `\n` 两个字面字符夹住
+// worker：同一份源码被 JSON.stringify 塞进 Blob 分片数组（pack-core.mjs:2626-2632）⇒ 标记被 `\n` 两个字面字符夹住
 const PDF_WORKER_SITE = '\\n/* DSHM_MAP_COMPAT */\\n';
 const PDF_FACTORY_ANCHOR = 'factory: (require) => {';
-// 反向：注入后这个"裸 Blob 数组首元素"形态必须消失（pack-core.mjs:2621 的 blobAnchor 被整体替换）
+// 反向：注入后这个"裸 Blob 数组首元素"形态必须消失（pack-core.mjs:2626 的 blobAnchor 被整体替换）
 const PDF_BARE_BLOB_ANCHOR = 'new Blob([_dsh_pdf_worker_default, ';
 
 // ③ 终端：runner-launch-*.js + index.js
@@ -235,13 +235,13 @@ const SESSION_CALL_UPSTREAM_2 = '\t\t\tawait link(tmp, finalPath);';
 const SESSION_OLD_HELPER_HEAD = 'async function dshmPublishExclusive(fsImpl, from, to) {\n\tlet exists = true;\n\ttry {\n\t\tawait fsImpl.access(to);';
 // pack-core.mjs:2016 —— 凭据检查的两行原文（**必须连行成对否掉**：单否第二行会命中豁免后那行 ⇒ 恒红）
 const CREDENTIALS_UPSTREAM = '\tif (process.platform === "win32") return;\n\tif ((mode & GROUP_OTHER_BITS) === 0) return;';
-// pack-core.mjs:2235-2239 —— fs-local 的 createIfAbsent 发布段原文
+// pack-core.mjs:2240-2244 —— fs-local 的 createIfAbsent 发布段原文
 const FS_LOCAL_UPSTREAM = '\t\tif (createIfAbsent !== void 0) try {\n\t\t\tawait linkFile(tempPath, absolutePath);\n\t\t} catch (error) {\n\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);\n\t\t}';
-// pack-core.mjs:2307 —— attachment-local 的 npm 导入行原文
+// pack-core.mjs:2312 —— attachment-local 的 npm 导入行原文
 const ATTACH_IMPORT_UPSTREAM = 'import { chmod, link, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";';
-// pack-core.mjs:2315-2320 —— syncDirectory 的徒手 open/sync/close 原文
+// pack-core.mjs:2320-2325 —— syncDirectory 的徒手 open/sync/close 原文
 const ATTACH_SYNC_UPSTREAM = '\tconst handle = await open(path, constants.O_RDONLY);\n\ttry {\n\t\tawait handle.sync();\n\t} finally {\n\t\tawait handle.close();\n\t}';
-// pack-core.mjs:2348 —— link 发布块原文（两处：source / staged.path），逐字复刻模板
+// pack-core.mjs:2353 —— link 发布块原文（两处：source / staged.path），逐字复刻模板
 const attachmentLinkBefore = (src) => '\t\ttry {\n\t\t\tawait link(' + src + ', target);\n\t\t} catch (error) {\n'
   + '\t\t\t/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */\n'
   + '\t\t\tif (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;\n'
@@ -339,7 +339,7 @@ function nativeCaptureStructural(text) {
  *   · `wrapSharp()`（:1603-1665）—— 替换式 + `renameSync`：两个产物都是 pack-core 写的
  *     **确定性**内容（无时间戳）⇒ manifest 可逐字断言；反向用"上游真件的 lib/ 不得出现在
  *     node_modules/sharp 下"（它只该在 sibling 包 sharp.impl/ 里）。
- *   · `addSystemAddonPackage()`（:1753-1798）—— 新造包 + 真占位文件：**没有上游原文**（见上），
+ *   · `addSystemAddonPackage()`（:1753-1883）—— 新造包 + 真占位文件：**没有上游原文**（见上），
  *     反向改判产物形态（manifest 键集 / 占位内容 / 不是 ELF）。
  *     —— **以代码为准**：同一函数还整份重写了 `node-addon-system/lib/flock.js`（:1810-1882），
  *     它同样只有 die() 兜底 ⇒ 一并纳入（反向 = 可执行代码里不得再有 `process.report`）。
@@ -790,7 +790,7 @@ const INJECTED_PATCHES = [
   {
     key: 'app-boot 只读保护',
     fn: 'patchAppBootReadonlyStack()',
-    note: 'pack-core.mjs:2154-2207；标记名与上表一致（上表只写了一个文件，实际**两份副本都要改**）。'
+    note: 'pack-core.mjs:2159-2212；标记名与上表一致（上表只写了一个文件，实际**两份副本都要改**）。'
       + '反向判据 = 每条裸赋值都必须被 try/catch 包住（上游形态 = 裸赋值）。',
     sites: [APP_BOOT_MAIN, APP_BOOT_WORKER].map((rel) => ({
       rel,
@@ -805,7 +805,7 @@ const INJECTED_PATCHES = [
   {
     key: 'fs-local link',
     fn: 'patchFsLocalLink()',
-    note: 'pack-core.mjs:2222-2277；标记名与上表一致。反向判据只有 1 条但**必须逐字**：'
+    note: 'pack-core.mjs:2227-2282；标记名与上表一致。反向判据只有 1 条但**必须逐字**：'
       + '同文件另有 2 处 `await rename(tempPath, absolutePath);`（:586/:588，上游原有），'
       + '泛化成"不许出现 rename"会恒红。',
     sites: [{
@@ -815,7 +815,7 @@ const INJECTED_PATCHES = [
         ['const linkUnsupported = code === "EPERM" || code === "EACCES"', '链接类错误判定（鸿蒙 EPERM/EACCES）'],
         ['code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EXDEV";', '链接类错误判定的其余码'],
       ],
-      reverse: [[FS_LOCAL_UPSTREAM, 'pack-core.mjs:2235-2239 的 before（整段 5 行，含缩进）']],
+      reverse: [[FS_LOCAL_UPSTREAM, 'pack-core.mjs:2240-2244 的 before（整段 5 行，含缩进）']],
     }],
   },
 
@@ -823,7 +823,7 @@ const INJECTED_PATCHES = [
   {
     key: 'attachment link',
     fn: 'patchAttachmentLocalLink()',
-    note: 'pack-core.mjs:2292-2360；标记名与上表一致。反向 4 条：npm 导入行、syncDirectory 原段、'
+    note: 'pack-core.mjs:2297-2365；标记名与上表一致。反向 4 条：npm 导入行、syncDirectory 原段、'
       + '两个 link 发布块（导入行里本来就有 `link` 标识符 ⇒ 泛化判据恒红）。',
     sites: [{
       rel: ATTACH_LIB,
@@ -836,10 +836,10 @@ const INJECTED_PATCHES = [
         ['if (error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOENT" || error.code === "ENOTDIR")) return;', '祖先目录不可达就跳过该级'],
       ],
       reverse: [
-        [ATTACH_IMPORT_UPSTREAM, 'pack-core.mjs:2307 的 import 行原文'],
-        [ATTACH_SYNC_UPSTREAM, 'pack-core.mjs:2315-2320 的 syncDirectory 原文'],
-        [attachmentLinkBefore('source'), 'pack-core.mjs:2348 的 link 发布块原文（source）'],
-        [attachmentLinkBefore('staged.path'), 'pack-core.mjs:2348 的 link 发布块原文（staged.path）'],
+        [ATTACH_IMPORT_UPSTREAM, 'pack-core.mjs:2312 的 import 行原文'],
+        [ATTACH_SYNC_UPSTREAM, 'pack-core.mjs:2320-2325 的 syncDirectory 原文'],
+        [attachmentLinkBefore('source'), 'pack-core.mjs:2353 的 link 发布块原文（source）'],
+        [attachmentLinkBefore('staged.path'), 'pack-core.mjs:2353 的 link 发布块原文（staged.path）'],
       ],
     }],
   },
