@@ -282,7 +282,7 @@ exec 探测：… rg=denied，rg-real=denied，bash=ok
 
 | 目标 | 落点 | 时机与理由 |
 |---|---|---|
-| 核心树里的 `rg`（要被 spawn） | `tools/pack-core.mjs:247-305` 的 `selfSignNatives()` | **必须放在 `pack()` 之前、所有"会改写产物"的步骤之后**。踩过的坑：最初放在 `replaceKoffiJs()` 之后，被后面的 `ensureRipgrepPlatformPackage()`（它会重写 rg）**覆盖** ⇒ 磁盘上的 rg 又变回未签名（`docs/70:297-304`；顺序在 `pack-core.mjs:2300-2319` 有长注释） |
+| 核心树里的 `rg`（要被 spawn） | `tools/pack-core.mjs:247-305` 的 `selfSignNatives()` | **必须放在 `pack()` 之前、所有"会改写产物"的步骤之后**。踩过的坑：最初放在 `replaceKoffiJs()` 之后，被后面的 `ensureRipgrepPlatformPackage()`（它会重写 rg）**覆盖** ⇒ 磁盘上的 rg 又变回未签名（`docs/70:297-304`；顺序在 `pack-core.mjs:3050-3057` 有长注释） |
 | 工具链归档里的 git / python3.12 | `tools/place-toolchain.mjs` + `tools/sign-tar-elf.py` | 它们在**归档**里，解包发生在设备上 ⇒ 构建期必须先解 → 签 → 重新打包 |
 
 **"构建期自签名"这一整套是怎么工作的**（这一节是本约束的重点）：
@@ -846,7 +846,7 @@ python -c "import tarfile;t=tarfile.open(r'third_party/sherpa_onnx-1.13.3.har');
 
 ### 2.2 执行顺序（顺序本身是知识）
 
-主流程是**显式的一串调用**（pack-core.mjs:2288-2321），不是自动发现的步骤：
+主流程是**显式的一串调用**（pack-core.mjs:3004-3049），不是自动发现的步骤：
 
 ```js
 materialize();                        // ① 物化
@@ -877,7 +877,7 @@ const packed = pack();                // ㉕ 打包 zip
 const manifest = writeManifest(...);  // ㉖ 写清单
 ```
 
-**㉔ 的位置是踩坑换来的**（pack-core.mjs:2311-2318）：
+**㉔ 的位置是踩坑换来的**（pack-core.mjs:3050-3057）：
 
 > 最初 `selfSignNatives()` 放在 `replaceKoffiJs()` 之后，结果签名被后面的
 > `ensureRipgrepPlatformPackage()` 覆盖掉了——**它是"把 rg 重新拷进树"的步骤**，
@@ -922,13 +922,13 @@ const manifest = writeManifest(...);  // ㉖ 写清单
 
 ```text
 pack-core.mjs:771   DSHM_HMS_PROVIDER            || HDSH_HMS_PROVIDER
-pack-core.mjs:1200  DSHM_ORIGIN_LIST             || HDSH_ORIGIN_LIST
-pack-core.mjs:1578  DSHM_LINK_SANDBOX            || HDSH_LINK_SANDBOX
-pack-core.mjs:1641  DSHM_CREDENTIALS_MODE_EXEMPT || HDSH_CREDENTIALS_MODE_EXEMPT
-pack-core.mjs:1702  DSHM_WORKFLOW_DISABLED       || MARK.replace('DSHM_','HDSH_')
-pack-core.mjs:1796  DSHM_READONLY_STACK_GUARD    || HDSH_READONLY_STACK_GUARD
-pack-core.mjs:1860  DSHM_FS_LOCAL_SANDBOX        || HDSH_FS_LOCAL_SANDBOX
-pack-core.mjs:1930  DSHM_ATTACHMENT_SANDBOX      || HDSH_ATTACHMENT_SANDBOX
+pack-core.mjs:1549  DSHM_ORIGIN_LIST             || HDSH_ORIGIN_LIST
+pack-core.mjs:1949  DSHM_LINK_SANDBOX            || HDSH_LINK_SANDBOX
+pack-core.mjs:2012  DSHM_CREDENTIALS_MODE_EXEMPT || HDSH_CREDENTIALS_MODE_EXEMPT
+pack-core.mjs:2073  DSHM_WORKFLOW_DISABLED       || MARK.replace('DSHM_','HDSH_')
+pack-core.mjs:2172  DSHM_READONLY_STACK_GUARD    || HDSH_READONLY_STACK_GUARD
+pack-core.mjs:2236  DSHM_FS_LOCAL_SANDBOX        || HDSH_FS_LOCAL_SANDBOX
+pack-core.mjs:2306  DSHM_ATTACHMENT_SANDBOX      || HDSH_ATTACHMENT_SANDBOX
 ```
 
 （`docs/70` 的 E-SV22 记的是"同一类共 7 处"，指那一轮批量修的范围；
@@ -960,26 +960,26 @@ if (text.includes(MARK)) { /* 旧版：先删掉旧注入段再注入新版 */ }
 `die('原生采集补丁：发现旧注入但无法定位其边界，请人工检查 client.js')`（450）。
 
 **结论性规矩**：凡"会出现多个版本的同位注入"，幂等判据必须是版本标记，不能是存在性。
-同类做法还有：`wrapSharp` 用 `package.json` 的版本号 `0.0.0-dshm-dispatch` 当标记（1266），
-`replaceKoffiJs` 用 `3.2.1 + name === 'koffi' + src/koffi/index.cjs 存在` 三条一起判（1349-1350），
-`addSystemAddonPackage` 用 `0.1.2-dshm-shim`（1413）。
+同类做法还有：`wrapSharp` 用 `package.json` 的版本号 `0.0.0-dshm-dispatch` 当标记（1631），
+`replaceKoffiJs` 用 `3.2.1 + name === 'koffi' + src/koffi/index.cjs 存在` 三条一起判（1698-1699），
+`addSystemAddonPackage` 用 `0.1.2-dshm-shim`（1762）。
 
 ### 2.6 打包容器：为什么是 zip
 
-`writeZip()` 是**自己实现的最小 ZIP 写入器**（pack-core.mjs:2098-2199），
+`writeZip()` 是**自己实现的最小 ZIP 写入器**（pack-core.mjs:2796-2897），
 不用外部 `zip` 工具、不支持 zip64。理由是**端侧只有 zip 解压 API**：
 
 > 鸿蒙侧只有 `@ohos.zlib.decompressFile`，没有 tar/gzip 的等价物。
 > 用 tar.gz 就得在 ArkTS 里手写 tar 解析 + gzip 解压——纯额外风险与代码量
-> （pack-core.mjs:2073-2077）。
+> （pack-core.mjs:2771-2775）。
 
 规模核对（同处）：本机实测 zip **29,351 条目**（`dist/core/dsh-core-0.2.0-rc.2.manifest.json` 的
 `package.entries`），< 65535；解包约 241 MB < 4 GB ⇒ **不需要 zip64**。
 （`0.2.0-rc.1` 时代为 29,602 条目 / 242.7 MiB，同量级。）
 
-另一个刻意的设计：**zip 条目时间戳固定**（pack-core.mjs:2095-2096，`DOS_TIME`/`DOS_DATE` 写死）。
+另一个刻意的设计：**zip 条目时间戳固定**（pack-core.mjs:2793-2794，`DOS_TIME`/`DOS_DATE` 写死）。
 ⚠️ 但这**不等于"包可复现"**：清单与树内元数据都带 `generatedAt`/`builtAt`
-（`pack-core.mjs:2002`、`:2244`，值来自 `new Date().toISOString()`），
+（`pack-core.mjs:2958`、`:2700`，值来自 `new Date().toISOString()`），
 实测同一配方连跑三次，**条目数与体积恒定、sha256 每次不同**
 （`0.2.0-rc.1` 三次：`9279c4d5…` / `b8b48252…` / `67b85c26…`）。
 所以"固定时间戳"只保证**同一批文件在同一次运行内的可比性**，不要拿它推断"重跑一次应当同哈希"。
@@ -993,11 +993,11 @@ if (text.includes(MARK)) { /* 旧版：先删掉旧注入段再注入新版 */ }
 ```js
 // 随应用分发：放进 entry 的 resfile（**不是 rawfile**）——resfile 安装后解压到沙箱、
 // 可按真实路径只读访问；rawfile 的 fd 不是文件系统 fd，copyFile 会拷坏
-// （pack-core.mjs:2224-2225）
+// （pack-core.mjs:2922-2923）
 ```
 
 所以 `--place-in-app` 的复制目标是
-`entry/src/main/resources/resfile/dsh-core-<ver>-openharmony-arm64.zip`（pack-core.mjs:2227-2231）。
+`entry/src/main/resources/resfile/dsh-core-<ver>-openharmony-arm64.zip`（pack-core.mjs:2924-2945）。
 
 ### 2.8 失败会死在哪些点（关键分组）
 
@@ -1966,13 +1966,13 @@ PY
 | 2 | `resources/base/profile/` | `main_pages.json`、`backup_config.json` |
 | 2 | `ets/` | `modules.abc`（3,012,044 B）+ `sourceMaps.map`（1,481,152 B） |
 
-**只有 111 个条目**这件事本身就是一条设计结论：核心树的 2.9 万个条目**不在 HAP 里平铺**，而是压在一个 zip 里（`tools/pack-core.mjs` 的自建 zip 写入器，`tools/pack-core.mjs:2098-2199`）。原因见 §2。
+**只有 111 个条目**这件事本身就是一条设计结论：核心树的 2.9 万个条目**不在 HAP 里平铺**，而是压在一个 zip 里（`tools/pack-core.mjs` 的自建 zip 写入器，`tools/pack-core.mjs:2796-2897`）。原因见 §2。
 
 ### 1.2 每个位置放什么、谁生成它
 
 | 位置 | 里面是什么 | 谁生成 | 该由谁维护 |
 |---|---|---|---|
-| `resources/resfile/*.zip` | dsh 核心树（**518 个包 / 26,066 文件 / 252,069,490 B（240.8 MiB）解包后**，`dist/core/dsh-core-0.2.0-rc.2.manifest.json`；解包后树里 `dsh-client-ui-*` 53 个） | `node tools/pack-core.mjs --skip-install --place-in-app`（放置点：`tools/pack-core.mjs:2226-2231`） | `hostcore/core-recipe.json`（唯一事实来源）+ `tools/pack-core.mjs` 的补丁函数 |
+| `resources/resfile/*.zip` | dsh 核心树（**518 个包 / 26,066 文件 / 252,069,490 B（240.8 MiB）解包后**，`dist/core/dsh-core-0.2.0-rc.2.manifest.json`；解包后树里 `dsh-client-ui-*` 53 个） | `node tools/pack-core.mjs --skip-install --place-in-app`（放置点：`tools/pack-core.mjs:2924-2945`） | `hostcore/core-recipe.json`（唯一事实来源）+ `tools/pack-core.mjs` 的补丁函数 |
 | `resources/resfile/resources/app/` | `main.js` / `fetch-shim.js` / `undici-shim.mjs` / `undici-loader.mjs` / `require-builtin-shim.cjs` / `dshm-installer.js` / `dshm-user-rows.js` / `dshm-skills.js` / `dshm-compat.js` / `package.json`（**10 件**） | `node tools/place-host-app.mjs`（清单：`tools/place-host-app.mjs:29` 的 `FILES`；`package.json` 由脚本内联生成，`:43-50`） | `hostcore/app/`（源），放置件是**快照** |
 | `resources/resfile/toolchain/{python,git}/` | CPython 3.12.14 musl 归档（27,720,007 B）+ Alpine git 2.47.3 及 14 个依赖 apk（合计 8,501,127 B） | `node tools/place-toolchain.mjs`（目标目录：`tools/place-toolchain.mjs:31`） | `third_party/`（不入库） |
 | `resources/resfile/busybox/busybox` | 单文件多合一 busybox | 入库资产（不在 `tools/` 脚本里生成） | 手工更新 |
@@ -4722,7 +4722,7 @@ Test-Path .git                     # False
 ```
 
 唯一的历史版本载体是 **`.codegenie/.git`**——一个把 `worktree` 指向仓库根的 git 目录
-（`.codegenie/.git/config` 里 `worktree = D:\\desktop\\temp\\desktop.ohos.arm64`），
+（`.codegenie/.git/config` 里 `worktree = <仓库工作区>`），
 只有 **3 个提交，全部停在 2026-09-21**（`.codegenie/.git/logs/HEAD`）。
 用 `GIT_DIR` + `GIT_WORK_TREE` 显式指向它才能读：
 
@@ -5411,7 +5411,7 @@ grep -c "DSHM_ORIGIN_LIST\|HDSH_ORIGIN_LIST" tools/pack-core.mjs
 | 体积 | **449.2 MB** | `Get-ChildItem .codegenie -Recurse -File \| Measure-Object -Property Length -Sum` |
 | 文件数 | **24137**（其中 `.codegenie/.git` 占 24136，`objects` 占 24129） | 同上 |
 | 内容 | **只有一个 `.git/` 目录**，无工作树文件 | `Get-ChildItem .codegenie -Force -Directory` |
-| 它的身份 | 一个 `worktree` **指向仓库根**的 git 目录 | `.codegenie/.git/config`：`worktree = D:\\desktop\\temp\\desktop.ohos.arm64` |
+| 它的身份 | 一个 `worktree` **指向仓库根**的 git 目录 | `.codegenie/.git/config`：`worktree = <仓库工作区>` |
 | 提交数 | **3 条，全部停在 2026-09-21** | `.codegenie/.git/logs/HEAD`（最新 `61f6ab7`，时间戳 1789928363 = 2026-09-21 02:19:23） |
 | 索引规模 | **28724 条目**（与当时整棵树同规模） | `git ls-files \| Measure-Object` |
 | 是否入库 | **已被忽略** | `.gitignore:20`：`/.codegenie/` |
