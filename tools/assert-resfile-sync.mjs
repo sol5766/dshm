@@ -17,10 +17,13 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // 与 place-host-app.mjs 的 FILES 保持同步（新增文件两处一起改）
 const FILES = [
   'main.js',
+  'jitless-env.cjs',
+  'worker-bootstrap.cjs',
   'fetch-shim.js',
   'undici-shim.mjs',
   'undici-loader.mjs',
   'require-builtin-shim.cjs',
+  'internal-undici-shim.cjs',
   'dshm-installer.js',
   'dshm-user-rows.js',
   'dshm-skills.js',

@@ -115,6 +115,42 @@ if (blockStart >= 0 && blockEnd > blockStart) {
     ['/system/bin/find', '/ws', '-type', 'f', '-name', '*.ets'],
     'glob：negation 跳过后首个正 pattern 生效');
 
+  // 【2026-10-05 真机缺陷回归：目录锚定】`dir/*` 类模式**不得**退化成"任意深度的 basename 匹配"。
+  // 真机实测（13111 个文件的树）：原实现 `_tool_probe/*` 命中 13111（应为 1）、
+  // `_tool_probe/*.txt` 命中全局 8 条；根因是 `glob.split("/").pop()` 把目录前缀 pop 掉了，
+  // 于是 argv 变成 `find <root> -type f -name '*'`。
+  // 修法：最长**字面目录前缀**并入 find 起点 + `-maxdepth` 限深（端侧 toybox 实测支持）。
+  const anchored = [
+    ['_tool_probe/*', '_tool_probe', '*'],
+    ['./_tool_probe/*', '_tool_probe', '*'],
+    ['pptmaster/*', 'pptmaster', '*'],
+    ['_tool_probe/*.txt', '_tool_probe', '*.txt'],
+    ['_tool_probe/hello.*', '_tool_probe', 'hello.*'],
+  ];
+  for (const [pattern, dir, name] of anchored) {
+    const argv = api.buildFallbackArgv('glob', ['--files', `--glob=${pattern}`, '--', '/ws']);
+    eq(argv, ['/system/bin/find', `/ws/${dir}`, '-type', 'f', '-maxdepth', '1', '-name', name],
+      `glob：${pattern} 锚定到 ${dir}/ 并限深 1 层`);
+    ok(argv[1] !== '/ws', `glob：${pattern} 的 find 起点已收窄（原缺陷下这里是 /ws ⇒ 全树）`);
+  }
+  // 末段不含 `/`（含 `**/x`）：保持 rg 的"任意深度"语义，**不加** -maxdepth
+  eq(api.buildFallbackArgv('glob', ['--files', '--glob=**/hello.txt', '--', '/ws']),
+    ['/system/bin/find', '/ws', '-type', 'f', '-name', 'hello.txt'], 'glob：**/x 保持任意深度');
+  eq(api.buildFallbackArgv('glob', ['--files', '--glob=*.ets', '--', '/ws']),
+    ['/system/bin/find', '/ws', '-type', 'f', '-name', '*.ets'], 'glob：纯 basename 保持任意深度');
+  // 多展开但**起点相同**：仍走精确形（maxdepth + -o 分组），不要无谓退到 -path
+  eq(api.buildFallbackArgv('glob', ['--files', '--glob=_tool_probe/*.{txt,md}', '--', '/ws']),
+    ['/system/bin/find', '/ws/_tool_probe', '-type', 'f', '-maxdepth', '1',
+      '(', '-name', '*.txt', '-o', '-name', '*.md', ')'],
+    'glob：dir/*.{a,b} 同起点仍精确限深');
+  // 中间段带通配 / 多起点：退到 -path 锚定（POSIX 的 * 跨 /，做不到精确限深，但仍锚定目录）
+  eq(api.buildFallbackArgv('glob', ['--files', '--glob=a/*/b.txt', '--', '/ws']),
+    ['/system/bin/find', '/ws', '-type', 'f', '(', '-path', '*/a/*/b.txt', ')'],
+    'glob：中间段通配 → -path 锚定');
+  eq(api.buildFallbackArgv('glob', ['--files', '--glob={a,b}/*.md', '--', '/ws']),
+    ['/system/bin/find', '/ws', '-type', 'f', '(', '-path', '*/a/*.md', '-o', '-path', '*/b/*.md', ')'],
+    'glob：多起点（花括号）→ -path 锚定');
+
   // buildFallbackArgv：grep → grep -Hrn
   eq(api.buildFallbackArgv('grep', ['--regexp=foo|bar', '--', '/ws']),
     ['/system/bin/grep', '-Hrn', '-E', '-e', 'foo|bar', '/ws'], 'grep：基础 -Hrn -E -e');
@@ -122,6 +158,18 @@ if (blockStart >= 0 && blockEnd > blockStart) {
     ['/system/bin/grep', '-Hrn', '-E', '-e', 'x', '/ws', '--include=*.md'], 'grep：--include 过滤');
   eq(api.buildFallbackArgv('grep', ['--regexp=x']), ['/system/bin/grep', '-Hrn', '-E', '-e', 'x', '.'],
     'grep：无 root 默认 .');
+  // 【2026-10-05 同类缺陷回归】grep 侧原来也一律只取末段做 --include ⇒ `dir/*.ts` 会搜**全树**。
+  // 系统 grep 没有路径 glob，但它的**搜索根**就是目录约束 ⇒ 把字面前缀换进根参数。
+  const grepAnchored = api.buildFallbackArgv('grep', ['--regexp=x', '--glob=dir/*.ts', '--', '/ws']);
+  eq(grepAnchored, ['/system/bin/grep', '-Hrn', '-E', '-e', 'x', '/ws/dir', '--include=*.ts'],
+    'grep：dir/*.ts 把搜索根换到 dir/');
+  ok(grepAnchored[5] === '/ws/dir', 'grep：搜索根已收窄（原缺陷下这里是 /ws ⇒ 全树）');
+  eq(api.buildFallbackArgv('grep', ['--regexp=x', '--glob=dir/**/*.ts', '--', '/ws']),
+    ['/system/bin/grep', '-Hrn', '-E', '-e', 'x', '/ws/dir', '--include=*.ts'],
+    'grep：dir/**/*.ts 先去掉 **/ 再锚定');
+  eq(api.buildFallbackArgv('grep', ['--regexp=x', '--glob=**/*.ts', '--', '/ws']),
+    ['/system/bin/grep', '-Hrn', '-E', '-e', 'x', '/ws', '--include=*.ts'],
+    'grep：**/*.ts 保持全树（任意深度）');
 
   // 不可降级：stub 下没有 find/grep 时返回空数组（caller 会抛 SEARCH_FAILED）
   const noTool = new Function('existsSync', 'parse', 'Buffer',

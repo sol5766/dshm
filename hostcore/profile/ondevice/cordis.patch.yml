@@ -153,9 +153,10 @@
 # 是 bring-up 期的权宜——当时端侧 `bash` 是 busybox 副本、必报 `applet not found`，
 # 留着工具只会让模型拿到一个必然失败的工具。现在 bash 垫片随包布置，官方默认
 # （`disabled: process.platform === 'win32'`）在端侧即"启用"，故删掉本覆盖。
-# ⚠ 如实登记：垫片在**手机档内不生效**（真机 exec 探测 `ash=denied` ⇒ 首行解释器
-# 起不来），所以本档的 `tool-bash` 事实上仍是"必然失败的工具"；保留启用状态是因为
-# 判据在探针（`exec 探测：…ash=…`）而不在开关，且 tablet/2in1 档可能可用。
+# ⚠ 如实登记（2026-10-05 档位口径更正）：垫片**只在手机档不生效**（该档真机 exec 探测
+# `ash=denied` ⇒ 首行解释器起不来）；**PC/2in1 档实测 `ash=ok`**（真机 `exec 探测 8/8` 含 ash），
+# 垫片可用 ⇒ `tool-bash` 在该档**不是**"必然失败的工具"。保留启用状态的理由不变：
+# 判据在探针（`exec 探测：…ash=…`）而不在开关，且 tablet/2in1 档确实可用。
 # 保留 `tool-pwsh`：鸿蒙确实没有 PowerShell，工具留着必然 ENOENT。
 - id: tool-pwsh
   disabled: true
@@ -217,19 +218,40 @@
 # 官方 bundle 默认即启用（dsh-web-app 注册这三行且不带 disabled）。留着只是冗余；
 # 且它们在 agent preset 之外、按 id 覆盖全局，长期会掩盖官方默认的变化。
 
-# ⑦ workflow / PTC：**端侧不可用，禁用**（P1-1，2026-09-26）
-#    结论来自实测：`@deepseek-ai/dsh-ptc-runtime-node` 的执行入口调用
-#    `node:module` 的 `stripTypeScriptTypes`（lib/index.js:930 剥离用户脚本的 TS 类型），
-#    而该 API 在 `--jitless` 下抛
-#      `WebAssembly is not supported in this environment, but is required for TypeScript`
-#    （本机 Node v24.14.1 `--jitless` 逐字复现；端侧 BOOT_00 报 jitless=true）。
-#    PTC 还额外 spawn 一个子 Node 进程，那条链在端侧同样受进程创建限制。
-#    【两处都要治】：
-#      ① host 面这两行（dsh-base 声明）——下面这两条 id 覆盖；
-#      ② 模型的**工具清单**由 agent preset 决定（dsh-web-app/presets/*.patch.yml 的
-#         `delegation` 组里另有 workflow-ptc / tool-workflow 两份副本，在 isolate
-#         作用域内按 id 查不到），profile 的 patch 行够不着 ⇒ 由打包层
-#         tools/pack-core.mjs 的 patchAgentPresetWorkflow() 直接给 preset 文件加 disabled。
+# ⑦ workflow / PTC（2026-10-05 更新）
+#
+#  【一】PTC **模式**（`run_code` 工具）已在端侧打通：官方 `ptc-runtime` 行换成自带的
+#   同进程纯 JS 实现 `@deepseek-ai/dshm-ptc-runtime-inproc`。
+#
+#   为什么必须换：官方 `@deepseek-ai/dsh-ptc-runtime-node` 有两条结构性死路 ——
+#     ① 用 `node:module` 的 `stripTypeScriptTypes`（SWC **wasm**）剥离类型，
+#        `--jitless` 下必抛 `WebAssembly is not defined`。2026-10-05 真机日志逐字可见：
+#        先 `ExperimentalWarning: stripTypeScriptTypes …`（第一次调用），紧接着
+#        `code run failed (exception): WebAssembly is not defined` —— 失败发生在
+#        **解析/擦除那一刻**，与用户代码无关（空程序、非法语法都报同一条）。
+#     ② 还要 spawn 一个子 Node 进程（端侧 `spawn` 被拒 `EACCES`，且
+#        `process.execPath` 是 `/system/bin/appspawn`）。
+#   自带实现：纯 JS 类型擦除（包壳后擦除再切壳，与官方 index.js:755/930 同法）+
+#   `node:vm` 同进程求值 + 宿主 binding 直连；`sandboxMode` 返回 `undefined`
+#   （不能做文件封闭 ⇒ 消费者因此不传 sandboxPolicy、也不要求结果带 sandbox）。
+#
+#   替换写法要点：**不能直接改名**——`applyEntryPatches` 的普通 patch 只按键覆盖，
+#   它的 `name` 字段仅用于校验（不符就跳过）。所以必须"停用官方行 + insert 自己的行"。
+#   新行插在**根层**，而 cordis 服务注册在根 ctx ⇒ `ctx.ptcRuntime` 即我们的实现。
+#   恢复条件：删掉本节这两条 + pack-core 的 DSHM_PLUGIN_PACKAGES 里对应那一项。
+- id: ptc-runtime
+  disabled: true
+- insert:
+    - id: ptc-runtime-inproc
+      name: '@deepseek-ai/dshm-ptc-runtime-inproc'
+#
+#  【二】workflow 相关两行**仍禁用**（另案，不要顺手放开）：`workflow-ptc` /
+#   `tool-workflow` 除了 PTC 运行时，还依赖 subagent 的 spawn 链与 dsh-workflow；
+#   本轮只验证 `run_code` 这条 PTC 模式链路。
+#   模型的**工具清单**由 agent preset 决定（dsh-web-app/presets/*.patch.yml 的
+#   `delegation` 组里另有 workflow-ptc / tool-workflow 两份副本，在 isolate
+#   作用域内按 id 查不到），profile 的 patch 行够不着 ⇒ 由打包层
+#   tools/pack-core.mjs 的 patchAgentPresetWorkflow() 直接给 preset 文件加 disabled。
 - id: workflow-ptc
   disabled: true
 - id: tool-workflow
@@ -385,10 +407,13 @@
 #    告知用户。目标根只认 `DSHM_PUBLIC_DOWNLOAD`（ArkTS 认领后传入、Host 启动期已
 #    lstat + 探写验证过；见 hostcore/app/main.js 的 resolveWorkspaceDir()）——
 #    env 为空时**如实报错**，不拼路径、不退到进程 cwd（那会静默写错地方）。
-#    落盘用与 ⑩ 同源的去 chmod 原语 `mkdir → open('w') → writeFile(Buffer) → sync
-#    → close`；**不用** chmod（实测 EPERM）/ rename（未证实）/ link（沙箱禁）。
-#    如实登记的代价：就地写**非原子**（目标原本不存在时，失败后把半截文件 unlink 掉；
-#    目标原本存在时只能如实报错，不删用户已有文件）。
+#    落盘用与 ⑩ 同源的去 chmod 原语：**同目录隐藏临时文件 `.partial` → `open('w'[,mode])`
+#    → `writeFile(Buffer)` → `sync` → `close` → `rename` 发布**（`rename` 只用于**同一目录内**
+#    改名，端侧实测放行；见 `dshm-tool-fs-remove/lib/index.js` 文件头与
+#    `dshm-fs-write-nonchmod/lib/fsio-nochmod.js:22-33`）。**不用** chmod（实测 EPERM）/ link（沙箱禁）。
+#    【2026-10-05 更正】本节原先写"不用 rename（未证实）…就地写**非原子**（失败后把半截文件
+#    unlink 掉）"——那是本插件的**早期版本**形态；现版本已改为 `.partial` + `rename`，即
+#    **原子发布**，与 ⑩ 完全同源。残留的真实语义差异见 ⑩ 的"语义差异"清单。
 #
 #    【写法照抄先例】与本节 :298-303 的两条 `insert:` 逐字同形——applyEntryPatches
 #    的普通 patch 行是"按 id 更新已有条目"，id 不存在时只 warn 后跳过；新增行必须
@@ -494,17 +519,21 @@
 #    hostcore/plugins/dshm-fs-write-nonchmod/，由 tools/pack-core.mjs 的
 #    embedDshmToolPackages() 放进核心树 node_modules）`extends SandboxedFileSystem`，
 #    **只重写 `writeText` / `editText` 的落盘一步**，改用 31 号探针实测放行的组合：
-#        open(path,'w'[,mode]) → writeFile → close
-#    不用 chmod、不用 rename、不用 link（全部未证实或已证实被拒）。路径封闭
+#        open(temp,'w'[,mode]) → writeFile → close → rename(temp, target)   （同目录内改名）
+#    **不用 chmod**（实测 EPERM）；`link` 不用（沙箱禁）。路径封闭
 #    （`checkedTarget`）、per-target 锁（`withLock`）、版本守卫
 #    （`FS_STALE_VERSION` / `FS_NOT_OBSERVED`）、`probe`/`readTextForDiff`/`readForEdit`/
 #    `applyLiteralEdit` 与返回结构全部与上游逐字同形（对照表见
 #    `44-写入去chmod/简报.md` §契约对照）。
 #
-#    【如实登记的语义差异】① 就地写**非原子**（上游是暂存+rename 发布；补齐需要未验证的
-#    rename，按"没证实就别用"不做）；② `createIfAbsent` 的 no-clobber 从"发布期"降级为
-#    "锁内检查期"（仅进程外并发创建者这一个窗口）；③ `fsync` 失败不再判写入失败（只打
-#    stderr 警告）；④ 更新既有文件时权限位反而更准（就地写不换 inode，mode 逐位保留）。
+#    【如实登记的语义差异】① 暂存件是**同目录隐藏文件**（`.名.pid.uuid.partial`）而非上游那种
+#    私有暂存**目录**：上游靠目录 0o700 + 文件 0o600 保护中间态，而那两步都要 `chmod`（端侧
+#    EPERM）⇒ 改为同目录隐藏文件 + `rename`（`rename` 会把临时件的 mode 带过去，所以覆写时
+#    把**目标既有 mode** 交给 `open`）；② `createIfAbsent` 的 no-clobber 从"发布期"降级为
+#    "锁内检查期"（仅"进程外并发创建者"这一个窗口）；③ `fsync` 失败不再判写入失败（只打
+#    stderr 警告）；④ 更新既有文件时权限位反而更准（`rename` 前把目标 mode 交给 `open`）。
+#    【2026-10-05 更正】本节原先写"不用 rename（未证实）"+"就地写**非原子**"——与实现相反：
+#    现实现用 `.partial` + `rename`，**是原子发布**（见 `lib/fsio-nochmod.js:22-33` 文件头）。
 #
 #    【怎么关掉】把下面两处删掉（`fs-sandbox` 的 disabled 行 + 本 insert 行）+
 #    pack-core 的 DSHM_PLUGIN_PACKAGES 里那一项，即完全回到上游 `dsh-fs-sandbox`。

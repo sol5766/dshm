@@ -866,6 +866,30 @@ const DSHM_PLUGIN_PACKAGES = [
   // `loading:"bytes-complete"` + 正文面板/工具栏按钮调 ArkTS 桥 `openFilePreview` 弹系统预览窗。
   // **只认领 `doc/docx/ppt/pptx`**：`xls/xlsx/csv/tsv` 归内置 Excel（纯客户端实现，端侧正常）。
   { name: '@deepseek-ai/dshm-office-system-preview', dir: 'dshm-office-system-preview' },
+  // PTC 运行时（同进程纯 JS 实现，2026-10-05）：
+  //
+  // 【为什么必须换掉官方实现】`@deepseek-ai/dsh-ptc-runtime-node` 有两条**结构性死路**：
+  //   ① 用 `node:module` 的 `stripTypeScriptTypes`（SWC 的 **wasm** 版）剥离用户脚本的
+  //      TS 类型 ⇒ `--jitless` 下必抛。2026-10-05 真机日志逐字可见：先
+  //      `ExperimentalWarning: stripTypeScriptTypes …`（第一次调用），紧接着
+  //      `code run failed (exception): WebAssembly is not defined` —— 失败发生在
+  //      **解析/擦除那一刻**，所以空程序、非法语法、`tools.bash` 全都报同一条
+  //      ⇒ PTC 模式 31 个工具全不可达。
+  //   ② 它还要新起一个子 Node 进程（端侧 `spawn` 被拒 `EACCES`，且
+  //      `process.execPath` 是 `/system/bin/appspawn`）。
+  //
+  // 【本插件做什么】按 `ctx.ptcRuntime` 缝（`@deepseek-ai/dsh-ptc-runtime`）重新实现：
+  //   纯 JS 类型擦除（`lib/ts-strip.cjs` + vendor 的 `@babel/standalone` 单文件；
+  //   仍是官方那套"包进 `async function __dsh_program__()` → 擦除 → 切壳"手法）
+  //   + `node:vm` 同进程求值 + 宿主 binding 直连。
+  //   契约面如实收窄：`sandboxMode` 返回 `undefined`（不做文件封闭）⇒ 消费者因此
+  //   **不传** `sandboxPolicy`、也不要求结果带 `sandbox`（`dsh-tools/lib/types/ptc.js:74`）。
+  //
+  // 【接线在哪】`hostcore/profile/ondevice/cordis.patch.yml` ⑦：停用官方 `ptc-runtime` 行
+  //   + `insert` 本插件（**不能直接改名**：`applyEntryPatches` 的 `name` 字段只作校验）。
+  //   `workflow-ptc` / `tool-workflow` 仍禁用（另案，别顺手放开）。
+  // 【恢复条件】官方若给出"无 wasm 的擦除 + 不 spawn"的实现，删掉本项与 profile ⑦ 那两行即可。
+  { name: '@deepseek-ai/dshm-ptc-runtime-inproc', dir: 'dshm-ptc-runtime-inproc' },
 ];
 /**
  * 承载自带插件依赖声明的上游包。
@@ -1145,9 +1169,40 @@ function patchFsSearchFallback() {
   const file = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-tool-fs-search', 'lib', 'index.js');
   if (!existsSync(file)) die('fs-search 降级 patch：找不到 dsh-tool-fs-search/lib/index.js（树形态变了）');
   let t = readFileSync(file, 'utf8');
+
+  // 【为什么不再"见到函数名就跳过"（2026-10-05 修）】
+  // 旧守卫是 `if (t.includes('function buildFallbackArgv')) 跳过` ⇒ **注入块的实现一旦要升级就
+  // 永远升不上去**：本次修 `glob` 目录锚定（真机 P1）时，pack-core 打印"已在，跳过"，树里留的
+  // 还是旧实现，而门禁读到旧行为报 16 条红 —— 差点被误判成"门禁写错了"。
+  // 现在改成**可重入重打**：把**未打补丁的原文**存一份在树外（`dist/core/work/.pack-core-pristine/`），
+  // 每次打包都从 pristine 重新注入。
+  // 安全性：只有当树里那份**确实等于我们上次打出来的结果**（哈希相符）时才用 pristine 覆盖它；
+  // 若哈希不符（上游升级、或有人手改过），就把当前内容当作新的原文另存 —— 绝不用旧 pristine
+  // 把上游更新**降级**掉（那是比"补丁没升级"更坏的静默事故）。
+  const pristineDir = join(dirname(STAGE), '.pack-core-pristine');
+  const pristineFile = join(pristineDir, 'dsh-tool-fs-search-index.js');
+  const pristineMeta = join(pristineDir, 'dsh-tool-fs-search-index.meta.json');
+  const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+  let base = t;
+  let reusedPristine = false;
+  if (existsSync(pristineFile) && existsSync(pristineMeta)) {
+    let recorded = '';
+    try { recorded = JSON.parse(readFileSync(pristineMeta, 'utf8')).patchedSha256 ?? ''; } catch { recorded = ''; }
+    if (recorded !== '' && sha256(t) === recorded) {
+      base = readFileSync(pristineFile, 'utf8');
+      reusedPristine = true;
+      log('[pack-core]   fs-search 降级 patch：树里那份=上次打出的结果 ⇒ 回到 pristine 原文重打（可重入）');
+    } else {
+      log('[pack-core]   fs-search 降级 patch：树里那份与记录不符（上游更新/手改？）⇒ 以当前内容为新的原文');
+    }
+  }
+  if (!reusedPristine) {
+    mkdirSync(pristineDir, { recursive: true });
+    writeFileSync(pristineFile, base);
+  }
+  t = base;
   if (t.includes('function buildFallbackArgv')) {
-    log('[pack-core]   fs-search 降级 patch 已在，跳过');
-    return;
+    die('fs-search 降级 patch：pristine 原文里竟然已有注入块 —— pristine 记录不自洽，人工核对');
   }
 
   const helpers = `// ── 鸿蒙适配（pack-core 注入）：rg 不可 exec 时的 find/grep 降级 ──
@@ -1193,6 +1248,29 @@ function expandBraces(pattern) {
 	}
 	return out;
 }
+/** 段里是否含 glob 元字符（不用正则，避免模板串转义地狱）。 */
+function hasGlobMeta(segment) {
+	return segment.includes("*") || segment.includes("?") || segment.includes("[") || segment.includes("{");
+}
+/**
+ * glob 模式的"最长字面目录前缀 + 剩余段"拆分（降级路径专用；**纯函数**便于门禁直接提纯测）。
+ *
+ * 【为什么需要它（2026-10-05 真机缺陷）】原实现一律**取 glob 的末段**做 -name、丢掉目录前缀：
+ *   _tool_probe/*      →  find <root> -type f -name '*'
+ *   _tool_probe/*.txt  →  find <root> -type f -name '*.txt'
+ * 于是退化成"任意深度的 basename 匹配"：真机在 13111 个文件的树里 _tool_probe/* 命中 13111
+ * （应为 1）、_tool_probe/*.txt 命中全局 8 条。末段带字面前缀（dir/hello.ext）时恰好看着正常，
+ * 所以这条缺陷能长期潜伏。
+ */
+function splitGlobAnchor(globPattern) {
+	const normalized = globPattern.replace(/^\\.\\//, "");
+	const segs = normalized.split("/").filter((s) => s !== "" && s !== ".");
+	if (segs.length === 0) return { dir: "", rest: ["*"] };
+	let literal = 0;
+	// 最后一段永不并入前缀（它是 -name 的匹配对象）
+	while (literal < segs.length - 1 && !hasGlobMeta(segs[literal])) literal++;
+	return { dir: segs.slice(0, literal).join("/"), rest: segs.slice(literal) };
+}
 /** 降级 argv：把 rg 参数转成系统 find/grep 参数；返回空数组表示无法降级。 */
 function buildFallbackArgv(toolName, argv) {
 	let root = ".";
@@ -1218,10 +1296,26 @@ function buildFallbackArgv(toolName, argv) {
 		const args = [findPath];
 		// toybox 用 argv[1] 分发 applet（argv[0]=toybox 时需显式 applet 名）
 		if (parse(findPath).base === "toybox") args.push("find");
-		args.push(root, "-type", "f");
-		if (globPattern !== "") {
-			const base = globPattern.replaceAll("**/", "").split("/").pop() ?? globPattern;
-			const names = expandBraces(base);
+		if (globPattern === "") return args.concat([root, "-type", "f"]);
+		// 见 splitGlobAnchor 的注释：**目录前缀必须并入 find 的起点**，不能再被 pop 掉。
+		const specs = expandBraces(globPattern).map((one) => splitGlobAnchor(one));
+		// 可精确表达的条件：① 所有展开共享同一个起点目录；② 除末段外没有别的通配段
+		//   （** 段例外 —— 它等价于"不限深度"，去掉 -maxdepth 即可）。
+		const sameStart = specs.every((one) => one.dir === specs[0].dir);
+		const middleOk = specs.every((one) => !one.rest.slice(0, -1).some((x) => x !== "**" && hasGlobMeta(x)));
+		if (sameStart && middleOk) {
+			const dir = specs[0].dir;
+			const rest = specs[0].rest;
+			const names = [];
+			for (const one of specs) {
+				for (const n of expandBraces(one.rest[one.rest.length - 1])) names.push(n);
+			}
+			const startDir = dir === "" ? root : root.replace(/\\/+$/, "") + "/" + dir;
+			args.push(startDir, "-type", "f");
+			// 有 ** 段、或"末段不含 /"（dir 为空 ⇒ 与 rg --glob 的任意深度语义一致）⇒ 不加 -maxdepth。
+			// 端侧 toybox find 实测支持 -maxdepth（-maxdepth 1 只列一层）。
+			const anyDepth = dir === "" || specs.some((one) => one.rest.some((x) => x.includes("**")));
+			if (!anyDepth) args.push("-maxdepth", String(rest.length));
 			if (names.length > 1) {
 				args.push("(");
 				names.forEach((n, idx) => {
@@ -1230,9 +1324,20 @@ function buildFallbackArgv(toolName, argv) {
 				});
 				args.push(")");
 			} else {
-				args.push("-name", names[0] ?? base);
+				args.push("-name", names[0]);
 			}
+			return args;
 		}
+		// 近似形：中间段带通配（a/*/b.txt）或多个花括号展开（各自起点不同）⇒ 用 -path 锚定。
+		// 注意 POSIX fnmatch 的 * **跨 /**（端侧实测：-path '*/dir/*' 同时命中深层文件），
+		// 所以 -path 只能"锚定目录"，做不到 rg 那样精确限深；但仍远严于"退化成全树 basename"。
+		args.push(root, "-type", "f", "(");
+		specs.forEach(({ dir, rest }, idx) => {
+			if (idx > 0) args.push("-o");
+			const rel = (dir === "" ? [] : [dir]).concat(rest).join("/").split("**").join("*");
+			args.push("-path", "*/" + rel);
+		});
+		args.push(")");
 		return args;
 	}
 	const grepPath = probeSystemTool(["grep"]);
@@ -1242,11 +1347,18 @@ function buildFallbackArgv(toolName, argv) {
 	// rg 查询语法是 PCRE2；系统 grep 用 ERE 保留 |、()、+、? 的语义。
 	// 必须 -H：单文件参数时 grep 默认不打印文件名前缀，下游按 path:line:content
 	// 解析会整行丢弃 → 单文件恒 "No matches found"（DSHM 2026-09-16 实测教训）。
-	args.push("-Hrn", "-E", "-e", pattern, root);
+	let searchRoot = root;
+	let include = "";
 	if (globPattern !== "") {
-		const base = globPattern.replaceAll("**/", "").split("/").pop() ?? globPattern;
-		args.push("--include=" + base);
+		// 目录锚定（2026-10-05：与 glob 同一类缺陷）——原实现一律只取末段做 --include
+		// ⇒ dir/*.ts 会搜**全树**。系统 grep 没有 rg 的路径 glob，但它的**搜索根**就是
+		// 目录约束：前缀是字面目录时直接把根换过去（dir/**/*.ts 先去掉 **/ 再判）。
+		const anchor = splitGlobAnchor(globPattern.split("**/").join(""));
+		if (anchor.dir !== "") searchRoot = root.replace(/\\/+$/, "") + "/" + anchor.dir;
+		include = anchor.rest.length > 0 ? anchor.rest[anchor.rest.length - 1] : "*";
 	}
+	args.push("-Hrn", "-E", "-e", pattern, searchRoot);
+	if (include !== "") args.push("--include=" + include);
 	return args;
 }
 /** 把系统 grep 文本输出（path:line:content）转成 rg --json 风格 NDJSON。 */
@@ -1331,7 +1443,31 @@ function grepTextToNdjson(stdout) {
   if (!t.includes(oldOut)) die('fs-search 降级 patch：输出段锚点未命中（collected 形态变了）');
   t = t.replace(oldOut, newOut);
 
+  // 【为什么在这里自检（2026-10-05 一天内连踩两次）】上面三段注入都是**模板串**，而模板串有三条暗礁：
+  //   ① 反斜杠要写两个（正则里的 `\/` 会被吃成一个裸 `/`，注入后是语法错的 `//+$/`）；
+  //   ② 反引号与 `${` 要转义（否则被当模板定界/插值）；
+  //   ③ **块注释里出现 `*/` 会提前终止注释**（今天就是写了 `"**/"` 这个字面量把 JSDoc 截断的）。
+  // 写错任意一个字符，注入进树里的就是**语法坏的 JS**；而 pack-core 只做文本替换、不解析 ⇒
+  // 要等几分钟打包完、由门禁才发现（今天两次都是这样）。
+  // 判据必须是**整文件**解析：spawn/输出两段是**片段**（含被锚点拆开的 `try{…}` 与 `await`），
+  // 拆开单独解析必然假阳性（实测两种）。故写临时 .mjs 文件、用 `node --check` 做完整 ESM 解析。
+  const syntaxProbe = join(tmpdir(), `dshm-fs-search-probe-${process.pid}.mjs`);
+  writeFileSync(syntaxProbe, t);
+  const probeRun = spawnSync(process.execPath, ['--check', syntaxProbe], { encoding: 'utf8' });
+  try { unlinkSync(syntaxProbe); } catch { /* 临时文件删不掉不影响结论 */ }
+  if (probeRun.status !== 0) {
+    const detail = String(probeRun.stderr || '').split('\n').filter((line) => line.trim() !== '').slice(0, 6).join(' | ');
+    die(`fs-search 降级 patch：注入后**全文语法不自洽** —— ${detail}\n`
+      + '  多半是模板串转义写错：反斜杠要写两个（\\ → \\\\）、反引号与 ${ 要转义、块注释里不能出现注释终止符');
+  }
+
   writeFileSync(file, t);
+  writeFileSync(pristineMeta, JSON.stringify({
+    note: 'pristine = 未打补丁的 dsh-tool-fs-search/lib/index.js；patchedSha256 = 上次注入后的哈希（用于下次判断能否安全从 pristine 重打）',
+    pristineSha256: sha256(base),
+    patchedSha256: sha256(t),
+    at: new Date().toISOString(),
+  }, null, 2));
   log('[pack-core]   fs-search 降级 patch：rg exec 探测 + find/grep fallback + NDJSON 转换已注入');
 }
 

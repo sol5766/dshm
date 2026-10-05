@@ -101,14 +101,29 @@ if (-not $SkipRebuild) {
     $env:DEVECO_CLI_CLT_PATH = $clt
     $env:PATH = "$env:JAVA_HOME\bin;$clt\node;$env:PATH"
     Push-Location $root
+    # 【为什么这一段临时把 ErrorActionPreference 降为 Continue（2026-10-05 实测踩到）】
+    # 下面那行是 `*> 日志文件` —— 这是 **PowerShell 层的 stderr 重定向**。PS 5.1 会把原生命令
+    # 写到 stderr 的**每一行**包成一个 ErrorRecord；而本脚本开头设了
+    # `$ErrorActionPreference = 'Stop'`，于是 hvigor 的一句警告
+    # （实测逐字：`> hvigor WARN: Warning: 'page_show' conflict, first declared.`）
+    # 就会把脚本**当场终止**并报 `NativeCommandError`，构建根本没跑完 ——
+    # 症状是"唯一受认可的装机入口突然装不了"，而且真正的构建错误反而被这行噪声盖住。
+    # 因此只在这一段放宽：stderr 一行不少地进日志，构建结果照旧用 $LASTEXITCODE 判定（见下）。
+    # 别把这段挪出 try/finally —— 它只保护这一次重定向调用。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         & "$clt\node\node.exe" "$clt\hvigor\bin\hvigorw.js" assembleHap `
             --mode module -p product=default -p buildMode=debug --no-daemon *> "$root\dist\_update_build.log"
-        if ($LASTEXITCODE -ne 0) {
-            Get-Content "$root\dist\_update_build.log" -Tail 25
-            throw '构建失败'
-        }
-    } finally { Pop-Location }
+        $buildExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-Location
+    }
+    if ($buildExit -ne 0) {
+        Get-Content "$root\dist\_update_build.log" -Tail 25
+        throw '构建失败'
+    }
     Ok '构建成功'
 } else {
     Step 3 '跳过构建（-SkipRebuild）'
