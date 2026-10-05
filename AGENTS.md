@@ -199,3 +199,20 @@ node tools/check-core-openharmony-patches.mjs  # 核心树里的 19 处端侧注
 > 另记（提交卫生）：`docs/90` 的一次"等长替换"（行号重算）因**文件 size 不变**，被 git 的 stat 缓存当成"未改"，
 > 结果随另一个只 `git add docs/90` 的提交一起落库 —— 内容正确但提交归属与 message 不符。
 > ⇒ 提交前用 `git status` + `git diff --cached --stat` 核对**暂存内容**，别只信 `git status` 的"已暂存"三字。
+
+
+---
+
+## 清理 `dist/core` 的两个教训（2026-10-05 夜，实战踩出来的）
+
+1. **保留当前容器的判据要用"完整文件名前缀"，不要用"版本号 + 点"**。
+   `dist/core` 里旧容器可以清（构建产物，本次一次释放 **792 MiB**），但当前那份的名字是
+   `dsh-core-<version>-openharmony-arm64.zip` —— `<version>` 后面跟的是 **`-`**，不是 `.`。
+   用 `"dsh-core-0.2.1-alpha.1+dshm.6.*"` 作保留判据会把**当前容器也删掉**（本次就这么干了 ✗），
+   而 `check-resfile-core-zip.mjs` 会立刻变红 —— **这条门禁的价值就在这儿**。正确判据：
+   `$keep = 'dsh-core-' + $ver + '-'` 或直接用完整文件名白名单。
+2. **误删可从已装 HAP 逐字节恢复**（比重跑 `pack-core` 快十几分钟）：
+   已签名 HAP 里就有那份容器，路径 `resources/resfile/dsh-core-<version>-openharmony-arm64.zip`；
+   用 .NET `System.IO.Compression.ZipFile` 把它原样写出到 `dist/core/` 即可，
+   随后用 `Get-FileHash` 与 `entry/src/main/resources/resfile/` 里那份对齐（本次两者 sha256 完全一致 ✓）。
+   ⇒ 清 `dist/core/*.zip` 前后都跑一次 `node tools/check-resfile-core-zip.mjs`，是零成本的保险。
