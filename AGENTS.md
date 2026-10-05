@@ -127,7 +127,7 @@ node tools/check-core-openharmony-patches.mjs  # 核心树里的 19 处端侧注
 |---|---|---|
 | 构建产物 | `entry/build/default/outputs/default/` | 会被 clean 覆盖，**不要当交付物留档** |
 | 交付/侧载包 | `dist/sideload/` | 不会被构建清掉，含 README + 校验 |
-| 文档 | `docs/` | 编号连续：`00-`…`95-`（当前最大编号 95；`95` 是收尾审计台账） |
+| 文档 | `docs/` | 编号连续：`00-`…`97-`（当前最大编号 **97**；`95` 收尾审计台账、`96` 侧栏预览竞品调研、`97` `readBytes` 空响应根因与修复），索引见 `docs/README.md` |
 | 一次性排查脚本 | 用完即删 | 不要把临时诊断脚本留在 `tools/` |
 
 ---
@@ -158,6 +158,14 @@ node tools/check-core-openharmony-patches.mjs  # 核心树里的 19 处端侧注
    顺带让端侧走新版本 ⇒ 直接解包的分支。
 3. **resfile 只允许 1 份核心容器**：`--place-in-app` 只增不删 ⇒ 多份 core 共存把 HAP 从 306 MiB 顶到
    491 MiB（实测）。现已在 pack-core 里自动清掉非当前版本，并有门禁 `tools/check-resfile-core-zip.mjs` 兜底。
+
+> **`coreVersion` 命名口径（2026-10-05 定案）**：核心树版本统一写成 `0.2.1-alpha.1+dshm.<n>`
+> —— `+dshm.<n>` 是 semver 的 **build metadata**，**不参与优先级比较**，纯粹是**给人读的**：
+> 端侧目录名 `dshm/cores/<version>` 与自检输出 `OK 核心树 <version> 在` 都能**一眼看出设备在跑哪一版**，
+> 事后核查不用去猜。它与上面第 2 条**配套**：只要核心树内容有变（补丁增删、插件副本、版本号），
+> 就必须递增 `<n>` —— 否则端侧不换树，`pack-core` 也不会**重新物化**出干净树。
+> 当前值：`0.2.1-alpha.1+dshm.6`（见 `hostcore/core-recipe.json`；撤除 `DSHM_DOC_LOAD_DEDUP` 时由 `+dshm.5` 升来）。
+> （第 2 条里 `+dshm.1/+dshm.2/+dshm.3` 是各轮**历史**实际用过的值，保持原样，不改写历史。）
 
 
 ---

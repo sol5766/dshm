@@ -83,7 +83,7 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 | 三处落地 | 侧栏 `dsh-client-ui-sidebar-right/lib/client.js:8647-8650`；subagent `dsh-client-ui-subagent/lib/client.js:722-731`（host/path/query 三件都取回） |
 | PDF 双 realm | `dsh-client-ui-sidebar-documentpreview/lib/client.pdf.js:980`（chunk 工厂）与 `:24740`（内联 worker Blob）；实测 `DSHM_MAP_COMPAT` 2 次、`install(Map.prototype` 4 次 |
 | Office docx/pptx | 走 `hostcore/plugins/dshm-office-system-preview/lib/client.js:65`（EXTENSIONS）、`:281-291`（`priority:"extension"`）；接线 `cordis.patch.yml:657-659` + `pack-core.mjs` 清单。**2026-10-05 改**：`loading` 由 `"bytes-complete"` 改为 `"text-pages"`（正文本来就不渲染内容，只需一个能落地的状态）——因为 `workspaceFiles/readBytes` 从 10/05 起**每次都被客户端立刻取消**（宿主不轮转日志 `dshm-host.log`：10/04 = 3 请求/3 成功/0 取消；10/05 = 78 请求/78 取消/0 成功，耗时 3–13 ms；同期 `stat`/`read` 一直 200），`bytes-complete` 因此永远拿不到 content，工具栏入口也不出现 |
-| 注入点 | `tools/pack-core.mjs:2427-2535`（资源地址）、`:2599-2632`（PDF）、调用点 `:3003-3004` |
+| 注入点 | `tools/pack-core.mjs:2432-2540`（资源地址）、`:2604-2637`（PDF）、调用点 `:3024-3025` |
 
 ### 1.5 GitCode #2 —— 端侧终端打不开（已 closed）
 
@@ -91,7 +91,7 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 
 - 平台白名单：`dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js:670`（`linux || openharmony` ⇒ `LinuxProcessInspector`）；
   `lib/index.js:1164`（`shellActivity` 对 openharmony 短路）、`:856`（inspectActivity idle 分支放行）；
-  调用点 `:1419-1422` 与 issue 引文逐字一致；注入点 `pack-core.mjs:2634-2682`、调用点 `:3005`。
+  调用点 `:1419-1422` 与 issue 引文逐字一致；注入点 `pack-core.mjs:2639-2687`、调用点 `:3026`。
 - 真机端到端：`docs/HANDOFF.md:631`（`ps` 见 `/usr/bin/zsh -i`、PPID=Host、fd→`/dev/pts/0`；PTY 回显 `ZSH=5.9`）。
 - **前提已被后续改动绕过**：`cordis.patch.yml:143-146` 现在是系统 `/usr/bin/zsh`（N5，2026-10-03，
   比本补丁晚 91 秒）⇒ `--rcfile` 冲突不再可达。
@@ -147,7 +147,7 @@ ACL 对照（Documents/Download/Desktop 全 EPERM）**正面冲突**，且该 do
 | 12 | `ts-strip.cjs:414-417` 写"真机尚未验证"，与 changelog"真机验收通过"矛盾 | ✅ **已修**（端侧已验收，注释改为事实 + 残留边界） |
 | 13 | `parity-matrix.md:334` 写插件 `index.js` 37,227 B，实际 38,518 B | ✅ **已修** |
 | 14 | `dist/_*` 清理口径与事实不符（自述"只留 32 个被引用"，实测 37 个里 6 个零引用） | ✅ **已修**（删 6 个，现 32 个） |
-| 15 | 零散：AGENTS"编号连续 `00-`…`80-`"而 `docs/90` 存在；`pack-core.mjs` 拼写 `pristinMeta`；原生库路径两份实现（`main.js:613-625` vs `jitless-env.cjs:90-100`）；`main.js:243`/`:251` 同一噪声两种措辞 | ✅ **已全部修**（编号范围→`95-`、拼写→`pristineMeta`、原生库路径合并为 `jitlessEnv.resolveNativeLibsDir()`、噪声文案抽成 `diagKnownJitlessUndiciNoise()`；另修 `pack-core.mjs:2149` 的"4 处"→"6 处"）。见 §8.3/§8.1 |
+| 15 | 零散：AGENTS"编号连续 `00-`…`80-`"而 `docs/90` 存在；`pack-core.mjs` 拼写 `pristinMeta`；原生库路径两份实现（`main.js:613-625` vs `jitless-env.cjs:90-100`）；`main.js:243`/`:251` 同一噪声两种措辞 | ✅ **已全部修**（编号范围→`95-`、拼写→`pristineMeta`、原生库路径合并为 `jitlessEnv.resolveNativeLibsDir()`、噪声文案抽成 `diagKnownJitlessUndiciNoise()`；另修 `pack-core.mjs:2152` 的"4 处"→"6 处"）。见 §8.3/§8.1 |
 
 ### 3.3 口径一致性修复（本轮已落地，12 处）
 
@@ -302,7 +302,7 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 1. **看不见的恒真**：`profiles/ondevice/cordis.patch.yml` 是 **CRLF**（实测 667 个 CRLF），
    而 `pack-core` 的替换模板一律 `\n` ⇒ 多行反向判据不做归一化就会**恒绿**（摆设判据）。
    门禁现在读取时把 `\r\n` 折成 `\n`（逐字节判据仍读原始字节）。
-2. **注释与实现不符**：`tools/pack-core.mjs:2149` 原写"这 **4** 处"，实际是"两份副本 × 各 3 处 = **6**"；
+2. **注释与实现不符**：`tools/pack-core.mjs:2152` 原写"这 **4** 处"，实际是"两份副本 × 各 3 处 = **6**"；
    门禁按树内实际钉死，注释已就地更正。
 
 **仍未纳入的 6 处**（同为打包期 `die()` 兜底、无独立门禁）：`allowOriginList`（`DSHM_ORIGIN_LIST`）、
@@ -371,7 +371,7 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 | `addSystemAddonPackage()` :1753 | `0.1.2-dshm-shim` | **新造包、没有上游原文** ⇒ 只能断言产物存在 + 完整性（如实说明，不编造反向判据） |
 | `addOnDevicePreset()` :1065 | 端侧 preset | **当前布局下它一个字节都不复制**（产物 = 官方 shipping 集）⇒ 按代码为准**不设内容判据**，只记这一事实 |
 | `addPlatformAliases()` :1487 | `@ohos-ports` 平台别名 | 整目录复制 ⇒ 反向 = 别名目录与**树内**源目录逐字节一致（源也在树内 ⇒"真副本"型） |
-| `embedTreeInfo()` / `verifyTreeInfoContract()` :2689/:2728 | 树根 `dshm-core.json` | **真生成物**（`builtAt` 是打包时刻的 ISO 时间戳）⇒ **只做形状断言**：存在 + JSON 可解析 + 字段名/类型 + 来自配方与代码常量的**确定值**（`coreVersion`/`platform`/`profile`/`overrides`）+ 内部一致 |
+| `embedTreeInfo()` / `verifyTreeInfoContract()` :2689/:2733 | 树根 `dshm-core.json` | **真生成物**（`builtAt` 是打包时刻的 ISO 时间戳）⇒ **只做形状断言**：存在 + JSON 可解析 + 字段名/类型 + 来自配方与代码常量的**确定值**（`coreVersion`/`platform`/`profile`/`overrides`）+ 内部一致 |
 
 ⇒ §8.1 结尾列的"仍未纳入的 6 处"**全部清零**：端侧注入补丁门禁现在覆盖**全部**已知注入点。
 
@@ -400,6 +400,14 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 每步独立 try/catch。真机 `diag-file-preview` 新增 7 条 `ok`（含用户原始的
 `报行合一对保险业的影响(动画版).pptx`）：docx/pptx 走插件认领，odt/ods/odp 走上游
 "不支持空态"——**两条路都会渲染 `.actions` 槽** ⇒ 按钮可用 ⇒ 桥 ok。
+
+> ⚠️ **2026-10-05 收尾更正（以代码为准）**：上面记的是当天**上午**的状态，晚些时候**认领收窄为
+> Office-only 9 项**（`doc docx ppt pptx xls xlsx odt ods odp`；见 `docs/97` §7 与
+> `hostcore/plugins/dshm-office-system-preview/lib/client.js:79-93` 的 `EXTENSIONS`）⇒
+> **odt/ods/odp 现在也走插件认领**，不再是"走上游不支持空态"；图片 / PDF / HTML / 表格 / SVG 则
+> 交回**上游内联渲染器**。插件的 `loading` 仍是 `"text-pages"`（`:359`，正文不渲染文件内容）。
+> 另外，本节当时归因的"`readBytes` 被客户端取消"**已证伪**，真根因见 `docs/97`
+> （宿主 undici 垫片不认 `new Response(FormData)`）。
 
 ### 10.3 曾被当成"根因二"（**已证伪**，见 `docs/97`）：`bytes-complete` 渲染器被自身的 abort 循环取消
 
@@ -491,9 +499,51 @@ Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台�
 - 本文件 §10.3：标题从"真根因二（未修）"改为"曾被当成根因二（**已证伪**）"，并就地加了一条更正说明
   （真根因是宿主 undici 垫片，见 `docs/97`）。
 
-### 11.4 行号漂移（如实登记）
+### 11.4 行号漂移：已逐条按内容重算（2026-10-05 收尾轮，60 处 / 4 个文件）
 
-撤除块落在 `tools/pack-core.mjs` 第 1531 行之后 ⇒ 本文档与门禁注释里 **>1531 的 `pack-core.mjs:NNNN`
-引用整体 -99**（§9.3 表格里的 `:1603`/`:1753`/`:2689`/`:2728`、§10.1 的 `:2924` 属此列；`allowOriginList`
-的 `:1532` 恰好不变）。这些引用**不参与任何门禁判定**（`check-doc-refs` 只核对 `docs/` 内的行号引用），
-本轮未逐条重算 —— 记在这里，避免下一个人拿它们当准。
+**原登记（"`>1531` 的引用整体 -99"）经复核不成立**。本轮改成逐条按内容核对：先 `grep -n`
+定位被引用的函数 / 锚点，再比对被引行原文，最后对每条写内容断言（一次性脚本，**111 条断言全过**，
+用完即删）。真实情况分三类：
+
+1. **本来就对（不动）**：`allowOriginList()` `:1532`、`wrapSharp()` `:1603`、
+   `addSystemAddonPackage()` `:1753`、`addOnDevicePreset()` `:1065`、`addPlatformAliases()` `:1487`、
+   `embedTreeInfo()` `:2689`，以及 §10.1 的 `:2924`。
+   原因：`dedupDocumentLoad()` 当初就插在 `allowOriginList()` **之前**（把它后面的行整体 +98），
+   撤除后这些锚点**又回到原位** ⇒ 对"撤除前就已存在的锚点"净位移是 **0**，不是 -99。
+2. **偏小 5（+5）**：`patchAppBootReadonlyStack()` **之后**的锚点 —— 该函数的 JSDoc 在 2026-10-05
+   补了「更正计数」段（+5 行），此后的引用没跟上：`2154-2207→2159-2212`、`2222-2277→2227-2282`、
+   `2292-2360→2297-2365`、`2427-2535→2432-2540`、`2599-2632→2604-2637`、`2634-2682→2639-2687`，
+   以及门禁里这些函数**内部**的锚点（`2438-2439→2443-2444`、`2449-2451→2454-2456`、`2468→2473`、
+   `2507→2512`、`2615-2617→2620-2621`、`2621-2628→2626-2632`、`2235-2239→2240-2244`、
+   `2307→2312`、`2315-2320→2320-2325`、`2348→2353`）。
+3. **更早的历史漂移（与本次撤除无关）**：`addSystemAddonPackage()` 的区间终点（门禁旧写
+   `:1753-1798`，函数实际到 `:1883`）；`docs/90` §2.4 的 8 处双标记判定表（旧
+   `1200/1578/1641/1702/1796/1860/1930` → 实测 `1549/1949/2012/2073/2172/2236/2306`，`771` 本来就对）；
+   `docs/90` §2.5–§2.7 的 zip 写入器 / 时间戳 / resfile 锚点，以及 §1.x 的自签名顺序注释与主流程调用串。
+
+本轮实际改了 **60 处引用（56 次替换）、4 个文件**：
+
+| 文件 | 处数 | 内容 |
+|---|---|---|
+| `tools/check-core-openharmony-patches.mjs` | 27 | ①–③ 头部区间、④/⑤ 清单、各处 `note:` / `reverse:` 锚点注释 |
+| `docs/95`（本文件） | 8 | §1.4 注入点 `:2427-2535→:2432-2540`、`:2599-2632→:2604-2637`、调用点 `:3003-3004→:3024-3025`；§1.5 `:2634-2682→:2639-2687`、调用点 `:3005→:3026`；§3.2 与 §8.3 的 `:2149→:2152`；§9.3 的 `:2728→:2733` |
+| `docs/70` | 3 | 资源地址装甲 / PDF Map / subprocess 三段区间 |
+| `docs/90` | 22 | §2.4 双标记表 7 处、§2.5 三个标记行、§2.6/§2.7 的 zip 写入器·`DOS_TIME`/`DOS_DATE`·`generatedAt`/`builtAt`·resfile 锚点、§1.x 自签名顺序注释与主流程调用串 |
+
+**仍未逐条重算（如实登记）**：`docs/90` 里其余年代的 `pack-core.mjs:NNNN`（§3.x 等处，漂移可达
+数百行，且部分同形引用其实指向**别的文件**，需逐段判读）；`docs/review-report-2026-09-29.md:822`
+（2026-09-29 的**时点快照**，它指向的"静默跳过"注释在现树里已无唯一对应行）。
+这些引用**不参与任何门禁判定**（`check-doc-refs` 只核对 `docs/` 内的行号引用），不计入上面的 60 处。
+
+### 11.5 `coreVersion` 命名口径（2026-10-05 定案：保持 `+dshm.6`）
+
+`hostcore/core-recipe.json` 的 `coreVersion` 统一写成 `0.2.1-alpha.1+dshm.<n>` —— 其中 `+dshm.<n>` 是
+semver 的 **build metadata**，**不参与优先级比较**，纯粹是**给人读的**：端侧目录名
+`dshm/cores/<version>` 与自检输出 `OK 核心树 <version> 在` 都能**一眼看出设备在跑哪一版**，事后核查不必靠猜。
+
+它与 `AGENTS.md`「出包与核心树的三个坑」第 2 条**配套**：只要核心树内容有变（补丁增删、插件副本、版本号），
+就必须递增 `<n>` —— 否则端侧不会换树，`pack-core` 也不会**重新物化**出干净树
+（`dist/core/work/<ver>` 复用会静默跳过注入）。
+
+**本轮核对结论：保持 `0.2.1-alpha.1+dshm.6` 不动**（撤除 `DSHM_DOC_LOAD_DEDUP` 时已由 `+dshm.5` 升上来），
+不做改名、不重新出包。历史叙述里的 `+dshm.1/+dshm.2/+dshm.3` 是各轮实际用过的值，**保持原样**。

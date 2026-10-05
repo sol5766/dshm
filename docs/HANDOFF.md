@@ -606,8 +606,14 @@ author/committer 时刻相同。差异只在 commit 对象的元数据，且用 
   - 新增 `entry/src/main/ets/system/StatusBarTray.ets`、`entry/src/main/ets/backgroundability/BackGroundAbility.ets`；
     `module.json5` 声明 `BackGroundAbility`（`processMode = NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM` + `STARTUP_HIDE`，
     无 `skills` ⇒ 不进启动器）；`rawfile/tray_{white,black}.png`（由 `tools/make-icon.py` 生成）。
-  - 关闭按钮 = 切后台（`onPrepareToTerminate` 返回 `true` + 最小化）；
-    **托盘图标未就绪时必须放行关闭**（`StatusBarTray.isReady()`），否则用户没有回程入口。
+  - **关闭按钮 = 官方终止行为**（2026-10-05 定案，**不要**再改回拦截）：`EntryAbility` **不重写**
+    `onPrepareToTerminate` —— 全仓该回调的**方法定义只有一处**：`entry/src/main/ets/backgroundability/BackGroundAbility.ets:43`
+    （托盘后台进程自己的终止回调，用来做摘图标收尾）；`entry/src/main/ets/entryability/EntryAbility.ets` 里只剩若干
+    **过时注释**提到它。⇒ 点窗口关闭即真退出，托盘图标随进程收走，托盘**不拦关闭**。
+  - 托盘是**运行时**常驻入口（三条需求）：① 运行时挂图标（`StatusBarTray.install` + `hold`）；
+    ② 左键 = 唤回主窗（`EntryAbility.restoreMainWindow`）；③ 右键**只用系统自带菜单**（真退出走系统那一项），
+    只额外补一项「打开应用」。退出收尾 = `StatusBarTray.remove()` 摘图标 → `publishExitRequest()`
+    通知后台进程自退 → `delayBeforeTerminate()` → `terminateSelf()`（见 `EntryAbility.exitApp()`）。
   - 托盘右键最终形态：**系统自带的「退出」** + 我们的「打开应用」（`notifyOnly` + menuCode）；
     左键点图标 = 唤回主窗。真机验证过：图标在顶栏 `[1853,5][1913,68]`，进程对 `ps` 可见
     `com.dshm.dshclient:entry:BackGroundAbility:<n>`。
@@ -674,16 +680,18 @@ DeepSeek Harness 的主机上启用文档预览服务」。
 不可达**（`:1288 throw new Error(\`Unsupported LibreOfficeKit host: …\`)`）。内置实现还写
 `loading: "renderer"`，正文自己不结束加载 ⇒ 界面表现为永远转圈。
 
-**做法**：新增端侧客户端插件 `@deepseek-ai/dshm-office-system-preview`，认领 `doc/docx/ppt/pptx` 的侧边栏
-预览，正文显示文件名 + 大小 + 「用系统预览打开」按钮，标题栏右侧同一个入口；点击走 ArkTS 桥
+**做法**：新增端侧客户端插件 `@deepseek-ai/dshm-office-system-preview`，认领侧边栏预览，
+正文显示文件名 + 大小 + 「用系统预览打开」按钮，标题栏右侧同一个入口；点击走 ArkTS 桥
 `openFilePreview` → PreviewKit，由系统原生预览窗渲染。**与上游默认的取舍**：这是"把不可用变成可用"，
-不是"把可用变成另一个样子"——所以只认领坏掉的那四个后缀。
+不是"把可用变成另一个样子"——**2026-10-05 收窄为 Office-only 9 项**
+（`lib/client.js:79-93` 的 `EXTENSIONS`：`doc docx ppt pptx xls xlsx odt ods odp`；`ico` 已去掉，`md` 走内置文本渲染）。
+图片 / PDF / HTML / 表格 / SVG **交回上游内联渲染器**（根因链见 `docs/97`）。
 
 | 关键点 | 事实 |
 |---|---|
 | 为什么非 builtin 就赢 | `matchingDocumentPreviews` rank = `priority === "builtin" ? 0 : 1`；`candidates` 只返回 matched、不追加 fallback ⇒ 后缀命中的非 builtin 必为 `candidates[0]` |
-| ~~**必须** `loading: "bytes-complete"`~~ → **2026-10-05 改为 `"text-pages"`** | 原判据（10/04 验证时成立）：它由宿主读完整个文件后把 `content = {kind:"bytes", data}` 交给正文；写 `"renderer"` 则要求正文自行结束加载，否则永远转圈。**10/05 新事实**：`workspaceFiles/readBytes` 被客户端**每次立刻取消**（宿主不轮转日志 `dshm-host.log`：10/04 = 3/3 成功；10/05 = 78/78 取消、0 成功，耗时 3–13 ms；同期 `stat`/`read` 200）⇒ `bytes-complete` 永远拿不到 content、入口也不出现。本插件正文**不渲染文件内容**，故改用 `"text-pages"`（走可用的 `workspaceFiles/read`；二进制落到上游 "unsupported" 分支，**该分支与失败分支都会渲染 `.actions` 槽** `lib/client.js:798/953` ⇒ 「系统预览」按钮照常出现） |
-| **不要**认领 `xls/xlsx/csv/tsv` | 内置 Excel 实现是纯客户端的、本来就正常（`LazyExcelBody` + `client.excel.js`），认领它 = 回退可用预览 |
+| ~~**必须** `loading: "bytes-complete"`~~ → **2026-10-05 改为 `"text-pages"`**（**至今仍是**，`lib/client.js:359`） | 原判据（10/04 验证时成立）：它由宿主读完整个文件后把 `content = {kind:"bytes", data}` 交给正文；写 `"renderer"` 则要求正文自行结束加载，否则永远转圈。**10/05 记的"`workspaceFiles/readBytes` 被客户端每次立刻取消"后来被证伪** —— 真根因是宿主 undici 垫片 `DshmResponse` 不认 `new Response(FormData)`（见 `docs/97`，已修）。改用 `"text-pages"` 这条**保留**且与真根因无关：本插件正文**不渲染文件内容**，只需一个能落地的状态（走可用的 `workspaceFiles/read`；二进制落到上游 "unsupported" 分支，**该分支与失败分支都会渲染 `.actions` 槽** `lib/client.js:798/953` ⇒ 「系统预览」按钮照常出现） |
+| `xls/xlsx` **已改为认领**（10/05 收窄时纳入 Office-only 9 项）；**`csv/tsv` 仍不认领** | 旧判据"内置 Excel 实现是纯客户端的、本来就正常"**只对 `csv/tsv` 成立**：`xls/xlsx` 的真正渲染与 doc/ppt 同类，同样依赖宿主 `remote.officeToPdf`（LibreOfficeKit 只认 darwin/win32/linux ⇒ 端侧结构性不可达，见上文根因）⇒ 必须借系统预览。判据出处：`hostcore/plugins/dshm-office-system-preview/lib/client.js:79-93` 的 `EXTENSIONS` 含 `xls/xlsx`、不含 `csv/tsv` |
 | 读上限 | 整文件 `readBytes` 走 `maxFileBytes` = **32 MB**（`dsh-api-workspace-files/lib/index.js:385`），不是分页的 2 MB（`:384`）⇒ 3–4.6 MB 的测试 ppt 安全 |
 | locale ns | 必须用自有 ns（`dshmOfficeSystemPreview`）；复用上游 `sidebarOffice` 会抛 `locale namespace "…" already has locale` |
 | host 半边 | 空 `apply`（照 `@deepseek-ai/dsh-client-ui-open-in-app/lib/index.js` 的 481 B 形状）——真正干活的都在客户端半边 |
