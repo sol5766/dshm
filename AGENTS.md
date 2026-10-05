@@ -1,4 +1,4 @@
-# AGENTS.md — DSHM 项目工作约束
+﻿# AGENTS.md — DSHM 项目工作约束
 
 > 本文件是给自动化助手/AI 的工作约定。**违反会造成不可逆损失**，务必先读。
 
@@ -102,6 +102,7 @@ node tools/check-ptc-ts-strip.mjs        # PTC 的纯 JS erasable-TS 擦除器�
 node tools/check-ptc-runtime-inproc.mjs  # PTC 同进程运行时契约（在 --jitless 的临时舞台里跑真 run）
 node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pack-core ↔ 核心树 三处一致
 node tools/check-core-openharmony-patches.mjs  # 核心树里的 19 处端侧注入补丁都在、且上游原文已消失（资源地址装甲 / PDF Map / 终端平台白名单 / 语音原生采集 / 录音约束 / HMS provider / 端侧 profile 与自带插件副本 / session link / 凭据 / preset workflow / app-boot 只读 stack / fs-local link / attachment link / Origin 列表 / sharp 调度器 / system 平台包 / 端侧 preset / 平台别名 / 树内清单）；另有 1 处**撤除守卫** —— 已撤除的 `DSHM_DOC_LOAD_DEDUP` 不得复活（标记必须 0 处、上游原文形态必须已恢复）
+node tools/check-decor-button-mode.mjs        # 自绘顶栏底色 ↔ 窗口三键配色必须接线一致（2026-10-05「三键不可见」回归的守卫；带对照臂）
 .\tools\device-acceptance.ps1        # 真机端侧验收
 ```
 
