@@ -32,6 +32,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { webview } from '@kit.ArkWeb';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { emitter } from '@kit.BasicServicesKit';
 import { picker, fileUri, fileShare } from '@kit.CoreFileKit';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 // `PermissionRequestResult` / `Permissions` 是 AbilityKit 的**顶层**导出，
@@ -58,6 +59,7 @@ import { copyText } from 'platform';
 // 【不含权限申请】本路线**不申请任何权限**（权限零差异铁律 + ACL 白名单只有 5 条，
 // 见 FilePicker.ets 顶部权限说明注释）⇒ 上一版的权限申请函数已整体删除。
 import { PickOutcome, probePathWritable, publicDownloadFolder } from 'platform';
+import { EVENT_PICKER_SUBSTITUTED, EVENT_KEY_PICKER_REASON, EVENT_KEY_PICKER_PATH } from 'platform';
 import type { PickedFolder } from 'platform';
 // 外链外开（2026-09-28，修「设置→登录」点不动）：见 OPEN_LINK_SHIM_JS。
 // isOpenableUrl 做 http/https 白名单；openExternalUrl 内部走 context.openLink。
@@ -988,6 +990,16 @@ class DshDirectoryPickerBridge {
       if (pub.outcome === PickOutcome.PICKED && pub.path.length > 0) {
         hilog.warn(DOMAIN, TAG, '所选目录不可写，已改用应用公共目录 path=%{public}s', pub.path);
         this.writeDiagMarker('diag-picker-public-path', `to=${pub.path}`);
+        // 【GitHub #3 的 R3：换路径必须让用户知道】"用户选了 A、实际工作区是 B" 这件事
+        // 发生在 Web 侧，而用户可见的提示位在壳层（`Index`）⇒ 走进程内事件契约
+        // （`platform/system/HostEvents.ets` 是事件 id 与载荷键的**唯一定义处**）。
+        // 壳层收到后打开自己的目录浮层、把原因写在其顶部（壳里没有 toast 通道，
+        // 见 `platform/notify` 的分层说明）。此前这里只落 diag 标记 ⇒ 用户完全看不到。
+        const pickerPayload: Record<string, Object> = {};
+        pickerPayload[EVENT_KEY_PICKER_REASON] =
+          `所选目录（${path}）Host 只能读、不能写入/删除；已改用本应用在系统下载目录下的专属目录`;
+        pickerPayload[EVENT_KEY_PICKER_PATH] = pub.path;
+        emitter.emit({ eventId: EVENT_PICKER_SUBSTITUTED }, { data: pickerPayload });
         this.dispatchResolve(id, pub.path, '');
         return;
       }

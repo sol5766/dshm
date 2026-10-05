@@ -181,6 +181,7 @@ import type { AttachOutcome, PluginInventoryTotals, CredentialWriteResult, HubSn
 import { emitter } from '@kit.BasicServicesKit';
 import { parseJson } from 'connection';
 import { EVENT_HOST_CONNECTED, EVENT_KEY_HOST_TOKEN, EVENT_KEY_HOST_URL } from 'platform';
+import { EVENT_PICKER_SUBSTITUTED, EVENT_KEY_PICKER_REASON, EVENT_KEY_PICKER_PATH } from 'platform';
 import { ConnectPane } from '../view/ConnectPane';
 import { FolderPicker, FolderPickerController } from '../view/FolderPicker';
 import { ChoiceSheet } from '../view/ChoiceSheet';
@@ -972,7 +973,34 @@ struct Index {
     return undefined;
   }
 
+  /**
+   * 「目录选择器已改用应用公共目录」事件的订阅回调（GitHub #3 的 R3）。
+   *
+   * 存下来是为了能在 `aboutToDisappear` 里 `emitter.off` —— `emitter.on` 不返回句柄，
+   * 退订必须拿**同一个函数引用**（与 `unwatchInput` 同一套写法）。
+   */
+  private pickerNoticeCb: ((data: emitter.EventData) => void) | undefined = undefined;
+
   aboutToAppear(): void {
+    // 目录选择器**换了路径**（用户选了 A、实际用 B）时给用户一句说明：事件由 `WebApp`（Web 侧）
+    // 在探写失败、改用应用公共目录时发出。此前那条路只落 diag 标记 ⇒ 用户完全看不到
+    // （issue #3 报的正是"UI 显示已授权、产出为零、无提示"）。
+    this.pickerNoticeCb = (data: emitter.EventData): void => {
+      const payload: Record<string, Object> = (data.data ?? {}) as Record<string, Object>;
+      const reason: string = typeof payload[EVENT_KEY_PICKER_REASON] === 'string'
+        ? payload[EVENT_KEY_PICKER_REASON] as string : '';
+      if (reason.length === 0) {
+        return;
+      }
+      const target: string = typeof payload[EVENT_KEY_PICKER_PATH] === 'string'
+        ? payload[EVENT_KEY_PICKER_PATH] as string : '';
+      const text: string = target.length > 0 ? `${reason}\n（实际使用：${target}）` : reason;
+      // 壳里没有 toast 通道（`platform/notify` 有分层说明）⇒ 借用**已有的目录浮层**：
+      // 它的 `reason` 参数本就是"为什么弹出这一层"的提示位（同 `openFolderPicker` 的用法）。
+      this.folderPicker.open(text);
+      this.folderPickerOpen = true;
+    };
+    emitter.on({ eventId: EVENT_PICKER_SUBSTITUTED }, this.pickerNoticeCb);
     // 设备形态只给**最弱的兜底猜测**；真实事实来自系统枚举（下面异步取回），
     // 三者按优先级合成（appstate/model/InputFacts，37 条断言）。它决定右键/悬停是否启用。
     this.formGuessModality = guessFromKeyboardForm(readDeviceFacts().keyboardLikely);
@@ -1410,6 +1438,14 @@ struct Index {
 
   aboutToDisappear(): void {
     this.unwatchWindowSize();
+    if (this.pickerNoticeCb !== undefined) {
+      // 【SDK 的 API 不对称，别照抄 `on` 的形状】`emitter.on/emit` 收 `InnerEvent`（`{ eventId }`），
+      // 而 `emitter.off` 的重载只收**裸 number / string**（`@ohos.events.emitter.d.ts`：`off(eventId: number, callback)`）
+      // —— 写成 `off({ eventId })` 会以 `Argument of type '{ eventId: any; }' is not assignable to parameter of type 'string'`
+      // 编译失败（2026-10-05 实测，9 个级联错误全出自这一行）。
+      emitter.off(EVENT_PICKER_SUBSTITUTED, this.pickerNoticeCb);
+      this.pickerNoticeCb = undefined;
+    }
     if (this.unwatchInput !== undefined) {
       this.unwatchInput();
       this.unwatchInput = undefined;
