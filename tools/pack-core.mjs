@@ -1529,104 +1529,6 @@ function addPlatformAliases() {
  * 上游若改了这段实现，这里会**报错退出**而不是静默跳过：悄悄发出一个
  * "WS 永远连不上"的包，比打包失败难查得多。
  */
-/**
- * 【DSHM_DOC_LOAD_DEDUP】修「`bytes-complete` 渲染器被自身的 abort 循环取消」。
- *
- * 症状：图片 / PDF / HTML / Excel 的内联预览**全部打不开**，前端报
- * 「读取失败：client api: workspaceFiles/readBytes failed: Failed to fetch」。
- * 真机读数（`dshm-host.log`）：`workspaceFiles/readBytes` 104 请求 / 3 成功 / **101 取消**，
- * 取消耗时 3–26 ms；同期 `stat` / `canAccessWorkspacePath` / `read` 全部 200。
- *
- * 根因（上游 `dsh-client-ui-sidebar-documentpreview/lib/client.js:660-678`）：
- *
- *   const started = current !== void 0;
- *   useEffect(() => { if (started || …) return; …loadAll(…)… },
- *     [started, tab.id, file, signal, loadPage, loadAll, prepareRenderer, canRead, mode, selected, meta.value?.version]);
- *
- * 依赖里含 `signal` / `selected` / `file` / `meta.value?.version` —— 任一新引用就让 effect 重跑，
- * 而重跑会把**上一次的请求 abort 掉**。`text-pages` 免疫：`read` 回得快 ⇒ `current` 立刻有值
- * ⇒ `started = true` ⇒ effect 不再重跑；`bytes-complete` 要等整读（base64 再膨胀 ~1.33×）
- * ⇒ **在完成前就被下一轮渲染取消**，于是永远读不完 ⇒ 用户看到「读取失败」。
- *
- * 链路后果：客户端关连接 → 宿主 `bridge()`（`dsh-client-connection/lib/index.js:36-38`）
- * `abort.abort()` → 响应流 chunk 被 `:95` 的 `continue` 跳过 → `:106 res.end()` 空写 →
- * ArkWeb `ERR_EMPTY_RESPONSE(-324)` → 前端 `Failed to fetch`。
- *
- * 本补丁：给这段 effect 加**同键在飞去重**（键 = `tab.id|file.path|mode|selected.id`，
- * **刻意不含 `meta.value?.version`** —— 版本抖动正是那种"每轮都换新引用"的触发源）。
- * 第一次整读因此有机会跑完；用户显式重试走另一条路（`reloadAll` / `reloadPages`、
- * `rendererReload` 里的 `prepareRenderer(..., true)`），不受这里影响。
- *
- * 锚点用**单行**并对缩进留出退路（`\t` 前缀失配时退回 trim 版）；找不到就 `die()`，绝不静默跳过。
- */
-function dedupDocumentLoad() {
-  const target = join(
-    STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-documentpreview', 'lib', 'client.js',
-  );
-  if (!existsSync(target)) {
-    die(`文件预览去重补丁：找不到 ${target}`);
-  }
-  let text = readFileSync(target, 'utf8');
-  if (text.includes('DSHM_DOC_LOAD_DEDUP')) {
-    log('[pack-core]   文件预览去重补丁已存在（跳过）');
-    return;
-  }
-  const anchorStartRaw = '\t\t\tconst started = current !== void 0;';
-  const anchorStart = anchorStartRaw.trim();
-  const anchorEffectRaw = '\t\t\t\tif (started || !canRead || mode === void 0 || selected === void 0) return;';
-  const anchorEffect = anchorEffectRaw.trim();
-  const startText = text.includes(anchorStartRaw) ? anchorStartRaw : (text.includes(anchorStart) ? anchorStart : '');
-  const effectText = text.includes(anchorEffectRaw) ? anchorEffectRaw : (text.includes(anchorEffect) ? anchorEffect : '');
-  if (startText === '') {
-    die('文件预览去重补丁：找不到 `const started = current !== void 0;`（上游实现已变化）');
-  }
-  if (effectText === '') {
-    die('文件预览去重补丁：找不到 effect 的早退行（上游实现已变化）');
-  }
-  if (text.split(startText).length - 1 !== 1 || text.split(effectText).length - 1 !== 1) {
-    die('文件预览去重补丁：锚点不唯一，拒绝瞎改');
-  }
-  const afterStart = `${startText}
-\t\t\t/* DSHM_DOC_LOAD_DEDUP: 同一 (tab,file,mode,selected) 在飞时不再重发整读；键刻意不含 version。 */
-\t\t\tconst dshmLoadKeyRef = (0, react.useRef)("");
-\t\t\tconst dshmLoadKey = started ? "" : [String(tab.id), String(file && file.path ? file.path : ""), String(mode), String(selected && selected.id ? selected.id : "")].join("|");
-\t\t\t/* DSHM_DOC_LOAD_DEDUP: 整读用**面板自持**的 signal，不转发 owner 的 signal。
-\t\t\t * 真机实测（10-05）：owner 一重渲染就 abort 掉上一轮的控制器，readBytes 在
-\t\t\t * 10–29 ms 内被取消（114 请求 / 0 成功 / 111 取消）⇒ bytes-complete 渲染器
-\t\t\t * 永远读不完。本控制器只在面板卸载时 abort，保住"卸载即取消"的语义。 */
-\t\t\tconst dshmAbortRef = (0, react.useRef)(null);
-\t\t\tif (dshmAbortRef.current === null) dshmAbortRef.current = new AbortController();
-\t\t\tconst dshmSignal = dshmAbortRef.current.signal;`;
-  const afterEffect = `${effectText}
-\t\t\t\t/* 失败过一次就把去重键清掉：否则同 key 的 effect 会一直 return ⇒ 永远不能重试。 */
-\t\t\t\tif (current !== void 0 && current.failure !== void 0) dshmLoadKeyRef.current = "";
-\t\t\t\tif (dshmLoadKey !== "" && dshmLoadKeyRef.current === dshmLoadKey) return;
-\t\t\t\tdshmLoadKeyRef.current = dshmLoadKey;`;
-  text = text.replace(startText, afterStart).replace(effectText, afterEffect);
-  /*
-   * 三处加载调用把 owner 的 `signal` 换成面板自持的 `dshmSignal`（单行替换，各锚点唯一）。
-   * 同时补一个"卸载即取消"的清理，保持原语义。
-   */
-  const callAnchors = [
-    'if (mode === "text-pages") loadPage(tab.id, file, 1, signal, meta.value?.version);',
-    'else if (mode === "bytes-complete") loadAll(tab.id, file, signal, meta.value?.version);',
-    'else prepareRenderer(tab.id, signal, selected.id, meta.value?.version);'
-  ];
-  for (const anchor of callAnchors) {
-    if (text.split(anchor).length - 1 !== 1) {
-      die(`文件预览去重补丁：加载调用锚点不唯一或缺失（${anchor}）`);
-    }
-    text = text.replace(anchor, anchor.replace(', signal,', ', dshmSignal,'));
-  }
-  const unmountAnchor = '\t\t\tconst dshmSignal = dshmAbortRef.current.signal;';
-  text = text.replace(unmountAnchor, `${unmountAnchor}
-\t\t\t(0, react.useEffect)(() => () => {
-\t\t\t\ttry { dshmAbortRef.current.abort(); } catch (e) { /* 卸载清理失败：忽略 */ }
-\t\t\t}, []);`);
-  writeFileSync(target, text, 'utf8');
-  log('[pack-core]   文件预览去重补丁：bytes-complete 渲染器不再被自身的重渲染取消');
-}
-
 function allowOriginList() {
   const target = join(
     STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'index.js',
@@ -3103,7 +3005,6 @@ replaceKoffiJs();
 const sig = verify();
 addPlatformAliases();
 allowOriginList();
-dedupDocumentLoad();
 wrapSharp();
 addSystemAddonPackage();
 patchLinkForSandbox();

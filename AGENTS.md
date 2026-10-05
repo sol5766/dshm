@@ -101,7 +101,7 @@ node tools/check-skill-sync.cjs          # 内置技能同步（判据是内容 
 node tools/check-ptc-ts-strip.mjs        # PTC 的纯 JS erasable-TS 擦除器（81 条断言 + wasm 陷阱 + 变异自检）
 node tools/check-ptc-runtime-inproc.mjs  # PTC 同进程运行时契约（在 --jitless 的临时舞台里跑真 run）
 node tools/check-ptc-wiring.mjs          # PTC"换实现"接线：profile ↔ pack-core ↔ 核心树 三处一致
-node tools/check-core-openharmony-patches.mjs  # 核心树里的 13 处端侧注入补丁都在、且上游原文已消失（资源地址装甲 / PDF Map / 终端平台白名单 / 语音采集与录音约束 / HMS provider / profile 与自带插件副本 / session link / 凭据 / preset workflow / app-boot 只读 stack / fs-local link / attachment link）
+node tools/check-core-openharmony-patches.mjs  # 核心树里的 19 处端侧注入补丁都在、且上游原文已消失（资源地址装甲 / PDF Map / 终端平台白名单 / 语音原生采集 / 录音约束 / HMS provider / 端侧 profile 与自带插件副本 / session link / 凭据 / preset workflow / app-boot 只读 stack / fs-local link / attachment link / Origin 列表 / sharp 调度器 / system 平台包 / 端侧 preset / 平台别名 / 树内清单）；另有 1 处**撤除守卫** —— 已撤除的 `DSHM_DOC_LOAD_DEDUP` 不得复活（标记必须 0 处、上游原文形态必须已恢复）
 .\tools\device-acceptance.ps1        # 真机端侧验收
 ```
 

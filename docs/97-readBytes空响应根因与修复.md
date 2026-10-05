@@ -61,7 +61,7 @@
 1. **"修 abort"的思路从一开始就是错的**：症状（取消计数 100%）与真因（服务端一字未写就关连接）都会表现为"客户端失败"，只有 **ArkWeb 自己的错误码**（`EMPTY_RESPONSE` vs `ERR_ABORTED`）能区分主被动方 —— 先看错误码，再谈改谁。
 2. **垫片要按"上游真实用法"建用例**：上游用 `new Response(FormData)` 传附件，我们的垫片只实现了 4 种体 ⇒ 门禁必须覆盖"体形态"，而不是只覆盖"接口存在"。
 3. **"以前是好的"要对着时间线找那个 commit**：本次`b4bdcb5`（引入内部 undici 垫片）与故障起点"首次装机冷启动"精确对齐 ⇒ 一步定位。
-4. **`DSHM_DOC_LOAD_DEDUP` 是无效补丁**：它治的是不存在的病（面板自持 abort + 去重）。其中"失败后清去重键"一行落在 `if (started…) return` 之后，是**死代码**（失败后同键不会自动重试）——是否收口另案决定（需改核心树 ⇒ 升 `coreVersion` 重打包）。
+4. **`DSHM_DOC_LOAD_DEDUP` 是无效补丁（**已于 `coreVersion` +dshm.6 撤除**）**：它治的是不存在的病（面板自持 abort + 去重）。其中"失败后清去重键"一行落在 `if (started…) return` 之后，是**死代码**（失败后同键不会自动重试）。撤除方式：`tools/pack-core.mjs` 的 `dedupDocumentLoad()` 定义与调用点整段删除（不靠幂等跳过），`hostcore/core-recipe.json` 的 `coreVersion` 升到 `0.2.1-alpha.1+dshm.6` 让端侧换树；`tools/check-core-openharmony-patches.mjs` 新增 **1 处撤除守卫**（`DSHM_DOC_LOAD_DEDUP`/`dshmLoadKeyRef`/`dshmAbortRef`/`dshmSignal` 必须 **0 处**，且三个加载调用点必须回到上游的 `signal` 形态）—— 防止它被重新注入。
 
 ## 7. 当时的另一个改动（同批）
 

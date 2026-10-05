@@ -401,7 +401,7 @@ hdc shell "stat -c 'links=%h size=%s' <files>/dsh/home"             # 期望 lin
 `报行合一对保险业的影响(动画版).pptx`）：docx/pptx 走插件认领，odt/ods/odp 走上游
 "不支持空态"——**两条路都会渲染 `.actions` 槽** ⇒ 按钮可用 ⇒ 桥 ok。
 
-### 10.3 真根因二（**未修**）：`bytes-complete` 渲染器被自身的 abort 循环取消
+### 10.3 曾被当成"根因二"（**已证伪**，见 `docs/97`）：`bytes-complete` 渲染器被自身的 abort 循环取消
 
 `dsh-client-ui-sidebar-documentpreview/lib/client.js:660-678`：
 
@@ -431,6 +431,12 @@ useEffect(() => { if (started || !canRead || mode === void 0 || selected === voi
 **修复方向**（下一轮）：在 effect 上做**同键在飞去重**（`tab.id|file|mode|version` 未变则不重发），
 或让 `signal`/`selected` 不参与依赖；两者都要走 `pack-core` 注入 + 门禁断言。
 
+> ⚠️ **本节的"根因二"与"修复方向"都已被证伪（2026-10-05 夜）**：`readBytes` 空响应的真根因是
+> **宿主 undici 垫片不认 `new Response(FormData)`**（`hostcore/app/fetch-shim.js`，真机闭环证据见 `docs/97`），
+> 客户端 abort 只是**同一现象的另一种解释**（`ERR_EMPTY_RESPONSE(-324)` = 服务端一字未写就关连接，
+> 不是 `ERR_ABORTED`）。据此落地的补丁 `DSHM_DOC_LOAD_DEDUP` 属**无效补丁**（且"失败后清去重键"
+> 落在早退语句之后是死代码）⇒ **已于 `coreVersion` +dshm.6 整段撤除**（见 §11）。
+
 
 
 ### 10.4 方法论教训（2026-10-05，真机排障 30+ 轮换来的）
@@ -447,3 +453,47 @@ useEffect(() => { if (started || !canRead || mode === void 0 || selected === voi
    （应用自己写、shell 可读）比猜快得多。本次 `files/diag-tray` 一行 removeFromStatusBar ok 就定了案。
 5. **补丁脚本别依赖缩进/相邻文本**：两次编译失败（Duplicate function implementation、Cannot find name errOf）
    都是补丁把签名/助手搬错位置所致；锚点要单行、校验唯一性、失败就 die()。
+
+---
+
+## 11. 撤除无效补丁 `DSHM_DOC_LOAD_DEDUP`（`coreVersion` → `+dshm.6`，2026-10-05 夜）
+
+### 11.1 撤除方式（**不靠幂等跳过**）
+
+- `tools/pack-core.mjs`：`dedupDocumentLoad()` 的 JSDoc、函数定义与 `allowOriginList();` 之后的调用点
+  **整段删除**（99 行 / 4,978 B；脚本按内容定位、删完自查"0 处残留 + 无三连空行"）。
+- `hostcore/core-recipe.json`：`coreVersion` `0.2.1-alpha.1+dshm.5` → **`0.2.1-alpha.1+dshm.6`**
+  （改核心树必须升版本：端侧才会换树，pack-core 也才会**重新物化**出没打过该补丁的树）。
+- 出包链：`place-host-app.mjs` → `pack-core.mjs --place-in-app` → `check-resfile-core-zip` →
+  `check-core-openharmony-patches` → `check-parity` → `assert-resfile-sync` → `update-device.ps1`。
+
+### 11.2 门禁计数：为什么**不是**"19 → 18"
+
+该补丁**从来不在** `tools/check-core-openharmony-patches.mjs` 的登记表里 —— §9.3 的 19 = 资源地址装甲 ·
+PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · 端侧 profile · 自带插件包 ·
+session link · 凭据 660 · preset workflow · app-boot 只读 stack · fs-local link · attachment link ·
+Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单（本文件 §9.3 的表格逐项可查）。
+⇒ 撤除**不会**把 19 改成 18，也不需要动 ①–③ 与那 17 组判据。
+
+本轮按"**撤除也要有守卫**"补齐了这类洞（与 `absent` 型反向判据同源）：
+
+| 项 | 撤除前 | 撤除后（本门禁自报） |
+|---|---|---|
+| 覆盖的注入点 | 19 处 | 19 处（不变） |
+| 撤除守卫 | — | **1 处**：`DSHM_DOC_LOAD_DEDUP` / `dshmLoadKeyRef` / `dshmAbortRef` / `dshmSignal` 必须 **×0**，且 4 条"上游原文已恢复"（三个加载调用点回到 `signal`、`started` 早退行）必须在 |
+| 门禁断言 | 140 条 | **148 条**（`RESULT: 148 passed, 0 failed`） |
+| `--self-test` 用例 | 138 个 | **139 个**（新增 M9：把补丁重新注入 ⇒ 只该撤除守卫红；`self-test PASS（用例 139，不合格 0）`） |
+
+### 11.3 同步的文档
+
+- `AGENTS.md` 必跑清单那行：**"13 处端侧注入补丁"→ 与门禁一致**（19 处注入 + 1 处撤除守卫）。
+- `docs/96` R1 行与 §4 的另记、`docs/97` §6 教训 4：由"待定是否另案收口"改为**"已于 +dshm.6 撤除"**。
+- 本文件 §10.3：标题从"真根因二（未修）"改为"曾被当成根因二（**已证伪**）"，并就地加了一条更正说明
+  （真根因是宿主 undici 垫片，见 `docs/97`）。
+
+### 11.4 行号漂移（如实登记）
+
+撤除块落在 `tools/pack-core.mjs` 第 1531 行之后 ⇒ 本文档与门禁注释里 **>1531 的 `pack-core.mjs:NNNN`
+引用整体 -99**（§9.3 表格里的 `:1603`/`:1753`/`:2689`/`:2728`、§10.1 的 `:2924` 属此列；`allowOriginList`
+的 `:1532` 恰好不变）。这些引用**不参与任何门禁判定**（`check-doc-refs` 只核对 `docs/` 内的行号引用），
+本轮未逐条重算 —— 记在这里，避免下一个人拿它们当准。
