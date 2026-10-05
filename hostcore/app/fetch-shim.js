@@ -685,15 +685,6 @@ class DshmRequest {
 }
 
 /**
- * 安装垫片。
- *
- * 【为什么改成"缺哪个补哪个"】原先以"原生 fetch 是否可用"为唯一开关，于是
- * 该开关为真时若缺 `Request`/`Response` 也不会补——而 dsh 的 `/api`
- * 挂载点**必须**有 `Request`（E75）。现在这几个全局只要缺失就补；只有 `fetch` 本身
- * 在原生可用时才不覆盖。
- * @returns 是否安装了 `fetch` 本身（供入口脚本打日志）
- */
-/**
  * 把一个全局接口**确实**换成垫片实现。
  *
  * 【为什么不能用 `globalThis.X = shim`】端侧 Node v24.2.0 里
@@ -722,6 +713,21 @@ function defineGlobalShim(name, value) {
   }
 }
 
+/**
+ * 安装垫片。
+ *
+ * 【为什么改成"缺哪个补哪个"】原先以"原生 fetch 是否可用"为唯一开关，于是
+ * 该开关为真时若缺 `Request`/`Response` 也不会补——而 dsh 的 `/api`
+ * 挂载点**必须**有 `Request`（E75）。现在这几个全局只要缺失就补；只有 `fetch` 本身
+ * 在原生可用时才不覆盖。
+ *
+ * 【2026-10-05 修正文档归属】本块此前**紧贴在 `defineGlobalShim` 上方**（标题写"安装垫片"、
+ * 描述的却是另一个函数的返回语义），`@returns` 与实际函数对不上 —— 现移到它真正描述的
+ * 这个函数上方（返回值见下）。
+ *
+ * @returns {boolean} 是否**安装了 `fetch` 本身**（`false` = 原生可用且 WASM 可用、未覆盖；
+ *   供入口脚本打日志）
+ */
 function installFetchShim() {
   /*
    * 六个 Web 接口：缺哪个补哪个。
