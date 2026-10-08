@@ -464,15 +464,25 @@
 #    (dsh-api-workspace-controller/lib/index.js:609-641) 在 openharmony 落到
 #    `default: throw` 分支。两条都堵死 ⇒ 只能由本端在启动期登记一次。
 #
-#    【本行做什么】插件把 ArkTS 认领到的 `Download/<包名>/`
+#    【本行做什么（2026-10-07 收窄后）】插件把 ArkTS 认领到的 `Download/<包名>/`
 #    （env `DSHM_PUBLIC_DOWNLOAD`，见 hostruntime 的 buildHostEnv / NodeRuntime）经
-#    官方 API `workspaceRegistry.create()` 登记进注册表 ⇒ 它成为最新一条 ⇒ 客户端
-#    默认工作区就是用户可见目录。create() 幂等（已登记则只解析，不新增行）。
+#    官方 API `workspaceRegistry.create()` 登记**一次** —— 且只在注册表**为空**时。
+#    两个作用：① 给"新建会话"一个落点；② 让上面那个 initializeDefault() 在
+#    「workspaceIds.length > 0」处**干净短路**，不再去跑本端必失败的目录探测。
 #
-#    【边界】① 不改上游 dsh；② 不新增权限；③ 不删/不改任何既有目录与既有登记
-#    （用户仍可在 UI 里自行删除历史工作区）；④ **绝不阻断启动**：apply() 同步返回，
-#    登记是自行吞错的浮空 promise，失败只打一行日志；⑤ 没有 DSHM_PUBLIC_DOWNLOAD
-#    时完全惰性（其它部署零副作用）。
+#    【边界】① 不改上游 dsh；② 不新增权限；③ 用户已有工作区时**一条都不加**，
+#    也**不改**任何既有登记（用户可随时在 UI 里改名/删除）；④ **绝不阻断启动**：
+#    apply() 同步返回，登记/撤回是自行吞错的浮空 promise，失败只打一行日志；
+#    ⑤ 没有 DSHM_PUBLIC_DOWNLOAD 时完全惰性（其它部署零副作用）。
+#
+#    ⚠ **2026-10-07 收窄（真机实证；docs/113）**：原实现**每次启动都登记**，
+#    真机上因此留下一条**用户没建过**的工作区 `com.dshm.dshclient`
+#    （`$DSH_HOME/storages/workspace.json` 实证：`sessionIds: []`、
+#    createdAt = 2026-10-03T09:48:26Z）。既然 43 号已证"只登记不足以决定新会话落点"，
+#    这一手就是**净噪声** ⇒ 改成：注册表非空时完全不碰；若其中有本插件早先注入的那条
+#    （路径 = 认领目录）且**它 0 会话**，则撤回该条登记（只删注册表一行，
+#    目录与任何会话日志都不动），且撤完必须仍有别的行（否则注册表变空会把
+#    initializeDefault() 的短路条件弄丢）。
 #
 #    【恢复条件】上游若给"默认工作区"提供不依赖空历史的配置（或
 #    defaultWorkspaceDirectory 支持 openharmony），删掉本行 + pack-core 的

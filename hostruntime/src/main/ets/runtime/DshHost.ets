@@ -405,6 +405,7 @@ export class DshHost {
 
     this.transient = HostState.STARTING;
     this.lastFailureNote = '';
+    this.clearStaleStopRequest();
     try {
       const handle: HostHandle = await this.port.start(
         this.store.coreDir(target), this.store.homeDir(), DshHost.PROFILE);
@@ -617,6 +618,32 @@ return { ok: false, message: `回滚前停止当前核心失败：${stopped.mess
       return typeof ws === 'string' ? ws : '';
     } catch (e) {
       return '';
+    }
+  }
+
+  /**
+   * 清掉**上一次退出遗留**的 `host-stop-request`（只在起核心之前调用）。
+   *
+   * 【为什么必须在起核心之前清】宿主启动时会挂一条 1.5 s 巡检（`hostcore/app/main.js`
+   * 的停止通道）：**看到这个文件就当场关闭自己**。而应用退出是「写请求 → 进程被系统结束」，
+   * 宿主常常来不及在 1.5 s 内消费掉它 —— 2026-10-06 真机实测：请求写于 `02:32:59.930`，
+   * 下一次启动的宿主在 `02:33:39.806` 才读到它并立刻退出（`!! process.exit(0)：停止路径放行`）
+   * ⇒ 表现为「应用刚起来核心就没了」，而且没有任何报错。
+   *
+   * 【为什么可以无条件清】停止请求只可能由**上一次**的生命写：走到这里时本次宿主还没起来，
+   * 不存在「有人正在等我停」的语义；留着它唯一的效果就是让本次启动自杀。
+   * 失败不抛：清不掉也不该挡住启动（宿主那边还有 1.5 s 巡检兜底）。
+   */
+  private clearStaleStopRequest(): void {
+    const p: string = `${this.store.homeDir()}/host-stop-request`;
+    try {
+      if (!fs.accessSync(p)) {
+        return;
+      }
+      fs.unlinkSync(p);
+      hilog.warn(DOMAIN, TAG, '已清掉上次退出遗留的停止请求（不清会让本次启动被它当场关停）：%{public}s', p);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, '清理遗留停止请求失败（继续启动）：%{public}s', (e as BusinessError).message);
     }
   }
 

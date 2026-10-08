@@ -30,6 +30,10 @@ const skillsSync = require('./dshm-skills.js');
 // `setProfileVersionExemption` 接到端侧可达的入口（队列 + dsh 假壳 + 设置页）。
 // 同样单列文件，理由同上（main.js 不可 require）。
 const compatModule = require('./dshm-compat.js');
+// 纯 JS tar / tar.gz 解包（**单份实现**，与插件安装器共用同一份 walker）。
+// 工具链解包在手机 / 平板档必须走它：那条路原先是 `spawn busybox tar`，而本档
+// 应用自带可执行文件一律 EACCES（判决性读数见 docs/104）⇒ 永远解不出来。
+const tarGz = require('./tar-gz.cjs');
 
 /**
  * 路径从哪来（**这一环不能靠环境变量**）
@@ -1165,6 +1169,15 @@ function watchdogAuthUrl() {
  * 这一行会立刻给出结论。
  */
 let RUNTIME_FACTS_CACHE = null;
+/**
+ * exec / 终端探针读数的**内存暂存**（键 = `runtime.<key>`，值 = 该段的对象）。
+ *
+ * 【为什么要暂存，而不是探完直接补写】`ensureExecutables()` 在 boot 早期就 `setImmediate`
+ * 起跑，而 host-ready.json 要等 dsh 把 authenticatedUrl 打到 stdout 才首次落盘 —— 两个
+ * 时刻谁先谁后**不确定**。跑在前面的探针若直接补写，遇到的是"文件还不存在"或"文件属于
+ * 上一次进程"（pid 守卫）⇒ 读数就丢了。故一律先暂存，`writeHostReady()` 首次落盘时并进去。
+ */
+const PENDING_RUNTIME_PROBES = {};
 function runtimeFacts() {
   if (RUNTIME_FACTS_CACHE !== null) {
     return RUNTIME_FACTS_CACHE;
@@ -1312,11 +1325,91 @@ function writeHostReady(authUrl) {
         natives: facts.natives,
       },
     };
+    // 【探针读数先于本次落盘】见 PENDING_RUNTIME_PROBES：exec / 终端两批探针若已经跑完，
+    // 此刻文件里还没有它们的读数，这里补上（之后的探针由 recordRuntimeProbe 增量补写）。
+    const probeKeys = Object.keys(PENDING_RUNTIME_PROBES);
+    for (const probeKey of probeKeys) {
+      payload.runtime[probeKey] = PENDING_RUNTIME_PROBES[probeKey];
+    }
+    /*
+     * 【日志侧的可读副本（2026-10-06 加，手机档逼出来的）】手机 / 平板上 el2 的 `home` 是 0700
+     * ⇒ `hdc shell` 读不到 host-ready.json；而手机档的 Python 桥也可能不可用（stdlib 归档要 spawn
+     * busybox 解包，那一步在手机档 `EACCES`，见 docs/106 §1.2/§7.4）⇒ 这个文件事实上**只有应用
+     * 自己读得到**，外部核查（含下一轮自检报告）拿不到读数。故这里把同一批读数压成**一行**写进
+     * dshm-host.log：字段与 JSON 一一对应，任何档位都能一条 grep 拿到结论，不必依赖桥。
+     */
+    if (probeKeys.length > 0) {
+      const parts = [];
+      const rt = payload.runtime;
+      if (rt.exec !== undefined && rt.exec !== null) {
+        parts.push(`exec=${rt.exec.summary}`);
+      }
+      if (rt.terminal !== undefined && rt.terminal !== null) {
+        parts.push(`realShell=${rt.terminal.realShell}，shStat=${rt.terminal.shStat}`
+          + `，relaySh=${rt.terminal.relaySh}，relayAsh=${rt.terminal.relayAsh}`
+          + `，libsExec=${rt.terminal.libsExec}，hostDomain=${rt.terminal.hostDomain}`);
+      }
+      if (rt.python !== undefined && rt.python !== null) {
+        parts.push(`python=${rt.python.selftest}(bridge=${rt.python.bridge}，stdlib=${rt.python.stdlib})`);
+      }
+      diag(`探针读数（日志副本）：runtime={${probeKeys.join(',')}} ${parts.join(' | ')}`);
+    }
     fs.writeFileSync(path.join(HOME_DIR, 'host-ready.json'), JSON.stringify(payload, null, 2) + '\n', 'utf8');
     stage('BOOT_65_AUTH_URL', `port=${payload.port} tokenLen=${token.length} → host-ready.json`
       + ` node=${facts.nodeVersion} zstd=${facts.zstd} jitless=${facts.jitless}`);
   } catch (e) {
     console.error('[dshm-host] 写 host-ready.json 失败：' + (e && e.message));
+  }
+}
+
+/**
+ * 把一条**探针读数**补进 `host-ready.json` 的 `runtime` 段（原子替换，只补本次进程）。
+ *
+ * 【为什么需要 —— docs/106 §2】exec 探测与终端能力两组探针要等 spawnSync 出结果（秒级）
+ * 才拿得到读数，而 `runtimeFacts()` 在 boot 早期就把 host-ready.json 写完了 ⇒ 此前它们
+ * **只进 dshm-host.log**。2026-10-06 两份端侧自检报告（PC r4 / 手机 dshmarket）都因此只能
+ * 从日志文本反推"本档到底能不能 exec / python3 能不能跑"。这里在探针跑完后把读数补写回去：
+ * 只读 host-ready.json 的 agent / 门禁也能直接回答，不必再翻日志。
+ *
+ * 【为什么 tmp + rename】ArkTS 侧随时可能读 host-ready.json 取 token；就地截断写会让并发
+ * 读者读到半个 JSON（历史上那条"核心已重启，但没读到启动链接"就是这么来的）。同目录
+ * rename 是原子替换：读者只会看到旧全文或新全文。
+ *
+ * 【为什么 pid 守卫】文件可能是**上一次进程**留下的（长驻窗口里进程重启）；补写别人的
+ * 读数会张冠李戴 ⇒ pid 不是自己就一个字节都不动（读数已暂存，落盘时由 writeHostReady 带上）。
+ *
+ * 【与暂存的关系】本函数先把读数写进 PENDING_RUNTIME_PROBES，再尝试补写文件：探针跑在
+ * 首次落盘之前时补写必然落空，但读数不会丢 —— `writeHostReady()` 会把它一并落盘。
+ */
+function recordRuntimeProbe(key, value) {
+  PENDING_RUNTIME_PROBES[key] = value;
+  const file = path.join(HOME_DIR, `host-ready.json`);
+  try {
+    const payload = JSON.parse(fs.readFileSync(file, `utf8`));
+    if (payload === null || typeof payload !== `object` || payload.pid !== process.pid) {
+      // 【这行 diag 不能省】本分支是"读数照旧会落盘，但**不是**由本函数补写的"那条路径
+      // （读数由 PENDING_RUNTIME_PROBES 兜住、随 writeHostReady 落盘）。没有它，日志里看
+      // 起来像 recordRuntimeProbe 从没跑过 —— 2026-10-06 本轮真机自验时正被这一点绕了一次。
+      const filePid = (payload !== null && typeof payload === `object`) ? payload.pid : `n/a`;
+      diag(`探针读数已暂存（host-ready.json 仍属于上一次进程 pid=${filePid}，本进程是 ${process.pid}）：runtime.${key}`);
+      return;
+    }
+    if (payload.runtime === null || typeof payload.runtime !== `object`) {
+      payload.runtime = {};
+    }
+    payload.runtime[key] = value;
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', `utf8`);
+    fs.renameSync(tmp, file);
+    diag(`探针读数已补进 host-ready.json：runtime.${key}`);
+  } catch (e) {
+    // 【"文件还不存在"是预期路径】首次落盘尚未发生（或刚被上一次进程的残留挡住），
+    // 这时读数已经在暂存表里，降级成一行说明即可；其它错误仍按失败记录。
+    if (e !== null && e !== undefined && (e.code === `ENOENT` || e instanceof SyntaxError)) {
+      diag(`探针读数已暂存（host-ready.json 尚未落盘或不是本次进程的）：runtime.${key}`);
+    } else {
+      diag(`探针读数补写 host-ready.json 失败（不阻塞）：${String(e).slice(0, 140)}`);
+    }
   }
 }
 
@@ -3177,11 +3270,27 @@ function ensurePythonBridge() {
   if (bridge === null) {
     // 加载失败细节 getPyBridge 已 diag；标 done 不再重试
     pyBridgeSelftestDone = true;
+    // 【机器可读读数】直接回答端侧自检报告里"python3 到底能不能跑"（docs/106 §2）：
+    // 本档 Python 不是靠 execve（手机 / 平板档的 execve 被系统拒绝），而是靠进程内桥。
+    recordRuntimeProbe(`python`, {
+      bridge: false,
+      stdlib: false,
+      selftest: `unavailable`,
+      note: `addon 未加载（el1 libs 缺件或被 dlopen 策略拒绝）⇒ 本档 python3 命令不可用`,
+      measuredAt: new Date().toISOString(),
+    });
     return;
   }
   if (!pythonReady()) {
     // 不标 done：首次解包收尾后由第二个挂载点补跑
     diag('python 桥：stdlib 尚未解包就位，本轮跳过（解包收尾后自检）');
+    recordRuntimeProbe(`python`, {
+      bridge: true,
+      stdlib: false,
+      selftest: `pending`,
+      note: `桥已加载但 stdlib 未解包 ⇒ 本次启动暂不可执行（解包收尾后会补跑自检）`,
+      measuredAt: new Date().toISOString(),
+    });
     return;
   }
   pyBridgeSelftestDone = true;
@@ -3191,14 +3300,37 @@ function ensurePythonBridge() {
     const t0 = Date.now();
     const r = bridge.captureRun('print(1+1)');
     const out = String(r.stdout || '').trim();
-    if (r.ok && out === '2') {
+    const selftestOk = r.ok === true && out === '2';
+    if (selftestOk) {
       log(`python 桥自检通过：print(1+1)=2（${Date.now() - t0}ms），内嵌 CPython 可用`);
     } else {
       diag(`python 桥自检失败：ok=${r.ok} stdout=${JSON.stringify(out)} rc=${r.rc}`
         + ` error=${r.error || ''} stderr=${String(r.errStderr || '').slice(0, 200).replace(/\s+/g, ' ')}`);
     }
+    recordRuntimeProbe(`python`, {
+      bridge: true,
+      stdlib: true,
+      ready: ready.ready === true,
+      initialized: ready.initialized === true,
+      selftest: selftestOk ? `ok` : `fail`,
+      stdout: out,
+      rc: r.rc === undefined || r.rc === null ? null : String(r.rc),
+      elapsedMs: Date.now() - t0,
+      note: selftestOk
+        ? `内嵌 CPython 在宿主进程内可用（不 execve）⇒ 手机 / 平板档同样能跑 python3`
+        : `桥已加载但自检未通过，细节见 dshm-host.log 的"python 桥自检失败"行`,
+      measuredAt: new Date().toISOString(),
+    });
   } catch (e) {
     diag(`python 桥自检异常（调用失败）：${String(e).slice(0, 200).replace(/\s+/g, ' ')}`);
+    recordRuntimeProbe(`python`, {
+      bridge: true,
+      stdlib: true,
+      selftest: `error`,
+      error: String(e).slice(0, 140),
+      note: `桥自检抛出异常（宿主进程内调用失败）`,
+      measuredAt: new Date().toISOString(),
+    });
   }
 }
 
@@ -3869,6 +4001,26 @@ function execProbeTargets() {
       args: ['-c', 'echo DSHM-EXEC-OK'], env: process.env,
        },
     /*
+     * 【2026-10-06 手机档能力读数：系统 shell 与 toybox】（真机 Mate 80 / OH 7.0.0.105）
+     *
+     * 这两条探针回答的是"手机 / 平板上还有没有真 shell 可用"。读数（`node-output.log`）：
+     *   · system-sh=缺 —— "缺"来自本函数的前置判据 `statSize(t.p) <= 0`：**app 连 `stat`
+     *     都拿不到 `/system/bin/sh`**，而同目录的 toybox 拿得到。该文件在 `hdc shell`
+     *     （shell 域）下是 `-rwxr-xr-x root:shell 349184` ⇒ 拒绝发生在 MAC 对
+     *     `sh_exec` 标签的 `getattr`/`exec` 上，与执行位、与"文件在不在"都无关；
+     *   · toybox=ok —— `/system/bin/toybox` **能 execve**（真跑起来了）。同一份二进制的
+     *     applet 清单里**没有 sh / bash / ash**，但有 ls/cat/grep/sed/find/cp/mv/rm/
+     *     mkdir/chmod/tar/gzip/… 约 110 个（清单与取证见 docs/104）。
+     *   ⇒ 手机 / 平板：**没有真 shell 进程**（随包自签名 ELF 一律 EACCES、系统 sh 被 MAC 拒、
+     *     toybox 不带 sh applet），但**有真 userland 命令**可以 execve。
+     *
+     * 【为什么留这两条、不按"一次性探针"删】与上面 `ash` 那条同理：它是"本档还能执行什么"
+     * 的机器可读判据，每次启动都留证；OS 升级后 sh 是否放行、toybox 是否带 sh 都能被它发现。
+     * （本次追查用的 `toybox sh` 与 applet 清单两条一次性探针已删，读数记进 docs/104。）
+     */
+    { label: 'system-sh', p: '/system/bin/sh', args: ['-c', 'echo DSHM-SYSTEM-SH-OK'], env: process.env },
+    { label: 'toybox', p: '/system/bin/toybox', args: ['true'], env: process.env },
+    /*
      * 【报告 5 §2.3 的判决性验收】git **子进程类**命令（clone/fetch/pull/push）在
      * 端侧原本一律 rc=134（SIGABRT，`run-command.c:525 disabling cancellation`），
      * 由 `libdshm-gitcompat.so` 以 LD_PRELOAD 接管 `pthread_setcancelstate`/`_sigmask`。
@@ -3902,6 +4054,121 @@ function execProbeTargets() {
       })(),
     },
   ];
+}
+
+/**
+ * 终端能力判据（手机 / 平板档"还有没有真 shell"）：每次启动留一份机器可读读数。
+ *
+ * 【为什么要单开一个函数，而不并进 execProbeTargets()】
+ *   probeExec() 的判据是"进程有没有被 execve 起来"——任何正常退出都记 `ok`，
+ *   连 `toybox sh` 那种 `Unknown command sh` 也记 `ok`（真机读数里那条
+ *   `toybox-sh=ok` 就是这么来的，只看数字会误判成"有 sh"）。要量"这一档能不能
+ *   拿到真 shell"必须同时留下 **rc / 信号 / stdout / stderr**，故这里改用
+ *   spawnSync 直接留证。
+ *
+ * 【判据要回答的两条待判路径】（MAC 标签对照表与全部原始读数见 docs/104）
+ *   (1) toybox 能不能当**启动器**去 exec 真实 ELF（`toybox env <elf>`）：若 execve
+ *       时发生 MAC 域转换，`/system/bin/sh`（类型 sh_exec，宿主自己连 stat 都被拒）
+ *       就能被接力起来；
+ *   (2) HAP `libs/arm64/` 里的 ELF 能不能被直接 execve：若可以，就能把 shell 装成
+ *       `libX.so` 随包发（该目录的 `dlopen` 已证可用，见 jitless-env.cjs 的 E18）。
+ *   两条都为否 = 手机 / 平板的"真 shell 进程"无解（只能走纯 JS 命令翻译层）；
+ *   任一条为是 = 侧边栏终端可以做真 shell。故此函数是**产品判据**，
+ *   与一次性排障脚本不同：OS 升级后 sh 是否放行、libs 是否可以 exec 都由它发现。
+ */
+function probeShellCapability() {
+  const { spawnSync } = require('node:child_process');
+  const shimDir = process.env.PATH ? process.env.PATH.split(':')[0] : '';
+  const statusOf = (r) => (r.error ? `err(${r.error.code || 'unknown'})`
+    : `rc${r.status}${r.signal ? `/sig${r.signal}` : ''}`);
+  /*
+   * 【必须先去 NUL（2026-10-06 真机踩到）】`/proc/self/attr/current` 读出来尾部带一个
+   * `\0`，而 JS 的 `\s` **不匹配** `\u0000` ⇒ 它会原样留在读数里、再进 diag 行。后果不是
+   * "多了个字符"，而是**下游读日志的人被误导**：设备侧 grep 把含 NUL 的行当成到了行尾，
+   * `终端能力汇总：…` 那一行于是只显示到 `宿主域=…:s0`（r4 报告里那行"看起来只有宿主域"
+   * 就是这么来的，见 docs/106 §7）。故这里与下面的 hostDomain 都先剔 NUL。
+   */
+  const tidy = (s) => String(s === undefined || s === null ? '' : s).split('\u0000').join('').trim().replace(/\s+/g, ' ').slice(0, 120);
+  // 【同一批读数，两个去向】diag 那几行是给人看的（口径、行数都不变），readings 是给
+  // `host-ready.json` 的 runtime.terminal 用的结构化副本（docs/106 §2：端侧自检不必再
+  // 靠日志文本猜"本档有没有真 shell / python3 能不能跑"）。
+  const readings = [];
+  const run = (label, file, args, opts) => {
+    if (!file || file.length === 0 || statSize(file) <= 0) {
+      diag(`终端能力 ${label}：缺（${file || 'path 为空'}）`);
+      readings.push({ label, status: '缺', stdout: '', stderr: '' });
+      return `${label}=缺`;
+    }
+    let r = null;
+    try {
+      r = spawnSync(file, args, Object.assign({ encoding: 'utf8', timeout: 10000 }, opts || {}));
+    } catch (e) {
+      diag(`终端能力 ${label}：抛错 ${String(e).slice(0, 100)}`);
+      readings.push({ label, status: '抛错', stdout: '', stderr: '' });
+      return `${label}=抛错`;
+    }
+    const status = statusOf(r);
+    const out = tidy(r.stdout);
+    diag(`终端能力 ${label}：${status} out=[${out}] err=[${tidy(r.stderr)}]`);
+    readings.push({ label, status, stdout: out, stderr: tidy(r.stderr) });
+    return `${label}=${status}`;
+  };
+  const tb = '/system/bin/toybox';
+  const lines = [];
+  let hostDomain = '';
+  // (a) 宿主进程自己的 MAC 域：下面每一条读数的对照基准
+  try {
+    hostDomain = fs.readFileSync('/proc/self/attr/current', 'utf8').split('\u0000').join('').trim();
+    lines.push(`宿主域=${hostDomain}`);
+  } catch (e) {
+    lines.push(`宿主域=读失败(${e && e.code})`);
+  }
+  // (b) toybox 进程自己的域：与宿主域相同即 = exec 不做域转换 = 下面 (d)(e) 必然同判
+  lines.push(run('toybox域', tb, ['cat', '/proc/self/attr/current']));
+  // (c) toybox 能不能 stat 到 /system/bin/sh（宿主自己 stat 的读数是"缺"）
+  lines.push(run('toybox-stat-sh', tb, ['ls', '-l', '/system/bin/sh']));
+  // (d) 路径 (1)：toybox 当启动器 exec 系统 sh
+  lines.push(run('toybox-exec-sh', tb, ['env', '/system/bin/sh', '-c', 'echo DSHM-RELAY-SH-OK']));
+  // (e) 路径 (1) 的另一半：toybox 当启动器 exec 随包 ELF
+  lines.push(run('toybox-exec-ash', tb, ['env', path.join(shimDir, 'ash'), '-c', 'echo DSHM-RELAY-ASH-OK']));
+  // (f) 路径 (2)：libs/arm64 里的 ELF 直执（取存在的第一个候选；cwd 挪到 tmp 避免
+  //     exec 成功而崩在应用自己的工作目录里留 core）
+  let libPath = '';
+  for (const name of ['libgmodule-2.0.so', 'libffi.so', 'libpty.so', 'libkoffi.so']) {
+    const p = path.join(NATIVE_LIBS, name);
+    if (NATIVE_LIBS.length > 0 && statSize(p) > 0) {
+      libPath = p;
+      break;
+    }
+  }
+  lines.push(run('libs-exec', libPath, [], { cwd: require('node:os').tmpdir() }));
+  // 汇总一行：这是"本档终端能力"唯一的机器可读结论，缺它即视为没跑
+  diag(`终端能力汇总：${lines.join('，')}`);
+  // 【机器可读副本】判据看 **回显的 marker**，不看 rc：docs/104 实测 `toybox sh` 会被记成
+  // `ok`（真相在 stderr 的 Unknown command）—— 只看数字会把"没有 sh"读成"有 sh"。
+  const byLabel = {};
+  for (const r of readings) {
+    byLabel[r.label] = r;
+  }
+  const relayed = (label, marker) => {
+    const r = byLabel[label];
+    return r !== undefined && r.status === 'rc0' && r.stdout.indexOf(marker) >= 0;
+  };
+  const shOk = relayed('toybox-exec-sh', 'DSHM-RELAY-SH-OK');
+  const ashOk = relayed('toybox-exec-ash', 'DSHM-RELAY-ASH-OK');
+  recordRuntimeProbe('terminal', {
+    hostDomain: hostDomain.length > 0 ? hostDomain : 'read-failed',
+    toyboxDomain: byLabel['toybox域'] === undefined ? '' : byLabel['toybox域'].stdout,
+    shStat: byLabel['toybox-stat-sh'] === undefined ? 'n/a' : byLabel['toybox-stat-sh'].status,
+    relaySh: byLabel['toybox-exec-sh'] === undefined ? 'n/a' : byLabel['toybox-exec-sh'].status,
+    relayAsh: byLabel['toybox-exec-ash'] === undefined ? 'n/a' : byLabel['toybox-exec-ash'].status,
+    libsExec: byLabel['libs-exec'] === undefined ? 'n/a' : byLabel['libs-exec'].status,
+    realShell: shOk || ashOk ? 'yes' : 'no',
+    note: shOk || ashOk
+      ? 'toybox 当启动器已能起真 shell（本档终端可做真 shell）'
+      : '两条路径都被拒（toybox 中继 / 随包 ELF 都起不来）⇒ 本档没有真 shell，见 docs/104',
+    measuredAt: new Date().toISOString(),
+  });
 }
 
 /**
@@ -3949,18 +4216,37 @@ async function ensureExecutables() {
     diag(`git 探测仓库创建失败（不阻塞）：${String(e).slice(0, 140)}`);
   }
   const summary = [];
+  const execResults = {};
   for (const t of execProbeTargets()) {
     if (!t.p || t.p.length === 0 || statSize(t.p) <= 0) {
       // 【"缺"是读数，不是跳过】(2026-10-03) 未解包/半成品时它照样进汇总 ⇒ 端侧能看到
       // "这一项本次没有可执行文件"这一事实，而不是一行都没有（旧行为见本函数头注）。
       summary.push(`${t.label}=缺`);
+      execResults[t.label] = `缺`;
       continue;
     }
     const r = await probeExec(t.p, t.args, t.env);
     summary.push(`${t.label}=${r}`);
+    execResults[t.label] = r;
   }
   // 【无条件执行】这一行是"探针真的跑过"的唯一机器可读信号（没有它 ⇒ 本门禁不算通过）。
+  // （这行的字面形态被 `tools/assert-exec-fix.mjs` 断言 24 锁定：改动它等于改动那条守卫的判据，
+  //   所以这里保持原样，结构化副本另算一份 —— 不要为了省一次 join 去改它的写法。）
   diag(`exec 探测：${summary.join('，')}`);
+  // 【机器可读副本】同一批评数的结构化版本（docs/106 §2）：`runtime.exec.results`
+  // 让 agent / 门禁直接读结论，不必解析上面的日志文本。
+  recordRuntimeProbe(`exec`, {
+    results: execResults,
+    summary: summary.join('，'),
+    measuredAt: new Date().toISOString(),
+  });
+  // 【终端能力判据】紧跟 exec 探测之后跑：探针量"能不能 execve"，
+  // probeShellCapability() 量"这一档还有没有真 shell"，两者结论配套看（docs/104）。
+  try {
+    probeShellCapability();
+  } catch (e) {
+    diag(`终端能力探测异常：${String(e).slice(0, 140)}`);
+  }
 }
 
 /**
@@ -4068,6 +4354,24 @@ function scheduleToolchainExtraction(resRoot, binDir) {
   }
   const { spawn } = require('child_process');
   diag(`工具链：后台解包启动（python=${needPy}，git apk ${apks.length} 个），输出见 .extract.log`);
+  /*
+   * 【进程内回退只允许进一次（2026-10-07）】spawn 的失败有两种形态：
+   *   ① 同步抛错（uv_spawn 在 fork / open 阶段就失败）；② 异步 `'error'` 事件
+   *   （execve 阶段被拒 —— 手机 / 平板档的实测形态，见 docs/104）。
+   * 同一个 child 上两条异常路径**可能都触发**，而进程内解包是往同一个 `py-stage` 里写：
+   * 跑第二遍不只是白干 —— 它的 `finishToolchainExtraction` 会去 rename 一个已经被第一遍
+   * rename 走的 `py-stage`，再往日志里多丢一条无用失败行。故用一次性门闩；
+   * 判据与上游一致：重试发生在**下一次启动**，不是同一次启动里。
+   */
+  let inProcFallbackDone = false;
+  const inProcFallback = (why) => {
+    if (inProcFallbackDone) {
+      diag(`工具链：进程内回退已在进行（忽略重复触发：${why}）`);
+      return;
+    }
+    inProcFallbackDone = true;
+    inProcessToolchainFallback(tarball, needPy, needGit, why);
+  };
   let child;
   try {
     child = spawn(path.join(binDir, 'busybox'), ['ash', '-c', cmds.join('\n')], {
@@ -4076,6 +4380,7 @@ function scheduleToolchainExtraction(resRoot, binDir) {
   } catch (e) {
     try { fs.closeSync(logFd); } catch (e2) { /* 已关 */ }
     diag(`工具链：解包子进程 spawn 失败：${String(e)}`);
+    inProcFallback('spawn 同步抛错');
     return;
   }
   child.on('exit', (code, signal) => {
@@ -4088,6 +4393,53 @@ function scheduleToolchainExtraction(resRoot, binDir) {
   child.on('error', (e) => {
     try { fs.closeSync(logFd); } catch (e2) { /* 已关 */ }
     diag(`工具链：解包子进程异常：${String(e)}`);
+    inProcFallback('子进程无法启动');
+  });
+}
+
+/**
+ * 工具链解包的**进程内回退**（2026-10-07，手机 / 平板档）。
+ *
+ * 【什么时候会走到这里】正常路径是 `spawn <busybox> ash -c "tar xmzf …"`：
+ * PC/2in1 档可用；**手机 / 平板档必失败**——本档 SELinux 域下应用自带可执行文件
+ * 一律 `EACCES`（`docs/104` §2/§3，含"用能执行的程序当启动器"同判的实测）。
+ * 真机形态：每次启动先 `rmSync(PYTHON_PREFIX)`、spawn 报错、`.extract.log` 落 0 字节，
+ * 于是 `toolchain/python/bin/*` 永远为空、`runtime.python` 永远 `stdlib=false`
+ * ⇒ **应用自身的 Python 桥在本档永久不可用**（手机端体检报告 P0-2）。
+ *
+ * 【为什么回退能成立】解包**不需要**新进程：`tar.gz = gzip(ustar)`，
+ * `node:zlib.gunzipSync` + 512 字节头解析是零依赖的确定性路径
+ * （`hostcore/app/tar-gz.cjs`，与插件安装器共用同一份 walker）。该模块按批
+ * `await setImmediate` 让出事件循环，避免 80MB / 4530 个条目的同步写把主线程钉死
+ * （本项目在 `LOOP-GAP` 上已经踩过一次）。
+ *
+ * 【为什么 git 不在回退范围内】git 真身是随包 ELF，本档 `execve` 一律被拒
+ * ⇒ 解出来也永远起不来，只是白占 ~100MB 用户空间。故只解 python —— 它走
+ * dlopen + 进程内 CPython，是本档**唯一**真正能用的工具链。
+ */
+function inProcessToolchainFallback(tarball, needPy, needGit, why) {
+  if (!needPy) {
+    diag(`工具链：进程内回退无事可做（python 无需解包；原因=${why}）`);
+    finishToolchainExtraction(false, false);
+    return;
+  }
+  const pyStage = path.join(TOOLCHAIN_DIR, 'py-stage');
+  diag(`工具链：改用进程内解包（${why} ⇒ 本档不能创建进程）`);
+  tarGz.extractTarGzFile(tarball, pyStage, {
+    yieldEvery: 64,
+    onProgress: (n) => {
+      if (n % 512 === 0) {
+        diag(`工具链：进程内解包进行中（已落 ${n} 个条目）`);
+      }
+    },
+  }).then((st) => {
+    diag(`工具链：进程内解包完成（写 ${st.written} 个文件，跳过 ${st.skipped.length} 个链接/特殊条目）`);
+    if (needGit) {
+      diag('工具链：git 归档不做进程内解包（本档 execve 被拒 ⇒ git 真身起不来，解它只占磁盘）');
+    }
+    finishToolchainExtraction(true, false);
+  }).catch((e) => {
+    diag(`工具链：进程内解包失败（下次启动重试）：${String(e).slice(0, 300)}`);
   });
 }
 
@@ -4308,28 +4660,58 @@ function recoverOrphanLocks(homeDir) {
   }
   let removed = 0;
   let kept = 0;
+  /*
+   * 【保留原因要可读（2026-10-07）】PC 报告里那条读数「发现 21 个，清理孤儿 0」只能看出
+   * 「没删」，看不出**为什么没删** —— 而这恰恰是下一步定策略的唯一信息。三种成因的含义
+   * 完全不同：
+   *   · `存活`：确实还有活着的持有者（正常，本就不该删）；
+   *   · `EPERM(异uid)`：pid 存在但**不属于本应用** —— 鸿蒙的 pid 回收很快，这通常意味着
+   *     「记录的 pid 已被无关进程占用」，即原持有者早已消失（形态上就是孤儿）；
+   *   · `非pid` / `不可读`：文件不是上游那种 `<pid>\n` 记录（不该动）。
+   * 故本轮**只加读数、不改策略**：判据仍是「少删」，先把事实取回来再决定要不要收。
+   * 按类计数而不是逐条打，是因为真实条数可达 walk 上限 200，逐条会淹掉日志。
+   */
+  const keptWhy = new Map();
+  const keptSample = [];
+  const noteKept = (why, lock, owner) => {
+    kept++;
+    keptWhy.set(why, (keptWhy.get(why) || 0) + 1);
+    if (keptSample.length < 6) {
+      let age = '?';
+      try {
+        age = `${Math.round((Date.now() - fs.statSync(lock).mtimeMs) / 1000)}s`;
+      } catch (e) { /* 读不到年龄就留 ? */ }
+      keptSample.push(`${path.basename(lock)}(pid=${owner || '未知'}，${why}，age=${age})`);
+    }
+  };
   for (const lock of locks) {
     let ownerText = '';
     try {
       ownerText = fs.readFileSync(lock, 'utf8');
     } catch (e) {
-      kept++;
+      noteKept('不可读', lock, 0);
       continue;
     }
     const owner = Number.parseInt(ownerText.trim(), 10);
-    if (!Number.isInteger(owner) || owner <= 0 || owner === process.pid) {
-      kept++;
+    if (!Number.isInteger(owner) || owner <= 0) {
+      noteKept('非pid', lock, 0);
+      continue;
+    }
+    if (owner === process.pid) {
+      noteKept('本进程', lock, owner);
       continue;
     }
     let alive = true;
+    let eperm = false;
     try {
       process.kill(owner, 0);
     } catch (e) {
       // ESRCH = 没有这个进程；EPERM = 进程存在但不属于我们（仍算存活）
-      alive = !!(e && e.code === 'EPERM');
+      eperm = !!(e && e.code === 'EPERM');
+      alive = eperm;
     }
     if (alive) {
-      kept++;
+      noteKept(eperm ? 'EPERM(异uid)' : '存活', lock, owner);
       continue;
     }
     try {
@@ -4337,10 +4719,18 @@ function recoverOrphanLocks(homeDir) {
       removed++;
       diag(`孤儿写锁已清理：${lock}（持有者 pid=${owner} 已不存在）`);
     } catch (e) {
-      kept++;
+      noteKept('删除失败', lock, owner);
     }
   }
   diag(`写锁巡检：发现 ${locks.length} 个，清理孤儿 ${removed} 个，保留 ${kept} 个`);
+  /*
+   * 【明细必须在这行之后】`tools/device-acceptance.ps1` 拿「写锁巡检」这一行当「本次启动」
+   * 的起点（取最后一次出现之后的所有行）⇒ 把明细放在它前面会被切掉。
+   */
+  if (kept > 0) {
+    const byWhy = Array.from(keptWhy.entries()).map(([why, n]) => `${why}=${n}`).join('，');
+    diag(`写锁保留明细：${byWhy}；样例 ${keptSample.join(' | ')}`);
+  }
 }
 
 /**

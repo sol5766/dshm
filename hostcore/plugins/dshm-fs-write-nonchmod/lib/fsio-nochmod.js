@@ -59,6 +59,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { TextDecoder } from "node:util";
 import { FsError, FsVersion } from "@deepseek-ai/dsh-fs";
+import { describeWriteFailure } from "./denial-hints.js";
 
 /** 二进制采样的字节数——与上游 `BINARY_SAMPLE_BYTES` 逐字同源。 */
 const BINARY_SAMPLE_BYTES = 8192;
@@ -390,6 +391,6 @@ export async function writeFileAtomicNoChmod(absolutePath, content, mode, signal
 			}
 		}
 		await removePartial(tempPath, absolutePath);
-		throw isAbortError(error) ? new FsError("write aborted", "FS_ABORTED") : error;
+		throw isAbortError(error) ? new FsError("write aborted", "FS_ABORTED") : describeWriteFailure(error, absolutePath);
 	}
 }

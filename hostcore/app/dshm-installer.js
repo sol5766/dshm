@@ -141,86 +141,24 @@ async function fetchJson(urlStr) {
   return JSON.parse(buf.toString('utf8'));
 }
 
-// ── ustar 解包（含 GNU longname；symlink 跳过并如实报告）──────────────
-
-function readTarStr(buf, start, len) {
-  const s = buf.subarray(start, start + len).toString('utf8');
-  const nul = s.indexOf('\0');
-  return nul >= 0 ? s.slice(0, nul) : s;
-}
+// ── tar.gz 解包：**单份实现**在 hostcore/app/tar-gz.cjs ──────────────────
+//
+// 【2026-10-07 合并】本文件原有一份私有的 ustar 解包（只支持 ustar + GNU
+// longname，PAX 头直接跳过）。工具链解包（CPython stdlib 25MB tar.gz）在手机 /
+// 平板档必须走进程内解包（本档不能 spawn，见 docs/104），于是把 walker 抽成共享
+// 模块，两边**不存在第二份解析逻辑**。本文件保留同名同步入口 `extractTar`。
+const tarGz = require('./tar-gz.cjs');
 
 /**
- * 解 ustar/gnu tar 到 destDir。返回 { written: number, skipped: string[] }。
- * 【安全】条目路径先剥 npm tarball 的 `package/` 前缀，再逐段校验：
- * 任何 `..` 段或绝对路径直接抛错（tar-slip 防护），不静默跳过。
+ * 解 npm tarball（ustar / GNU / PAX）到 destDir，返回 { written, skipped }。
+ * 【与旧实现的三条语义逐字对齐】① 剥 `package/` 根前缀；② 路径含 `..` 段或为绝对
+ * 路径 ⇒ **抛出**（tar-slip 防护，不静默跳过）；③ symlink/hardlink 不建链
+ * （沙箱禁 link，真机探针 13900012）⇒ 如实跳过并报告。
+ * 【唯一的行为变化】PAX `path=` 现在会被采纳 ⇒ 超长路径（≥100 字符）**落到正确位置**，
+ * 而不是落在被截断的 ustar 名字上（旧实现忽略 PAX 头）。这是修正，不是回退。
  */
 function extractTar(tarBuf, destDir) {
-  let off = 0;
-  let longName = null;
-  let written = 0;
-  const skipped = [];
-  while (off + 512 <= tarBuf.length) {
-    const header = tarBuf.subarray(off, off + 512);
-    if (header.every((b) => b === 0)) {
-      break; // 结束块
-    }
-    let name = longName !== null ? longName : readTarStr(header, 0, 100);
-    longName = null;
-    const prefix = readTarStr(header, 345, 155);
-    if (prefix.length > 0 && longName === null && name.length < 100) {
-      name = prefix + '/' + name;
-    }
-    const sizeField = readTarStr(header, 124, 12).trim();
-    const size = sizeField.length > 0 ? (parseInt(sizeField, 8) || 0) : 0;
-    const type = String.fromCharCode(header[156] || 0x30);
-    off += 512;
-    const padded = Math.ceil(size / 512) * 512;
-    const dataEnd = off + size;
-    if (type === 'L') { // GNU long name：内容是下一个条目的名字
-      longName = readTarStr(tarBuf, off, size);
-      off += padded;
-      continue;
-    }
-    if (type === 'K') { // GNU long linkname：与文件落位无关
-      off += padded;
-      continue;
-    }
-    if (type === 'x' || type === 'g') { // pax 头：跳过（内容以键值对形式描述元数据）
-      off += padded;
-      continue;
-    }
-    // 剥 npm tarball 的 package/ 根前缀（0/1 层）
-    let rel = name;
-    if (rel === 'package' || rel === 'package/') {
-      off += padded;
-      continue; // 根目录条目本身
-    }
-    if (rel.startsWith('package/')) {
-      rel = rel.slice('package/'.length);
-    }
-    rel = rel.replace(/\/+$/, '');
-    if (rel.length === 0) {
-      off += padded;
-      continue;
-    }
-    const segs = rel.split('/');
-    if (rel.startsWith('/') || rel.startsWith('\\') || segs.indexOf('..') >= 0) {
-      throw new Error('tar 条目路径不安全，拒绝解包：' + name);
-    }
-    const target = path.join(destDir, ...segs);
-    if (type === '5') {
-      fs.mkdirSync(target, { recursive: true });
-    } else if (type === '0' || type === '\0') {
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, tarBuf.subarray(off, dataEnd));
-      written += 1;
-    } else {
-      // '1'/'2' = symlink/hardlink（沙箱禁 link，13900012）；其余罕见类型跳过
-      skipped.push(name + '（type=' + type + '）');
-    }
-    off += padded;
-  }
-  return { written, skipped };
+  return tarGz.extractTar(tarBuf, destDir, { stripPrefixes: ['package'] });
 }
 
 // ── 简化 semver（^ ~ 精确 * latest >= <）───────────────────────────────

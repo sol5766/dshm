@@ -2,7 +2,7 @@
   "name": "@deepseek-ai/dshm-workspace-claim",
   "version": "0.0.0",
   "private": true,
-  "description": "DSHM 端侧的默认工作区登记：把 ArkTS 认领到的 Download/<包名>/ 在启动期注册进 Host 的工作区注册表，使客户端（官方 Web UI 的 recentWorkspace / 本端中枢）的'新建会话'默认落在用户可见目录，而不是历史 picker 记忆值。",
+  "description": "DSHM 端侧的默认工作区登记：**只在注册表为空（全新安装）时**把 ArkTS 认领到的 Download/<包名>/ 注册进 Host 的工作区注册表一次 —— 既给'新建会话'一个落点，也让上游 initializeDefault() 干净短路（本端跑不了它的目录探测）。用户已有工作区时一条都不加，并撤回本插件早先注入的、0 会话的那一条（2026-10-07 收窄，见 docs/113）。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

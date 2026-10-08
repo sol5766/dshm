@@ -1,0 +1,18 @@
+{
+  "name": "@deepseek-ai/dshm-profile-pnpm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧「profile 包管理进程内通道」：给 @deepseek-ai/dsh-plugin-manager 的 runProfilePnpm() 一条不走 spawn 的包操作通道（add/remove → $DSH_HOME/install-queue，由宿主进程内的 dshm-installer 代行），使「设置 → 插件」的安装/卸载在无可用 shell 的手机/平板档也能工作。见 lib/index.js 头注。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT"
+}
