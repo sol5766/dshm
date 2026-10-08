@@ -269,8 +269,11 @@ export struct ConnectPane {
 
       ForEach(this.hosts, (h: HostRecord) => {
         Row({ space: Sp.M }) {
-          Circle({ width: 8, height: 8 })
-            .fill(h.authorized ? $r('sys.color.confirm') : $r('sys.color.warning'))
+          Row()
+            .width(Sp.S)
+            .height(Sp.S)
+            .backgroundColor(h.authorized ? $r('sys.color.confirm') : $r('sys.color.warning'))
+            .borderRadius(Radius.S)
           Column({ space: 2 }) {
             Text(h.name)
               .fontSize(Fs.SECONDARY)

@@ -52,8 +52,11 @@ export struct SettingsInventory {
 
       ForEach(this.filtered(), (p: PluginItem) => {
         Row({ space: Sp.M }) {
-          Circle({ width: 8, height: 8 })   // token-exempt: 状态点几何（与插件行原样一致，搬迁不改视觉）
-            .fill(p.phase === 'active' ? $r('sys.color.confirm') : $r('sys.color.font_tertiary'))
+          Row()
+            .width(Sp.S)
+            .height(Sp.S)
+            .backgroundColor(p.phase === 'active' ? $r('sys.color.confirm') : $r('sys.color.font_tertiary'))
+            .borderRadius(Radius.S)
           Column({ space: 2 }) {
             Text(p.moduleName)
               .fontSize(Fs.SECONDARY)

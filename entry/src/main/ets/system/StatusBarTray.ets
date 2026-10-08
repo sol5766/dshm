@@ -38,10 +38,22 @@
  * SDK 对 `removeFromStatusBar` 明确：无前台窗口时不可删除（错误码 1010710004）。
  * ⇒ **不要**在无窗口的进程（如 `BackGroundAbility`）里指望它能摘掉图标：那个进程连
  * `installed` 都是自己的 `false`（模块级 static 不跨进程），第一行就早退了。
+ *
+ * ⇒ 因此摘图标**必须排在"停核心"之前**（见 `EntryAbility.finalizeBeforeExit`）：停核心是
+ * 不定长等待，等它回来窗口可能已经不在了。历史上 `exitApp` 把 `remove` 排在
+ * `stopHostThenExit()` 之后，叠加"先 markUnavailable 把 installed 清零"，摘图标在唯一一条
+ * 退出路径上**一次都没发出去**（2026-10-06 修）。
+ *
+ * ## 可观测性（为什么托盘事件要落文件）
+ *
+ * 本机 `hilog` 读不到本应用的 ArkTS 输出 ⇒ 托盘事件一律追加到 `filesDir/diag-tray`
+ * （`diag`）：挂上 / 摘掉 / 摘失败（带错误码）/ 幂等跳过 / 谁按的退出键。事后一份文件
+ * 就能判定"走了哪条路径、有没有真摘掉"。
  */
 
 import { statusBarManager } from '@kit.DeskTopExtensionKit';
 import { common, contextConstant, StartOptions, Want } from '@kit.AbilityKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { commonEventManager, emitter, BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -60,6 +72,15 @@ const BG_ABILITY_NAME: string = 'BackGroundAbility';
 /** 托盘图标（rawfile）：系统按状态栏明暗二选一渲染，故需纯白 / 纯黑两份单色剪影 */
 const ICON_WHITE: string = 'tray_white.png';
 const ICON_BLACK: string = 'tray_black.png';
+
+/**
+ * 托盘诊断落点（`filesDir/diag-tray`，一行「ISO 时间戳 + 事件」）。
+ *
+ * 【为什么必须有它】本机 `hilog` 读不到本应用的 ArkTS 输出（`hilog -x` 里 `entry/tray`
+ * 0 条、持久 hilog 里 `com.dshm.dshclient` 0 条，见 docs/98 §6），而「退出后图标还在」是
+ * **概率性**故障 ⇒ 不落文件就只能靠猜。这里只记事实，不做任何业务判断。
+ */
+const DIAG_FILE: string = 'diag-tray';
 
 /** 左键点击弹窗区高度（vp，SDK 要求 > 0） */
 const QUICK_HEIGHT: number = 30;
@@ -93,6 +114,19 @@ export class StatusBarTray {
   private static iconClickCb: ((clickType: string) => void) | null = null;
   private static subscribers: Array<commonEventManager.CommonEventSubscriber> = [];
 
+  /** 追加一条托盘诊断（与 pages/WebApp.ets 的 writeDiagMarker 同一套写法；写失败静默）。 */
+  private static diag(context: common.Context, detail: string): void {
+    try {
+      const p: string = `${context.filesDir}/${DIAG_FILE}`;
+      const f: fileIo.File = fileIo.openSync(p,
+        fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.APPEND);
+      fileIo.writeSync(f.fd, `${new Date().toISOString()} ${detail}\n`);
+      fileIo.closeSync(f);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, '托盘诊断写入失败：%{public}s', errOf(err as Object));
+    }
+  }
+
   private static async pixelMapOf(context: common.UIAbilityContext, name: string): Promise<image.PixelMap> {
     const bytes: Uint8Array = context.resourceManager.getRawFileContentSync(name);
     const src: image.ImageSource = image.createImageSource(bytes.buffer as ArrayBuffer);
@@ -115,6 +149,7 @@ export class StatusBarTray {
      */
     if (StatusBarTray.installed) {
       hilog.info(DOMAIN, TAG, '托盘图标已在位：幂等跳过（不摘、不重挂）');
+      StatusBarTray.diag(context, 'install skip：installed=true（幂等，不摘不重挂）');
       return;
     }
     /*
@@ -128,8 +163,10 @@ export class StatusBarTray {
     try {
       statusBarManager.removeFromStatusBar(context);
       hilog.info(DOMAIN, TAG, '首次挂载：先摘残留注册（无残留时也会成功）');
+      StatusBarTray.diag(context, 'install pre-clean ok：已摘掉上次遗留的注册');
     } catch (err) {
       hilog.info(DOMAIN, TAG, '首次挂载摘残留注册失败（多半本来就没有，忽略）：%{public}s', errOf(err as Object));
+      StatusBarTray.diag(context, `install pre-clean skip：${errOf(err as Object)}（无残留时正常）`);
     }
 
     const white: image.PixelMap = await StatusBarTray.pixelMapOf(context, ICON_WHITE);
@@ -162,9 +199,16 @@ export class StatusBarTray {
      * （两次调用的实参完全相同 ⇒ 重试只会拿到同一个错）。降级归于上层：`setupTray` 捕获后
      * 记日志，图标没挂上只等于少一个入口，不影响关闭与退出。
      */
-    statusBarManager.addToStatusBar(context, item);
+    try {
+      statusBarManager.addToStatusBar(context, item);
+    } catch (err) {
+      // 记完再抛：调用方（setupTray）会降级——图标没挂上只等于少一个入口
+      StatusBarTray.diag(context, `install failed：addToStatusBar ${errOf(err as Object)}`);
+      throw err as Error;
+    }
     StatusBarTray.installed = true;
     hilog.info(DOMAIN, TAG, '托盘图标已挂上');
+    StatusBarTray.diag(context, 'install ok：addToStatusBar 成功');
   }
 
   /**
@@ -192,34 +236,29 @@ export class StatusBarTray {
     });
   }
 
-  /** 摘托盘图标（幂等）。失败只记日志：退出流程不该被一个图标卡住。 */
+  /**
+   * 摘托盘图标（幂等）。失败只记日志：退出流程不该被一个图标卡住。
+   *
+   * 【成败都要把 `installed` 归零 —— 这是 2026-10-06 修的那个"退出后图标还在"】
+   * 成功 ⇒ 图标确实不在了，归零正确。失败（典型 1010710004「无前台窗口时不可删除」）⇒
+   * 图标**可能还在**；此时若把 `installed` 留在 `true`，下一次 `install()` 会因幂等早退
+   * 而**永远不再尝试清理** —— 这正是"概率性残留、重启若干次都还在"的形态。
+   * 归零后下一次 `install()` 会回到「首次挂载」路径（先摘残留、再挂新的），图标能回来。
+   */
   static remove(context: common.Context): void {
     if (!StatusBarTray.installed) {
+      StatusBarTray.diag(context, 'remove skip：installed=false（本进程没挂过或已摘）');
       return;
     }
     try {
       statusBarManager.removeFromStatusBar(context);
-      StatusBarTray.installed = false;
       hilog.info(DOMAIN, TAG, '托盘图标已摘除');
+      StatusBarTray.diag(context, 'remove ok');
     } catch (err) {
       hilog.warn(DOMAIN, TAG, '摘除托盘图标失败（退出流程继续）：%{public}s', errOf(err as Object));
-    }
-  }
-
-  /**
-   * 标记托盘入口已失效（图标随后台进程一起被系统收走时调用）。
-   *
-   * 【为什么需要它】`removeFromStatusBar` 在无前台窗口时必失败（1010710004）⇒ 那条路径上
-   * `installed` 会被留在 `true`，而图标其实可能已经不在了。图标是否还在**查不到**，
-   * 但「入口可能没了」这件事是确定的，就按确定的记：把 `installed` 归零。
-   * 效果是下一次 `install()` 会重新走「首次挂载」路径（先摘残留、再挂）——图标能回来。
-   */
-  static markUnavailable(): void {
-    if (!StatusBarTray.installed) {
-      return;
+      StatusBarTray.diag(context, `remove failed：${errOf(err as Object)}（图标可能仍在；下次启动先摘残留）`);
     }
     StatusBarTray.installed = false;
-    hilog.warn(DOMAIN, TAG, '托盘入口标记为失效（图标可能已随后台进程消失）');
   }
 
   /** 左键点击托盘图标（`iconClickType` 目前只会是 `leftClick`，见 SDK 声明）。 */

@@ -52,8 +52,11 @@ export struct SettingsDevice {
           ForEach(this.hosts, (h: HostRecord) => {
             Column({ space: Sp.XS }) {
               Row({ space: Sp.S }) {
-                Circle({ width: 8, height: 8 })
-                  .fill(h.authorized ? $r('sys.color.confirm') : $r('sys.color.warning'))
+                Row()
+                  .width(Sp.S)
+                  .height(Sp.S)
+                  .backgroundColor(h.authorized ? $r('sys.color.confirm') : $r('sys.color.warning'))
+                  .borderRadius(Radius.S)
                 Text(h.name)
                   .fontSize(Fs.BODY)
                   .layoutWeight(1)

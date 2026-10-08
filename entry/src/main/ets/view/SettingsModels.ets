@@ -372,8 +372,11 @@ export struct SettingsModels {
       Column({ space: Sp.XS }) {
         Row({ space: Sp.S }) {
           // 状态点复用与提供方卡片同一套语义：按 `<ROUTE>_API_KEY` 的配置状态
-          Circle({ width: 8, height: 8 })   // token-exempt: 状态点几何
-            .fill(this.providerKeyColor(p.route))
+          Row()
+            .width(Sp.S)
+            .height(Sp.S)
+            .backgroundColor(this.providerKeyColor(p.route))
+            .borderRadius(Radius.S)
           Column({ space: 2 }) {
             Text(p.displayName.length > 0 ? p.displayName : p.route)
               .fontSize(Fs.BODY)
@@ -526,8 +529,11 @@ export struct SettingsModels {
     ForEach(this.providerGroups(), (g: ModelProviderGroup) => {
       Column({ space: Sp.XS }) {
         Row({ space: Sp.S }) {
-          Circle({ width: 8, height: 8 })   // token-exempt: 状态点几何
-            .fill(this.providerKeyColor(g.provider))
+          Row()
+            .width(Sp.S)
+            .height(Sp.S)
+            .backgroundColor(this.providerKeyColor(g.provider))
+            .borderRadius(Radius.S)
           Column({ space: 2 }) {
             Text(g.providerName.length > 0 ? g.providerName : g.provider)
               .fontSize(Fs.BODY)

@@ -51,7 +51,9 @@ import {
   EVENT_HOST_CONNECTED,
   EVENT_KEY_HOST_TOKEN,
   EVENT_KEY_HOST_URL,
+  followScreenRotationOnHandheld,
   HostStore,
+  isHandheldForm,
   KeepAlive,
   KEY_THEME_MODE,
   LocalPrefs,
@@ -60,9 +62,11 @@ import {
   readDeviceFacts,
   registerWindow,
   relabelWindow,
+  restoreFolderGrants,
   SecretLoadState,
   ThemeMode,
   unregisterWindow,
+  windowCount,
   WindowKind,
   WindowMemory,
   WindowParams
@@ -291,6 +295,28 @@ export default class EntryAbility extends UIAbility {
       hilog.error(DOMAIN, TAG, 'DSHM-RUNTIME 调用原生模块失败：%{public}s', e.message);
       hilog.error(DOMAIN, TAG, 'DSHM-RUNTIME 模块类型=%{public}s 导出键=%{public}s',
         typeof dshhost, keys);
+    }
+    /*
+     * 【2026-10-06】目录授权**跨启动恢复**（手持档"侧边栏工作区文件"重启后还能不能读的关键）。
+     *
+     * 现象：手机/平板上 picker 给的目录授权是**进程级临时**的 —— 用户选完目录当场
+     * `workspaceFiles/list` 能列出内容，进程一重启同一条调用就报
+     * `cannot list "…": permission denied`，文件页整页读不出来（真机原始读数见 docs/105）。
+     * 平台给的两步是 `persistPermission`（选完记下来）+ `activatePermission`（重启启用回来），
+     * 本仓此前只做了第一步 ⇒ 记了却没人启用。这里在启动时补第二步。
+     *
+     * 【为什么放在最前】它必须在**宿主服务文件页之前**完成；而排在后面的宿主启动还要
+     * probe → 解包核心 → spawn（秒级到十秒级），用户点开文件页时这份恢复早已到位。
+     * 【为什么只对手持档】2in1/PC 上宿主本来就读得到 picker 目录（docs/30 实测），
+     * 不需要这条恢复 ⇒ 不为 PC 引入新动作。
+     */
+    if (isHandheldForm()) {
+      restoreFolderGrants(this.context).then((summary: string) => {
+        hilog.info(DOMAIN, TAG, 'DSHM-GRANT 目录授权启动恢复：%{public}s', summary);
+      }).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG,
+          'DSHM-GRANT 目录授权启动恢复异常（降级：用户自选目录可能读不到）：%{public}s', err.message);
+      });
     }
     this.autoStartHostForDiagnosis();
     // 【报告 4 ②】整机冷启动通道：轮询 host-exit-mode（与 Host 的 host-stop-request 对称）
@@ -583,6 +609,11 @@ export default class EntryAbility extends UIAbility {
 
     // 主界面 = Web 壳页：官方 apps/desktop 的鸿蒙等价物（loadURL → Host web UI）。
     // Index/Poc1 保留在 main_pages 里（诊断/回退入口），不再是默认主页。
+    // 手持形态（手机/平板）先接上「跟随屏幕旋转」再载入 Web 壳页：官方 Web 界面按桌面宽度排布，
+    // 竖屏放不下两栏（2026-10-06 手机真机：设置对话框宽 1113 px，右侧内容被裁到屏外），
+    // 横过来才完整；朝向交给传感器**且受系统旋转锁定管辖**（口径：锁定不转、解锁才转）。判据与理由见
+    // platform 的 followScreenRotationOnHandheld；非手持形态（2in1/桌面）此处为空操作。
+    followScreenRotationOnHandheld(windowStage);
     windowStage.loadContent('pages/WebApp', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
@@ -612,6 +643,43 @@ export default class EntryAbility extends UIAbility {
       hilog.info(DOMAIN, TAG, '窗口已注销 id=%{public}s', this.windowId);
       this.windowId = '';
     }
+  }
+
+  /**
+   * 系统发起的关闭（窗口右上角「关闭」/ 任务栏右键「退出」/ 托盘右键里系统自带的「退出」）
+   * 的钩子，也是整条退出链上**唯一能可靠摘掉托盘图标**的时机。
+   *
+   * 【SDK 原文】"Triggered by the system just before the UIAbility is about to close (for example,
+   * when the user clicks the close button in the top-right corner of the application window or
+   * exits from the dock or system tray)"，需 `ohos.permission.PREPARE_APP_TERMINATE`
+   * （module.json5 已声明）。SDK 列出的两个"本回调不会被调用"的条件本工程都不满足：
+   * 没注册 `windowStageClose` 监听，`AppAbilityStage` 也没实现 `onPrepareTermination*`。
+   *
+   * 【为什么不拦截】返回 `false` = 继续终止 ⇒ 这正是**鸿蒙默认的退出语义**，本应用不改它：
+   * 「关闭」就是退出。这里只借这个时机补收尾（摘图标 / 通知托盘进程 / 停核心）。
+   *
+   * 【为什么非得在这里做】`removeFromStatusBar` 的 SDK 前置是"有前台窗口"（无则
+   * 1010710004），而本回调在窗口被销毁**之前**触发。系统直接结束进程的那类退出不经过它，
+   * 那种情况只能靠下次 `install()` 的"先摘残留"兜底（force-stop 也一样）。
+   *
+   * 【只认最后一个窗口】会话窗（specified 实例）关闭不该牵动整个应用；还有别的窗口活着时
+   * 应用没退，托盘图标要留着当回程入口。
+   */
+  onPrepareToTerminate(): boolean {
+    if (this.launchParams.kind !== WindowKind.MAIN || windowCount() > 1) {
+      return false;
+    }
+    if (this.exiting) {
+      return false;
+    }
+    this.exiting = true;
+    // 不 await：系统按本回调的返回值决定是否继续终止，回调必须立刻返回。
+    // 收尾里 `host.stop()` 的"停止请求"文件是**同步**写下的（见 DshHost.stop），
+    // 所以即使进程随后就被结束，宿主也已经收到停止请求。
+    this.finalizeBeforeExit('系统关闭主窗（最后一个窗口）').catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, '系统关闭路径收尾异常（进程即将结束）：%{public}s', err.message);
+    });
+    return false;
   }
 
   onForeground(): void {
@@ -683,8 +751,10 @@ export default class EntryAbility extends UIAbility {
 
     // 托盘后台 Ability 被系统结束 ⇒ 图标很可能已随之消失，走退出收尾，避免
     // 「主 Ability 已死、图标还在」的半死状态。
+    // 【不要在这里先 markUnavailable】那会把 `installed` 提前清零，使 exitApp 里的
+    // `remove()` 首行早退（一次系统调用都不发）—— 图标到底还在不在，交给 `remove()` 自己判：
+    // 它无论成败都会把 `installed` 归零（见 StatusBarTray.remove）。
     StatusBarTray.subscribeBgTerminating(() => {
-      StatusBarTray.markUnavailable();
       this.exitApp('托盘后台进程被系统结束');
     });
   }
@@ -697,19 +767,33 @@ export default class EntryAbility extends UIAbility {
   }
 
   /**
-   * 真正退出应用：停核心 → 摘托盘图标 → 结束 Ability。
+   * 退出前的收尾（幂等）：摘托盘图标 → 通知托盘进程退出 → 停核心。
    *
-   * 触发点只剩一个：**托盘后台进程被系统结束**（`subscribeBgTerminating`）。用户点关闭窗口、
-   * 点任务栏右键「退出」、点托盘系统自带「退出」都是系统直接终止，不经过本方法——那种情况下
-   * 进程整体消失，下面的收尾本来就没有执行者。
+   * 【顺序不能反】摘图标要趁**还有窗口**（SDK：无前台窗口时 `removeFromStatusBar` 报
+   * 1010710004），而 `stopHostThenExit()` 是不定长等待 ⇒ 必须排在它前面。
+   * 2026-10-05→06 的写法把 `remove` 放在 `stopHostThenExit()` **之后**，等它回来窗口
+   * 往往已经不在了 ⇒ 摘图标失败、图标残留。
    *
-   * 【为什么要先停核心】官方不保证 `terminateSelf()` 会清理应用自己拉起的 Node 线程。
+   * 【为什么要停核心】官方不保证 `terminateSelf()` 会清理应用自己拉起的 Node 线程。
    * 宿主是同进程线程（见 runtime/NodeRuntime.ets 文件头），进程真死时它自然一起死，
    * 但只要存在"进程没立刻死"的时序，残留的宿主就会占着回环端口，下次启动撞"端口已占用"。
    * 停一次是协作式且幂等的（`DshHost.stop()`），成本一个文件写入，收益是确定的下次启动。
+   */
+  private finalizeBeforeExit(reason: string): Promise<void> {
+    hilog.info(DOMAIN, TAG, '退出收尾（摘托盘 → 通知托盘进程 → 停核心）：%{public}s', reason);
+    StatusBarTray.remove(this.context);
+    // 托盘后台 Ability 是**另一个进程**，terminateSelf 只结束本实例，不会连它一起收掉。
+    // 不通知它自行退出，就会留下一个"图标已摘、进程还在"的孤儿。
+    StatusBarTray.publishExitRequest();
+    return this.stopHostThenExit();
+  }
+
+  /**
+   * 真正退出应用：收尾（摘托盘 → 通知托盘进程 → 停核心）→ 结束 Ability。
    *
-   * 【顺序】摘图标要在**还有前台窗口**时做（SDK：无前台窗口时 removeFromStatusBar 报
-   * 1010710004）。本方法由后台事件触发时窗口通常还在，所以先 remove 再 terminate。
+   * 触发点：**托盘后台进程被系统结束**（`subscribeBgTerminating`）。
+   * 系统发起的关闭走 `onPrepareToTerminate`（同样调用 `finalizeBeforeExit`，但终止由系统做，
+   * 见该方法的注释）。
    */
   private exitApp(reason: string): void {
     if (this.exiting) {
@@ -718,11 +802,7 @@ export default class EntryAbility extends UIAbility {
     this.exiting = true;
     hilog.info(DOMAIN, TAG, '开始退出应用：%{public}s', reason);
 
-    this.stopHostThenExit().then(() => {
-      StatusBarTray.remove(this.context);
-      // 托盘后台 Ability 是**另一个进程**，terminateSelf 只结束本实例，不会连它一起收掉。
-      // 不通知它自行退出，就会留下一个"图标已摘、进程还在"的孤儿。
-      StatusBarTray.publishExitRequest();
+    this.finalizeBeforeExit(reason).then(() => {
       return StatusBarTray.delayBeforeTerminate();
     }).then(() => {
       this.context.terminateSelf().then(() => {
@@ -733,7 +813,7 @@ export default class EntryAbility extends UIAbility {
         hilog.error(DOMAIN, TAG, 'terminateSelf 失败：%{public}s', err.message);
       });
     }).catch((err: BusinessError) => {
-      // 走到这里意味着 stopHostThenExit 自己抛了（理论上不该，它内部已兜底）
+      // 走到这里意味着收尾自己抛了（理论上不该，stopHostThenExit 内部已兜底）
       this.exiting = false;
       hilog.error(DOMAIN, TAG, '退出流程异常：%{public}s', err.message);
     });
