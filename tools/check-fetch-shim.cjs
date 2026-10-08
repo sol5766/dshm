@@ -26,6 +26,11 @@
  *
  * 覆盖 dsh 实际用到的面（`dsh-llm-deepseek/lib/index.js:1770` 的 POST JSON + signal、
  * 响应 `.ok/.status/.headers/.text()/.json()`，以及附件上传要用的 FormData）。
+ *
+ * 【2026-10-06 扩：请求方向的流式体】`DshmRequest` 曾把流式体一律吞掉且**不设 `body`**，
+ * 而全仓唯一的 `streaming` 路由（`/api/session/uploadFileBinary`，附件上传）正是靠
+ * `request.body` 拿字节 ⇒ 真机上"对话框上传文件"永远失败、报文只剩 ATTACHMENT_WRITE_FAILED
+ * （真因见 docs/111）。下面 ⑧′/⑧″ 就是这条的回归断言 + 对照臂。
  */
 'use strict';
 
@@ -136,7 +141,8 @@ async function check(name, fn) {
   });
 
   // ② 安装垫片
-  const { installFetchShim, DshmFormData } = require('../hostcore/app/fetch-shim.js');
+  const { installFetchShim, DshmFormData, DshmHeaders } = require('../hostcore/app/fetch-shim.js');
+  const { Readable } = require('node:stream');
   const installed = installFetchShim();
   assert.strictEqual(installed, true, 'installFetchShim() 应返回 true（WASM 不可用时必须覆盖原生 fetch）');
   assert.strictEqual(typeof globalThis.fetch, 'function', '安装后 fetch 应为函数');
@@ -287,6 +293,66 @@ async function check(name, fn) {
     assert.strictEqual(first.done, false, '应能读到第一块');
     assert.ok(Buffer.from(first.value).length > 0);
     await reader.cancel();
+  });
+
+  /*
+   * ── ⑧′ 请求方向的流式体（2026-10-06 的真 bug 回归断言）─────────────────────
+   *
+   * 【被量的是什么】`dsh-client-connection/lib/index.js:75-81` 的 `bridge()` 对声明为
+   * `streaming` 的路由构造 `new Request(url, {body: Readable.toWeb(req), duplex: 'half'})`；
+   * 处理器（`dsh-client-file-upload` 的 `/api/session/uploadFileBinary`）随后读
+   * `request.body` → `body.getReader()`。所以"垫片给不给 `body`"就是这条路由的生死线。
+   *
+   * 【探针写成函数是为了给它配对照臂】判据必须能**判红**：下面立刻用一个"照旧实现"
+   * （流式体一律吞成 `_body=null`、不设 `body`）跑同一段探针，它必须报 not-ok。
+   * 没有这个对照臂，探针有可能恒绿（例如把 `req.body` 换成别的东西也能"读到串"）。
+   */
+  const STREAM_CHUNKS = ['hello-', 'stream'];
+  const streamBodyProbe = async (RequestImpl) => {
+    const req = new RequestImpl('http://dsh.internal/api/session/uploadFileBinary?name=x.txt', {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: Readable.toWeb(Readable.from(STREAM_CHUNKS.map((s) => Buffer.from(s)))),
+      duplex: 'half',
+    });
+    if (req.body === null || req.body === undefined) {
+      return { ok: false, why: `request.body === ${String(req.body)}（流式体被吞掉 ⇒ 处理器会掉进 undefined.getReader()）` };
+    }
+    if (typeof req.body.getReader !== 'function') {
+      return { ok: false, why: `request.body 不是可读流（getReader=${typeof req.body.getReader}）` };
+    }
+    const reader = req.body.getReader();
+    const chunks = [];
+    for (;;) {
+      const step = await reader.read();
+      if (step.done === true) break;
+      chunks.push(Buffer.from(step.value));
+    }
+    const text = Buffer.concat(chunks).toString('utf8');
+    const want = STREAM_CHUNKS.join('');
+    return text === want ? { ok: true, text } : { ok: false, why: `读出 ${JSON.stringify(text)}，应为 ${JSON.stringify(want)}` };
+  };
+
+  await check('请求流式体保真（streaming 路由的 request.body 可读）', async () => {
+    const probe = await streamBodyProbe(globalThis.Request);
+    assert.strictEqual(probe.ok, true, probe.why);
+  });
+
+  await check('对照臂：吞掉流式体的 Request 实现必须被判红', async () => {
+    /* 「照旧实现」：只认 Buffer，其余一律 `_body = null`，且**不设** `body`。 */
+    class DroppingRequest {
+      constructor(input, init = {}) {
+        this.url = String(input);
+        this.method = init.method === undefined ? 'GET' : String(init.method).toUpperCase();
+        this.headers = init.headers instanceof DshmHeaders ? init.headers : new DshmHeaders(init.headers);
+        this.signal = init.signal;
+        this.bodyUsed = false;
+        this._body = Buffer.isBuffer(init.body) ? init.body : null;
+      }
+    }
+    const probe = await streamBodyProbe(DroppingRequest);
+    assert.strictEqual(probe.ok, false,
+      '对照臂竟然判绿 ⇒ 上面的断言量不到"流式体被吞"这件事（探针失效）');
   });
 
   await check('signal 中止 → 请求被拒', async () => {

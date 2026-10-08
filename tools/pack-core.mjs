@@ -151,10 +151,17 @@ function dirSize(p) {
 /** 极简 glob：只支持 `**&#47;` 前缀与 `*` 通配，够本脚本用。 */
 function matchGlob(relPath, pattern) {
   const norm = relPath.split(sep).join('/');
+  // 【2026-10-07 修：链式 replace 会自我改写】
+  // 旧实现第二步把 `**&#47;` 换成「点星加斜杠」的任意层前缀，第三步的 `*`→`[^/]*` 又把**刚注入的
+  // 这个占位符**一起改掉 ⇒ 生成的正则只认**一层目录**（`a/b/c.d.ts` 匹配不到，`b/c.d.ts` 才行）。
+  // 实测后果：`**&#47;*.d.ts` 只删到 128 / 7448 个，容器 zip 只小 0.77 MB（预期 −21 MB）；
+  // 而日志里的「删除 xx MB」完全看不出异常 —— dirSize 只在循环前后各测一次，中间少删多少都自洽。
+  // 同一条链上的 `**&#47;*.exe` / `*.dll` / `*.pdb` 也一直只删到顶层。
+  // 改法：**单次 replace + 回调** —— 回调的返回值不再被扫描，占位符不会被二次改写。
+  // 语义（够本脚本用）：`**&#47;` = 任意层目录前缀；其余 `**` = 跨目录任意串；`*` = 不跨目录。
   const rx = new RegExp('^' + pattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*\//g, '(?:.*/)?')
-    .replace(/\*/g, '[^/]*') + '$');
+    .replace(/\*\*\/|\*\*|\*/g, (m) => (m === '**/' ? '(?:.*/)?' : m === '**' ? '.*' : '[^/]*')) + '$');
   return rx.test(norm);
 }
 
@@ -168,12 +175,38 @@ function listFilesRecursive(base, dir = base, out = []) {
   return out;
 }
 
+/**
+ * 裁剪时**永不删除**的文件名前缀（按 basename、大小写不敏感）。
+ *
+ * 【为什么必须有这张豁免表】`removeGlobs` 里的 `**&#47;*.md` 会连 `LICENSE.md` / `NOTICE.md` / `COPYING`
+ * 一起删 —— 体积可以忽略，但**许可证与归属声明缺失是合规问题**，而这类文件对运行期毫无影响。
+ * 取"前缀命中"是为了同时保住 `LICENSE`、`LICENSE-MIT`、`LICENSE.md`、`NOTICE.txt`、`COPYING`、
+ * `AUTHORS`/`CONTRIBUTORS` 等常见命名；被删面本来就只有 `*.md` / `*.map` / 测试目录，
+ * 因此这张表不会误伤任何被 require 的 JS。
+ */
+const PRUNE_KEEP_BASENAME_PREFIXES = [
+  'license', 'licence', 'notice', 'copying', 'authors', 'contributors', 'thirdpartynotices',
+];
+
 function prune() {
   const nm = join(STAGE, 'node_modules');
   log('\n[pack-core] ② 裁剪非鸿蒙二进制');
   let before = dirSize(nm);
   let removedBytes = 0;
   let removedCount = 0;
+  let keptLicense = 0;
+  let keptAsset = 0;
+  /*
+   * 【keepGlobs：运行期资源豁免，优先于所有 removeGlobs（2026-10-07 新增）】
+   * 起因：`**&#47;*.md` 会连**被代码真正读取的资源**一起删 —— 实测 `@deepseek-ai/dsh-skill-badge`
+   * 的 `assets/dsh-badge.md` 正是 `lib/index.js` 里 `new URL("../assets/dsh-badge.md", import.meta.url)`
+   * + `readFile(...)` 的读取目标，删掉它 ⇒ 这个内置技能的 provider 直接抛错（"看起来是文档、
+   * 实际是运行期资源"，光看扩展名分辨不出来）⇒ 用**目录级豁免**（`assets/` 是包内资源目录）。
+   * 豁免表从配方的 `keepGlobs` 字段收集（可挂在任意规则上，收集时与规则顺序无关）。
+   * 注意：`dir` 形式的规则（koffi / node-pty 的平台目录）是显式点名的删除，**不走**这张表。
+   */
+  const keepGlobs = (recipe.prune ?? []).flatMap((r) => r.keepGlobs ?? []);
+  const isKept = (rel) => keepGlobs.some((g) => matchGlob(rel, g));
 
   for (const rule of recipe.prune ?? []) {
     if (rule.dir) {
@@ -201,6 +234,17 @@ function prune() {
       for (const f of listFilesRecursive(nm)) {
         const rel = f.slice(nm.length + 1);
         if (!matchGlob(rel, pattern)) continue;
+        // 运行期资源豁免（keepGlobs）优先：这类文件会被代码读，不是"随包文档"。
+        if (isKept(rel)) {
+          keptAsset++;
+          continue;
+        }
+        // 许可证 / 归属声明一律保全（体积可忽略；删了是合规风险）——见 PRUNE_KEEP_BASENAME_PREFIXES。
+        const base = f.slice(f.lastIndexOf(sep) + 1).toLowerCase();
+        if (PRUNE_KEEP_BASENAME_PREFIXES.some((p) => base.startsWith(p))) {
+          keptLicense++;
+          continue;
+        }
         removedBytes += statSync(f).size;
         removedCount++;
         rmSync(f, { force: true });
@@ -209,7 +253,8 @@ function prune() {
     }
   }
   const after = dirSize(nm);
-  log(`[pack-core]   删除 ${removedCount} 项 / ${(removedBytes / 1048576).toFixed(1)} MB；`
+  log(`[pack-core]   删除 ${removedCount} 项 / ${(removedBytes / 1048576).toFixed(1)} MB`
+    + `（另有 ${keptLicense} 个许可证/归属声明、${keptAsset} 个 keepGlobs 运行期资源按豁免表保留）；`
     + `node_modules ${(before / 1048576).toFixed(1)} MB → ${(after / 1048576).toFixed(1)} MB`);
 }
 
@@ -890,6 +935,32 @@ const DSHM_PLUGIN_PACKAGES = [
   //   `workflow-ptc` / `tool-workflow` 仍禁用（另案，别顺手放开）。
   // 【恢复条件】官方若给出"无 wasm 的擦除 + 不 spawn"的实现，删掉本项与 profile ⑦ 那两行即可。
   { name: '@deepseek-ai/dshm-ptc-runtime-inproc', dir: 'dshm-ptc-runtime-inproc' },
+  // 市场宿主桥（2026-10-06，见 hostcore/plugins/dshm-market-bridge/lib/index.js 头注）：
+  // 手机/平板档"沙箱内一切自带可执行文件的 execve 都被拒"⇒ 插件市场赖以工作的
+  // `spawn("pnpm")` / `spawn("dsh")` 结构性不可用（真机现象：「pnpm 自动配置失败」、
+  // 市场一个插件都装不上）。本插件按上游明文契约（`dshmarket/lib/index.js:235-271`）
+  // 发布 `desktopProfiles` + `desktopPnpm`，把市场的 add/remove 改走**进程内安装队列**
+  // （与 `bin/pnpm` 假壳同一份协议），全程不 spawn。只在假壳真跑不起来时才接管
+  // （同步探 `bin/pnpm --version`）⇒ PC/2in1 档行为零变化。
+  // 【与其它 dshm-* 的差别】它**没有** cordis 行，也不是"插件页里的一项"：服务必须在
+  // Loader 条目挂载**之前**就位，所以由 pack-core 的
+  // `patchMarketDesktopRuntime()` 注入进 `@deepseek-ai/dsh/lib/profile-boot-*.js` 的
+  // boot 回调（与 profileContext 同时机）；本清单里的作用只是"落树 + 声明依赖"。
+  { name: '@deepseek-ai/dshm-market-bridge', dir: 'dshm-market-bridge' },
+  // profile 包管理进程内通道（2026-10-06，见 hostcore/plugins/dshm-profile-pnpm/lib/index.js 头注）：
+  // 手持档（手机/平板）**没有任何可 execve 的 shell**（`system-sh=缺` / `ash=denied` /
+  // `bash=denied` / `realShell=no`），而 `@deepseek-ai/dsh-plugin-manager` 的
+  // `runProfilePnpm()` 最后一跳是 `execa(options.command ?? "pnpm", …)` ⇒ 假壳
+  // `bin/pnpm` 的第一行解释器就被内核拒（`spawn pnpm EACCES`），假壳里唯一干活的
+  // 实现（写 `install-queue/*.rem`）**结构上不可达** ⇒ 「设置 → 插件 → 卸载」
+  // 100% 失败、装上的包卸不掉（用户可见文案是 execa 的英文原文）。
+  // 上游的 `profileContext.packageManager` 钩子只能换"spawn 哪个可执行文件"，本档
+  // 任何 command 都点不着火（toybox 可跑但**不带 sh applet**）⇒ 纯配置解决不了。
+  // 本插件把 add/remove 改走**与应用内安装器同一份队列协议**（与市场桥同判据：
+  // 同步探 `bin/pnpm --version`，能跑就完全惰性）⇒ PC/2in1 档行为零变化。
+  // 【与其它 dshm-* 的差别】它也没有 cordis 行：接线由本文件的
+  // `patchProfilePnpmBridge()` 注入进 plugin-manager 的 `operations.js`。
+  { name: '@deepseek-ai/dshm-profile-pnpm', dir: 'dshm-profile-pnpm' },
 ];
 /**
  * 承载自带插件依赖声明的上游包。
@@ -1385,6 +1456,29 @@ function grepTextToNdjson(stdout) {
 		}));
 	}
 	return lines.join("\\n") + (lines.length > 0 ? "\\n" : "");
+}
+/**
+ * 把「空结果」从「访问被拒」里救出来（真机 P1-1，见 docs/108）。
+ *
+ * 【缺陷】rg 遇到读不进去的目录时**不保证**用非 0/1 的退出码：权限拒绝是遍历期错误，
+ * rg 把 \`目录: Permission denied (os error 1)\` 打到 stderr 后继续；若最终没有命中，
+ * 它就以 exit 1 收场 —— 而上游把 exit 1 一律读成「真的没有匹配」（noMatches）。
+ * 于是 \`glob(Documents,"*")\` 变成 "No files found"、\`grep(Documents,".")\` 变成
+ * "No matches found"，把「没权限」伪装成「目录是空的」；用户与模型都会据此误判。
+ * （降级路径同理：find 撞上 EPERM 也是 exit 1。）
+ *
+ * 【判据为什么只加在「空结果」这一支】大树里个别子目录读不到是常态（跨挂载点、系统目录），
+ * 不能因为 stderr 里出现一条 Permission denied 就把整次搜索判失败 —— 那会把已经拿到的
+ * 结果一起丢掉。所以只有「stderr 有访问类关键词」且「stdout 一个结果都没有」才升级为错误。
+ *
+ * @returns 要抛的 SearchError；不是「访问被拒」时返回 null（保持上游语义）
+ */
+function accessibilityDenial(toolName, stderrText) {
+	const text = typeof stderrText === "string" ? stderrText : "";
+	if (!/permission denied|operation not permitted|os error 1\\b|os error 13\\b|EACCES|EPERM/i.test(text)) return null;
+	const first = text.split("\\n").find((line) => line.trim() !== "");
+	if (first === undefined) return null;
+	return new SearchError(toolName + " 读不到搜索目录：目录被系统拒绝访问（Permission denied）—— 这是『读不到』，不是『没有内容』。原始 stderr: " + first.trim(), "SEARCH_FAILED");
 }`;
 
   // 1) helpers 注入：resolveRgPath 尾锚点（文件内唯一，rg -c 验证）
@@ -1442,6 +1536,21 @@ function grepTextToNdjson(stdout) {
 \t\t: stdoutRaw;`;
   if (!t.includes(oldOut)) die('fs-search 降级 patch：输出段锚点未命中（collected 形态变了）');
   t = t.replace(oldOut, newOut);
+
+  // 4) 「空结果」守卫（真机 P1-1，docs/108）：rg / find 把「读不到」以 exit 1 收场时，
+  //    上游一律读成「真的没有匹配」⇒ glob 报 No files found、grep 报 No matches found，
+  //    把「被系统拒绝」伪装成「目录是空的」。这里把「stderr 有访问类关键词 且 stdout 为空」
+  //    升级成可读错误。判据与理由见注入进来的 accessibilityDenial 头注。
+  const oldEmpty = `\tif (outcome.exitCode !== 0 && outcome.exitCode !== 1) throw classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy);
+\treturn {`;
+  const newEmpty = `\tif (outcome.exitCode !== 0 && outcome.exitCode !== 1) throw classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy);
+\tif (outcome.exitCode === 1 && stdout.text.length === 0) {
+\t\tconst denial = accessibilityDenial(toolName, stderr.text);
+\t\tif (denial !== null) throw denial;
+\t}
+\treturn {`;
+  if (!t.includes(oldEmpty)) die('fs-search 空结果守卫：锚点未命中（runRipgrep 尾段形态变了）');
+  t = t.replace(oldEmpty, newEmpty);
 
   // 【为什么在这里自检（2026-10-05 一天内连踩两次）】上面三段注入都是**模板串**，而模板串有三条暗礁：
   //   ① 反斜杠要写两个（正则里的 `\/` 会被吃成一个裸 `/`，注入后是语法错的 `//+$/`）；
@@ -2212,6 +2321,164 @@ function patchAppBootReadonlyStack() {
 }
 
 /**
+ * 端侧「市场宿主桥」接线（2026-10-06）。
+ *
+ * 【为什么必须有这一步】手机/平板档沙箱内一切自带可执行文件的 execve 都被系统拒绝，
+ * 插件市场（`dshmarket`）赖以工作的 `spawn("pnpm")` 探针与 `spawn("dsh")` 安装因此
+ * **结构性不可用** —— 用户真机现象就是「pnpm 自动配置失败」，且市场一个插件都装不上
+ * （完整证据链见 `hostcore/plugins/dshm-market-bridge/lib/index.js` 头注）。
+ *
+ * 【上游给的正规缝】`dshmarket/lib/index.js:235-271` 明文规定：宿主发布
+ * `desktopProfiles` 后，市场即 `inject(["desktopPnpm"])` 改用宿主自带的包管理器运行时，
+ * 那时它的 `probePnpm` / `provisionPnpm` 是常量真 ——「pnpm 自动配置」这一步根本不会发生。
+ * 同一处注释还规定这两个服务必须在 **Loader 条目挂载之前**存在。核心树里唯一满足这个
+ * 时机的地方，就是这里：`boot(...)` 回调里 `profileContext` 被 provide 的那两行之后。
+ *
+ * 【为什么不用 "insert 一个 cordis 行"】行序是"bundle 行在前、profile patch 行在后"，
+ * 而市场自己就是 bundle 行 ⇒ 补丁行永远排它后面，赌不赢挂载顺序（实测口径见
+ * `hostcore/plugins/dshm-workspace-claim` 之类"只管自己、不依赖顺序"的同族选择）。
+ *
+ * 【注入内容】`await import("@deepseek-ai/dshm-market-bridge")` 后 `provide` 两个服务；
+ * 包本体由 `embedDshmToolPackages()` 落进树（`node_modules/@deepseek-ai/dshm-market-bridge`），
+ * 从 `@deepseek-ai/dsh/lib/` 起算的裸标识符解析正好命中它。
+ * **失败只记一行**：桥是增量能力，任何失败都不许影响已验收的启动链路。
+ *
+ * 【幂等/防呆】按标记跳过重复注入；找不到锚点即 die —— 上游改了这段就当场暴露在打包期，
+ * 而不是静默失效成"手机档市场又装不上了"（那种回归只能靠用户复现）。
+ */
+function patchMarketDesktopRuntime() {
+  const libDir = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh', 'lib');
+  if (!existsSync(libDir)) {
+    die(`市场宿主桥补丁：找不到 ${libDir}`);
+  }
+  const MARK = 'DSHM_MARKET_BRIDGE_BOOT';
+  /*
+   * 锚点：`profileContext` 与 `DSH_LAUNCH_ENVIRONMENT_KEY` 的两次 provide（同一回调内，
+   * 缩进两个 tab）。这两行的相对顺序与缩进都是上游 `runProfile()` 的既有形态。
+   */
+  const anchor = '\t\t\thostCtx.provide("profileContext", profileContext);\n'
+    + '\t\t\thostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.environment);\n';
+  const injection = [
+    `\t\t\t/* ${MARK}: 端侧市场宿主桥（desktopProfiles + desktopPnpm）。`,
+    '\t\t\t   上游契约要求这两个服务在 Loader 条目挂载之前就位，所以 provide 必须在这里',
+    '\t\t\t   （与 profileContext 同一时机），不能写成 cordis 行（行序赌不过 bundle 行）。',
+    '\t\t\t   实现见 hostcore/plugins/dshm-market-bridge/（源码）；失败只记一行，不阻断启动。 */',
+    '\t\t\ttry {',
+    '\t\t\t\tconst mkt = await import("@deepseek-ai/dshm-market-bridge");',
+    '\t\t\t\tmkt.provideMarketBridge(hostCtx, profileContext);',
+    '\t\t\t} catch (error) {',
+    '\t\t\t\tconsole.error("dsh: 市场宿主桥未挂载（不影响启动）："',
+    '\t\t\t\t\t+ (error && error.message ? error.message : error));',
+    '\t\t\t}',
+    '',
+  ].join('\n');
+  // 实现文件的名字带上游构建哈希（`profile-boot-<hash>.js`），所以按前缀找而不是写死。
+  const impls = readdirSync(libDir).filter((n) => /^profile-boot-.*\.js$/.test(n));
+  if (impls.length === 0) {
+    die(`市场宿主桥补丁：${libDir} 下没有 profile-boot-*.js`);
+  }
+  let injected = 0;
+  for (const fileName of impls) {
+    const target = join(libDir, fileName);
+    const text = readFileSync(target, 'utf8');
+    if (text.includes(MARK) || !text.includes(anchor)) {
+      continue;
+    }
+    writeFileSync(target, text.replace(anchor, anchor + injection), 'utf8');
+    log(`[pack-core]   市场宿主桥：${fileName} 已注入 desktopProfiles/desktopPnpm 的 provide`);
+    injected += 1;
+  }
+  if (injected === 0) {
+    if (impls.some((n) => readFileSync(join(libDir, n), 'utf8').includes(MARK))) {
+      log('[pack-core]   市场宿主桥补丁已存在（跳过）');
+      return;
+    }
+    die('市场宿主桥补丁：profile-boot 实现文件里找不到 provide(profileContext) 锚点'
+      + '（上游结构变化？），拒绝静默跳过');
+  }
+}
+
+/**
+ * 端侧「profile 包管理进程内通道」接线（2026-10-06）。
+ *
+ * 【为什么必须有这一步】手机/平板档沙箱内**没有任何可 execve 的 shell**
+ * （`system-sh=缺`、`ash=denied`、`bash=denied`、`realShell=no`），而
+ * `@deepseek-ai/dsh-plugin-manager` 的 `runProfilePnpm()` 最后一跳是
+ * `execa(options.command ?? 'pnpm', …)`（`lib/types/operations.js:325`）⇒ 假壳
+ * `bin/pnpm` 的**第一行解释器**就被内核拒（`spawn pnpm EACCES`），假壳里唯一干活的
+ * 实现（`remove/rm` 分支写 `install-queue/<base>.rem`）因此**结构上不可达**。
+ * 真机现象：「设置 → 插件 → 卸载」100% 失败、装上的包卸不掉，用户看到的是 execa
+ * 的英文原文（`Command failed with EACCES: pnpm remove <名>`）。
+ *
+ * 【上游的钩子救不了】`profileContext.packageManager`（`types/index.js:340/:401/:729`）
+ * 只能改"**spawn 哪个可执行文件**"与 env，最终仍是 `execa(command, args)` ——
+ * 本档任何 command 都点不着火：`toybox=ok` 但 toybox **不带 sh applet**
+ * （真机 `toybox-exec-sh=rc1` / `toybox-exec-ash=rc126`）。⇒ 纯配置解决不了，
+ * 必须在 `execa` 之前分叉。
+ *
+ * 【注入点为什么选这里】`operations.js` 里 `preflight`（兼容性预检）之后、
+ * `const cancellation = new AbortController()` 之前：**兼容性预检与 profile 清单快照
+ * 都已保留**（回滚语义不变），而 `execa` 还没被调用。此处 `log` / `append` /
+ * `output` / `truncated` / `logPath` / `incompatible` 都已在作用域内，所以接管分支能
+ * 合成**与 execa 路径完全相同的返回形状**（`{exitCode, output, truncated, logPath,
+ * incompatible}`），写进同一份 `.plugin-manager/logs/operation-<id>/pnpm.log`，
+ * 上游的"失败 ⇒ `throw new Error(output)`"链路一个字都不用改。
+ *
+ * 【惰性保证】桥自己先同步探一次 `bin/pnpm --version`（与市场桥同一判据）；能跑就返回
+ * `undefined` ⇒ 这里原样继续走 `execa`。PC/2in1 档（`sh=ok`/`ash=ok`）因此**行为一个
+ * 字节不变**，市场与设置页都仍走已验收的 spawn 链路。
+ *
+ * 【幂等/防呆】按标记跳过；找不到锚点即 die —— 上游改了这段就当场暴露在打包期，
+ * 而不是静默失效成"平板档又卸不掉插件了"。
+ */
+function patchProfilePnpmBridge() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-plugin-manager',
+    'lib', 'types', 'operations.js');
+  if (!existsSync(target)) {
+    die(`profile 包通道补丁：找不到 ${target}`);
+  }
+  const MARK = 'DSHM_PROFILE_PNPM_BRIDGE';
+  const anchor = '    if (preflight.length > 0)\n'
+    + "        return rejected(preflight, 'nothing was installed');\n";
+  const injection = [
+    `    /* ${MARK}: 端侧（手机/平板档）没有任何可 execve 的 shell，execa(pnpm) 必 EACCES。`,
+    '       上游的 packageManager 钩子只能换"spawn 哪个可执行文件"，本档任何 command 都点不着火',
+    '       ⇒ 必须在这里分叉：探针判"随包假壳跑不起来"时改走 Host 进程内的安装队列',
+    '       （与市场桥同一协议、同一判据、同一个 dshm-installer）。',
+    '       返回 undefined = 不接管、照旧 spawn（PC/2in1 档就是这条）⇒ 已验收链路零变化。',
+    '       实现见 hostcore/plugins/dshm-profile-pnpm/。 */',
+    '    {',
+    '        const dshmPnpm = await import("@deepseek-ai/dshm-profile-pnpm");',
+    '        const bridged = await dshmPnpm.bridgeRunProfilePnpm(args, {',
+    '            dir, signal: options.signal,',
+    '        });',
+    '        if (bridged !== undefined) {',
+    '            if (bridged.text.length > 0) {',
+    '                const bridgedBytes = Buffer.from(bridged.text, "utf8");',
+    '                await log.write(bridgedBytes);',
+    '                options.onOutput?.(bridged.text, bridged.exitCode === 0 ? "stdout" : "stderr");',
+    '                append(bridgedBytes);',
+    '            }',
+    '            await log.close();',
+    '            return { exitCode: bridged.exitCode, output: output.toString("utf8"), truncated, logPath, incompatible };',
+    '        }',
+    '    }',
+    '',
+  ].join('\n');
+  const text = readFileSync(target, 'utf8');
+  if (text.includes(MARK)) {
+    log('[pack-core]   profile 包通道补丁已存在（跳过）');
+    return;
+  }
+  if (!text.includes(anchor)) {
+    die('profile 包通道补丁：operations.js 里找不到 preflight/`nothing was installed` 锚点'
+      + '（上游结构变化？），拒绝静默跳过');
+  }
+  writeFileSync(target, text.replace(anchor, anchor + injection), 'utf8');
+  log('[pack-core]   profile 包通道：operations.js 已注入 runProfilePnpm 的进程内分叉');
+}
+
+/**
  * `dsh-fs-local` 的**硬链接禁令**包容（P1，2026-09-26）。
  *
  * 【上游行为】`writeFileAtomic(createIfAbsent=…)` 用 `link(2)` 做 no-clobber 发布
@@ -2281,6 +2548,129 @@ function patchFsLocalLink() {
   log('[pack-core]   fs-local 补丁：createIfAbsent 发布 link→rename 回退（鸿蒙禁硬链接）');
 }
 
+
+/**
+ * `dsh-fs-local` 的**权限错误人话化**（真机 P1-2，2026-10-06，见 docs/109）。
+ *
+ * 【上游行为】读路径上凡是被平台拒的调用，都把 node 的裸错直接上抛：
+ *   · `statRegularFile()` 只认 ENOENT（其余 `throw error`）；
+ *   · `readFileAbortable()` 只认 abort（其余 `throw error`）。
+ * 真机（PC 档）在 `/storage/Users/currentUser/{Documents,Desktop,Download}` 这类受保护用户
+ * 目录上拿到的正是裸 `EPERM: operation not permitted, stat/open …` ⇒ 用户与模型都只能猜。
+ * 同一棵树里 `listDir` 早就把权限错翻成了 `FS_PERMISSION_DENIED`（`listingIoError()`），
+ * 本补丁只是把读路径对齐到那条**上游已有**的口径。
+ *
+ * 【等价改写】复用上游已有的 `FS_PERMISSION_DENIED` 与同一句文案
+ * （`cannot <verb> "<path>": permission denied`）；只翻权限错（EPERM/EACCES），
+ * 其余错误（not-found 的 FS_NOT_FOUND、abort 的 FS_ABORTED）逐字不动。
+ * `readFileAbortable()` 因此多收一个 `displayPath`（调用方共两处，都已带上），只用于报错文案。
+ *
+ * 【幂等/防呆】逐站点判断：上游片段还在就替换；片段不在而注入形态在 = 已打过（跳过）；
+ * 两者都不在 = `die()`。末尾再核对标记总数 —— 上游改结构必须当场暴露在打包期，
+ * 而不是静默失效成「真机又是裸 EPERM」（那种回归只能靠用户复现）。
+ */
+function patchFsLocalPermissionHint() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-fs-local', 'lib', 'index.js');
+  if (!existsSync(target)) {
+    die(`fs-local 权限文案补丁：找不到 ${target}`);
+  }
+  /*
+   * 注入文本一律用**单引号**串拼（不用模板串）：里面既有反向引号又有 ${…}，
+   * 模板串会在这里被就地求值（实测炸过），单引号串才是"逐字写进树里"。
+   */
+  const MARK = 'DSHM_FS_LOCAL_PERMISSION_HINT';
+  const sites = [
+    {
+      why: 'statRegularFile：stat 被拒 ⇒ FS_PERMISSION_DENIED',
+      before: [
+        '\t\t/* v8 ignore next 2 -- a non-ENOENT stat failure needs a permission/IO fault; only the not-found path is reachable in tests. */',
+        '\t\tif (!isENOENT(error)) throw error;',
+        '\t\tthrow new FsError(`cannot ${verb} "${target.displayPath}": not found`, "FS_NOT_FOUND");',
+      ].join('\n'),
+      after: [
+        '\t\t/*',
+        '\t\t * 【DSHM 端侧补丁 2026-10-06（DSHM_FS_LOCAL_PERMISSION_HINT）】上游把 stat 的裸 errno 直接上抛：',
+        '\t\t * 真机（PC 档）在受保护的用户目录上得到 `EPERM: operation not permitted, stat …`。',
+        '\t\t * 这里复用上游**已有**的 FS_PERMISSION_DENIED（listingIoError() 早就在用这个码），',
+        '\t\t * 文案与 `cannot list "…": permission denied` 同一口径；其余错误原样上抛。',
+        '\t\t * v8 ignore next 3 -- 需要一次 stat 的权限/IO 故障；测试里只覆盖 not-found 那条。',
+        '\t\t */',
+        '\t\tif (isPermissionError(error)) throw new FsError(`cannot ${verb} "${target.displayPath}": permission denied`, "FS_PERMISSION_DENIED", { cause: error });',
+        '\t\tif (!isENOENT(error)) throw error;',
+        '\t\tthrow new FsError(`cannot ${verb} "${target.displayPath}": not found`, "FS_NOT_FOUND");',
+      ].join('\n'),
+    },
+    {
+      why: 'readFileAbortable：open/read 被拒 ⇒ FS_PERMISSION_DENIED（并多收 displayPath）',
+      before: [
+        'async function readFileAbortable(absolutePath, verb, signal) {',
+        '\ttry {',
+        '\t\treturn await readFile(absolutePath, signal ? { signal } : {});',
+        '\t} catch (error) {',
+        '\t\t/* v8 ignore next 2 -- a non-abort readFile rejection needs a permission/IO fault racing an open file. */',
+        '\t\tif (!isAbortError(error)) throw error;',
+        '\t\tthrow new FsError(`${verb} aborted`, "FS_ABORTED");',
+        '\t}',
+        '}',
+      ].join('\n'),
+      after: [
+        '/*',
+        ' * 【DSHM 端侧补丁 2026-10-06（DSHM_FS_LOCAL_PERMISSION_HINT）】多收的 displayPath 只为把',
+        ' * 「读被拒」讲清楚（见下面 catch 的权限分支）；调用方只有 readWholeText() 与 readForEdit()',
+        ' * 两处，都已带上。',
+        ' */',
+        'async function readFileAbortable(absolutePath, verb, signal, displayPath) {',
+        '\ttry {',
+        '\t\treturn await readFile(absolutePath, signal ? { signal } : {});',
+        '\t} catch (error) {',
+        '\t\t/*',
+        '\t\t * 【DSHM 端侧补丁 2026-10-06】上游在这里只认 abort；权限错（真机 PC 档：',
+        '\t\t * `EPERM: operation not permitted, open …`）会裸着上抛 ⇒ 先翻权限、再判 abort，其余原样上抛。',
+        '\t\t * v8 ignore next 3 -- 需要一次 open/read 的权限故障；测试里只覆盖 abort 那条。',
+        '\t\t */',
+        '\t\tif (isPermissionError(error)) throw new FsError(`cannot ${verb} "${displayPath}": permission denied`, "FS_PERMISSION_DENIED", { cause: error });',
+        '\t\tif (!isAbortError(error)) throw error;',
+        '\t\tthrow new FsError(`${verb} aborted`, "FS_ABORTED");',
+        '\t}',
+        '}',
+      ].join('\n'),
+    },
+    {
+      why: 'readWholeText 的调用点：补上 displayPath',
+      before: '\tconst raw = await readFileAbortable(target.targetKey, "read", signal);',
+      after: '\tconst raw = await readFileAbortable(target.targetKey, "read", signal, target.displayPath); /* DSHM_FS_LOCAL_PERMISSION_HINT */',
+    },
+    {
+      why: 'readForEdit 的调用点：补上 displayPath',
+      before: '\tconst buffer = await readFileAbortable(absolutePath, "edit", signal);',
+      after: '\tconst buffer = await readFileAbortable(absolutePath, "edit", signal, displayPath); /* DSHM_FS_LOCAL_PERMISSION_HINT */',
+    },
+  ];
+  let text = readFileSync(target, 'utf8');
+  let patched = 0;
+  for (const site of sites) {
+    const times = text.split(site.before).length - 1;
+    if (times === 0) {
+      if (text.includes(site.after)) continue; // 已打过（幂等）
+      die(`fs-local 权限文案补丁：未找到待替换片段（${site.why}）—— 上游结构变化？拒绝静默跳过`);
+    }
+    if (times !== 1) {
+      die(`fs-local 权限文案补丁：待替换片段出现 ${times} 次（${site.why}）—— 判据不再唯一，拒绝静默乱改`);
+    }
+    text = text.split(site.before).join(site.after);
+    patched += 1;
+  }
+  if (patched === 0) {
+    log('[pack-core]   fs-local 权限文案补丁已存在（跳过）');
+    return;
+  }
+  const marks = text.split(MARK).length - 1;
+  if (marks !== sites.length) {
+    die(`fs-local 权限文案补丁：标记 ${MARK} 应出现 ${sites.length} 次，实际 ${marks} 次 —— 补丁不完整，拒绝出包`);
+  }
+  writeFileSync(target, text, 'utf8');
+  log(`[pack-core]   fs-local 权限文案补丁：stat/open 的裸 errno ⇒ FS_PERMISSION_DENIED（${marks} 处）`);
+}
 /**
  * `dsh-attachment-local` 的**硬链接禁令 + 祖先 fsync 容错**（P1，2026-09-26）。
  *
@@ -2362,6 +2752,77 @@ function patchAttachmentLocalLink() {
 
   writeFileSync(target, text, 'utf8');
   log('[pack-core]   attachment-local 补丁：link→copyFile + 祖先 fsync 容错（鸿蒙沙箱）');
+}
+
+// ── ⑥ attachment-local 的失败 cause 必须进报文（2026-10-06）───────────────
+/*
+ * 【这一组解决什么】附件落盘失败时，`dsh-attachment-local` 的**三处** catch 把真正的 cause
+ * （syscall 的 errno / TypeError 正文）包进 `AttachmentError` 的 `options.cause`；而
+ * `dsh-client-file-upload/lib/index.js:269` 的 `commit()` 只取 `error.code` 放进 details ⇒
+ * 报文里只剩 `{"reason":"ATTACHMENT_WRITE_FAILED"}`，**真因当场丢弃**，连日志都没有一处。
+ *
+ * 【代价（2026-10-06 实测，见 docs/111）】一个"流式请求体被宿主 fetch 垫片吞掉"的
+ * `TypeError: Cannot read properties of undefined (reading 'getReader')`，因为报文与
+ * "鸿蒙沙箱禁止 chmod/copyFile"**逐字相同**，被端侧自检报告连续两轮判成"补丁把附件写坏"， 
+ * 最后靠 `attachments/v1/tmp` 的 mtime 变化反推失败阶段才定位到真正的组件。
+ *
+ * 【改法】在最里面那一层就把 cause 的 `code` + `message` 织进 `AttachmentError` 的
+ * **message**：该 message 经 `commit()` 原样进 HTTP 响应体的 `error.message`（用户界面与
+ * 日志都看得到），同时 `console.error` 落一条宿主日志（`node-output.log` 可 `hdc file recv` 取回）。
+ * 不改 code、不改 details 形状、不改控制流 ⇒ `session/attachment-invalid` +
+ * `reason=ATTACHMENT_WRITE_FAILED` 这套既有口径**保持不变**，只是**多带一句人话**。
+ *
+ * 【纪律】与上面所有 patch 一致：不改上游判定逻辑，只改打包产物；找不到片段就 die。
+ */
+function patchAttachmentLocalCause() {
+  const target = join(
+    STAGE, 'node_modules', '@deepseek-ai', 'dsh-attachment-local', 'lib', 'index.js',
+  );
+  if (!existsSync(target)) {
+    die(`attachment-local cause 补丁：找不到 ${target}`);
+  }
+  let text = readFileSync(target, 'utf8');
+  /* 独立标记（不复用 DSHM_ATTACHMENT_SANDBOX）：两者的注入时机互不依赖，
+   * 树增量复用 + 只升过 ⑪ 的那种旧树不该让本条被静默跳过。 */
+  if (text.includes('DSHM_ATTACHMENT_CAUSE')) {
+    log('[pack-core]   attachment-local cause 补丁已存在（跳过）');
+    return;
+  }
+
+  // ① 在 syncDirectory 之前插一个纯函数（模块级函数声明，抛出点都在其后定义，靠提升即可见）。
+  const helperAnchor = 'async function syncDirectory(path) {';
+  if (!text.includes(helperAnchor)) {
+    die('attachment-local cause 补丁：syncDirectory 锚点已变化（未找到待插入位置），拒绝静默跳过');
+  }
+  /* 生成到端侧的那段源码：**只用字符串拼接**，不在外层模板字面量里再嵌反引号/`${` ——
+   * 2026-10-06 踩过一次：嵌进去的转义反引号会把外层模板提前收尾，pack-core 自己
+   * `node --check` 仍绿，但生成出来的文件是坏语法（到装机才炸）。 */
+  const helper = `/*
+ * 【DSHM 端侧补丁 2026-10-06（DSHM_ATTACHMENT_CAUSE）】把真正的失败 cause 织进 message。
+ * 原实现把 cause 只挂在 options.cause 上，而唯一的读点（dsh-client-file-upload 的
+ * commit()）只取 code ⇒ 报文里丢了 syscall/errno，故障排查只能靠猜。详见 docs/111。
+ */
+function attachmentPersistFailure(error) {
+\tconst code = error !== null && typeof error === "object" && typeof error.code === "string" ? error.code : "";
+\tconst detail = error instanceof Error ? error.message : String(error);
+\tconst cause = code === "" ? detail : code + ": " + detail;
+\tconsole.error("[attachment-local] 落盘失败：" + cause);
+\treturn "Unable to persist attachment. (" + cause + ")";
+}
+${helperAnchor}`;
+  text = text.replace(helperAnchor, helper);
+
+  // ② 三处抛出点（publishImmutableAlias / stageImmutableObject / publishStagedObject）挂钩。
+  const throwBefore = '\t\tthrow new AttachmentError("Unable to persist attachment.", "ATTACHMENT_WRITE_FAILED", { cause: error });';
+  const throwAfter = '\t\tthrow new AttachmentError(attachmentPersistFailure(error), "ATTACHMENT_WRITE_FAILED", { cause: error });';
+  const hits = text.split(throwBefore).length - 1;
+  if (hits !== 3) {
+    die(`attachment-local cause 补丁：期望 3 处 ATTACHMENT_WRITE_FAILED 抛出点，实到 ${hits} 处，拒绝静默跳过`);
+  }
+  text = text.split(throwBefore).join(throwAfter);
+
+  writeFileSync(target, text, 'utf8');
+  log('[pack-core]   attachment-local cause 补丁：3 处 ATTACHMENT_WRITE_FAILED 带上 cause（新增 2026-10-06）');
 }
 
 // ── ⑤ 鸿蒙前端兼容补丁（对齐 GitCode issue #1 / #2）───────────────────────
@@ -3010,9 +3471,13 @@ addSystemAddonPackage();
 patchLinkForSandbox();
 patchCredentialsOwnerCheck();
 patchAppBootReadonlyStack();
+patchMarketDesktopRuntime();
+patchProfilePnpmBridge();
 patchAgentPresetWorkflow();
 patchFsLocalLink();
+patchFsLocalPermissionHint();
 patchAttachmentLocalLink();
+patchAttachmentLocalCause();
 /*
  * 【⑤ 鸿蒙前端/平台兼容补丁】对应 GitCode issue #1（侧边栏资源预览不可用、PDF 预览
  * 报错）与 #2（侧边栏终端 openharmony 被判为不支持），以及 N4（侧栏 files 页签被

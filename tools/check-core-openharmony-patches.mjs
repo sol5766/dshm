@@ -49,6 +49,22 @@
  *   · `patchFsLocalLink()`（:2227-2282）→ `DSHM_FS_LOCAL_SANDBOX`
  *   · `patchAttachmentLocalLink()`（:2297-2365）→ `DSHM_ATTACHMENT_SANDBOX`
  *
+ *   【2026-10-06 新增 ⑫（+dshm.7）】与上一条同族的"打包期 die() 才是唯一兜底"的洞：
+ *   · `patchMarketDesktopRuntime()` → `DSHM_MARKET_BRIDGE_BOOT`
+ *     —— 把 `desktopProfiles` / `desktopPnpm` 两个宿主服务的 provide 注入
+ *     `@deepseek-ai/dsh/lib/profile-boot-*.js` 的 boot 回调（手机档插件市场唯一的
+ *     非 spawn 通道；完整因果见 `hostcore/plugins/dshm-market-bridge/lib/index.js` 头注）。
+ *     文件名带构建哈希 ⇒ 判据按 readdir 过滤，与 ③ 的 runner-launch-* 同款。
+ *
+ *   【2026-10-06 新增 ⑬（+dshm.10）】同一族的洞，但打的是上游的**包管理器调用点**：
+ *   · `patchProfilePnpmBridge()` → `DSHM_PROFILE_PNPM_BRIDGE`
+ *     —— 在 `@deepseek-ai/dsh-plugin-manager/lib/types/operations.js` 的
+ *     `runProfilePnpm()` 里分叉出一条**不走 spawn** 的进程内队列通道（手机/平板档
+ *     没有任何可 execve 的 shell ⇒ `execa("pnpm", …)` 必 `spawn pnpm EACCES`，
+ *     「设置 → 插件 → 安装/卸载」100% 失败；完整因果见
+ *     `hostcore/plugins/dshm-profile-pnpm/lib/index.js` 头注与 docs/110）。
+ *     目标文件是**固定名** ⇒ 判据写死路径；反向判据 = 上游锚点仍在。
+ *
  * ---------------------------------------------------------------------------
  * 【2026-10-05 第二轮扩容：再纳入 6 个"只有打包期 `die()` 兜底"的打包步骤】
  * ---------------------------------------------------------------------------
@@ -173,6 +189,29 @@ const SHELL_ACTIVITY_UPSTREAM = 'if (spec.shellActivity !== true || platform ===
 const IDLE_PATCHED = '(this.platform === "linux" || this.platform === "openharmony") /* DSHM_OPENHARMONY_SUBPROCESS */ && observed.complete === true && root === void 0';
 const IDLE_UPSTREAM = 'this.platform === "linux" && observed.complete === true && root === void 0';
 
+/*
+ * ⑫ 市场宿主桥（2026-10-06）：`@deepseek-ai/dsh/lib/profile-boot-*.js` 的 boot 回调里
+ * 注入 `desktopProfiles` + `desktopPnpm` 的 provide（见 pack-core 的 `patchMarketDesktopRuntime()`）。
+ * 文件名与 runner-launch 一样带构建哈希 ⇒ 同样走 readdir 过滤，不能写死。
+ */
+const DSH_MARKET_LIB = 'dsh/lib';
+const DSH_MARKET_MARKER = 'DSHM_MARKET_BRIDGE_BOOT';
+/** 注入必须落在这一行之后（上游 boot 回调里 provide profileContext 的那句）。 */
+const DSH_MARKET_ANCHOR = '\t\t\thostCtx.provide("profileContext", profileContext);';
+const DSH_MARKET_PATCHED = 'mkt.provideMarketBridge(hostCtx, profileContext);';
+
+/*
+ * ⑬ profile 包通道（2026-10-06，+dshm.10）：`dsh-plugin-manager` 的 `runProfilePnpm()`
+ * 里分叉出**不走 spawn** 的进程内通道（见 pack-core 的 `patchProfilePnpmBridge()`）。
+ * 与 ⑫ 的差别：目标文件是**固定名**（不带构建哈希）⇒ 路径可以写死。
+ */
+const PROFILE_PNPM_LIB = 'dsh-plugin-manager/lib/types/operations.js';
+const PROFILE_PNPM_MARKER = 'DSHM_PROFILE_PNPM_BRIDGE';
+/** 注入必须落在这一行**之后**（上游兼容性预检的"拒绝安装"分支 —— 它就是注入锚点）。 */
+const PROFILE_PNPM_ANCHOR = "    if (preflight.length > 0)\n"
+  + "        return rejected(preflight, 'nothing was installed');\n";
+const PROFILE_PNPM_PATCHED = 'dshmPnpm.bridgeRunProfilePnpm(args, {';
+
 /* ═══════════ ④ 扩容（2026-10-05）：其余 10 个注入函数的清单门禁 ═══════════
  *
  * 站点（site）形状：
@@ -237,6 +276,16 @@ const SESSION_OLD_HELPER_HEAD = 'async function dshmPublishExclusive(fsImpl, fro
 const CREDENTIALS_UPSTREAM = '\tif (process.platform === "win32") return;\n\tif ((mode & GROUP_OTHER_BITS) === 0) return;';
 // pack-core.mjs:2240-2244 —— fs-local 的 createIfAbsent 发布段原文
 const FS_LOCAL_UPSTREAM = '\t\tif (createIfAbsent !== void 0) try {\n\t\t\tawait linkFile(tempPath, absolutePath);\n\t\t} catch (error) {\n\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);\n\t\t}';
+// pack-core.mjs 的 patchFsLocalPermissionHint() —— fs-local 权限错误人话化（P1-2，2026-10-06，见 docs/109）
+const FS_LOCAL_PERM_MARK = 'DSHM_FS_LOCAL_PERMISSION_HINT';
+const FS_LOCAL_PERM_STAT_FWD = '\t\tif (isPermissionError(error)) throw new FsError(`cannot ${verb} "${target.displayPath}": permission denied`, "FS_PERMISSION_DENIED", { cause: error });';
+const FS_LOCAL_PERM_HEAD_FWD = 'async function readFileAbortable(absolutePath, verb, signal, displayPath) {';
+const FS_LOCAL_PERM_CALL_READ_FWD = '\tconst raw = await readFileAbortable(target.targetKey, "read", signal, target.displayPath); /* DSHM_FS_LOCAL_PERMISSION_HINT */';
+const FS_LOCAL_PERM_CALL_EDIT_FWD = '\tconst buffer = await readFileAbortable(absolutePath, "edit", signal, displayPath); /* DSHM_FS_LOCAL_PERMISSION_HINT */';
+const FS_LOCAL_PERM_V8_STAT_OLD = '\t\t/* v8 ignore next 2 -- a non-ENOENT stat failure needs a permission/IO fault; only the not-found path is reachable in tests. */';
+const FS_LOCAL_PERM_HEAD_OLD = 'async function readFileAbortable(absolutePath, verb, signal) {';
+const FS_LOCAL_PERM_CALL_READ_OLD = '\tconst raw = await readFileAbortable(target.targetKey, "read", signal);';
+const FS_LOCAL_PERM_CALL_EDIT_OLD = '\tconst buffer = await readFileAbortable(absolutePath, "edit", signal);';
 // pack-core.mjs:2312 —— attachment-local 的 npm 导入行原文
 const ATTACH_IMPORT_UPSTREAM = 'import { chmod, link, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";';
 // pack-core.mjs:2320-2325 —— syncDirectory 的徒手 open/sync/close 原文
@@ -247,6 +296,9 @@ const attachmentLinkBefore = (src) => '\t\ttry {\n\t\t\tawait link(' + src + ', 
   + '\t\t\tif (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;\n'
   + '\t\t\tif (await digestFile(target) !== ' + (src === 'source' ? 'sha256' : 'staged.sha256')
   + ') throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");\n\t\t}';
+// pack-core.mjs 的 patchAttachmentLocalCause()（⑪b，2026-10-06，见 docs/111）——
+// 三处落盘失败抛出点的**上游原文**（缩进 2 个 tab）。注入后必须一处不剩。
+const ATTACH_THROW_UPSTREAM = '\t\tthrow new AttachmentError("Unable to persist attachment.", "ATTACHMENT_WRITE_FAILED", { cause: error });';
 
 /* ── 插入型补丁的反向判据（structural） ── */
 
@@ -690,7 +742,14 @@ const INJECTED_PATCHES = [
     sites: [{
       rel: 'node_modules/@deepseek-ai/dshm-workspace-claim/lib/index.js',
       markers: [['DSHM_PUBLIC_DOWNLOAD', 5]],
-      forward: [['process.env.DSHM_PUBLIC_DOWNLOAD || ""', '默认工作区根只认 ArkTS 认领到的目录（没有就完全惰性）']],
+      forward: [
+        ['process.env.DSHM_PUBLIC_DOWNLOAD || ""', '默认工作区根只认 ArkTS 认领到的目录（没有就完全惰性）'],
+        ['const DEFAULT_TITLE = "下载";', '2026-10-07：登记标题不退化成本应用包名（否则工作区列表里像一条垃圾记录）'],
+        ['if (!Array.isArray(list)) {', '2026-10-07：读不出注册表就 fail-closed（既不新增也不撤回），绝不替用户加一条'],
+        ['const emptyMine = mine.filter((w) => Array.isArray(w.sessionIds) && w.sessionIds.length === 0);', '2026-10-07：只撤「本插件自己那条 + 0 会话」'],
+        ['if (emptyMine.length === 0 || emptyMine.length >= list.length) {', '2026-10-07：撤完必须仍非空（空了 initializeDefault() 会去跑本端必失败的目录探测）'],
+        ['return registry.create(target, DEFAULT_TITLE).then((workspace) => {', '2026-10-07：登记只在注册表为空时发生'],
+      ],
       reverse: [],
     }, {
       rel: 'node_modules/@deepseek-ai/dshm-tool-fs-remove/lib/index.js',
@@ -819,27 +878,57 @@ const INJECTED_PATCHES = [
     }],
   },
 
-  /* ── ⑪ attachment-local：link → copyFile + 祖先 fsync 容错（替换式，4 条反向） ── */
+  /* ── ⑩b fs-local 的权限错误人话化（插入式，4 处；真机 P1-2） ── */
+  {
+    key: 'fs-local 权限文案',
+    fn: 'patchFsLocalPermissionHint()',
+    note: 'pack-core.mjs 的 patchFsLocalPermissionHint()；标记 `DSHM_FS_LOCAL_PERMISSION_HINT` **恰好 4 处**'
+      + '（statRegularFile 1 + readFileAbortable 1 + 两个调用点各 1）。'
+      + '反向 4 条（逐字，含 tab 缩进）：stat 那条旧 v8 注、readFileAbortable 的三参函数头、两个三参调用点'
+      + ' —— 少翻一处，真机就还会看到裸 EPERM（本组就是 docs/108→109 那次缺口的守卫）。'
+      + '**不许**泛化成「树里不得出现 EPERM」：同一文件里 EPERM 到处都有（link 回退、chmod 分支）。',
+    sites: [{
+      rel: FS_LOCAL_LIB,
+      markers: [[FS_LOCAL_PERM_MARK, 4]],
+      forward: [
+        [FS_LOCAL_PERM_STAT_FWD, 'statRegularFile 的权限分支（复用上游已有的 FS_PERMISSION_DENIED）'],
+        [FS_LOCAL_PERM_HEAD_FWD, 'readFileAbortable 多收 displayPath'],
+        [FS_LOCAL_PERM_CALL_READ_FWD, 'readWholeText 的调用点'],
+        [FS_LOCAL_PERM_CALL_EDIT_FWD, 'readForEdit 的调用点'],
+      ],
+      reverse: [
+        [FS_LOCAL_PERM_V8_STAT_OLD, 'statRegularFile 的上游 v8 注（补丁后换成权限分支）'],
+        [FS_LOCAL_PERM_HEAD_OLD, 'readFileAbortable 的三参函数头原文'],
+        [FS_LOCAL_PERM_CALL_READ_OLD, 'readWholeText 的三参调用点原文'],
+        [FS_LOCAL_PERM_CALL_EDIT_OLD, 'readForEdit 的三参调用点原文'],
+      ],
+    }],
+  },
+
+  /* ── ⑪ attachment-local：link → copyFile + 祖先 fsync 容错 + 失败 cause 进报文 ── */
   {
     key: 'attachment link',
-    fn: 'patchAttachmentLocalLink()',
+    fn: 'patchAttachmentLocalLink() + patchAttachmentLocalCause()',
     note: 'pack-core.mjs:2297-2365；标记名与上表一致。反向 4 条：npm 导入行、syncDirectory 原段、'
       + '两个 link 发布块（导入行里本来就有 `link` 标识符 ⇒ 泛化判据恒红）。',
     sites: [{
       rel: ATTACH_LIB,
-      markers: [['DSHM_ATTACHMENT_SANDBOX', 1]],
+      markers: [['DSHM_ATTACHMENT_SANDBOX', 1], ['DSHM_ATTACHMENT_CAUSE', 1]],
       forward: [
         ['import { chmod, copyFile, link, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";', '补上的 copyFile 导入'],
         ['await copyFile(source, target, constants.COPYFILE_EXCL);', '发布点①（source）改用 COPYFILE_EXCL'],
         ['await copyFile(staged.path, target, constants.COPYFILE_EXCL);', '发布点②（staged.path）'],
         ['handle = await open(path, constants.O_RDONLY);', 'syncDirectory 里改成可失败的 open'],
         ['if (error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOENT" || error.code === "ENOTDIR")) return;', '祖先目录不可达就跳过该级'],
+        ['function attachmentPersistFailure(error) {', '⑪b：把 cause 的 code/message 织进 message 的助手（2026-10-06，docs/111）'],
+        ['throw new AttachmentError(attachmentPersistFailure(error), "ATTACHMENT_WRITE_FAILED", { cause: error });', '⑪b：3 处落盘失败抛出点都改走该助手（否则报文里只剩 ATTACHMENT_WRITE_FAILED，真因当场丢失）'],
       ],
       reverse: [
         [ATTACH_IMPORT_UPSTREAM, 'pack-core.mjs:2312 的 import 行原文'],
         [ATTACH_SYNC_UPSTREAM, 'pack-core.mjs:2320-2325 的 syncDirectory 原文'],
         [attachmentLinkBefore('source'), 'pack-core.mjs:2353 的 link 发布块原文（source）'],
         [attachmentLinkBefore('staged.path'), 'pack-core.mjs:2353 的 link 发布块原文（staged.path）'],
+        [ATTACH_THROW_UPSTREAM, '⑪b 的 3 处 `new AttachmentError("Unable to persist attachment."…)` 原文'],
       ],
     }],
   },
@@ -1318,6 +1407,91 @@ function audit(scope) {
     }
   }
 
+  /* ── ⑫ 市场宿主桥：`@deepseek-ai/dsh/lib/profile-boot-*.js` 的 boot 回调（插入型） ── */
+  {
+    const libDir = join(scope, ...DSH_MARKET_LIB.split('/'));
+    if (!existsSync(libDir)) {
+      bad(`市场宿主桥补丁：缺目录 ${DSH_MARKET_LIB}`);
+    } else {
+      const impls = readdirSync(libDir).filter((n) => /^profile-boot-.*\.js$/.test(n));
+      if (impls.length === 0) {
+        bad(`市场宿主桥补丁：${DSH_MARKET_LIB} 下找不到 profile-boot-*.js（pack-core 的 die 条件之一）`);
+      }
+      for (const fileName of impls) {
+        const text = readFileSync(join(libDir, fileName), 'utf8').replace(/\r\n/g, '\n');
+        const n = countOf(text, DSH_MARKET_MARKER);
+        if (n === 1) {
+          ok(`市场宿主桥补丁 · ${fileName}：${DSH_MARKET_MARKER} ×1`);
+        } else if (n === 0) {
+          bad(`市场宿主桥补丁 · ${fileName}：没有 ${DSH_MARKET_MARKER} —— pack-core 的 `
+            + 'patchMarketDesktopRuntime() 没跑到（或产物是旧树）⇒ 手持档市场仍走 spawn 链路，插件一个都装不上');
+          // 标记都没有，后面的片段判据必然也命中不了：只报这一条，不刷屏。
+          continue;
+        } else {
+          bad(`市场宿主桥补丁 · ${fileName}：${DSH_MARKET_MARKER} 出现 ${n} 次（规定 1 次）—— 重复注入`);
+        }
+        if (text.includes(DSH_MARKET_PATCHED)) {
+          ok(`市场宿主桥补丁 · ${fileName}：boot 回调里已 provide desktopProfiles/desktopPnpm`);
+        } else {
+          bad(`市场宿主桥补丁 · ${fileName}：找不到 ${JSON.stringify(DSH_MARKET_PATCHED)} —— 注入段形态已变，`
+            + '门禁需与 pack-core 的 injection 同步复核');
+        }
+        /*
+         * 插入型补丁的"反向"：没有要否掉的原文，改判**上游锚点仍在**。它同时是"注入位置
+         * 有依据"的证据 —— 上游若把 profile-boot 的这两行 provide 挪走/改写，锚点会先消失，
+         * 那时 pack-core 的 die 与这里的判据会一起红，而不是静默失效。
+         */
+        if (text.includes(DSH_MARKET_ANCHOR)) {
+          ok(`市场宿主桥补丁 · ${fileName}：上游锚点在（profileContext 的 provide 仍在，注入位置有依据）`);
+        } else {
+          bad(`市场宿主桥补丁 · ${fileName}：上游锚点 ${JSON.stringify(DSH_MARKET_ANCHOR)} 不见了`
+            + ' —— 上游改了 profile-boot 结构，注入位置失去依据');
+        }
+      }
+    }
+  }
+
+  /* ── ⑬ profile 包通道：`runProfilePnpm()` 的进程内分叉（插入型，目标文件名固定） ── */
+  {
+    const text = read(PROFILE_PNPM_LIB);
+    if (text === null) {
+      bad(`profile 包通道补丁：缺文件 ${PROFILE_PNPM_LIB}`);
+    } else {
+      // 与 ⑫ 同源：仓库侧是 LF，端侧树可能是 CRLF ⇒ 先归一再判（否则锚点判据会假红）
+      const norm = text.replace(/\r\n/g, '\n');
+      const n = countOf(norm, PROFILE_PNPM_MARKER);
+      if (n === 1) {
+        ok(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：${PROFILE_PNPM_MARKER} ×1`);
+      } else if (n === 0) {
+        bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：没有 ${PROFILE_PNPM_MARKER} —— pack-core 的 `
+          + 'patchProfilePnpmBridge() 没跑到（或产物是旧树）⇒ 手持档「设置 → 插件」的安装/卸载仍走 '
+          + '`spawn pnpm`，而本档没有可 execve 的 shell ⇒ 用户看到的还是 `spawn pnpm EACCES`');
+        // 标记都没有，后面的片段判据必然也命中不了：只报这一条，不刷屏。
+      } else {
+        bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：${PROFILE_PNPM_MARKER} 出现 ${n} 次（规定 1 次）—— 重复注入`);
+      }
+      if (n === 1) {
+        if (norm.includes(PROFILE_PNPM_PATCHED)) {
+          ok(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：已调用插件的 bridgeRunProfilePnpm(args, …)`);
+        } else {
+          bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：找不到 ${JSON.stringify(PROFILE_PNPM_PATCHED)} —— `
+            + '注入段形态已变（标记在但调用没了 ⇒ 分叉是个空壳），门禁需与 pack-core 的 injection 同步复核');
+        }
+        /*
+         * 插入型补丁的"反向"：没有要否掉的原文，改判**上游锚点仍在**。它同时是"注入位置
+         * 有依据"的证据 —— 上游若把兼容性预检的拒绝分支挪走/改写，锚点会先消失，
+         * 那时 pack-core 的 die 与这里的判据会一起红，而不是静默失效。
+         */
+        if (norm.includes(PROFILE_PNPM_ANCHOR)) {
+          ok(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：上游锚点在（preflight 拒绝分支仍在，注入位置有依据）`);
+        } else {
+          bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：上游锚点 ${JSON.stringify(PROFILE_PNPM_ANCHOR)} 不见了`
+            + ' —— 上游改了 runProfilePnpm 的预检结构，注入位置失去依据');
+        }
+      }
+    }
+  }
+
   /* ── ④ 撤除守卫：已撤除的无效补丁 `DSHM_DOC_LOAD_DEDUP` 不得复活（+dshm.6） ── */
   {
     const text = read(DEDUP_REL);
@@ -1358,7 +1532,7 @@ function runGuard() {
     process.exit(3);
   }
   const { notes, fails } = audit(CORE);
-  console.log('════════ 核心树端侧补丁门禁（19 处注入 + 1 处撤除守卫：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · fs-local link · attachment link · Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单 · 撤除守卫[DSHM_DOC_LOAD_DEDUP 不得复活]） ════════');
+  console.log('════════ 核心树端侧补丁门禁（23 处注入 + 1 处撤除守卫：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · 市场宿主桥 · profile 包通道 · fs-local link · fs-local 权限文案 · attachment link · attachment 失败 cause · Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单 · 撤除守卫[DSHM_DOC_LOAD_DEDUP 不得复活]） ════════');
   console.log(`核心树：${CORE}`);
   for (const n of notes) console.log(n);
   if (fails.length > 0) {
@@ -1367,7 +1541,7 @@ function runGuard() {
     console.log(`\nRESULT: ${notes.length} passed, ${fails.length} failed`);
     process.exit(1);
   }
-  console.log(`\nRESULT: ${notes.length} passed, 0 failed —— 19 处端侧注入补丁都在树里，且上游原文/未注入形态均已消失`
+  console.log(`\nRESULT: ${notes.length} passed, 0 failed —— 23 处端侧注入补丁都在树里，且上游原文/未注入形态均已消失`
     + '；另有 1 处**撤除守卫**（`DSHM_DOC_LOAD_DEDUP` 已于 coreVersion +dshm.6 撤除 ⇒ 标记必须 0 处、上游原文形态必须已恢复）。'
     + '（树内清单 dshm-core.json 是生成物，只按形状判：存在 + 字段/类型 + 配方一致 + 内部一致）。');
 }
@@ -1379,6 +1553,8 @@ const SELFTEST_FILES = [
   ...ARMOR_SITES.map((s) => s.rel),
   PDF_REL,
   `${SUBPROCESS_LIB}/index.js`,
+  // ⑬ profile 包通道（固定文件名，直接进自检副本）
+  PROFILE_PNPM_LIB,
   // 撤除守卫（④ 段）：它的判据也走 scope 相对读取 ⇒ 临时副本里必须有这个文件
   DEDUP_REL,
 ];
@@ -1442,6 +1618,15 @@ function selfTest() {
       const rel = `${SUBPROCESS_LIB}/${ent.name}`;
       if (!SELFTEST_FILES.includes(rel)) copyInto(scope, rel);
     }
+    /*
+     * 市场宿主桥：`@deepseek-ai/dsh/lib/profile-boot-*.js` 同样是构建哈希名（这里只挑
+     * `profile-boot*` 两个文件复制 —— `dsh/lib/` 整目录太大，没必要）。
+     */
+    const marketLibDir = join(CORE, ...DSH_MARKET_LIB.split('/'));
+    for (const ent of readdirSync(marketLibDir, { withFileTypes: true })) {
+      if (!ent.isFile() || !/^profile-boot-.*\.js$/.test(ent.name)) continue;
+      copyInto(scope, `${DSH_MARKET_LIB}/${ent.name}`);
+    }
     // ④ 段：按树根相对路径整份复制（含 mirrors 的目录 ⇒ 临时树与真树同构）
     for (const rel of SELFTEST_TREE_ENTRIES) copyTreeEntry(tmp, rel);
 
@@ -1498,6 +1683,10 @@ function selfTest() {
     // 【注意变异要真的把标记"改没"】不能改成 `原标记 + "_X"` —— 那是原标记的超串，
     // 计数类判据照样命中，用例会变成假绿。
     const mutantRunner = () => readdirSync(libDir).filter((n) => /^runner-launch-.*\.js$/.test(n))[0];
+    /** ⑫ 市场宿主桥：挑出**真被注入过**的那个 profile-boot 实现文件（哈希名，不能写死）。 */
+    const mutantMarketBoot = () => readdirSync(marketLibDir)
+      .filter((n) => /^profile-boot-.*\.js$/.test(n))
+      .find((n) => readFileSync(join(marketLibDir, n), 'utf8').includes(DSH_MARKET_MARKER));
     const handCases = [
       {
         name: 'M1 资源装甲标记（client-resources）被改名 → ①红',
@@ -1591,6 +1780,30 @@ function selfTest() {
           .replace(DEDUP_UPSTREAM_RESTORED[3][0], DEDUP_UPSTREAM_RESTORED[3][0].replace('tab.id, signal,', 'tab.id, ownerSignal,'))),
         expect: /找不到恢复后的上游原文/,
         only: /撤除守卫/,
+      },
+      /* ── M11：⑫ 市场宿主桥 —— 注入段被整体回退（上游锚点仍在）⇒ 只该这一组红 ── */
+      {
+        name: 'M11 市场宿主桥的注入段被整体删掉（锚点仍在）→ ⑫红',
+        run: () => {
+          const rel = `${DSH_MARKET_LIB}/${mutantMarketBoot()}`;
+          mutate(rel, (t) => t.replace(
+            /[ \t]*\/\* DSHM_MARKET_BRIDGE_BOOT[\s\S]*?\n\t\t\t\}\n/,
+            '\n',
+          ));
+          return rel;
+        },
+        expect: /没有 DSHM_MARKET_BRIDGE_BOOT/,
+        only: /市场宿主桥补丁/,
+      },
+      /* ── M12：⑬ profile 包通道 —— 注入段被整体删掉（上游锚点仍在）⇒ 只该这一组红 ── */
+      {
+        name: 'M12 profile 包通道的注入段被整体删掉（锚点仍在）→ ⑬红',
+        run: () => mutate(PROFILE_PNPM_LIB, (t) => t.replace(
+          /[ \t]*\/\* DSHM_PROFILE_PNPM_BRIDGE[\s\S]*?\n    \}\n/,
+          '\n',
+        )),
+        expect: /没有 DSHM_PROFILE_PNPM_BRIDGE/,
+        only: /profile 包通道补丁/,
       },
     ];
 

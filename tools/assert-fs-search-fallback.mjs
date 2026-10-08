@@ -50,6 +50,9 @@ ok(t.includes('function probeSystemTool('), 'helpers: probeSystemTool 定义在�
 ok(t.includes('function expandBraces('), 'helpers: expandBraces 定义在位');
 ok(t.includes('function buildFallbackArgv('), 'helpers: buildFallbackArgv 定义在位');
 ok(t.includes('function grepTextToNdjson('), 'helpers: grepTextToNdjson 定义在位');
+ok(t.includes('function accessibilityDenial('), 'helpers: accessibilityDenial 定义在位');
+ok(t.includes('if (outcome.exitCode === 1 && stdout.text.length === 0) {'),
+  '输出后守卫：「空结果 + 访问被拒 ⇒ 升级为错误」的判据在位');
 ok(t.includes('await rgExecutable(ctx, rgPath, exec.signal)'), 'spawn 段：exec 探测调用在位');
 ok(t.includes('const fb = buildFallbackArgv(toolName, argv);'), 'spawn 段：降级 argv 构造在位');
 ok(t.includes('argv: spawnArgv,'), 'spawn 段：argv 改用 spawnArgv 变量');
@@ -89,12 +92,21 @@ const blockEnd = t.indexOf('\n/**\n* Run the packaged ripgrep binary', blockStar
 ok(blockStart >= 0 && blockEnd > blockStart, '注入块可定位（let rgExecOk … 下一个 JSDoc 前）');
 if (blockStart >= 0 && blockEnd > blockStart) {
   const block = t.slice(blockStart, blockEnd);
-  const factory = new Function('existsSync', 'parse', 'Buffer',
-    block + '\nreturn { rgExecutable, probeSystemTool, expandBraces, buildFallbackArgv, grepTextToNdjson };');
+  // SearchError 定义在注入块**之外**（模块前段的 classifyRunFailure 上方）⇒ 提取块时要喂同形替身。
+  class StubSearchError extends Error {
+    constructor(message, code, options) {
+      super(message);
+      this.name = 'SearchError';
+      this.code = code;
+      if (options?.cause !== void 0) this.cause = options.cause;
+    }
+  }
+  const factory = new Function('existsSync', 'parse', 'Buffer', 'SearchError',
+    block + '\nreturn { rgExecutable, probeSystemTool, expandBraces, buildFallbackArgv, grepTextToNdjson, accessibilityDenial };');
   // stub：PC 上没有 /system/bin —— 让 grep/find 命中系统路径分支
   const stubExists = (p) => p === '/system/bin/grep' || p === '/system/bin/find';
   const stubParse = (p) => ({ base: p.split('/').pop() });
-  const api = factory(stubExists, stubParse, Buffer);
+  const api = factory(stubExists, stubParse, Buffer, StubSearchError);
 
   // expandBraces
   eq(api.expandBraces('*.{sh,txt}'), ['*.sh', '*.txt'], 'expandBraces：两分支展开');
@@ -172,8 +184,8 @@ if (blockStart >= 0 && blockEnd > blockStart) {
     'grep：**/*.ts 保持全树（任意深度）');
 
   // 不可降级：stub 下没有 find/grep 时返回空数组（caller 会抛 SEARCH_FAILED）
-  const noTool = new Function('existsSync', 'parse', 'Buffer',
-    block + '\nreturn { buildFallbackArgv };')(() => false, stubParse, Buffer);
+  const noTool = new Function('existsSync', 'parse', 'Buffer', 'SearchError',
+    block + '\nreturn { buildFallbackArgv };')(() => false, stubParse, Buffer, StubSearchError);
   eq(noTool.buildFallbackArgv('glob', ['--files', '--', '/ws']), [], '探测不到系统工具 → 空数组');
 
   // grepTextToNdjson
@@ -183,6 +195,27 @@ if (blockStart >= 0 && blockEnd > blockStart) {
     'NDJSON：正常行转换 + 单冒号/空行丢弃');
   eq(api.grepTextToNdjson(''), '', 'NDJSON：空输入');
   eq(api.grepTextToNdjson('a.js:0:zero'), '', 'NDJSON：行号 0 非法丢弃');
+
+  // 【2026-10-06 真机 P1-1 回归（docs/108）】空结果 + 访问被拒 ⇒ 必须抛可读错误，
+  // 不能伪装成 "No files found" / "No matches found"。rg 与 find 都在**遍历期**报权限错
+  // 然后以 exit 1 收场，上游把 exit 1 一律读成"真的没有匹配" ⇒ 正是这条缺陷的入口。
+  const deniedStderrs = [
+    '/x/Documents: Permission denied (os error 1)',
+    'find: /x/Documents: Permission denied',
+    'rg: /x: EACCES: permission denied, open',
+    'fs: operation not permitted, opendir',
+    'grep: /x: Permission denied (os error 13)'
+  ];
+  for (const stderr of deniedStderrs) {
+    const err = api.accessibilityDenial('glob', stderr);
+    ok(err !== null && err.code === 'SEARCH_FAILED', `accessibilityDenial：识别访问被拒 ⇒ SEARCH_FAILED（${stderr}）`);
+    ok(err !== null && err.message.includes(stderr.trim()),
+      `accessibilityDenial：报错里带上原始 stderr（${stderr}）`);
+  }
+  // 反例：这些**不能**升级成错误，否则"真的没有匹配"会被误报成搜索失败。
+  eq(api.accessibilityDenial('glob', ''), null, 'accessibilityDenial：stderr 空 ⇒ null（真的是"没有文件"）');
+  eq(api.accessibilityDenial('grep', 'rg: some unrelated warning\n'), null, 'accessibilityDenial：无关 stderr ⇒ null');
+  eq(api.accessibilityDenial('glob', undefined), null, 'accessibilityDenial：stderr 缺失 ⇒ null');
 
   // rgExecutable：spawn 抛错（execve 被拒）→ false 且记忆
   let spawns = 0;

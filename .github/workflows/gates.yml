@@ -79,7 +79,7 @@ jobs:
       - name: 准备 · 同步 Host 入口到 resfile
         run: node tools/place-host-app.mjs
 
-      # ── 门禁 01-11：AGENTS.md「必跑的回归门禁」里 CI 能跑的那些 ──────────
+      # ── 门禁 01-12：AGENTS.md「必跑的回归门禁」里 CI 能跑的那些 ──────────
       # 每个门禁单独一步，便于在 Actions 界面上 1:1 对应到清单里的名字。
       # if: !cancelled() ⇒ 前一项红也继续跑完，一次看清全部红项；job 整体仍然失败。
       - name: 门禁 · assert-cli-shim
@@ -130,9 +130,28 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/check-worker-jitless.mjs
 
+      - name: 门禁 · check-market-bridge（手机档插件市场的进程内包通道 · 启用判据带对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-market-bridge.mjs
+
+      - name: 门禁 · check-profile-pnpm-bridge（手持档「设置 → 插件」安装/卸载的进程内包通道 · 启用判据带对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-profile-pnpm-bridge.mjs
+
+      - name: 门禁 · check-denial-hints（「被平台拒绝」的 errno 人话化 · 两份副本逐字节一致 · 带反向判据）
+        if: ${{ !cancelled() }}
+        run: node tools/check-denial-hints.mjs
+
+      - name: 门禁 · check-fetch-shim（垫片本身 · 含请求方向流式体 ⑧′ 与「吞体的旧实现必须判红」⑧″ 对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-fetch-shim.cjs
+
       # ── 门禁自检：证明这些检测器**真的会红** ─────────────────────────────
       # 只跑支持 --self-test（注入式负测试 / 变异自检）的那几条；未提供该开关的
       # 门禁（assert-cli-shim 等）本身就是纯断言，不重复跑。
+      - name: 门禁 · check-workspace-claim（默认工作区登记不许替用户建工作区 · 带「旧实现必须判红」对照臂）
+        run: node tools/check-workspace-claim.mjs
+
       - name: 自检 · check-parity
         if: ${{ !cancelled() }}
         run: node tools/check-parity.mjs --self-test
@@ -156,3 +175,7 @@ jobs:
       - name: 自检 · check-worker-jitless
         if: ${{ !cancelled() }}
         run: node tools/check-worker-jitless.mjs --self-test
+
+      - name: 自检 · check-profile-pnpm-bridge（4 个变异体各改一处源码锚点）
+        if: ${{ !cancelled() }}
+        run: node tools/check-profile-pnpm-bridge.mjs --self-test

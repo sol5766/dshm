@@ -56,7 +56,15 @@ ok((c.match(/ensureExecutables\(\)\.catch/g) || []).length === 2, 'ensureExecuta
 ok(/if \(pyOk && gitOk\) \{[\s\S]{0,140}setImmediate/.test(c), '解包收尾仅在锚点齐备时触发探测');
 ok(/hmfs 的执行许可与"文件创建者"绑定/.test(c), '根因证据注释在位');
 ok((c.match(/\( exec "\$/g) || []).length === 4, 'wrapper 子 shell 探测（python/pip3/git/rg）');
-ok((c.match(/execve 被拒/g) || []).length === 2, '降级文案字面量（helper+rg）');
+/*
+ * 【2026-10-07 收窄：从「裸短语计数」改成「完整文案断言」】原判据是短语 `execve 被拒` 恰好
+ * 出现 2 次 —— 这是个**脆锚点**：任何一处解释性 diag 用了同样的措辞就会误判 FAIL（本轮
+ * 工具链解包回退里加的一条就把它踩红了），而它真正想守的东西（「两条用户可见的降级文案
+ * 都在」）反而没被断言到。现口径：断言**完整句子**恰好出现 2 次（helper 与 rg 各一条）——
+ * 少一条仍 FAIL，别处出现同义措辞不再误伤。
+ */
+ok((c.match(/该设备系统策略禁止运行第三方原生二进制（execve 被拒），暂不可用/g) || []).length === 2,
+  '降级文案字面量（helper+rg 各一条完整句）');
 ok(/unavailable\('git'\)/.test(c), 'git wrapper 调降级 helper（python3/pip3 已由 Phase 2 桥回退接管）');
 ok(/unavailable\('python3'\)/.test(c) === false && /pythonBridgeShimLines\(\s*'pip3'/.test(c), 'python3/pip3 wrapper 走桥回退而非死路 126');
 ok(/尚未就位（首次启动解包中）/.test(c), '解包中缺失与策略拒绝文案分离');
