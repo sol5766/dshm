@@ -24,8 +24,17 @@ pip3 list                            # 等价 python3 -m pip list
 `-m <module> [args...]`、`-V/--version`、`-h/--help`。
 不支持：交互式 REPL、stdin 管道模式（`python3 - < x.py`，请传脚本路径）。
 
-本设备没有系统 python3，沙箱也不能 execve 外部 ELF，但 DSHM 在 node 进程内
-内置了 CPython 3.12（NAPI addon dlopen libpython + embedding API）。
+> ⚠️ **上面这段"像平常一样用"只在 PC/2in1 档成立。** 手机 / 平板档下 `python3`/`pip3`
+> **命令入口起不来**（垫片是脚本，解释器 `/system/bin/sh` 被系统拒绝）；那两档能用的是
+> **内嵌运行时本身**（`/dshm-python/*` 端点）。详见下方"档位"一段与 `docs/106` §4。
+
+本设备没有系统 python3；能否 `execve` 外部 ELF **取决于设备档位**（PC/2in1 档实测
+可以 —— 同批 exec 探针 10/10 全通；手机 / 平板档一律被拒 `EACCES`，判决性读数见
+`docs/104`）。**由此"命令"与"运行时"是两件事**：手机 / 平板档下 `python3`/`pip3`
+这两个**命令行入口起不来**（垫片是 `#!/system/bin/sh` 脚本，解释器被拒 ⇒ 整条命令
+无从执行，与 `npm` 垫片同因；判据与裁定见 `docs/106` §4）；**但内嵌 CPython 运行时
+本身与档位无关** —— 它是宿主进程内的 NAPI addon（dlopen libpython + embedding API），
+不 execve，两档都能用，下面的 `/dshm-python/*` 端点就是它的入口。
 垫片与下列 HTTP 端点都走同一运行时；能 exec 真身的设备垫片会自动直连
 （行为不变），被 execve 策略拒绝时自动切桥模式。
 
@@ -98,7 +107,7 @@ wget -O - 'http://127.0.0.1:3120/dshm-python/status' 2>/dev/null
 - **不 spawn 子进程**：Python 在宿主 node 进程内运行，`libpython_runner.so`
   NAPI addon dlopen libpython3.12.so.1.0（el1 bundle libs，与 koffi/sharp
   同通道）调 CPython embedding API。
-- **不 execve**：debug 签名域禁止 exec。
+- **不 execve**：桥模式全程不创建子进程（手机 / 平板档 `execve` 被系统拒绝，PC/2in1 档可以，但本路径不需要）。
 - **GIL 管理**：`PyGILState_Ensure/Release` + `PyEval_SaveThread`，多线程安全。
 - **stdlib 就位**：toolchain/python/lib/python3.12（首次启动从 resfile 解包）。
 - **跨请求共享同一解释器**：全局变量、已 import 的模块在后续请求中仍在；

@@ -67,6 +67,10 @@ export {
   // 上一版的权限申请函数已随 module.json5 的两条声明一并删除。
   probePathWritable,
   publicDownloadFolder,
+  // 【2026-10-06】手持档的采纳判据（手机/平板：picker 给的目录授权**只活一次进程** ⇒ 还要过
+  // "持久授权"这道闸；2in1/PC 不受影响）。理由与真机原始读数见 FilePicker.ets 的 isHandheldForm()。
+  isHandheldForm,
+  isPathWithin,
   // 【2026-10-03】包名的唯一来源（`Download/<包名>/` 的那一段）。**不是路径来源**：
   // 默认工作区路径的唯一来源是上面 `claimPublicDownloadFolder()` 的返回值，经
   // `buildHostEnv()` 的 `DSHM_PUBLIC_DOWNLOAD` 在 spawn 前交给 Host。包名只用于
@@ -74,6 +78,11 @@ export {
   readBundleName
 } from './system/FilePicker';
 export type { PickedFile, PickedFolder } from './system/FilePicker';
+// 【2026-10-06】目录授权的**持久化与跨启动恢复**（`persistPermission` 记下来 +
+// 启动 `activatePermission` 启用回来）。手持档"侧边栏工作区文件"选完当场能读、重启后也能读
+// 靠的就是这一对；判据与真机原始读数见 docs/105。
+export { rememberFolderGrant, restoreFolderGrants, storedGrants } from './system/FolderGrants';
+export type { FolderGrant, GrantOutcome } from './system/FolderGrants';
 // 【2026-10-04】系统原生文件预览（PreviewKit）。只为**非文本**文件（Office 全族、
 // pdf、图片、音视频）提供机制：路径→URI、后缀→MIME、可用性、开/关系统预览窗。
 // 上游的 Office 预览走 LibreOffice 引擎转换，而 `libreoffice-kit` 在本平台直接
@@ -104,6 +113,7 @@ export {
   PARAM_SESSION_ID,
   PARAM_TITLE,
   PARAM_WINDOW_KIND,
+  followScreenRotationOnHandheld,
   WindowKind
 } from './window/WindowRegistry';
 export type { WindowParams } from './window/WindowRegistry';

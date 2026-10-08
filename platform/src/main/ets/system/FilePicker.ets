@@ -31,6 +31,10 @@ import { fileUri } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+// 形态事实（手机/平板 vs 2in1）：判据只对前者收口，见 isHandheldForm() 的长注释。
+import { FormFactor, readDeviceFacts } from './DeviceFacts';
+// 目录授权的持久化与跨启动恢复：手持档"选完能读、重启也能读"的唯一开关，见 docs/105。
+import { GrantOutcome, rememberFolderGrant } from './FolderGrants';
 
 const DOMAIN: number = 0xD5A1;
 const TAG: string = 'platform/filepicker';
@@ -172,21 +176,48 @@ export async function pickFolder(context: common.Context): Promise<PickedFolder>
       reason: '已选中文件夹，但拿不到它的真实路径（Host 需要路径而不是 URI），因此无法作为工作区。'
     };
   }
-  // 【2026-10-03 新增】探一次"Host 能不能在这个目录里真写"。
+  // 【2026-10-03 新增；2026-10-06 收口】非手持档（2in1 / PC）走探写："Host 能不能在这个目录里真写"。
   // 【为什么必须探】Host 是 Node、按 POSIX 路径干活（`dsh-fs-local` 是纯 node:fs，
   // 自身不做任何路径转换/沙箱判断），而"能读"不等于"能写"：本应用拿不到路径级写权时，
   // 选中的目录只读得动——用户看到的正是"agent 只能读、写不进、bash rm 也删不掉"。
   // 探得到的结论是**实测**，比按权限表推断可靠（hmfs 上元数据会撒谎，见 docs/70 §2.1）。
-  if (!probePathWritable(realPath)) {
+  // 【2026-10-06 晚 更正：判据从"宿主验过的目录"改成"授权能不能跨重启"】
+  // 同日下午那一版判据是"只接受落在宿主自己验过的目录里的路径"，依据是"宿主读不到 picker
+  // 目录"。**那条读数是真的，但结论错了**：宿主读不到不是平台边界，而是 picker 给的授权
+  // **只活这一次进程** —— 同一条路径、同一台机（Mate 80 / OH 7.0.0.105）：
+  //   · 选完当场：`workspaceFiles/list` 返回 `data.csv/hello.txt/notes.md` 三个文件；
+  //   · 重启之后：同一条调用报 `cannot list "…/Download/harness": permission denied`。
+  // 两次原始读数与完整时间线见 docs/105。于是这一档只接受**两类**路径：
+  //   ① 本应用**按包名归属**的公共目录内（`Download/<包名>/`；官方 FAQ
+  //      `faqs-local-file-manager-67` 口径：该 URI 自带持久权限，跨重启有效）；
+  //   ② 用户自己的目录 + 这一次的持久授权**已确认生效**（`checkPersistentPermission` 为真；
+  //      重启后由 `restoreFolderGrants()` 重新启用）。
+  // 两类都不满足才回落到应用专属目录 —— 那时回落是**如实**的：这条路径重启后确实读不到。
+  // 其它档（2in1 / PC）：沿用 ArkTS 探写，**逐字不动**（PC 上宿主本来就读得到 picker 目录，
+  // 不需要授权持久化 ⇒ 这一档不为 PC 记授权、不引入新动作）。
+  const handheld: boolean = isHandheldForm();
+  const claimed: PickedFolder | undefined = handheld ? await publicDownloadFolder(context) : undefined;
+  const owned: boolean = claimed !== undefined && claimed.outcome === PickOutcome.PICKED
+    && isPathWithin(realPath, claimed.path);
+  const granted: GrantOutcome = handheld
+    ? await rememberFolderGrant(context, uri, realPath)
+    : { persisted: false, note: '非手持档：不记授权' };
+  const acceptable: boolean = handheld ? (owned || granted.persisted) : probePathWritable(realPath);
+  if (!acceptable) {
     hilog.warn(DOMAIN, TAG,
-      '所选目录不可写 path=%{public}s，改用应用公共目录', realPath);
-    const fallback: PickedFolder = await publicDownloadFolder(context);
+      '所选目录不可用 path=%{public}s handheld=%{public}s granted=%{public}s',
+      realPath, handheld ? 'true' : 'false', granted.note);
+    const fallback: PickedFolder = claimed !== undefined ? claimed : await publicDownloadFolder(context);
     if (fallback.outcome === PickOutcome.PICKED && fallback.path.length > 0) {
       return {
         outcome: PickOutcome.PICKED, uri: fallback.uri, path: fallback.path,
         name: fallback.name,
-        reason: `所选目录（${realPath}）Host 只能读、不能写入/删除；已改用本应用在系统`
-          + `「文件管理 → 下载」下的专属目录，它在文件管理器里可见且 agent 可读写删。`
+        reason: handheld
+          ? `所选目录（${realPath}）没能建立跨启动的目录授权（${granted.note}）：手机/平板上`
+            + `选择器给的授权只对本次运行有效，重启后宿主会读不到它；已改用本应用在系统`
+            + `「文件管理 → 下载」下的专属目录，它在文件管理器里可见且 agent 可读写删。`
+          : `所选目录（${realPath}）Host 只能读、不能写入/删除；已改用本应用在系统`
+            + `「文件管理 → 下载」下的专属目录，它在文件管理器里可见且 agent 可读写删。`
       };
     }
     // 兜底也拿不到 ⇒ 保持原行为（返回用户选的路径）。宁可"能读不能写"，
@@ -247,6 +278,66 @@ export function probePathWritable(path: string): boolean {
       }
     }
   }
+}
+
+/**
+ * 手持档（手机 / 平板）：picker 给的目录授权**只活一次进程**，所以这一档要额外过"持久授权"这道闸。
+ *
+ * ── 现象（同一路径、同一台机 Mate 80 / VYG-AL00 / OH 7.0.0.105 / API 26）──────
+ *   · 用户选完目录**当场**：宿主 `workspaceFiles/list` 正常返回内容（真机读数：重启前那次
+ *     `…/Download/harness` 返回 `data.csv` / `hello.txt` / `notes.md` 三个文件）；同一时刻
+ *     ArkTS 侧 `probePathWritable()` 也通过（`diag-resolve-dispatched path=…`）。
+ *   · **重启之后**：ArkTS 侧探写**照样通过**（`fileIo` 走服务代理），而宿主同一条调用报
+ *     `cannot list "…/Download/harness": permission denied` ⇒ 文件页整页读不出来。
+ *   两条读数并列时看着"互相矛盾"，其实只是**授权有生命周期**。
+ *
+ * ── 为什么 ───────────────────────────────────────────────────────────────
+ *   · picker 授予的目录权限是**进程级临时授权**：`fileIo`（服务代理）与宿主（Node 裸
+ *     `node:fs`）用的是**同一份**授权（同 UID、同进程）⇒ "当场能读"与"重启读不到"是
+ *     同一件事的两个时刻，不是两条通路。
+ *   · 本仓 2026-10-06 之前只在选完时调了 `persistPermission()`（把授权**记下来**），
+ *     **没在启动时 `activatePermission()`**（把它**启用回来**）⇒ 记了却没人启用，
+ *     重启后照样读不到。两步的语义是 SDK 原文（`@ohos.fileshare.d.ts`：activate =
+ *     "Enable the URI that have been permanently authorized"），权限为
+ *     normal / system_grant（本包已声明，见 module.json5）。落地见 `FolderGrants.ets`。
+ *
+ * ── 判据（实现见 `pickFolder()` 里那一段）──────────────────────────────────
+ *   ① 本应用**按包名归属**的公共目录内（`Download/<包名>/`）：授权跨重启有效（官方 FAQ
+ *      `faqs-local-file-manager-67` 口径）；
+ *   ② 用户目录 + `checkPersistentPermission()` 为真（重启后由 `restoreFolderGrants()` 启用）。
+ *   两类都不满足才回落到应用专属目录 —— 那时回落是**如实**的：这条路径重启后确实读不到。
+ *
+ * ── 为什么只对手机 / 平板生效（PC 不许被改坏）────────────────────────────
+ * 2in1 / PC 上宿主**能**读 picker 目录（同仓 docs/30 实测），不需要授权持久化 ⇒ 那一支
+ * **逐字不动**（也不为 PC 记授权、不引入新动作）。设备事实读不到时也返回 false
+ * （退回 2in1 行为）——保守方向：宁可少收口，也不误伤桌面。
+ */
+export function isHandheldForm(): boolean {
+  try {
+    const form: FormFactor = readDeviceFacts().form;
+    return form === FormFactor.PHONE || form === FormFactor.TABLET;
+  } catch (e) {
+    const err = e as BusinessError;
+    hilog.warn(DOMAIN, TAG, '形态读取失败（按非手持处理，保持 2in1 旧行为）：%{public}s', err.message);
+    return false;
+  }
+}
+
+/**
+ * `child` 是否等于 `parent`，或位于 `parent` 之下。
+ *
+ * 纯字符串判据（不做 realpath）：两个入参都来自系统给的绝对路径（picker 返回值 /
+ * `Download/<包名>` 直拼），不含 `..` 也不经符号链接，落盘反而引入新的失败形态。
+ */
+export function isPathWithin(child: string, parent: string): boolean {
+  if (parent.length === 0 || child.length === 0) {
+    return false;
+  }
+  if (child === parent) {
+    return true;
+  }
+  const base: string = parent.endsWith('/') ? parent : `${parent}/`;
+  return child.startsWith(base);
 }
 
 /**

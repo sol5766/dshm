@@ -58,7 +58,10 @@ import { copyText } from 'platform';
 // dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md §5.3）。
 // 【不含权限申请】本路线**不申请任何权限**（权限零差异铁律 + ACL 白名单只有 5 条，
 // 见 FilePicker.ets 顶部权限说明注释）⇒ 上一版的权限申请函数已整体删除。
-import { PickOutcome, probePathWritable, publicDownloadFolder } from 'platform';
+import { PickOutcome, probePathWritable, publicDownloadFolder, isHandheldForm, isPathWithin } from 'platform';
+// 目录授权的持久化与跨启动恢复（手持档"选完能读、重启也能读"的唯一开关，见 docs/105）
+import { rememberFolderGrant } from 'platform';
+import type { GrantOutcome } from 'platform';
 import { EVENT_PICKER_SUBSTITUTED, EVENT_KEY_PICKER_REASON, EVENT_KEY_PICKER_PATH } from 'platform';
 import type { PickedFolder } from 'platform';
 // 外链外开（2026-09-28，修「设置→登录」点不动）：见 OPEN_LINK_SHIM_JS。
@@ -984,9 +987,25 @@ class DshDirectoryPickerBridge {
     // spawn，二者自身不做任何路径转换或沙箱判断），新插件跑在同一进程、同一 token 下
     // ⇒ 受**同一份 OS 授权**约束，在 JS 层补不出权限。**只能在拿到授权的那一层换路径。**
     // 详见 30 号文档 §2.2/§5.2。
-    if (!probePathWritable(path)) {
-      this.writeDiagMarker('diag-picker-public-fallback', `from=${path}`);
-      const pub: PickedFolder = await publicDownloadFolder(ctx);
+    // 【2026-10-06 晚 更正：判据从"宿主验过的目录"改成"授权能不能跨重启"】
+    // 同日下午那版依据的是"宿主读不到 picker 目录"——**读数是真的、结论错了**：picker 给的
+    // 授权只活一次进程（选完当场宿主能列出该目录的内容，重启后同一条调用报
+    // `cannot list …: permission denied`；两次原始读数与完整时间线见 docs/105）。
+    // 判据因此分两类：① 本应用**按包名归属**的公共目录内（跨重启有效，官方 FAQ 口径）；
+    // ② 用户自己的目录 + 这一次的持久授权**已确认生效**（重启后由 restoreFolderGrants() 启用）。
+    // 2in1/PC 沿用 ArkTS 探写、**逐字不动**（PC 本来就读得到 picker 目录，不需要持久授权）。
+    const handheld: boolean = isHandheldForm();
+    const claimed: PickedFolder | undefined = handheld ? await publicDownloadFolder(ctx) : undefined;
+    const owned: boolean = claimed !== undefined && claimed.outcome === PickOutcome.PICKED
+      && isPathWithin(path, claimed.path);
+    const granted: GrantOutcome = handheld
+      ? await rememberFolderGrant(ctx, uri, path)
+      : { persisted: false, note: '非手持档：不记授权' };
+    const acceptable: boolean = handheld ? (owned || granted.persisted) : probePathWritable(path);
+    if (!acceptable) {
+      this.writeDiagMarker('diag-picker-public-fallback',
+        `from=${path} handheld=${handheld ? 'true' : 'false'} granted=${granted.note}`);
+      const pub: PickedFolder = claimed !== undefined ? claimed : await publicDownloadFolder(ctx);
       if (pub.outcome === PickOutcome.PICKED && pub.path.length > 0) {
         hilog.warn(DOMAIN, TAG, '所选目录不可写，已改用应用公共目录 path=%{public}s', pub.path);
         this.writeDiagMarker('diag-picker-public-path', `to=${pub.path}`);
@@ -997,7 +1016,9 @@ class DshDirectoryPickerBridge {
         // 见 `platform/notify` 的分层说明）。此前这里只落 diag 标记 ⇒ 用户完全看不到。
         const pickerPayload: Record<string, Object> = {};
         pickerPayload[EVENT_KEY_PICKER_REASON] =
-          `所选目录（${path}）Host 只能读、不能写入/删除；已改用本应用在系统下载目录下的专属目录`;
+          handheld
+            ? `所选目录（${path}）没能建立跨启动的目录授权（${granted.note}）：手机/平板上选择器给的授权只对本次运行有效，重启后宿主会读不到它；已改用本应用在系统下载目录下的专属目录`
+            : `所选目录（${path}）Host 只能读、不能写入/删除；已改用本应用在系统下载目录下的专属目录`;
         pickerPayload[EVENT_KEY_PICKER_PATH] = pub.path;
         emitter.emit({ eventId: EVENT_PICKER_SUBSTITUTED }, { data: pickerPayload });
         this.dispatchResolve(id, pub.path, '');
