@@ -248,3 +248,20 @@ hdc install -r <hap>
 
 本项目是**移植**：把官方面向桌面的 dsh 运行时搬到鸿蒙。`dsh` / DeepSeek Harness 的商标与上游代码版权归其各自所有者，
 本仓库只包含客户端侧的实现、适配与文档。
+
+## 赞赏支持
+
+DSHM 是**业余时间**做的移植：官方的 dsh 运行时没有鸿蒙端，端侧差异、沙箱绕行、手持档适配，
+以及两百多条回归门禁，都是照着真机读数一条条抠出来的。
+
+项目**完全免费、没有付费墙** —— 赞赏不会改变任何功能取舍，也不会影响 issue 的处理顺序。
+只是如果它正好省了你的事，愿意请我喝杯咖啡，我会很受用。
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/sponsor/wechat.jpg" alt="微信赞赏码" width="320"><br><sub>微信</sub></td>
+    <td align="center"><img src="docs/sponsor/alipay.jpg" alt="支付宝赞赏码" width="320"><br><sub>支付宝</sub></td>
+  </tr>
+</table>
+
+提 issue、附上复现步骤、或者把「已知边界」里少写的那条补给我们 —— 同样是实实在在的帮忙。谢谢。
