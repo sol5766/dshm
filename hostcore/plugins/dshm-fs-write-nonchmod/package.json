@@ -13,7 +13,8 @@
   },
   "files": [
     "lib/index.js",
-    "lib/fsio-nochmod.js"
+    "lib/fsio-nochmod.js",
+    "lib/denial-hints.js"
   ],
   "license": "MIT",
   "peerDependencies": {

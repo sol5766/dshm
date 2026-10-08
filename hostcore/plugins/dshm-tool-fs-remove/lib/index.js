@@ -106,6 +106,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { FsError, FsVersion } from "@deepseek-ai/dsh-fs";
+import { describeWriteFailure } from "./denial-hints.js";
 
 /** Stable Loader identity. */
 const name = "tool-fs-remove";
@@ -147,7 +148,14 @@ async function resolveTarget(ctx, exec, requestedPath, tool) {
 	const target = await ctx.fs.resolve(requestedPath, { cwd, signal: exec.signal });
 	const opts = hasCwd ? { cwd } : {};
 	// 不跟随末段符号链接 —— 软链按"链接文件"处理，悬空链也可见。
-	const info = await ctx.fs.lstat(requestedPath, opts, exec.signal);
+	// 解析这一步本身也可能被平台拒（策略更严的设备会连 stat 都不放行）⇒ 同样翻成人话，
+	// 否则 remove / move / publish 会把「没权限」报成裸 EPERM（真机 P1-2，见 docs/109）。
+	let info;
+	try {
+		info = await ctx.fs.lstat(requestedPath, opts, exec.signal);
+	} catch (error) {
+		throw describeWriteFailure(error, target.displayPath, "路径");
+	}
 	return { target, path: target.displayPath, info };
 }
 
@@ -313,7 +321,7 @@ async function writeFileAtomicBytes(absolutePath, bytes, mode, signal) {
 			}
 		}
 		await removePartial(tempPath, absolutePath);
-		throw isAbortError(error) ? new FsError("publish aborted", "FS_ABORTED") : error;
+		throw isAbortError(error) ? new FsError("publish aborted", "FS_ABORTED") : describeWriteFailure(error, absolutePath);
 	}
 }
 
@@ -375,7 +383,7 @@ function applyPublishTool(ctx) {
 				sourceInfo = await stat(from.path);
 			} catch (error) {
 				if (isENOENT(error)) throw new FsError(`cannot publish "${from.target.displayPath}": not found`, "FS_NOT_FOUND");
-				throw error;
+				throw describeWriteFailure(error, from.path, "路径");
 			}
 			if (!sourceInfo.isFile()) {
 				throw new Error(`publish: "${from.target.displayPath}" is not a regular file${sourceInfo.isDirectory() ? " (it is a directory)" : ""}; publish copies one file.`);
@@ -388,14 +396,19 @@ function applyPublishTool(ctx) {
 			try {
 				destinationInfo = await stat(destination);
 			} catch (error) {
-				if (!isENOENT(error)) throw error;
+				if (!isENOENT(error)) throw describeWriteFailure(error, destination, "路径");
 			}
 			if (destinationInfo !== null && !destinationInfo.isFile()) {
 				throw new Error(`publish: "${destination}" is not a regular file${destinationInfo.isDirectory() ? " (it is a directory)" : ""}; publish writes one file.`);
 			}
 			const existed = destinationInfo !== null;
 			/* 按字节读（不经过文本编解码）。 */
-			const bytes = await readFile(from.path, exec.signal ? { signal: exec.signal } : {});
+			let bytes;
+			try {
+				bytes = await readFile(from.path, exec.signal ? { signal: exec.signal } : {});
+			} catch (error) {
+				throw describeWriteFailure(error, from.path, "路径");
+			}
 			/* 原子落盘：失败时临时件由落盘原语清掉，**目标一直是旧内容或根本不存在**——
 			 * 所以这里不需要、也绝不允许再去删目标（那会毁掉用户已有文件或并发创建的文件）。 */
 			await writeFileAtomicBytes(destination, bytes, existed ? destinationInfo.mode & 0o777 : sourceInfo.mode & 0o777, exec.signal);
@@ -465,7 +478,11 @@ function applyRemoveTool(ctx) {
 				throw new Error(`remove: "${target.displayPath}" is a directory; pass recursive=true to delete it and everything inside it.`);
 			}
 			// 词法路径 —— 软链只删链接条目本身，与 POSIX `rm` 一致。
-			await rm(path, { recursive: info.type === "directory", force: false });
+			try {
+				await rm(path, { recursive: info.type === "directory", force: false });
+			} catch (error) {
+				throw describeWriteFailure(error, path, "路径");
+			}
 			// 软链的 target 身份是"链接目标"，它并没有消失 ⇒ 不发 absent 观察（见文件头）。
 			if (info.type !== "symlink") ctx.emit("fs/observed", target, { kind: "absent" }, exec);
 			return { path: target.displayPath, kind: info.type };
@@ -518,7 +535,11 @@ function applyMoveTool(ctx) {
 			const to = await resolveTarget(ctx, exec, args.destination, "move");
 			if (from.info === undefined) throw new FsError(`cannot move "${from.target.displayPath}": not found`, "FS_NOT_FOUND");
 			// 两端都用词法路径 ⇒ 软链移动的是链接本身（与 POSIX `mv` 一致）。
-			await rename(from.path, to.path);
+			try {
+				await rename(from.path, to.path);
+			} catch (error) {
+				throw describeWriteFailure(error, to.path);
+			}
 			// 同 remove：软链的目标身份没有消失 ⇒ 不发 absent 观察。
 			if (from.info.type !== "symlink") ctx.emit("fs/observed", from.target, { kind: "absent" }, exec);
 			return { source: from.target.displayPath, destination: to.target.displayPath };

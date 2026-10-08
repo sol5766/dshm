@@ -12,7 +12,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js"
+    "lib/index.js",
+    "lib/denial-hints.js"
   ],
   "license": "MIT",
   "peerDependencies": {

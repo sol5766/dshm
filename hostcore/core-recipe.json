@@ -1,6 +1,6 @@
 {
   "$comment": "DSHM 端侧 dsh 核心树的配方（唯一事实来源）。tools/pack-core.mjs 读它来物化、裁剪、校验、打包。改版本/换移植件都只改这里。",
-  "coreVersion": "0.2.1-alpha.1+dshm.6",
+  "coreVersion": "0.2.1-alpha.1+dshm.13",
   "platform": {
     "os": "openharmony",
     "cpu": "arm64"
@@ -15,6 +15,13 @@
   "profile": "ondevice",
   "$comment_prune": "只删这些规则命中的路径，绝不广谱清理。keepOnlyDirs：保留列出的子目录，其余子目录删除。remove：整目录删除。removeGlobs：按 glob 删除文件。",
   "prune": [
+    {
+      "why": "keepGlobs：**运行期资源豁免**，优先级高于所有 removeGlobs，命中即不删。代价实测 0.107 MB / 245 个文件，换来的是不删「被代码真正读取的包内资源」。本轮实证两处：① `@deepseek-ai/dsh-skill-badge/lib/index.js` 用 `new URL(\"../assets/dsh-badge.md\", import.meta.url)` + `readFile(...)` 读 `assets/dsh-badge.md`（删了 ⇒ 该内置技能的 provider 直接抛错）；② `@deepseek-ai/dsh-experimental-inspector/lib/devtools/` 下 240 个 .md 是 DevTools 面板内容（Issues 描述 / What''s New），由同目录的 resource-manifest.json 登记。已核：assets/ 与 devtools/ 下没有任何 *.exe/*.dll/*.pdb（否则也会被这条豁免留住）。见 docs/112 §5",
+      "keepGlobs": [
+        "**/assets/**",
+        "**/devtools/**"
+      ]
+    },
     {
       "why": "koffi 一个包自带 19 个平台的 .node（其中仅非鸿蒙就 25.2 MB），只留鸿蒙",
       "dir": "koffi/build/koffi",
@@ -45,6 +52,32 @@
         "**/*.exe",
         "**/*.dll",
         "**/*.pdb"
+      ]
+    },
+    {
+      "why": "类型声明（*.d.ts）运行期从不被 require（Node 只加载 JS）；7448 个 / 34.5 MB，deflate 后省 ~7.1 MB。见 docs/112 §5",
+      "removeGlobs": [
+        "**/*.d.ts"
+      ]
+    },
+    {
+      "why": "sourcemap（*.map）只在调试取栈时用，宿主没开 --enable-source-maps；4363 个 / 39.8 MB，deflate 后省 ~8.6 MB。见 docs/112 §5",
+      "removeGlobs": [
+        "**/*.map"
+      ]
+    },
+    {
+      "why": "包内文档（*.md）不参与运行；1217 个 / 8.5 MB，deflate 后省 ~3.4 MB。两处豁免：许可证/归属声明由 pack-core 的 PRUNE_KEEP_BASENAME_PREFIXES 保全；**被代码读取的资源**（assets/、devtools/）由上面那条 keepGlobs 保全。见 docs/112 §5",
+      "removeGlobs": [
+        "**/*.md"
+      ]
+    },
+    {
+      "why": "测试语料（test / tests / __tests__ 目录）不随包分发；1244 个 / 8.1 MB，deflate 后省 ~2.0 MB。故意不含 spec 目录那条 glob：@standard-schema/spec 的 spec 段是**包名**，那条 glob 会删掉它的 dist 入口（docs/112 §5.2）",
+      "removeGlobs": [
+        "**/test/**",
+        "**/tests/**",
+        "**/__tests__/**"
       ]
     }
   ],

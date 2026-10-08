@@ -1,0 +1,18 @@
+{
+  "name": "@deepseek-ai/dshm-market-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧「市场宿主桥」：为插件市场（dshmarket）发布 desktopProfiles + desktopPnpm 两个宿主服务，把市场的 add/remove 走到进程内安装队列（$DSH_HOME/install-queue），使「沙箱内一切自带可执行文件的 execve 都被拒」的手持档（手机/平板）也能装插件。见 lib/index.js 头注。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT"
+}

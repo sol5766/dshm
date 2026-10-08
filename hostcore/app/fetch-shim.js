@@ -791,7 +791,24 @@ async function dshmFetch(input, init = {}, options = {}) {
  * ⇒ 被 `dsh-host-webserver` 的 catch-all 兜成 **空体 400**（`res.writeHead(400); res.end()`）。
  * 这正是实测现象：`GET /` 正常 200，而**所有** `POST /api/<endpoint>` 都是 400 空体，
  * dsh 侧无可用日志，换封装/cookie/头一律无效。
- * 只实现 dsh 用到的部分：`url/method/headers/signal` 与 `text()/json()/arrayBuffer()`。
+ * 只实现 dsh 用到的部分：`url/method/headers/signal/body` 与 `text()/json()/arrayBuffer()`。
+ *
+ * 【2026-10-06 补 `body`：流式请求体不再是"用不到"】原注释写着「流式 body 不支持：dsh 的
+ * /api 走 buffered 模式，用不到」——**这一点是错的**，代价是"对话框上传文件"整整两周
+ * 全平台不可用（真机实证 2026-10-06，见 docs/111）：
+ *   · `dsh-client-connection/lib/index.js:75-81` 的 `bridge()` 对声明为 `streaming` 的路由
+ *     构造 `new Request(url, { body: Readable.toWeb(req), duplex: 'half' })`；
+ *   · 全仓**唯一**的 streaming 路由是 `dsh-client-file-upload` 的
+ *     `/api/session/uploadFileBinary`（附件上传），它的处理器读 `request.body` 再
+ *     `requestBodyChunks(body)` → `body.getReader()`；
+ *   · 旧实现把流式体一律吞成 `_body = null` 且**不设 `body` 属性** ⇒ 处理器拿到
+ *     `undefined` ⇒ `undefined.getReader()` 抛 TypeError ⇒ 被
+ *     `dsh-attachment-local` 包成 `ATTACHMENT_WRITE_FAILED`（真因在报文里被吃掉）；
+ *   · 症状与普通"落盘失败"完全一样（`tmp/` 里建过又删掉一个暂存件、`file-objects/`
+ *     从未出现），所以被误判成补丁 bug 查了两周。
+ * 现在按标准 Fetch 语义补上：流式体原样交给 `this.body`（`duplex` 在我们这层无意义，
+ * 原生 `Request` 只是拿它当"你确实想流式发体"的声明）；无体/非流式体给 `body = null`
+ * （与原生一致，也正是 `requestBodyChunks` 的 `if (body === null) return` 判据）。
  */
 class DshmRequest {
   constructor(input, init = {}) {
@@ -801,12 +818,27 @@ class DshmRequest {
     this.signal = init.signal;
     this.bodyUsed = false;
     const raw = init.body;
+    /* 流式体（`streaming` 路由）必须原样保住：见类头 2026-10-06 的说明。 */
+    this._stream = null;
     if (raw === undefined || raw === null) this._body = null;
     else if (Buffer.isBuffer(raw)) this._body = raw;
     else if (typeof raw === 'string') this._body = Buffer.from(raw, 'utf8');
     else if (raw instanceof ArrayBuffer) this._body = Buffer.from(raw);
     else if (ArrayBuffer.isView(raw)) this._body = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
-    else this._body = null; // 流式 body 不支持：dsh 的 /api 走 buffered 模式，用不到
+    /* 判据与 `encodeRequestBody` 同一把尺子（鸭子类型），别用 `instanceof ReadableStream`：
+     * 调方给的是 `Readable.toWeb(nodeStream)`，而 jitless 下 `ReadableStream` 是 JS 实现，
+     * 跨实现 `instanceof` 会漏判。 */
+    else if (typeof raw.getReader === 'function') {
+      this._body = null;
+      this._stream = raw;
+    } else this._body = null;
+    /*
+     * 【`body === null` 而不是 `undefined`】原生 Fetch 对"没有体"的请求给的就是 `null`
+     * （`requestBodyChunks(body)` 的早退判据正是 `body === null`；给它 `undefined` 会掉进
+     * `undefined.getReader()`）。dsh 里唯一的 `request.body` 读点就在这条 streaming 路由上，
+     * 所以这里与原生对齐既安全又必要。
+     */
+    this.body = this._stream;
     /*
      * 【诊断（E77）】dsh 的 `bridge` 读请求体后应传 `body: Buffer`；若这里拿到的是空，
      * 就说明体在到达处理器前就没了（或桥没传）。打一行到 Host 输出（本机可直接看到），
@@ -817,7 +849,9 @@ class DshmRequest {
         : (Buffer.isBuffer(raw) ? 'Buffer' : (typeof raw === 'string' ? 'string'
         : (raw instanceof ArrayBuffer ? 'ArrayBuffer' : (ArrayBuffer.isView(raw) ? 'ArrayBufferView'
         : (raw !== null && typeof raw === 'object' ? `object:${raw.constructor === undefined ? '?' : raw.constructor.name}` : typeof raw))))));
-      console.error(`DSHM-REQDIAG body kind=${kind} bodyNull=${this._body === null}`
+      /* 【`stream=` 这一栏是 2026-10-06 加的】没有它就读不出"体是**流式**保留下来了"与
+       * "体被吞成空"的区别 —— 两者的 `bodyNull` 都是 true、preview 都是 `(null)`。 */
+      console.error(`DSHM-REQDIAG body kind=${kind} bodyNull=${this._body === null} stream=${this._stream !== null}`
         + ` content-length=${this.headers.get('content-length') ?? 'none'} url=${this.url}`
         + ` preview=${this._body === null ? '(null)' : JSON.stringify(this._body.toString('utf8').substring(0, 120))}`);
     }
