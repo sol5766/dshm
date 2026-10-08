@@ -281,6 +281,11 @@ function selfTest() {
   // 构造只含一个官方 id 的"全清单"，避免自检依赖真实矩阵规模
   const single = ['layout'];
   const saved = OFFICIAL_SURFACE.splice(0, OFFICIAL_SURFACE.length, ...single);
+  // 不变式 A2 的清单同理按用例注入：真实清单有 16 项端侧独有能力面，而样例里没有它们的行，
+  // 若让 A2 取真实清单，下面每一条"正常样例"都会被判红 —— 这正是本自检自进 CI 起就没绿过的原因
+  // （A2 于 ee92b44 加入，样例没同步；2026-10-06 修）。A2 本身仍由末尾两条带 `locals` 的用例覆盖。
+  const savedLocal = REQUIRED_LOCAL_SURFACE.splice(0, REQUIRED_LOCAL_SURFACE.length);
+  const localRow = `| \`dshm-selfdemo\` 自检样例 | w | s | u | p | DONE | DONE | DONE | DONE | DONE |\n`;
 
   const cases = [
     {
@@ -357,11 +362,24 @@ function selfTest() {
       text: head + `| \`layout\` 外壳 | w | s | u | p | ${NO_DIFF} | ${NO_DIFF} | ${NO_DIFF} | ${NO_DIFF} | TODO |\n`
         + gaps(['layout']) + statsWith({ DONE: 0, PARTIAL: 0, BOUNDARY: 0, TODO: 1, 合计: 1 }),
       want: 0
+    },
+    {
+      why: '端侧独有能力面漏行必须命中（不变式 A2：新增端侧能力必须登记）',
+      locals: ['dshm-selfdemo'],
+      text: head + goodRow + gaps([]) + statsWith({ DONE: 1, PARTIAL: 0, BOUNDARY: 0, TODO: 0, 合计: 1 }),
+      want: 1
+    },
+    {
+      why: '端侧独有能力面登记了即通过（不变式 A2 的正向）',
+      locals: ['dshm-selfdemo'],
+      text: head + goodRow + localRow + gaps([]) + statsWith({ DONE: 2, PARTIAL: 0, BOUNDARY: 0, TODO: 0, 合计: 2 }),
+      want: 0
     }
   ];
 
   let failed = 0;
   for (const c of cases) {
+    REQUIRED_LOCAL_SURFACE.splice(0, REQUIRED_LOCAL_SURFACE.length, ...(c.locals ?? []));
     const { problems } = checkMatrix(parseMatrix(c.text));
     const got = problems.length > 0 ? 1 : 0;
     const ok = got === c.want;
@@ -371,6 +389,7 @@ function selfTest() {
   }
 
   OFFICIAL_SURFACE.splice(0, OFFICIAL_SURFACE.length, ...saved);
+  REQUIRED_LOCAL_SURFACE.splice(0, REQUIRED_LOCAL_SURFACE.length, ...savedLocal);
   console.log(failed === 0
     ? `\n✅ 自检通过：检测器在 ${cases.length} 个正/负样例上都符合预期。`
     : `\n❌ 自检失败 ${failed} 项——门禁不可信，不得据此判断对等状态。`);

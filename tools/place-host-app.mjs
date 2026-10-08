@@ -60,7 +60,13 @@ const DEST = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resourc
 //       worker 里的 `globalThis.fetch` 又是原生 undici ⇒ 插件自建 worker 激活失败
 //       （真机形态：开发者工具启用 experimental-inspector 报
 //       `dsh: warning: 1 entry did not activate … WebAssembly is not defined`）。
-const FILES = ['main.js', 'jitless-env.cjs', 'worker-bootstrap.cjs', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'internal-undici-shim.cjs', 'dshm-installer.js', 'dshm-user-rows.js', 'dshm-skills.js', 'dshm-compat.js'];
+//   · tar-gz.cjs —— 纯 JS tar / tar.gz 解包（**单份实现**，插件安装器与工具链共用）。
+//       main.js 的工具链解包在手机 / 平板档**不能 spawn**（本档应用自带可执行文件一律
+//       EACCES，见 docs/104）⇒ 走进程内回退；漏掉它 ⇒ `require('./tar-gz.cjs')` 抛
+//       MODULE_NOT_FOUND，被调用点吞成一行 diag，表现为 `toolchain/python/bin/*` 永远为空、
+//       `runtime.python` 永远 `stdlib=false`（与修复前一模一样）。
+//       `dshm-installer.js` 也 require 它 ⇒ 插件安装同样会哑。
+const FILES = ['main.js', 'tar-gz.cjs', 'jitless-env.cjs', 'worker-bootstrap.cjs', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'internal-undici-shim.cjs', 'dshm-installer.js', 'dshm-user-rows.js', 'dshm-skills.js', 'dshm-compat.js'];
 
 mkdirSync(DEST, { recursive: true });
 

@@ -17,6 +17,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // 与 place-host-app.mjs 的 FILES 保持同步（新增文件两处一起改）
 const FILES = [
   'main.js',
+  'tar-gz.cjs',
   'jitless-env.cjs',
   'worker-bootstrap.cjs',
   'fetch-shim.js',

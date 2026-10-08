@@ -101,6 +101,26 @@ if ($beforeHomeLinks -lt 0) {
     Info "（`ls` 读不到条目是**预期**：home 是 0700、shell 是另一个 uid；以指纹为准，不要据此判断「数据被清」）"
 }
 
+# ── 2b) 日志台账基线（本轮"新鲜度"判据）──────────────────────────────────
+# 【为什么必须有这一段（2026-10-06 真机踩到）】`dshm-host.log` 是**跨 boot 追加**的
+# （首行至今仍是 2026-09-27 的 boot 标记），而第 8 步原先只取"最后一行 exec 探测"——
+# 于是一次 `hdc install -r` 之后应用根本没起来，脚本照样报
+#   OK   Host HTTP 已就绪（有 websocket 接入）
+#   FAIL exec 探测未全通（共 13 项）：…（**上一轮**的读数）
+# 即"端侧就绪"是**假绿**，而它正是"装机到底成没成"的唯一判据。改法：先记几个只增不减的
+# 计数器，装后必须**增加**才认这一轮。
+function LogCount($pattern) {
+    # 【必须带 -e（2026-10-06 实测）】模式串以 `-` 开头时（如 `--- boot pid=`）会被 grep
+    # 当成选项：`grep -c '--- boot pid='` 实测返回 **0**（不是报错），基线因此静默变成 0。
+    $n = Shell "grep -c -e '$pattern' $filesDir/dshm-host.log 2>/dev/null"
+    if ($n -match '^\d+$') { return [int]$n }
+    return 0
+}
+$beforeBootCount = LogCount '--- boot pid='
+$beforeExecCount = LogCount 'exec 探测：'
+$beforeMuxCount  = LogCount 'IN-UPGRADE GET /api/remote.mux'
+Info "日志台账基线：boot=$beforeBootCount exec=$beforeExecCount mux=$beforeMuxCount"
+
 # ── 3) 构建 ──────────────────────────────────────────────────────────────
 if (-not $SkipRebuild) {
     Step 3 '构建 debug 版（侧载与验收统一用 debug，签名=debugKey）'
@@ -165,8 +185,30 @@ Step 6 '冷启动应用'
 Shell "aa force-stop $bundle" | Out-Null
 Start-Sleep -Seconds 2
 Shell "aa start -a EntryAbility -b $bundle" | Out-Null
-Info "等待 $BootWaitSec 秒（首次可能需解包核心树）"
-Start-Sleep -Seconds $BootWaitSec
+# 【为什么从"盲等 90 秒"改成"轮询到出现本轮 exec 探测"（2026-10-06 真机踩到）】
+# 盲等只能保证"过了 90 秒"，不能保证"应用起来了"：实测 `hdc install -r` 之后那一次
+# `aa start` 没把应用拉起来（日志停在上一轮的 LOOP-ALIVE），而第 8 步读到上一轮日志，
+# 于是脚本报"端侧就绪"。轮询判据用 2b 记下的 exec 计数增量——它只在**真 boot** 时长。
+Info "等待启动（最多 $BootWaitSec 秒；首次可能需解包核心树）"
+$booted = $false
+$waited = 0
+while ($waited -lt $BootWaitSec) {
+    Start-Sleep -Seconds 5
+    $waited += 5
+    if ((LogCount 'exec 探测：') -gt $beforeExecCount) { $booted = $true; break }
+}
+if ($booted) {
+    Ok "端侧已起来（第 $waited 秒出现本轮 exec 探测）"
+} else {
+    Info "第 $waited 秒仍未见本轮 boot —— 再拉一次前台（实测 install 后首次 aa start 有概率不生效）"
+    Shell "aa start -a EntryAbility -b $bundle" | Out-Null
+    Start-Sleep -Seconds 25
+    if ((LogCount 'exec 探测：') -gt $beforeExecCount) {
+        Ok '重拉之后端侧已起来'
+    } else {
+        Bad '端侧没有起来：本轮没有任何新的 exec 探测行'
+    }
+}
 
 # ── 7) 验证：数据是否保留 ────────────────────────────────────────────────
 Step 7 '验证用户数据仍在（这是关键一步）'
@@ -213,29 +255,73 @@ if ($afterCores -notmatch [regex]::Escape($wantCore)) {
 # 写死总数会**在新增探测目标后失效**：8 项里只 ok 了 7 项（新的那项失败）依然是"通过"。
 # 改为"逐项都必须 =ok、且至少有一项"——探测项数由 hostcore/app/main.js 的
 # execProbeTargets() 决定，这里不再持有总数。见 docs/90 §8.1。
-Step 8 '验证端侧就绪（exec 探测逐项 + HTTP）'
+Step 8 '验证端侧就绪（exec 探测逐项 + HTTP；只认本轮新读数）'
+# 【档位识别（2026-10-06 加）】`const.product.devicetype` 是宿主侧可读的系统参数，
+# 与 ArkTS 侧 `deviceInfo.deviceType` 同源（platform 的 DeviceFacts.formOf 归一规则：
+# phone / tablet ⇒ 手持；2in1 / 2in1_foldable / desktop ⇒ 桌面）。读不到就按**非手持**
+# 处理 —— 即保持本脚本原先那条最严判据，绝不因为读不到形态而放宽。
+$deviceType = (Shell 'param get const.product.devicetype' | Out-String).Trim()
+$handheld = ($deviceType -eq 'phone' -or $deviceType -eq 'tablet')
+Info "设备形态 const.product.devicetype=$deviceType（判据：$(if ($handheld) { '手持档' } else { 'PC/2in1 档（或未识别 ⇒ 从严）' })）"
 $log = Shell "grep -E 'exec 探测：' $filesDir/dshm-host.log 2>/dev/null | tail -1"
 Info $log
+$afterExecCount = LogCount 'exec 探测：'
 $probe = [regex]::Match($log, 'exec 探测：(.*)')
 $execOk = $false
-if (-not $probe.Success) {
+if ($afterExecCount -le $beforeExecCount) {
+    Bad "本轮没有新的 exec 探测行（$beforeExecCount → $afterExecCount）—— 读数不可用，端侧可能没起来"
+} elseif (-not $probe.Success) {
     Bad '宿主日志里没有 exec 探测行'
 } else {
     $items = @($probe.Groups[1].Value -split '[，,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    $bad = @($items | Where-Object { $_ -notmatch '=ok$' })
-    if ($items.Count -gt 0 -and $bad.Count -eq 0) {
-        Ok "exec 探测 $($items.Count)/$($items.Count) 全通"
-        $execOk = $true
+    if ($handheld) {
+        # ── 手持档判据（2026-10-06 加）───────────────────────────────────
+        # 【为什么必须分档】原先只有一条判据「逐项都 =ok」。那对 PC/2in1 是对的，对手机 /
+        # 平板却是**假红**：手机档下随包自签名 ELF 一律被系统拒绝（`rg/ash/bash=denied`）、
+        # 系统 sh 连 stat 都拿不到（`system-sh=缺`），这是**已定案的平台行为**（docs/104、
+        # docs/106 §1.2），不是装机失败。旧写法会在手机上报「更新未完全通过」，把读者推向
+        # 「回滚 / 重装」的错误方向（本项目的纪律：**假红和假绿一样有害**）。
+        # 【为什么用规则而非标签白名单】探测项由 main.js 的 `execProbeTargets()` 决定，写死
+        # 标签会像旧版写死总数（`-ge 7`）那样在新增探测项后静默失效（见 docs/90 §8.1）。
+        # 故这里只按"值的形状"判：手持档必须至少有一条**真命令通道**（=ok），其余 =denied /
+        # =缺 逐条打印但不判失败；若一条 =denied 都没有，说明平台策略可能变了 ⇒ 提示复测。
+        $okItems = @($items | Where-Object { $_ -match '=ok$' })
+        $deniedItems = @($items | Where-Object { $_ -match '=denied$' })
+        $absentItems = @($items | Where-Object { $_ -match '=缺$' })
+        if ($deniedItems.Count -gt 0) {
+            Info "=denied  $($deniedItems -join '，')  ← 随包 ELF / 系统 sh 被 MAC 拒绝，属预期（docs/104）"
+        } else {
+            Info "本轮没有一条 =denied —— 若随包 ELF 真的被放行了（OS 升级？），docs/104 的结论需要复测"
+        }
+        if ($absentItems.Count -gt 0) {
+            Info "=缺      $($absentItems -join '，')  ← 未解包，或连 stat 都被拒（system-sh 属后者）"
+        }
+        # 判据：宿主必须还能 execve **系统**真命令（toybox）。它在 PC 与手机上都该是 ok。
+        $toyboxOk = @($items | Where-Object { $_ -match '^toybox=ok$' }).Count -gt 0
+        if ($items.Count -gt 0 -and $toyboxOk) {
+            Ok "exec 探测：手持档判据通过（toybox=ok ⇒ 真命令通道在；共 $($items.Count) 项，其中 =ok $($okItems.Count) / =denied $($deniedItems.Count)）"
+            $execOk = $true
+        } else {
+            Bad "手持档下 toybox 未 ok（$($items -join '，')）—— 宿主连系统真命令都起不来，需查"
+        }
     } else {
-        Bad "exec 探测未全通（共 $($items.Count) 项）：$($bad -join '，')"
+        $bad = @($items | Where-Object { $_ -notmatch '=ok$' })
+        if ($items.Count -gt 0 -and $bad.Count -eq 0) {
+            Ok "exec 探测 $($items.Count)/$($items.Count) 全通"
+            $execOk = $true
+        } else {
+            Bad "exec 探测未全通（共 $($items.Count) 项）：$($bad -join '，')"
+        }
     }
 }
 
-$http = Shell "grep -c 'IN-UPGRADE GET /api/remote.mux' $filesDir/dshm-host.log 2>/dev/null"
-if ($http -match '^\d+$' -and [int]$http -gt 0) {
-    Ok 'Host HTTP 已就绪（有 websocket 接入）'
+$afterMuxCount = LogCount 'IN-UPGRADE GET /api/remote.mux'
+if ($afterMuxCount -gt $beforeMuxCount) {
+    Ok "Host HTTP 已就绪（本轮有新的 websocket 接入：$beforeMuxCount → $afterMuxCount）"
 } else {
-    Bad '未见 HTTP 就绪迹象'
+    # 非判据：界面没连上来时本来就没有 websocket —— 旧写法 `grep -c … -gt 0` 对**跨 boot
+    # 追加**的日志是**恒真**的，等于每次都替这一步背书。
+    Info "本轮未见新的 websocket 接入（$beforeMuxCount → $afterMuxCount；非判据）"
 }
 
 # ── 9) 结论 ──────────────────────────────────────────────────────────────
