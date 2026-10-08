@@ -67,6 +67,10 @@
 
 ### D4. API 24 与 `Circle().fill(...)` 的兼容性（已知悬案）
 
+> **✅ 已结（2026-10-06）**：6 处已改成视觉等价的 `Row + backgroundColor`（`docs/108` §1.2），
+> `compatibleSdkVersion` 拍板固定 **`6.1.1(24)`**（`docs/110` §5），产物 `minAPIVersion=60101024`；
+> 真机上这 6 处状态点/色点的渲染仍属"装机后目视复核"项（`docs/110` §7）。
+
 - 现象：6 处 `Circle().fill(...)` 被编译器标注 `since SDK 26.0.0`，而我们的
   `compatibleSdkVersion` 固定在 `6.1.1(24)`（用户决定：**暂保持 24**，沉浸光感因此不可用，
   升级路径记在 `HarmonyTheme` 的 `HarmonyMaterial`）。
