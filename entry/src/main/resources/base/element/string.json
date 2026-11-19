@@ -13,12 +13,16 @@
       "value": "DSHM"
     },
     {
-      "name": "perm_internet_reason",
-      "value": "连接你指定的 DeepSeek Harness Host（本机或局域网/隧道地址）以收发会话与事件"
+      "name": "shortcut_new_session",
+      "value": "新建会话"
     },
     {
-      "name": "perm_network_info_reason",
-      "value": "检测网络状态切换，用于断线后自动重连与局域网 Host 发现"
+      "name": "agent_ext_desc",
+      "value": "DSHM端侧 A2A 智能体服务"
+    },
+    {
+      "name": "perm_internet_reason",
+      "value": "连接你指定的DSHM Host（本机或局域网/隧道地址）以收发会话与事件"
     },
     {
       "name": "perm_keep_background_reason",
@@ -39,18 +43,6 @@
     {
       "name": "perm_store_persist_reason",
       "value": "在应用沙箱的持久存储区保存核心运行时数据，避免每次启动重复解包"
-    },
-    {
-      "name": "perm_user_file_reason",
-      "value": "读写用户选择的项目目录（工作区），用于文件浏览、代码编辑与版本管理"
-    },
-    {
-      "name": "perm_full_disk_reason",
-      "value": "访问用户磁盘上的项目文件以支持工作区目录的完整读写（开发工具场景）"
-    },
-    {
-      "name": "perm_custom_sandbox_reason",
-      "value": "为核心运行时的子进程与原生扩展配置自定义沙箱，支持开发工具执行外部构建与命令"
     },
     {
       "name": "perm_microphone_reason",
@@ -234,7 +226,67 @@
     },
     {
       "name": "tray_hover_tips",
-      "value": "DSHM 正在运行（左键打开窗口）"
+      "value": "DSHM正在运行（左键打开窗口）"
+    },
+    {
+      "name": "UsageFormAbility_label",
+      "value": "DSHM 会话卡片"
+    },
+    {
+      "name": "UsageFormAbility_desc",
+      "value": "显示当前会话进度、账户余额或 token 用量"
+    },
+    {
+      "name": "form_display_name",
+      "value": "DSHM会话"
+    },
+    {
+      "name": "form_description",
+      "value": "当前会话进度 + 账户余额；余额不可用时显示 token 用量"
+    },
+    {
+      "name": "perm_custom_sandbox_reason",
+      "value": "作为本地开发工具，在动态沙箱执行域中运行随包分发的已签名 git、rg、shell 与 Python 等工具"
+    },
+    {
+      "name": "perm_ignore_library_validation_reason",
+      "value": "加载本地开发工具和插件携带的原生共享库，支持未经过系统库签名校验的随包模块"
+    },
+    {
+      "name": "perm_executable_memory_reason",
+      "value": "为核心运行时 JIT 与本地虚拟机翻译缓存申请匿名可执行内存，避免降级到解释执行"
+    },
+    {
+      "name": "perm_vibrate_reason",
+      "value": "复制、粘贴和会议录音开始或结束时提供轻触反馈，帮助用户确认操作完成；设备无振动能力时自动降级"
+    },
+    {
+      "name": "perm_read_pasteboard_reason",
+      "value": "用户主动执行粘贴时读取剪贴板纯文本并插入当前输入框；不会后台读取、读取图片或上传剪贴板内容"
+    },
+    {
+      "name": "perm_documents_directory_reason",
+      "value": "用户授权后，可将公共 Documents 目录中的项目作为工作区，在应用内浏览、搜索和编辑文件"
+    },
+    {
+      "name": "perm_download_directory_reason",
+      "value": "用户授权后，可直接导入公共 Download 目录中的项目压缩包、源码和构建产物作为工作区"
+    },
+    {
+      "name": "perm_desktop_directory_reason",
+      "value": "用户授权后，可将公共 Desktop 目录中的临时项目和脚本作为工作区进行浏览和编辑"
+    },
+    {
+      "name": "perm_full_disk_reason",
+      "value": "仅用于 PC / 2in1：读写用户选为项目工作区的本地文件夹（含符号链接）并运行随包工具链；不访问其他目录。"
+    },
+    {
+      "name": "perm_get_network_info_reason",
+      "value": "读取当前网络类型与连通状态，便于本地宿主在离线时直接降级，而不是等待请求超时"
+    },
+    {
+      "name": "perm_running_lock_reason",
+      "value": "解包核心、启动宿主、安装插件等长任务执行期间保持 CPU 不休眠，避免中途被系统降频或挂起"
     }
   ]
 }

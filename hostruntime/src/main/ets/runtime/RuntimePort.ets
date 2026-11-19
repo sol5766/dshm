@@ -69,7 +69,12 @@ export interface RuntimePort {
   probe(): Promise<RuntimeProbe>;
 
   /** 启动 Host。coreDir 是某一版核心的根（内含 node_modules 与 profiles/）。 */
-  start(coreDir: string, homeDir: string, profile: string): Promise<HostHandle>;
+  /**
+   * @param portOverride 显式端口（可选）。superagent 跑独立进程时用它固定 3082，
+   *                     否则按包名推导的端口会与主宿主撞车（EADDRINUSE）。
+   */
+  start(coreDir: string, homeDir: string, profile: string,
+    portOverride?: number): Promise<HostHandle>;
 
   /** 停止 Host。未启动时应是幂等的 no-op。 */
   stop(): Promise<void>;
@@ -87,21 +92,6 @@ export interface RuntimePort {
   isRunning(): boolean;
 }
 
-/** 未接线载体的探测结果：**如实**说明"还没接"，并给出下一步。 */
-export function notWiredProbe(note: string): RuntimeProbe {
-  return {
-    kind: RuntimeKind.NONE,
-    available: false,
-    note: note,
-    nodeVersion: '',
-    platform: '',
-    zstd: null,
-    jitless: null,
-    natives: [],
-    listenAddress: '',
-  };
-}
-
 // ── Host 启动契约：argv 与 env ──────────────────────────────────────────────
 //
 // 【为什么要在这里、以纯函数的形式定下来】端侧 Host 的配置通道**是环境变量而不是 argv**：
@@ -114,6 +104,8 @@ export function notWiredProbe(note: string): RuntimeProbe {
 
 /** 端侧 Host 的回环端口。与 main.js 的 DSHM_PORT 默认值一致，但**显式传**，不依赖默认值。 */
 export const HOST_DEFAULT_PORT: number = 3120;
+/** 浏览器自动化桥的正式包默认端口；其他包按 Host 端口偏移同步隔离。 */
+export const BROWSER_BRIDGE_DEFAULT_PORT: number = 19390;
 
 /**
  * `startHost()` 的 argv（**不含 argv[0]**；引导层会补一个 "node"）。
@@ -122,8 +114,9 @@ export const HOST_DEFAULT_PORT: number = 3120;
  * 核心树是可切换/回滚的，而入口脚本随应用发版，两者生命周期不同，混在一起会导致
  * "回滚核心版本把入口脚本也换掉了"。
  */
-export function buildHostArgv(entryScript: string): string[] {
-  return [
+export function buildHostArgv(entryScript: string, jitless: boolean = true): string[] {
+  const argv: string[] = [];
+  if (jitless) {
     // **必须**：这是"不申请 ALLOW_WRITABLE_CODE_MEMORY"能成立的前提。
     // 少了它，V8 会在初始化时申请可写可执行内存而被系统拦（D6 §4.4）。
     // 它必须排在脚本路径**之前**：Node 把第一个非选项参数当脚本。
@@ -137,7 +130,9 @@ export function buildHostArgv(entryScript: string): string[] {
     // `undefined`**。因此任何依赖 WASM 的 npm 依赖（纯 JS 包里并不罕见）在端侧会直接
     // 不可用，而且报错形式往往是"某个东西是 undefined"而不是"缺了 WASM"。
     // 这是 jitless 路线已知且接受的代价（换的是不申请特殊权限、可正常上架）。
-    '--jitless',
+    argv.push('--jitless');
+  }
+  argv.push(
     // 【为什么没有 --no-experimental-fetch】端侧 libnode 已升级到 v24.2.0（libnode.so.137），
     // fetch 在 Node 24 已转正：`--experimental-fetch` 不再是 boolean 选项，`--no-` 否定形态
     // 会让进程死在 CLI 解析（真机实测：`invalid negation because it is not a boolean option`，
@@ -165,8 +160,9 @@ export function buildHostArgv(entryScript: string): string[] {
      *   而**上一版是能起来的**。dsh 的 `--port/--host/--no-open/--trusted-host` 一律走
      *   入口脚本里的 `runProfile({ args })`（→ `ctx.cmdlineArgs`），见 hostcore/app/main.js。
      */
-    entryScript,
-  ];
+    entryScript
+  );
+  return argv;
 }
 
 /**
@@ -191,24 +187,74 @@ export function buildHostArgv(entryScript: string): string[] {
  * @param publicDownload ArkTS 侧启动前认领到的公共下载目录；空串 ⇒ 不写这一项
  */
 export function buildHostEnv(coreDir: string, homeDir: string, sandboxHome: string,
-  port: number, profile: string, publicDownload: string = ''): string[] {
+  port: number, profile: string, publicDownload: string = '', deviceForm: string = 'unknown',
+  deviceModel: string = '', nativeTerminalOnly: boolean = false, deviceFamily: string = '',
+  nativeLibsDir: string = '', hostResourceDir: string = '',
+  pcResfileDir: string = '', compileCacheDir: string = ''): string[] {
   const env: string[] = [
     `DSHM_CORE_DIR=${coreDir}`,
     `DSHM_HOME=${homeDir}`,
     `DSHM_SANDBOX_HOME=${sandboxHome}`,
     `DSHM_PORT=${port}`,
+    `DSHM_BROWSER_PORT=${BROWSER_BRIDGE_DEFAULT_PORT + (port - HOST_DEFAULT_PORT)}`,
     `DSHM_PROFILE=${profile}`,
+    `DSHM_DEVICE_FORM=${deviceForm.length > 0 ? deviceForm : 'unknown'}`,
+    `DSHM_DEVICE_MODEL=${deviceModel.length > 0 ? deviceModel : 'unknown'}`,
+    `DSHM_DEVICE_FAMILY=${deviceFamily.length > 0 ? deviceFamily : 'unknown'}`,
+    `DSHM_NATIVE_TERMINAL_ONLY=${nativeTerminalOnly ? '1' : '0'}`,
     // 【必须】关掉 libuv 的 io_uring。
     // 真机崩溃日志（D6 E42）：`Reason:Signal:SIGSYS(SYS_SECCOMP) syscall number is 425`，
     // 栈为 `uv_loop_init ← node::tracing::Agent::Agent() ← node::V8Platform::Initialize ← node::Start`。
     // arm64 上系统调用号 425 就是 `io_uring_setup` —— libuv 1.52 在 loop 初始化时会尝试它，
     // 而鸿蒙的 seccomp 策略**直接拒绝并杀掉进程**（不是返回错误码，是 SIGSYS）。
-    // libuv 支持用该环境变量禁用这条路径；这是端侧能起来的前提之一。
+    // 真正的修复是构建期 `uv__use_io_uring()` 无条件 return 0（libuv 对普通
+    // `flags=0` 路径根本不读这个环境变量，见 tools/node-runtime/fix-uv-io-uring.sh）；
+    // 这里保留变量只为防御上游未来改变读取位置。
     'UV_USE_IO_URING=0',
   ];
+  /*
+   * 原生终端档同时用语义开关和插件强制关闭口关门。任一设备事实漏判时，
+   * `DSHM_VM_BASH=off` 仍能阻止 PC / Edge 预热 QEMU；bash 工具改用系统 zsh。
+   */
+  if (nativeTerminalOnly) {
+    env.push('DSHM_VM_BASH=off');
+    env.push('DSHM_BASH_EXECUTABLE=/usr/bin/zsh');
+  }
   // 【为什么只在非空时追加】见上方说明：空值绝不写进去（Host 靠"这一项不存在"来判定回退）。
   if (publicDownload.length > 0) {
     env.push(`DSHM_PUBLIC_DOWNLOAD=${publicDownload}`);
+  }
+  if (nativeLibsDir.length > 0) {
+    env.push(`DSHM_NATIVE_LIBS=${nativeLibsDir}`);
+    env.push(`DSHM_VM_LIBS=${nativeLibsDir}`);
+  }
+  if (hostResourceDir.length > 0) {
+    env.push(`DSHM_RESOURCE_DIR=${hostResourceDir}`);
+    env.push(`DSHM_VM_RESFILE=${hostResourceDir}/vm`);
+  }
+  if (pcResfileDir.length > 0) {
+    env.push(`DSHM_PC_RESFILE_DIR=${pcResfileDir}`);
+  }
+  /*
+   * Node 模块**编译缓存**（2026-11-15 冷启动优化）。
+   *
+   * 【为什么值得】端侧宿主启动的绝大部分耗时在 `BOOT_40 → BOOT_50`：插件图装载，
+   * 即上千个 CJS/ESM 模块的"读文件 → 解析 → 编译成字节码"。这段每次冷启动都要重来一遍，
+   * 而模块源码是**只读核心树**，同一次安装内逐字节不变 ⇒ 天然适合 V8 的 code cache。
+   * `NODE_COMPILE_CACHE` 由 libnode 自己实现（`src/compile_cache.cc` + `env.cc`
+   * `Environment::InitializeCompileCache`），缓存键包含源码内容哈希与 Node 版本，
+   * **不需要我们实现任何缓存失效逻辑**：换核心/换 Node 版本后旧条目自动不命中。
+   *
+   * 【为什么不改变功能】命中的只是"编译结果"，模块仍从原路径加载、仍按原顺序执行；
+   * 未命中（首次启动、源码变化）时行为与没开这项逐字相同。`--jitless` 不受影响：
+   * 缓存的是字节码，不是 JIT 生成的机器码。
+   *
+   * 【失败是安全的】缓存目录不可写 / 条目损坏时 libnode 只打一条调试信息并继续编译，
+   * 绝不会因此启动失败。目录放在 **cacheDir**（系统可清理）而不是用户数据目录，
+   * 避免把可再生成物混进会话/插件所在的 `files/dsh/home`。
+   */
+  if (compileCacheDir.length > 0) {
+    env.push(`NODE_COMPILE_CACHE=${compileCacheDir}`);
   }
   return env;
 }
@@ -223,43 +269,4 @@ export function buildHostEnv(coreDir: string, homeDir: string, sandboxHome: stri
 export function isWellFormedEnvPair(pair: string): boolean {
   const eq: number = pair.indexOf('=');
   return eq > 0;
-}
-
-/**
- * 未接线载体的实现。
- *
- * 它存在的意义不是"占位"，而是让**当前真实状态**（运行时还没接上）在类型系统里成立，
- * 从而核心页与诊断页可以照常渲染"未接线 + 原因 + 下一步"，而不是靠 if 判空。
- */
-export class NotWiredRuntime implements RuntimePort {
-  private readonly note: string;
-
-  constructor(note: string) {
-    this.note = note;
-  }
-
-  kind(): RuntimeKind {
-    return RuntimeKind.NONE;
-  }
-
-  label(): string {
-    return '未接线';
-  }
-
-  async probe(): Promise<RuntimeProbe> {
-    return notWiredProbe(this.note);
-  }
-
-  async start(coreDir: string, homeDir: string, profile: string): Promise<HostHandle> {
-    throw new Error(`运行时载体尚未接线，无法启动核心（${coreDir} / ${profile}）`);
-  }
-
-  async stop(): Promise<void> {
-    // 未接线载体没有可停的东西：幂等 no-op
-  }
-
-  /** 未接线载体上不可能有 Host 在跑——如实返回 false，不假装。 */
-  isRunning(): boolean {
-    return false;
-  }
 }

@@ -65,6 +65,8 @@ function classify(output, arm) {
   const portFromShim = has(/"portEvent":"shim"/);
   const portOk = has(/"port":"ok"/);
   const bodyOk = has(/"responseBody":"ok"/);
+  const shimSurfaceOk = has(/"shimSurface":"ok"/);
+  const globalSurfaceOk = has(/"globalSurface":"ok"/);
   if (arm === 'fixed') {
     /* 断言安装函数自己认为装成功：否则"返回 false 但端口事件恰好来自垫片"这种组合会被漏掉 */
     if (!installed) return { ok: false, why: 'installInternalUndiciShim() 返回的不是 true' };
@@ -73,6 +75,8 @@ function classify(output, arm) {
     if (!portFromShim) return { ok: false, why: 'MessagePort 事件不是垫片的 MessageEvent —— 内部路径没走垫片' };
     if (!portOk) return { ok: false, why: 'MessagePort 正常收发被破坏（回归）' };
     if (!bodyOk) return { ok: false, why: 'new Response(FormData) 不是可写的 multipart 字节流（附件型 RPC 会 ERR_EMPTY_RESPONSE）' };
+    if (!shimSurfaceOk) return { ok: false, why: '内建垫片的具名导出里有非函数值（键在、值是 undefined 之类）—— 见夹具 ④ 的注释' };
+    if (!globalSurfaceOk) return { ok: false, why: 'globalThis.{Headers,Request,Response,FormData} 没物化出函数（端侧 new Request 会抛）' };
     return { ok: true, why: '内部 require 已被接管，端口事件由垫片构造，收发无回归，响应体形态正确' };
   }
   // control 臂：必须**没有**被接管
@@ -84,16 +88,19 @@ function classify(output, arm) {
 /* ───────────────────────── 自检 ───────────────────────── */
 
 const SELF_TESTS = [
-  ['fixed 全绿 → ok', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","stage":"done"}', 'fixed', true],
-  ['fixed 安装返回 false → fail', '{"installReturned":false,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","stage":"done"}', 'fixed', false],
-  ['fixed 未接管 → fail', '{"installReturned":true,"internalIsShim":false,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","stage":"done"}', 'fixed', false],
-  ['fixed 端口事件非垫片 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"node","port":"ok","responseBody":"ok","stage":"done"}', 'fixed', false],
-  ['fixed 事件不可派发 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"throw:x","portEvent":"shim","port":"ok","responseBody":"ok","stage":"done"}', 'fixed', false],
-  ['fixed 端口回归 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"throw:x","responseBody":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 全绿 → ok', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', true],
+  ['fixed 安装返回 false → fail', '{"installReturned":false,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 未接管 → fail', '{"installReturned":true,"internalIsShim":false,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 端口事件非垫片 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"node","port":"ok","responseBody":"ok","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 事件不可派发 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"throw:x","portEvent":"shim","port":"ok","responseBody":"ok","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 端口回归 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"throw:x","responseBody":"ok","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
   /* ⑤ 的判别力：响应体形态坏掉必须是 fail（否则这条恒真的话，本门禁就等于没加） */
-  ['fixed 响应体形态坏 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"throw:chunk 不是字节","stage":"done"}', 'fixed', false],
-  ['fixed 响应体形态 bad → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"bad","stage":"done"}', 'fixed', false],
-  ['fixed 缺响应体读数 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 响应体形态坏 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"throw:chunk 不是字节","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 响应体形态 bad → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"bad","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  ['fixed 缺响应体读数 → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","shimSurface":"ok","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  /* ④ 的判别力：内建垫片导出面坏掉 / globalThis 物化不出来，都必须是 fail */
+  ['fixed 内建垫片具名导出坏（Request=undefined）→ fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","shimSurface":"bad:Request=undefined","globalSurface":"ok","stage":"done"}', 'fixed', false],
+  ['fixed globalThis 没物化出 Request → fail', '{"installReturned":true,"internalIsShim":true,"fastMessageEvent":"ok","portEvent":"shim","port":"ok","responseBody":"ok","shimSurface":"ok","globalSurface":"bad:Request=undefined","stage":"done"}', 'fixed', false],
   ['fixed 未跑完 → fail', '{"installReturned":true,"internalIsShim":true,"portEvent":"shim","responseBody":"ok"}', 'fixed', false],
   ['control 未接管 → ok', '{"installReturned":false,"internalIsShim":false,"fastMessageEvent":"skip","portEvent":"node","port":"ok","responseBody":"ok","stage":"done"}', 'control', true],
   ['control 抛错也算未接管 → ok', '{"installReturned":false,"internalIsShim":false,"fastMessageEvent":"skip","portEvent":"throw","port":"throw:x","responseBody":"throw","stage":"done"}', 'control', true],
@@ -191,14 +198,32 @@ const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
       && meta.attachments[0].part === 'bytes-0' && got.equals(WANT)) ? 'ok' : 'bad';
   } catch (e) { responseBody = 'throw:' + (e && e.message); }
 
-  // ④ 惰性接口现状（信息性：版本相关，不做判定）
+  // ④ 具名导出面（**判定**）：内建 undici 的 Web 接口必须是**函数**。
+  //    【为什么从"信息性"改成"判定"】键在、值为 undefined 是同一族的静默故障，
+  //    而旧版这里只打印 typeof、判成 "shim" 也算过（2026-10-10 真事故：
+  //    internal-undici-shim.cjs 从 fetch-shim.js 解构 DshmRequest，而后者漏了这条导出
+  //    ⇒ 内建 undici 的 Request: undefined ⇒ globalThis.Request 物化出 undefined
+  //    ⇒ new Request(...) 抛 TypeError，全靠"全局缺哪个补哪个"掩盖）。
+  const WEB_API = ['Headers', 'Request', 'Response', 'FormData', 'Blob', 'File'];
+  let shimSurface = 'ok';
+  for (const k of WEB_API) {
+    if (typeof shim[k] !== 'function') { shimSurface = 'bad:' + k + '=' + typeof shim[k]; break; }
+  }
+  // 端侧真正取用的四个名字必须能从 globalThis 物化出函数（惰性 getter 指向内建模块）
+  let globalSurface = 'ok';
+  for (const k of ['Headers', 'Request', 'Response', 'FormData']) {
+    let t;
+    try { t = typeof globalThis[k]; } catch (e) { t = 'throw'; }
+    if (t !== 'function') { globalSurface = 'bad:' + k + '=' + t; break; }
+  }
+  // 惰性接口现状（信息性：版本相关，不做判定）
   let lazy = {};
   for (const k of ['MessageEvent','CloseEvent','WebSocket','EventSource','Headers','Request','Response','FormData']) {
     try { lazy[k] = (globalThis[k] === shim[k]) ? 'shim' : typeof globalThis[k]; }
     catch (e) { lazy[k] = 'throw'; }
   }
 
-  out({ installReturned: installed, internalIsShim, fastMessageEvent, portEvent, port, responseBody, lazy, stage: 'done' });
+  out({ installReturned: installed, internalIsShim, fastMessageEvent, portEvent, port, responseBody, shimSurface, globalSurface, lazy, stage: 'done' });
   process.exit(0);
 })().catch((e) => { out({ stage: 'fatal', error: String(e && e.message) }); process.exit(1); });
 `;

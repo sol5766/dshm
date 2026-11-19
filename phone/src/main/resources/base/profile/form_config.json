@@ -1,0 +1,23 @@
+{
+  "forms": [
+    {
+      "name": "dshm_usage_card",
+      "displayName": "$string:form_display_name",
+      "description": "$string:form_description",
+      "src": "./ets/form/pages/UsageCard.ets",
+      "uiSyntax": "arkts",
+      "window": {
+        "designWidth": 720,
+        "autoDesignWidth": true
+      },
+      "isDefault": true,
+      "isDynamic": true,
+      "updateEnabled": false,
+      "defaultDimension": "2*2",
+      "supportDimensions": [
+        "2*2",
+        "2*4"
+      ]
+    }
+  ]
+}

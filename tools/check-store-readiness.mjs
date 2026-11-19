@@ -38,6 +38,17 @@ const ROOT = process.cwd();
 const BUNDLE_NAME = 'com.dshm.dshclient';
 const FORBIDDEN = 'ALLOW_WRITABLE_CODE_MEMORY';
 const REQUIRED_DEVICE_TYPES = ['phone', 'tablet', '2in1'];
+const EXPECTED_DELIVERY_DEVICE_TYPES = new Map([
+  /* 【2026-11-08】entry 同时声明 tablet + 2in1：双形态平板（Edge/Pro Max）按 PC 应用分发，
+     单形态平板运行时仍判 TABLET。原独立 pc 壳已并入 entry。 */
+  ['entry', ['tablet', '2in1']],
+  ['phone', ['phone']],
+  ['hostruntime', ['phone', 'tablet', '2in1']],
+]);
+const APPROVED_KERNEL_PERMISSIONS = new Set([
+  'ohos.permission.kernel.IGNORE_LIBRARY_VALIDATION',
+  'ohos.permission.kernel.EXEMPT_ANONYMOUS_EXECUTABLE_MEMORY',
+]);
 
 const SKIP_DIRS = new Set([
   'node_modules', 'oh_modules', 'build', 'dist', '.git', '.research', '.hvigor', '.idea',
@@ -105,7 +116,9 @@ for (const path of findFiles(ROOT, 'module.json5').concat(findFiles(ROOT, 'app.j
     fail(`${rel}: 在**声明**里出现了 ${FORBIDDEN}（注释里提到是可以的，声明里绝对不行）`);
   }
   for (const match of code.matchAll(/"(ohos\.permission\.kernel\.[A-Z_]+)"/g)) {
-    fail(`${rel}: 申请了 system_basic/ACL 级权限 ${match[1]}（本项目不申请任何特殊权限）`);
+    if (!APPROVED_KERNEL_PERMISSIONS.has(match[1])) {
+      fail(`${rel}: 申请了未批准的内核权限 ${match[1]}`);
+    }
   }
   // `definePermissions` is how a HAR smuggles the restricted permission into its host
   if (/"definePermissions"\s*:\s*\[/.test(code) && /kernel\./.test(code)) {
@@ -113,35 +126,42 @@ for (const path of findFiles(ROOT, 'module.json5').concat(findFiles(ROOT, 'app.j
   }
 }
 
-// ── 3. every built module must claim phone / tablet / 2in1 ────────────────
+// ── 3. delivery modules must cover the intended AGC device surface ─────────
 const profilePath = join(ROOT, 'build-profile.json5');
 if (!existsSync(profilePath)) {
   fail('build-profile.json5 不存在');
 } else {
   const profile = looseJson(readFileSync(profilePath, 'utf8'));
   const modules = profile?.modules ?? [];
-  const seen = [];
-  for (const mod of modules) {
+  const byName = new Map(modules.map((mod) => [String(mod.name ?? ''), mod]));
+  const seenTypes = new Set();
+  for (const [name, expected] of EXPECTED_DELIVERY_DEVICE_TYPES) {
+    const mod = byName.get(name);
+    if (mod === undefined) {
+      fail(`build-profile.json5 缺少交付模块 ${name}`);
+      continue;
+    }
     const srcPath = String(mod.srcPath ?? '').replace(/^\.\//, '');
     const moduleJson = join(ROOT, srcPath, 'src', 'main', 'module.json5');
     if (!existsSync(moduleJson)) {
-      fail(`模块 ${String(mod.name)} 的 module.json5 不存在（${relative(ROOT, moduleJson)}）`);
+      fail(`模块 ${name} 的 module.json5 不存在（${relative(ROOT, moduleJson)}）`);
       continue;
     }
     const json = looseJson(readFileSync(moduleJson, 'utf8'));
     const types = json?.module?.deviceTypes ?? [];
-    seen.push(`${String(mod.name)}: [${types.join(', ')}]`);
-    const missing = REQUIRED_DEVICE_TYPES.filter((t) => !types.includes(t));
-    if (missing.length > 0) {
-      fail(`模块 ${String(mod.name)} 的 deviceTypes 缺少 ${missing.join('/')}（目标要求手机/平板/2in1 都能装）`);
+    for (const type of types) seenTypes.add(type);
+    if (JSON.stringify(types) !== JSON.stringify(expected)) {
+      fail(`模块 ${name} 的 deviceTypes=${JSON.stringify(types)}，期望 ${JSON.stringify(expected)}`);
     }
   }
-  // The stage-1 Electron surface must not come back into the build path.
+  const missingDevices = REQUIRED_DEVICE_TYPES.filter((type) => !seenTypes.has(type));
+  if (missingDevices.length > 0) {
+    fail(`交付模块合计缺少设备类型 ${missingDevices.join('/')}`);
+  }
   for (const mod of modules) {
-    const name = String(mod.name ?? '');
     const srcPath = String(mod.srcPath ?? '');
-    if (/web_engine|electron/i.test(name) || /web_engine|electron/i.test(srcPath)) {
-      fail(`build-profile.json5 里仍有阶段一遗留模块 ${name}（${srcPath}）：那条通道依赖 JIT，不可上架`);
+    if (/\b(?:web_engine|electron)\b/i.test(`${String(mod.name ?? '')} ${srcPath}`)) {
+      fail(`build-profile.json5 里仍有阶段一遗留模块 ${String(mod.name)}（${srcPath}）：那条通道依赖 JIT，不可上架`);
     }
   }
   if (modules.length === 0) fail('build-profile.json5 没有任何模块');

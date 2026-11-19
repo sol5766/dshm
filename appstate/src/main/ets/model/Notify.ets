@@ -126,7 +126,12 @@ export const NOTIFY_POLICIES: NotifyPolicy[] = [
   },
   {
     kind: NotifyKind.TURN_DONE,
-    title: '回答完成',
+    /*
+     * 【2026-10-31 文案（docs/324）】用户口径：「当任务完成后通知栏提示任务已完成」。
+     * 原词是"回答完成"——那只描述了"模型答完了"，而用户脑子里这件事就是"任务跑完了"。
+     * 改为「任务已完成」，与它下方 TASK_DONE 的「任务完成」保持同一语感。
+     */
+    title: '任务已完成',
     priority: NotifyPriority.NORMAL,
     slot: NotifySlot.OUTCOME,
     target: NotifyTarget.SESSION_BOTTOM,
@@ -177,10 +182,25 @@ export function policyOf(kind: NotifyKind): NotifyPolicy {
   return NOTIFY_POLICIES[5];
 }
 
-/** 优先级 → 通知栏是否折叠进「决策」分组（规范的「高」两行合成一个分组）。 */
-export function groupOf(kind: NotifyKind): string {
-  const p: NotifyPolicy = policyOf(kind);
-  return p.slot === NotifySlot.DECISION ? '待决' : '进展';
+/**
+ * 通知栏分组。
+ *
+ * 【2026-11-11 用户反馈：多条通知全挤在一起】原来只按 slot 分成 '待决' / '进展' 两组，
+ * 而 `groupName` 相同就被系统折叠成一条 ⇒ 不同会话的通知混在一个组里，看不出是哪几个会话。
+ * 改成**按会话分组**（鸿蒙原生应用的通行形态）：同一会话的多条（进度 / 完成 / 待决）
+ * 折叠为一组，不同会话各自一条。
+ *
+ * 拿不到 sessionId 时返回空串 —— `NotificationCenter.publish()` 见空串就不设 groupName，
+ * 让系统按通知 id 独立展示（不能设成空字符串，否则所有"空会话"又会被聚成一组）。
+ *
+ * `kind` 目前不参与分组（同一会话的进度 / 完成 / 待决本就该折叠在一起）；保留参数
+ * 是为了将来要按类别再细分时不必改调用点。
+ */
+export function groupOf(kind: NotifyKind, sessionId: string): string {
+  if (sessionId.length > 0) {
+    return `dsh.session.${sessionId}`;
+  }
+  return '';
 }
 
 // ───────────────────────── 内容纪律：脱敏与截断 ─────────────────────────
@@ -392,7 +412,7 @@ export function notificationFor(input: NotifyInput): NotificationDraft {
     body: body,
     priority: policy.priority,
     slot: policy.slot,
-    group: groupOf(input.kind),
+    group: groupOf(input.kind, input.sessionId),
     route: routeOf(input.kind, input.sessionId, input.pendingId, input.hostId),
     ongoing: false
   };

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""就地给 tar.gz / .apk 归档里的 ELF 打自签名（报告 4 ③，2026-09-26）。
+"""就地给 tar.gz 归档里的 ELF 打自签名（报告 4 ③，2026-09-26）。
 
 【为什么需要它，而不是解包→签名→重打包】
 归档里有**符号链接**条目（python/bin/python → python3.12、git-core 里 180+ 个
@@ -38,12 +38,22 @@ def is_elf(path):
 
 
 def sign_one(java, jar, src, dst):
-    """调 binary-sign-tool 自签一个文件。成功返回 True。"""
-    proc = subprocess.run(
-        [java, "-jar", jar, "sign", "-mode", "localSign", "-selfSign", "1",
-         "-inFile", src, "-outFile", dst, "-signAlg", "SHA256withECDSA"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+    """调 binary-sign-tool 自签一个文件。成功返回 True。
+
+    【两种载体，判据是**路径扩展名**，不是平台】2026-11-02 真机实测：
+      · jar 形态（Windows DevEco）：`java -jar binary-sign-tool.jar sign -mode localSign -selfSign 1 -inFile … -outFile … -signAlg …`
+      · 原生形态（鸿蒙 CLT）：`binary-sign-tool sign -inFile … -outFile … -selfSign 1`
+    原生工具**不接受** jar 专有的 `-mode localSign`，也不接受 `-signAlg`；
+    而且参数顺序敏感 —— `-selfSign` 必须在 `-inFile/-outFile` **之后**，写反了会报
+    `'… is not trust command`（本轮踩过：先把 -selfSign 放前面，试了 6 种命令名全失败）。
+    成功输出为 `add codesign section success` + `write code sign data success`，
+    可用 `binary-sign-tool display-sign -inFile …` 复核为 `code signature is self-sign`。
+    """
+    native = not jar.endswith(".jar")
+    argv = ([jar, "sign", "-inFile", src, "-outFile", dst, "-selfSign", "1"] if native else
+            [java, "-jar", jar, "sign", "-mode", "localSign", "-selfSign", "1",
+             "-inFile", src, "-outFile", dst, "-signAlg", "SHA256withECDSA"])
+    proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
         tail = (proc.stderr or proc.stdout or b"").decode("utf-8", "replace").strip()
         print("  sign failed: %s :: %s" % (os.path.basename(src), tail[-160:]), file=sys.stderr)
@@ -101,6 +111,9 @@ def main():
         return 2
     jar, java = sys.argv[1], sys.argv[2]
     archives = sys.argv[3:]
+    if not os.path.exists(jar):
+        print("resign: 签名工具不存在：%s" % jar, file=sys.stderr)
+        return 2
     total_signed = 0
     with tempfile.TemporaryDirectory(prefix="dshm-sign-") as workdir:
         for archive in archives:

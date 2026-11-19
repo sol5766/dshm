@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # DSHM 门禁 · GitHub Actions
 #
 # 【范围】只放**不依赖真机、不依赖 HarmonyOS SDK、不依赖 Windows** 的那批门禁，跑在
@@ -7,7 +7,7 @@
 # 【显式准备步骤只有一步】tools/place-host-app.mjs —— resfile/resources/app/ 是生成物
 #   （见 .gitignore:46），assert-resfile-sync 少了它就是红，所以先同步一次。
 #
-# 【没有"解包核心树"这一步，因为无包可解】entry/src/main/resources/resfile/ 下：
+# 【没有"解包核心树"这一步，因为无包可解】hostruntime/src/main/resources/resfile/ 下：
 #   · 入库的只有 busybox/ 与 ohos-skills/（`git ls-tree HEAD -- entry/src/main/resources/resfile`
 #     只有 6 个文件）；
 #   · 核心树 zip 见 .gitignore:42、toolchain/ 见 .gitignore:44、resources/app/ 见 .gitignore:46。
@@ -90,6 +90,51 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/assert-resfile-sync.mjs
 
+      # 2026-11-12（docs/410）：内置救援插件 entry id 与外部同名插件解耦 + 让位逻辑。
+      - name: 门禁 · check-boot-rescue-id
+        if: ${{ !cancelled() }}
+        run: node tools/check-boot-rescue-id.mjs
+
+      - name: 门禁 · check-ai-disclosure-scope
+        if: ${{ !cancelled() }}
+        run: node tools/check-ai-disclosure-scope.mjs --self-test || { result=$?; if [ "$result" -eq 2 ]; then printf '%s\n' 'SKIP / UNVERIFIED: AI production core contract unavailable'; else exit "$result"; fi; }
+
+      # 2026-11-12：验证市场脚本求值后的真实查询行为，不将其等同于整页缩窄已修复。
+      - name: 门禁 · check-market-panel-width
+        if: ${{ !cancelled() }}
+        run: node tools/check-market-panel-width.mjs --self-test
+
+      # 2026-11-12：主会话输入框作用域与样式补挂、顶部避让按事件类型消费。
+      - name: 门禁 · check-composer-pin
+        if: ${{ !cancelled() }}
+        run: node tools/check-composer-pin.mjs --self-test
+
+      - name: 门禁 · check-phone-viewport-grid
+        if: ${{ !cancelled() }}
+        run: node tools/check-phone-viewport-grid.mjs --self-test
+
+      # 原生输出为 regular-file 追加写；4MiB 软阈值治理，宿主 C++ 行为与变异测试。
+      - name: 门禁 · check-node-output-bounds
+        if: ${{ !cancelled() }}
+        run: node tools/check-node-output-bounds.mjs --self-test
+
+      - name: 门禁 · check-memory-host-lifecycle
+        if: ${{ !cancelled() }}
+        run: node tools/check-memory-host-lifecycle.mjs --self-test
+
+      - name: 门禁 · check-guest-handle-lifecycle
+        if: ${{ !cancelled() }}
+        run: node tools/check-guest-handle-lifecycle.mjs --self-test
+
+      - name: 门禁 · check-native-capture-lifecycle
+        if: ${{ !cancelled() }}
+        run: node tools/check-native-capture-lifecycle.mjs --self-test
+
+      # 2026-11-12（docs/410）：bin/dsh 按 cores/.current 选核心（含真跑两个核心目录）。
+      - name: 门禁 · check-dsh-cli-current-core
+        if: ${{ !cancelled() }}
+        run: node tools/check-dsh-cli-current-core.mjs
+
       - name: 门禁 · check-parity
         if: ${{ !cancelled() }}
         run: node tools/check-parity.mjs
@@ -101,6 +146,28 @@ jobs:
       - name: 门禁 · assert-python-bridge
         if: ${{ !cancelled() }}
         run: node tools/assert-python-bridge.mjs
+
+      - name: 门禁 · check-cot-translation-live（官方思考翻译端侧**真跑**；核心树不在时如实跳过）
+        if: ${{ !cancelled() }}
+        # 这条**需要核心树**，而 CI 的干净检出里没有它（resfile 的 core zip 不入库）。
+        # 脚本在缺树时以退出码 2 结束并打印"环境受阻"，这里把它当"跳过"而不是"失败"：
+        # 目的是"有树时一定跑"，不是"没树时也判绿"。真正必跑的那条是
+        # check-cot-translation.mjs（纯静态，只需仓库内文件）。
+        run: node tools/check-cot-translation-live.mjs --offline || [ $? -eq 2 ]
+
+      - name: 门禁 · check-ws-self-heal（WS 升级失败后必须自动重试；带对照臂 + 连上复位场景）
+        if: ${{ !cancelled() }}
+        # 三端"左下角连接异常"的根因门禁（docs/335）。B1/B2/B3 证明"失败后会重试、删掉就只试一次"；
+        # C1/C2/C3 证明"连上后复位退避、不残留定时器"—— 后者防的是自愈把正常连接自己打断。
+        run: node tools/check-ws-self-heal.mjs
+
+      - name: 门禁 · check-user-data-preserved（升级不得动 home/ 用户数据；带 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-user-data-preserved.mjs
+
+      - name: 门禁 · check-ffmpeg-provision（随包 ffmpeg 升级失败必须保留旧版本；带对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-ffmpeg-provision.mjs
 
       - name: 门禁 · check-doc-refs
         if: ${{ !cancelled() }}
@@ -142,15 +209,352 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/check-denial-hints.mjs
 
+      - name: 门禁 · check-vm-bash（手持档 guest 虚拟机 bash 通道 · 分档判据带对照臂 · 不改派面）
+        if: ${{ !cancelled() }}
+        run: node tools/check-vm-bash.mjs
+
+      - name: 门禁 · check-bash-terminfo（bash/tmux wrapper 的 TERMINFO 走 etc/terminfo、TERM 可回退 xterm、三处随包归档含 xterm · 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-bash-terminfo.mjs && node tools/check-bash-terminfo.mjs --self-test
+
+      - name: 门禁 · check-task-state-compat（2in1 files 根只读时兼容副本必须跳过并缓存 · 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-task-state-compat.mjs && node tools/check-task-state-compat.mjs --self-test
+
+      - name: 门禁 · check-task-state-reconcile（遵循官方 turnBoundary：启动收敛残留 running / turn/end 所有 reason 置 done · 5 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-task-state-reconcile.mjs && node tools/check-task-state-reconcile.mjs --self-test
+
+      - name: 门禁 · 专用本地模型撤除与通用API保留
+        if: ${{ !cancelled() }}
+        run: node tools/check-local-model-removed.mjs --self-test
+
+      - name: 门禁 · 定向死链撤除
+        if: ${{ !cancelled() }}
+        run: node tools/check-targeted-residual-cleanup.mjs --self-test
+
+      - name: 门禁 · 并发任务状态身份
+        if: ${{ !cancelled() }}
+        run: node tools/check-task-state-concurrency.mjs --self-test
+
+      - name: 门禁 · guest终端生命周期回收
+        if: ${{ !cancelled() }}
+        run: node tools/check-guest-terminal-lifecycle.mjs
+
+      - name: 自检 · guest终端生命周期回收
+        if: ${{ !cancelled() }}
+        run: node tools/check-guest-terminal-lifecycle.mjs --self-test
+
+      - name: 门禁 · PC设置官方配色
+        if: ${{ !cancelled() }}
+        run: node tools/check-pc-settings-chrome.mjs --self-test
+
+      - name: 门禁 · 启动诊断就绪后调度
+        if: ${{ !cancelled() }}
+        run: node tools/check-startup-work.mjs --self-test
+
+      - name: 门禁 · 启动授权恢复等待与异常隔离
+        if: ${{ !cancelled() }}
+        run: node tools/check-folder-grants-startup.mjs --self-test
+
+      - name: 门禁 · 内置核心并发安装检查
+        if: ${{ !cancelled() }}
+        run: node tools/check-bundled-install-singleflight.mjs --self-test
+
+      - name: 门禁 · 共享HSP路径解析复用
+        if: ${{ !cancelled() }}
+        run: node tools/check-host-module-singleflight.mjs --self-test
+
+      - name: 门禁 · check-mobile-enter（移动端裸 Enter = 换行：keyCode 兜底 / composer 兜底 / 保护与诊断 · 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-mobile-enter.mjs && node tools/check-mobile-enter.mjs --self-test
+
+      - name: 门禁 · check-foldable-sidebar（单屏直板机 / 双屏三屏走桌面档 / 平板独立档不动 · 6 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-foldable-sidebar.mjs && node tools/check-foldable-sidebar.mjs --self-test
+
+      - name: 门禁 · check-host-vm-graceful-stop（P0-1 宿主停止必须等 VM QMP 优雅关机 · 12 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-host-vm-graceful-stop.mjs && node tools/check-host-vm-graceful-stop.mjs --self-test
+
+      - name: 门禁 · check-skill-single-source（P0-4 内置技能文档单源到 HSP · 7 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-skill-single-source.mjs && node tools/check-skill-single-source.mjs --self-test
+
+      - name: 门禁 · check-dual-shell-parity（P0-2 防漂移：双壳 7 个纯共享文件逐字节一致 · 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-dual-shell-parity.mjs && node tools/check-dual-shell-parity.mjs --self-test
+
+      - name: 门禁 · check-tools-syntax（tools/ 脚本 shebang 位置 + node --check 全量 · 含真跑对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-tools-syntax.mjs && node tools/check-tools-syntax.mjs --self-test
+
+      - name: 门禁 · check-vm-memory-tier（12G 保持低占用 / 16G+ 三端性能档 · 预热与覆盖面）
+        if: ${{ !cancelled() }}
+        run: node tools/check-vm-memory-tier.mjs
+
+      - name: 门禁 · check-edge-desktop-policy（MatePad Edge / QXS-* 永久 desktop · 终端只走原生 · bash 仍可用 guest）
+        if: ${{ !cancelled() }}
+        run: node tools/check-edge-desktop-policy.mjs
+
+      - name: 门禁 · check-fs-fence（文件访问范围闸门：沙箱 ∪ 用户目录 · 三个入口一份判据 · 带三条负控制）
+        if: ${{ !cancelled() }}
+        run: node tools/check-fs-fence.mjs
+
+      - name: 门禁 · check-handheld-back（手持档「返回 / 手势」分层消费 · 绝不吞返回 · PC 逐字不动 · 带三条对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-handheld-back.mjs
+
+      - name: 门禁 · check-boot-rescue（随包启动救援：核心树清单 + profile 默认启用 + tapIndex 注入 · 插件崩了也能卸载问题插件）
+        if: ${{ !cancelled() }}
+        run: node tools/check-boot-rescue.mjs
+
+      - name: 门禁 · check-sidebar-shim-css（侧栏垫片注入的样式表必须括号配平 · 桌面档规则必须在顶层 · 手持档抽屉那条不许被搬走 · 带 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-sidebar-shim-css.mjs
+
+      - name: 门禁 · check-phone-sidebar-core-compat（手机端侧栏对 0.2.2-rc.1 的 opener/inert 适配 · 恢复 1.1.7 单按钮可点 · 平板端不动 · 带 5 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-phone-sidebar-core-compat.mjs
+
+      - name: 门禁 · check-web-glass-skin（外壳玻璃：三个面 / 顶栏与输入框不得打标 / 页面采样深浅 / 特性探针 / 实色降级 / 诊断桥 / CSS 括号 · 带 8 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-web-glass-skin.mjs && node tools/check-web-glass-skin.mjs --self-test
+
+      - name: 门禁 · check-brand-surface（DSHM 独立品牌 · 无鲸鱼/官方文案 · MIT 与第三方声明随包 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-brand-surface.mjs
+
+      - name: 门禁 · check-deveco-paths（tools/ 下不许写死 DevEco Studio 安装根 · 带 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-deveco-paths.mjs
+
+      - name: 门禁 · check-plugin-render-arity（插件 output.render 必须两参 (args, value) —— 框架真实调用形状 · 带 2 组合成对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-plugin-render-arity.mjs
+
+      - name: 门禁 · check-open-link-bridge（外开桥三侧接线：Host 端点 / ArkTS 队列 / 插件拉起调用逐字一致 · 带 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-open-link-bridge.mjs
+
+      - name: 门禁 · check-browser-autoclose（任务结束自动关闭浏览器：turn/end 订阅 + 多标签只删自己页/单标签只最小化 · 带 6 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-browser-autoclose.mjs
+
+      - name: 门禁 · check-usage-card（桌面卡片：会话进度 + 余额 + 四档用量条形图 + 白底 + 仅主应用运行时推送 · 带 9 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-usage-card.mjs
+
       - name: 门禁 · check-fetch-shim（垫片本身 · 含请求方向流式体 ⑧′ 与「吞体的旧实现必须判红」⑧″ 对照臂）
         if: ${{ !cancelled() }}
         run: node tools/check-fetch-shim.cjs
+
+      - name: 门禁 · check-permission-surface（权限面与当前声明顺序和reason一致）
+        if: ${{ !cancelled() }}
+        run: node tools/check-permission-surface.mjs
+
+      - name: 门禁 · check-no-apk-surface（包内无 apk 目录 / 文件 / 归档条目 · 带 4 个变异体 + 1 条对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-no-apk-surface.mjs
+
+      - name: 门禁 · check-feature-wiring（功能"调用点还在不在"的接线粗筛 · 含三端目录授权链的反面规则）
+        if: ${{ !cancelled() }}
+        run: node tools/check-feature-wiring.mjs
+
+      # 2026-11-16：桥接契约层（信封/超时/幂等完成/同源闸门）与暴露面。
+      - name: 门禁 · check-bridge-contract（契约行为矩阵 + 两壳同源）
+        if: ${{ !cancelled() }}
+        run: node tools/check-bridge-contract.mjs
+
+      - name: 门禁 · check-bridge-surface（同源闸门/协议复校/主机全等/导航接管）
+        if: ${{ !cancelled() }}
+        run: node tools/check-bridge-surface.mjs
+
+      - name: 门禁 · check-bridge-methodlist（methodList ↔ 定义 ↔ 生成清单）
+        if: ${{ !cancelled() }}
+        run: node tools/check-bridge-methodlist.mjs
+
+      # 2026-11-16：工具落盘纪律（dry-run 不落盘 / 覆盖前备份）。
+      - name: 门禁 · check-tool-dryrun（safe-apply 行为 + place-host-app 接线）
+        if: ${{ !cancelled() }}
+        run: node tools/check-tool-dryrun.mjs
+
+      - name: 自检 · check-bridge-contract（5 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-bridge-contract.mjs --self-test
+
+      - name: 自检 · check-bridge-surface（4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-bridge-surface.mjs --self-test
+
+      - name: 自检 · check-tool-dryrun（1 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-tool-dryrun.mjs --self-test
+
+      - name: 门禁 · check-host-port-isolation（正式 3120/19390 · Beta 3121/19391，包名上下文兜底，带 5 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-host-port-isolation.mjs
+
+      - name: 门禁 · check-picker-api23（API 23 工作区选择：能力预检 + 专属目录兜底）
+        if: ${{ !cancelled() }}
+        run: node tools/check-picker-api23.mjs
+
+      # 2026-10-29（docs/291 复核）：内置核心"同版本换树"必须是
+      # stage（解包+校验，不碰目标）→ 挪旧树 → commit → 失败回滚；
+      # 旧写法"先挪后装"会让损坏的新容器把设备上唯一能跑的核心树删掉。
+      - name: 门禁 · check-bundled-core-rollback（核心换树顺序：先验证后替换 · 失败回滚旧树 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-bundled-core-rollback.mjs
+
+      # 2026-10-29（docs/291 复核）：手持档长时任务的生命期接线。
+      # phone 此前从未调用 noteBackground ⇒ 系统取消后的续期永远不触发；
+      # entry 漏了晚到 acquire 的代次校验 ⇒ 快速切回前台残留任务/通知。
+      - name: 门禁 · check-keepalive-wiring（entry/phone 保活接线：noteBackground · 回前台撤意图 · 晚到 acquire 代次校验 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-keepalive-wiring.mjs
+
+      # 2026-11-05（客户反馈核对）：保活链的**生产者**那一段。
+      # Host 写 workload.json 的 refs 时，判据必须认 card-state 的**真实字段**
+      # （`session.state === 'running'`）；此前只认顶层 `running`/`turnActive`，
+      # 而两个键从未被写入过 ⇒ refs 恒为 0 ⇒ 熄屏判成"无保活诉求"。
+      # 带 3 个变异体（删判据 / 常量赋值 / refs 常量）。
+      - name: 门禁 · check-workload-refs（Host workload.refs 判据必须认 card-state 真实字段 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-workload-refs.mjs
+
+      # 2026-11-05（用户口径）：提示音一律走系统提示音，三端都不得播随包音频。
+      - name: 门禁 · check-done-sound-system（三端不播随包音频 · 完成通知走可回退的有声渠道 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-done-sound-system.mjs
+
+      # 2026-10-29（docs/291 复核）：插件 tarball 必须按 registry 的
+      # dist.integrity / shasum 校验；两者皆无 ⇒ 拒绝安装。带行为样例与 3 个变异体。
+      - name: 门禁 · check-installer-integrity（插件安装 SRI 校验：解包前判死 · 缺元数据拒绝 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-installer-integrity.mjs
+
+      # 2026-10-29（docs/293 §5.1/§5.2 + docs/294 复测）：pnpm/npm 假壳的**执行语义**。
+      # 真跑生成的 shell 脚本：list 的目录回落 / rc / stdout-stderr 分流，
+      # config 的四态。静态 grep 判不出"退出码被 echo 覆盖"这类语义错。
+      - name: 门禁 · check-cli-shim-semantics（假壳语义：list 三种结局 + config 四态 · 真跑 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-cli-shim-semantics.mjs
+
+      # 2026-10-29（docs/298 P2）：会话同步清单的本地扫描面。
+      # 排除 cache/cores、代际版本与上游 CANONICAL_LOG_FILENAME 同口径、
+      # 对外 JSON 无绝对路径。带 3 个变异体。
+      - name: 门禁 · check-session-sync-scope（同步清单：排除面 · 代际解析 · 无绝对路径 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-session-sync-scope.mjs
+
+      # 2026-10-30（docs/310）：插件清单同步 —— 基础包过滤 / bundles 顺序 / spec 原样保留。
+      - name: 门禁 · check-plugin-manifest（插件清单：基础包过滤 · bundles 顺序 · spec 保留 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-plugin-manifest.mjs
+
+      # 2026-10-30（docs/319）：内置插件的模块格式自洽。
+      # ESM 包用 CJS 的 exports. 会**静默导出空模块** ⇒ cordis 不构造插件 ⇒ 功能不出现。
+      - name: 门禁 · check-plugin-module-format（ESM/CJS 自洽 · 导出可解析 · 带 3 个变异体 + 真跑）
+        if: ${{ !cancelled() }}
+        run: node tools/check-plugin-module-format.mjs
+
+      # 2026-10-30（docs/313/314）：云同步生产功能的三道核心门禁。
+      - name: 门禁 · check-sync-model（冲突不覆盖 · 进度含失败 · schema 拒绝 · 带 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-sync-model.mjs
+      - name: 门禁 · check-sync-planner（排除面 · workspaceId 稳定 · 不泄漏路径 · 带 3 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-sync-planner.mjs
+      - name: 门禁 · check-import-path（路径穿越 · 代际文件名与上游一致）
+        if: ${{ !cancelled() }}
+        run: node tools/check-import-path.mjs
+
+      - name: 自检 · check-bundled-core-rollback
+        if: ${{ !cancelled() }}
+        run: node tools/check-bundled-core-rollback.mjs --self-test
+
+      - name: 自检 · check-keepalive-wiring
+        if: ${{ !cancelled() }}
+        run: node tools/check-keepalive-wiring.mjs --self-test
+
+      - name: 自检 · check-workload-refs
+        if: ${{ !cancelled() }}
+        run: node tools/check-workload-refs.mjs --self-test
+
+      - name: 自检 · check-done-sound-system
+        if: ${{ !cancelled() }}
+        run: node tools/check-done-sound-system.mjs --self-test
+
+      - name: 门禁 · check-cloud-sync-policy（登录须经确认框 · 恢复不覆盖本机 · 账号显示非内部代号 · 只用 profile scope · 带 10 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-cloud-sync-policy.mjs
+
+      - name: 自检 · check-cloud-sync-policy
+        if: ${{ !cancelled() }}
+        run: node tools/check-cloud-sync-policy.mjs --self-test
+
+      - name: 自检 · check-installer-integrity
+        if: ${{ !cancelled() }}
+        run: node tools/check-installer-integrity.mjs --self-test
+
+      - name: 自检 · check-cli-shim-semantics
+        if: ${{ !cancelled() }}
+        run: node tools/check-cli-shim-semantics.mjs --self-test
+
+      - name: 自检 · check-session-sync-scope
+        if: ${{ !cancelled() }}
+        run: node tools/check-session-sync-scope.mjs --self-test
+
+      - name: 自检 · check-plugin-manifest
+        if: ${{ !cancelled() }}
+        run: node tools/check-plugin-manifest.mjs --self-test
+
+      - name: 自检 · check-plugin-module-format
+        if: ${{ !cancelled() }}
+        run: node tools/check-plugin-module-format.mjs --self-test
+
+      - name: 自检 · check-sync-model
+        if: ${{ !cancelled() }}
+        run: node tools/check-sync-model.mjs --self-test
+      - name: 自检 · check-sync-planner
+        if: ${{ !cancelled() }}
+        run: node tools/check-sync-planner.mjs --self-test
+      - name: 自检 · check-import-path
+        if: ${{ !cancelled() }}
+        run: node tools/check-import-path.mjs --self-test
+
+      # LOOP-GAP 治理（2026-10-19，docs/199）：同步 fs「探测型」调用的**负结果**缓存。
+      # 纯逻辑 + 接线 + 5 个变异对照臂（正结果也缓存 / 白名单失效 / 异常吞成 false /
+      # 过期失效 / off 被忽略，逐个必须判红）。离线，不需要核心树与设备。
+      - name: 门禁 · check-fs-probe-cache（fs 同步探测负结果缓存：负结果 TTL 30s · 白名单外直通 · 异常直通 · 带 5 个变异对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-fs-probe-cache.mjs
+
+      # LOOP-GAP 除根（2026-10-19，docs/199 §8）：收窄 Node 全局模块搜索路径。
+      # 判据：只摘 /storage/Users/currentUser 那一类项（沙箱项必须保留）/ 活路径表真的变窄
+      # （走 Module._initPaths 重算，splice Module.globalPaths 无效）/ HOME 与 NODE_PATH 逐字还原 /
+      # keep 开关 / 异常直通 / 不改 require 语义；带 4 个变异对照臂。离线。
+      - name: 门禁 · check-module-path-guard（全局模块路径收窄：只摘用户家目录项 · 沙箱项保留 · env 还原 · 带 4 个变异对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-module-path-guard.mjs
+
+      # LOOP-GAP 治理（2026-10-19，docs/200）：内嵌 CPython 的执行搬到 worker 线程。
+      # 判据：主线程零同步 captureRun（降级分支除外且必须被 DSHM_PY_INLINE 判定包住）/
+      # 超时 terminate + 重建 / worker 崩与报错必须回明确错误 / status 形状不变 / 单飞 FIFO。
+      # 全部离线（假 worker 注入，不需要真 Python），另带 6 个变异对照臂。
+      - name: 门禁 · check-python-async-worker（Python 执行线程=worker · 主线程零同步调用 · 超时 terminate · 带 6 个变异对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-python-async-worker.mjs
 
       # ── 门禁自检：证明这些检测器**真的会红** ─────────────────────────────
       # 只跑支持 --self-test（注入式负测试 / 变异自检）的那几条；未提供该开关的
       # 门禁（assert-cli-shim 等）本身就是纯断言，不重复跑。
       - name: 门禁 · check-workspace-claim（默认工作区登记不许替用户建工作区 · 带「旧实现必须判红」对照臂）
         run: node tools/check-workspace-claim.mjs
+
+      - name: 门禁 · check-tool-python（Agent 侧 `python` 工具 ↔ 进程内 CPython 桥 · 带 4 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-tool-python.mjs
 
       - name: 自检 · check-parity
         if: ${{ !cancelled() }}
@@ -176,6 +580,80 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/check-worker-jitless.mjs --self-test
 
+      - name: 自检 · check-sidebar-shim-css（4 个变异体：删收尾大括号 / 规则挪进 @media / 类名改成手持档 / 删内联样式）
+        if: ${{ !cancelled() }}
+        run: node tools/check-sidebar-shim-css.mjs --self-test
+
+      - name: 自检 · check-phone-sidebar-core-compat（5 个变异体：跳过 opener / 隐藏 opener / 展开态让位 / tick 调用 / 清 inert 逐条必须判红）
+        if: ${{ !cancelled() }}
+        run: node tools/check-phone-sidebar-core-compat.mjs --self-test
+
+      - name: 自检 · check-brand-surface（3 个变异体：保留鲸鱼 / 删 DSHM 名称 / 标题未去品牌）
+        if: ${{ !cancelled() }}
+        run: node tools/check-brand-surface.mjs --self-test
+
+      - name: 自检 · check-deveco-paths（4 个变异体：代码字面量判红 / 行注释判绿 / 块注释判绿 / 解析口写法判绿）
+        if: ${{ !cancelled() }}
+        run: node tools/check-deveco-paths.mjs --self-test
+
       - name: 自检 · check-profile-pnpm-bridge（4 个变异体各改一处源码锚点）
         if: ${{ !cancelled() }}
         run: node tools/check-profile-pnpm-bridge.mjs --self-test
+
+      - name: 自检 · check-tool-python（4 个变异体：超时上限 / 吞掉 ok:false / 去掉 inject 的 tools / 删掉 exitCode 的 type）
+        if: ${{ !cancelled() }}
+        run: node tools/check-tool-python.mjs --self-test
+
+      - name: 自检 · check-python-async-worker（6 个变异体：captureRun 放回主路径 / 超时不 terminate / 排队改 LIFO / 报错静默成空成功 / 开关默认翻转 / 吞掉 stderr 全部必须判红）
+        if: ${{ !cancelled() }}
+        run: node tools/check-python-async-worker.mjs --self-test
+
+      - name: 自检 · check-permission-surface（少一条 / 加一条 / 换一条 / 禁用条目 / 坏 reason / 禁用标识符 全部必须判红）
+        if: ${{ !cancelled() }}
+        run: node tools/check-permission-surface.mjs --self-test
+
+      - name: 自检 · check-no-apk-surface（.apk 文件 / apk 目录 / 归档条目 / 闭包混入 全部必须判红，guestpkgs 对照臂判绿）
+        if: ${{ !cancelled() }}
+        run: node tools/check-no-apk-surface.mjs --self-test
+
+      - name: 自检 · check-feature-wiring（3 个对照臂：退回启动闸门 / 退回 pick 分叉 / 退回只看探写，逐条必须判红）
+        if: ${{ !cancelled() }}
+        run: node tools/check-feature-wiring.mjs --self-test
+
+      - name: 自检 · check-picker-api23（退回 API 24 / 删除能力预检 / 删除兜底，逐条必须判红）
+        if: ${{ !cancelled() }}
+        run: node tools/check-picker-api23.mjs --self-test
+
+      - name: 门禁 · check-libnode-io-uring（随包 libnode.so.137 的 libuv io_uring 系统调用槽 16/16 必须仍是 mov w0,#-1 · 全文件广扫不许有活体 · 带 2 条对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-libnode-io-uring.mjs
+
+      - name: 自检 · check-libnode-io-uring（往返逐字节：未中性化件 + 17×4B 必须回到随包 sha256 · --restore 回退 · 未知字节必须拒绝写入）
+        if: ${{ !cancelled() }}
+        run: node tools/check-libnode-io-uring.mjs --self-test
+
+      - name: 门禁 · check-node-cli（插件独立 Node JIT、随包 libnode、ffmpeg/ffprobe 闭包与签名接线）
+        if: ${{ !cancelled() }}
+        run: node tools/check-node-cli.mjs
+
+      # ── 2026-10-19/20 MatePad Edge：图形内存收口 + 10 分钟长时任务取消根因
+      - name: 门禁 · check-memory-guard（Web 单渲染 · ArkWeb 回收 · Host 安全模式 · PC/2in1 TASK_KEEPING · 当前包名托盘 · 10 个变异对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-memory-guard.mjs
+
+      - name: 门禁 · check-node-runtime-startup（libnode 缺失时 runtimeVersion 空串 / startHost started=false · 2 个变异对照臂）
+        if: ${{ !cancelled() }}
+        run: node tools/check-node-runtime-startup.mjs
+
+      - name: 自检 · check-node-runtime-startup
+        if: ${{ !cancelled() }}
+        run: node tools/check-node-runtime-startup.mjs --self-test
+
+      # ── 2026-11-18 碰一碰：把台账里唯一缺门禁的在版功能补上
+      - name: 门禁 · check-knock-share-wiring（仅 PC 档注册 · 一窗一实例 · 能力面 object+file · 页面销毁只 detach · 垫片注入）
+        if: ${{ !cancelled() }}
+        run: node tools/check-knock-share-wiring.mjs
+
+      - name: 自检 · check-knock-share-wiring（7 个变异体：去掉档位闸 / phone 注册 / 漏 OBJECT / 关页注销 / 窗口不 release / 垫片不注入 / 固定 -1，逐条必须判红）
+        if: ${{ !cancelled() }}
+        run: node tools/check-knock-share-wiring.mjs --self-test

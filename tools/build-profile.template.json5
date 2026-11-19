@@ -19,12 +19,11 @@
       {
         "name": "default",
         "signingConfig": "default",
-        "targetSdkVersion": "6.1.1(24)",
-        // 【2026-10-06 拍板：兼容面定在 6.1.1(24)】面向平板端（HarmonyOS 6.1.1 = API 24）。
-        // 曾试过 6.1.0(23)（docs/108 §1，编译期同样 0 ERROR），但那只是"能更低"的验证：
-        // 本仓没有 API 23 的验证设备，不把未验收的兼容面当成产品口径（docs/110 §5）。
-        // 与 targetSdkVersion 同为 24 ⇒ 产物 minAPIVersion = 60101024。
-        "compatibleSdkVersion": "6.1.1(24)",
+        "targetSdkVersion": "26.0.0",
+        // HarmonyOS 6.1.0 / API 23 为最低安装面。手持档缺少 FolderSelection 时，
+        // 应用使用 Download/<包名> 专属目录作为真实工作区；2in1 与 API 26 手持档
+        // 继续使用系统文件夹选择器。
+        "compatibleSdkVersion": "6.1.0(23)",
         "runtimeOS": "HarmonyOS",
         // 【签名】本仓库**不含**签名材料（密钥库口令、证书路径均为个人机器绑定）。
         // 用 DevEco Studio 打开本工程 → File > Project Structure > Signing Configs →

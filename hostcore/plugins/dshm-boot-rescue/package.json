@@ -1,0 +1,42 @@
+{
+  "name": "@deepseek-ai/dshm-boot-rescue",
+  "version": "1.0.0",
+  "description": "DSHM 启动救援：插件加载失败页里注入恢复中心，停用肇事插件后重启应用即可恢复。",
+  "private": false,
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "author": "dshm-boot-rescue contributors",
+  "dependencies": {},
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dshm",
+    "harmonyos",
+    "plugin-recovery",
+    "safe-mode"
+  ],
+  "files": [
+    "lib/index.js",
+    "lib/rescue-client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/rescue-client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

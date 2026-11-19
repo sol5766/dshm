@@ -19,6 +19,8 @@
  *      保证判据是"运行时真的导出了什么"，而不是"源码里写了 export"。
  *   ② 扫核心树 + 已装插件的所有 `from 'undici'` / `import('undici')` 具名列表，
  *      逐个断言在 ① 里存在。
+ *   ④ 请求方向探针：`Request` 必须**真能用**（本地回环发一次 POST，断言 method/头/体逐字到达；
+ *      对照臂：吞掉 method/body 的假实现必须判红）—— 名字在但行为假属同一族事故，见该段注释。
  *   ③ 对照组：断言"上游确实会用到的名字"（`Agent`/`fetch`/`Dispatcher`/`EnvHttpProxyAgent`）
  *      真的被 ② 扫到了 —— 否则说明扫描逻辑失效（例如正则不再匹配上游写法），
  *      "全过"就成了假通过。
@@ -34,6 +36,7 @@
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createServer } from 'node:http';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -186,7 +189,7 @@ if (defaultObj !== undefined) {
 }
 
 /* 已修复的具体缺口：留成断言，防止有人"清理"掉它们 */
-for (const name of ['Pool', 'ProxyAgent', 'EnvHttpProxyAgent']) {
+for (const name of ['Pool', 'ProxyAgent', 'EnvHttpProxyAgent', 'Request']) {
   if (!exported.has(name)) {
     fail(`历史缺陷复发：垫片缺 \`${name}\`（见本文件头部注释里的两次事故记录）`);
   } else {
@@ -212,6 +215,77 @@ if (exported.has('ProxyAgent') && exported.has('Pool')) {
     }
   } catch (error) {
     fail(`降级实现构造抛错（会变成运行期失败，比缺导出更难查）：${error && error.message}`);
+  }
+}
+
+/* ── ④ 请求方向：`Request` 必须**真能用**（不是只为过解析期的空壳） ────────────
+ * 【为什么这条必须有牙】上面 ①②③ 只断言"导出面不缺名字"，而缺名字的代价是
+ * "整个模块图 `failed to import`"。**反向的坑是名字在、行为假**：给一个吞掉
+ * method/body 的 `Request`（本仓 `fetch-shim.js` 2026-10-07 就出过这个病 ——
+ * 只读 `.url` ⇒ `fetch(new Request(url, {method:'POST', body}))` 退化成"无头无体的 GET"）。
+ * 所以这里用**本地回环**真发一次 POST，断言服务端看到的 method / 头 / 体逐字一致；
+ * 并且**必须有对照臂**：把 method/body 吞掉的假实现判红，否则说明探针没有牙。
+ *
+ * 【只用 127.0.0.1:0】临时端口，不出网 —— 与 `check-fetch-shim.cjs` 同一做法。
+ */
+const PROBE_BODY = 'probe-请求体-中文';
+async function requestRoundTrip(RequestImpl) {
+  const seen = { method: null, probeHeader: null, body: null };
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen.method = req.method;
+      seen.probeHeader = req.headers['x-dshm-probe'] === undefined ? null : req.headers['x-dshm-probe'];
+      seen.body = Buffer.concat(chunks).toString('utf8');
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('pong');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const req = new RequestImpl('http://127.0.0.1:' + port + '/probe', {
+      method: 'POST',
+      headers: { 'x-dshm-probe': '1', 'content-type': 'text/plain' },
+      body: PROBE_BODY,
+    });
+    const resp = await shim.fetch(req, { redirect: 'manual' });
+    const text = await resp.text();
+    return { status: resp.status, text, seen };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+if (typeof shim.Request !== 'function') {
+  fail('垫片缺可用导出 `Request`（openai 7.x 的 x509-transport-capability.mjs 具名导入它 ⇒ '
+    + '整个 openai 模块图 failed to import）');
+} else {
+  try {
+    const r = await requestRoundTrip(shim.Request);
+    if (r.status !== 200 || r.text !== 'pong') fail(`Request 探针：响应不是 200/pong（拿到 ${r.status}/${JSON.stringify(r.text)}）`);
+    else if (r.seen.method !== 'POST') fail(`Request 探针：服务端看到的 method 是 ${r.seen.method}（应为 POST —— 典型的"只取 .url"退化）`);
+    else if (r.seen.probeHeader !== '1') fail(`Request 探针：自定义头丢了（拿到 ${JSON.stringify(r.seen.probeHeader)}）`);
+    else if (r.seen.body !== PROBE_BODY) fail(`Request 探针：请求体不一致（收到 ${JSON.stringify(r.seen.body)}）`);
+    else ok('Request 可用：`fetch(new Request(url, {method,headers,body}))` 真发 POST、头与体逐字到达（本地回环实测）');
+  } catch (error) {
+    fail(`Request 探针抛错（不可用）：${error && error.message}`);
+  }
+  /* 对照臂：吞掉 method/body 的假实现必须被判红 */
+  class DroppingRequest {
+    constructor(input) { this.url = String(input); this.method = 'GET'; this.headers = new Map(); }
+    async text() { return ''; }
+  }
+  try {
+    const r = await requestRoundTrip(DroppingRequest);
+    if (r.seen.method === 'POST' && r.seen.body === PROBE_BODY) {
+      fail('对照臂失守：吞掉 method/body 的假 Request 竟也通过了探针 —— 上面那条"Request 可用"没有牙');
+    } else {
+      ok(`对照臂如期判红：假 Request 在服务端看到 method=${r.seen.method} / body=${JSON.stringify(r.seen.body)}`);
+    }
+  } catch (error) {
+    ok(`对照臂如期判红（探针抛错也算）：${error && error.message}`);
   }
 }
 

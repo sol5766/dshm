@@ -43,6 +43,7 @@
  */
 
 const fetchShim = require('./fetch-shim.js');
+const path = require('node:path');
 const { dshmFetch, DshmHeaders, DshmRequest, DshmResponse, DshmFormData, DshmBlob, DshmFile } = fetchShim;
 
 /* ── Event 基类：优先原生，保证 dispatchEvent 接受我们的实例 ── */
@@ -121,12 +122,42 @@ function unsupported(name, hint) {
   };
 }
 
-/** WebSocket 常量要保留：有代码只读 `WebSocket.OPEN` 这类常量。 */
-const WebSocket = unsupported('WebSocket', '需要 WebSocket 时请用核心树里的 `ws`（纯 JS，走 node:http/node:net）。');
-WebSocket.CONNECTING = 0;
-WebSocket.OPEN = 1;
-WebSocket.CLOSING = 2;
-WebSocket.CLOSED = 3;
+/**
+ * jitless 下原生 WebSocket 依赖 WASM，但核心树自带纯 JS `ws`。
+ *
+ * 第三方插件（例如 @michengai/dsh-im-connect）可能直接 `new WebSocket(url)`，
+ * 不知道 HarmonyOS 的全局实现不可用。这里让 globalThis 的惰性 WebSocket
+ * 指向核心树 `ws`，对插件保持标准构造器形状；只有 ws 不能加载时才回退到
+ * 原来的明确报错类。
+ */
+function loadWsWebSocket() {
+  const coreDir = String(process.env.DSHM_CORE_DIR || '').trim();
+  const candidates = [];
+  if (coreDir.length > 0) {
+    candidates.push(path.join(coreDir, 'node_modules', 'ws'));
+  }
+  candidates.push('ws');
+  for (const candidate of candidates) {
+    try {
+      const mod = require(candidate);
+      const ctor = mod && (mod.WebSocket || mod.default || mod);
+      if (typeof ctor === 'function') {
+        return ctor;
+      }
+    } catch (e) {
+      // 继续下一个候选；最终仍失败才暴露明确降级。
+    }
+  }
+  return null;
+}
+
+const WsWebSocket = loadWsWebSocket();
+const WebSocket = WsWebSocket
+  || unsupported('WebSocket', '需要 WebSocket 时请用核心树里的 `ws`（纯 JS，走 node:http/node:net）。');
+if (typeof WebSocket.CONNECTING !== 'number') WebSocket.CONNECTING = 0;
+if (typeof WebSocket.OPEN !== 'number') WebSocket.OPEN = 1;
+if (typeof WebSocket.CLOSING !== 'number') WebSocket.CLOSING = 2;
+if (typeof WebSocket.CLOSED !== 'number') WebSocket.CLOSED = 3;
 
 const EventSource = unsupported('EventSource', '需要 SSE 时请用基于 node:http 的自实现。');
 
@@ -154,6 +185,7 @@ function getGlobalDispatcher() { return globalDispatcher; }
 module.exports = {
   /* 身份标记：回归门禁据此判定"内建 undici 已被本垫片接管" */
   __dshmInternalUndiciShim: true,
+  __dshmWebSocketImpl: WsWebSocket === null ? 'unsupported' : 'ws',
 
   /* Node 内部实际取用的项 */
   createFastMessageEvent,

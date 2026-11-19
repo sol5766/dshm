@@ -42,6 +42,9 @@ const DIAG_FILE: string = 'diag-folder-grants';
 /** 偏好库与键（与 `LocalPrefs`/`WindowMemory` 同一个库、不同键）。 */
 const STORE: string = 'dsh_folder_grants';
 const KEY_GRANTS: string = 'grants';
+const RESTORE_WORKERS: number = 4;
+const restoresInFlight: Map<string, Promise<string>> = new Map<string, Promise<string>>();
+type RestoreWorker = () => Promise<void>;
 
 /** 一条"用户选过的目录"登记。 */
 export interface FolderGrant {
@@ -90,13 +93,33 @@ function policyOf(uri: string): fileShare.PolicyInfo {
  * （"服务没回"vs"服务明确拒绝"），散着写迟早会把它们合并成一句"失败了"。
  */
 function withWatchdog<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
-  const wrapped: Promise<T | undefined> = work.then((v: T): T | undefined => v);
-  const watchdog: Promise<undefined> = new Promise<undefined>((resolve: (v: undefined) => void): void => {
-    setTimeout((): void => {
+  return new Promise<T | undefined>((resolve: (v: T | undefined) => void,
+    reject: (reason: Object) => void): void => {
+    let settled: boolean = false;
+    const timer: number = setTimeout((): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
       resolve(undefined);
     }, ms);
+    work.then((value: T): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    }, (reason: Object): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      reject(reason);
+    });
   });
-  return Promise.race<T | undefined>([wrapped, watchdog]);
 }
 
 /** 错误码的可读形式（`BusinessError.code` 是我们判断"哪一类拒绝"的唯一依据）。 */
@@ -217,7 +240,29 @@ export async function rememberFolderGrant(context: common.Context,
  *
  * @returns 一行汇总（给启动日志用）
  */
-export async function restoreFolderGrants(context: common.Context): Promise<string> {
+export function restoreFolderGrants(context: common.Context): Promise<string> {
+  let key: string;
+  try {
+    key = JSON.stringify([context.filesDir, context.applicationInfo.name]);
+  } catch (e) {
+    return Promise.reject<string>(e);
+  }
+  const existing: Promise<string> | undefined = restoresInFlight.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const pending: Promise<string> = runFolderGrantRestore(context).then((summary: string): string => {
+    restoresInFlight.delete(key);
+    return summary;
+  }, (reason: Object): Promise<string> => {
+    restoresInFlight.delete(key);
+    return Promise.reject<string>(reason);
+  });
+  restoresInFlight.set(key, pending);
+  return pending;
+}
+
+async function runFolderGrantRestore(context: common.Context): Promise<string> {
   const list: FolderGrant[] = await storedGrants(context);
   if (list.length === 0) {
     diag(context, 'restore：无已登记目录（跳过）');
@@ -225,22 +270,32 @@ export async function restoreFolderGrants(context: common.Context): Promise<stri
   }
   let ok: number = 0;
   const details: string[] = [];
-  for (const g of list) {
-    let line: string = '';
-    try {
-      const settled: boolean | undefined = await withWatchdog(
-        fileShare.activatePermission([policyOf(g.uri)]).then((): boolean => true), STEP_TIMEOUT_MS);
-      if (settled === undefined) {
-        line = '超时';
-      } else {
-        line = 'ok';
-        ok += 1;
+  let next: number = 0;
+  const worker: RestoreWorker = async (): Promise<void> => {
+    while (next < list.length) {
+      const index: number = next++;
+      const g: FolderGrant = list[index];
+      let line: string = '';
+      try {
+        const settled: boolean | undefined = await withWatchdog(
+          fileShare.activatePermission([policyOf(g.uri)]).then((): boolean => true), STEP_TIMEOUT_MS);
+        if (settled === undefined) {
+          line = '超时';
+        } else {
+          line = 'ok';
+          ok += 1;
+        }
+      } catch (e) {
+        line = `失败(${codeOf(e as Object)})`;
       }
-    } catch (e) {
-      line = `失败(${codeOf(e as Object)})`;
+      details[index] = `${g.path}=${line}`;
     }
-    details.push(`${g.path}=${line}`);
+  };
+  const workers: Promise<void>[] = [];
+  for (let i: number = 0; i < Math.min(RESTORE_WORKERS, list.length); i++) {
+    workers.push(worker());
   }
+  await Promise.all<void>(workers);
   const summary: string = `${ok}/${list.length} 已启用`;
   diag(context, `restore ${summary}：${details.join(' | ')}`);
   hilog.info(DOMAIN, TAG, '目录授权：启动恢复 %{public}s', summary);

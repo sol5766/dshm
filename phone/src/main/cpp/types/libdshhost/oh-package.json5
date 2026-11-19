@@ -1,0 +1,6 @@
+{
+  "types": "./index.d.ts",
+  "name": "libdshhost.so",
+  "description": "libdshhost.so type file",
+  "version": ""
+}

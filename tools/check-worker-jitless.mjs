@@ -55,7 +55,7 @@ const args = process.argv.slice(2);
 /** A 臂判定：必须失败，且原因是 WASM（否则说明这条路径已不再依赖 WASM，门禁失去意义）。 */
 export function classifyNoInjectArm(stdout, stderr) {
   const all = `${stdout}\n${stderr}`;
-  const wasmCause = /WebAssembly is not defined/.test(all);
+  const wasmCause = /WebAssembly is not (?:defined|supported)/.test(all);
   const reported = /\[probe\]\s*(\{.*\})/.exec(all);
   const ok = reported !== null && /"fetch":"200/.test(reported[1]);
   if (ok) return { ok: false, why: 'A 臂竟然全过 —— 说明 worker 里已经不需要补齐，本门禁失去意义，请重新审视' };
@@ -101,6 +101,8 @@ function selfTest() {
   const badReport = '[probe] {"wasm":"undefined","requireBuiltin":"FAIL: x","internalModule":"ok","fetch":"FAIL: y"}';
 
   t('A 臂：WASM 失败 → 成立', classifyNoInjectArm('', wasmStderr).ok);
+  t('A 臂：Node 26 的 not supported 文案 → 成立',
+    classifyNoInjectArm('', 'fetch failed: WebAssembly is not supported in this environment').ok);
   t('A 臂：全过 → 不成立', !classifyNoInjectArm('', okReport).ok);
   t('A 臂：失败但无 WASM 因果 → 不成立', !classifyNoInjectArm('', 'Error: ECONNREFUSED').ok);
   t('B 臂：三件事全通 → 成立', classifyInjectedArm(okReport, '').ok);
@@ -166,10 +168,10 @@ export function spawn(workerPath, url) {
   const worker = new Worker(pathToFileURL(workerPath), { execArgv: [], workerData: { url }, stdout: true, stderr: true });
   worker.stdout.on('data', (d) => process.stdout.write('[worker-out] ' + d.toString()));
   worker.stderr.on('data', (d) => process.stdout.write('[worker-err] ' + d.toString()));
-  worker.once('message', (report) => { console.log('[probe] ' + JSON.stringify(report)); worker.terminate(); });
-  worker.once('error', (error) => { console.log('[arm] worker error: ' + error.message.split('\\n')[0]); process.exitCode = 1; });
-  worker.once('exit', (code) => console.log('[arm] worker exit=' + code));
-  setTimeout(() => { console.log('[arm] watchdog 30s：worker 既没回消息也没退出'); process.exit(2); }, 30000);
+  const watchdog = setTimeout(() => { console.log('[arm] watchdog 30s：worker 既没回消息也没退出'); process.exit(2); }, 30000);
+  worker.once('message', (report) => { console.log('[probe] ' + JSON.stringify(report)); clearTimeout(watchdog); worker.terminate(); });
+  worker.once('error', (error) => { clearTimeout(watchdog); console.log('[arm] worker error: ' + error.message.split('\\n')[0]); process.exitCode = 1; });
+  worker.once('exit', (code) => { clearTimeout(watchdog); console.log('[arm] worker exit=' + code); });
   return worker;
 }
 `;
@@ -233,6 +235,10 @@ console.log('A 臂：不注入（对照）...');
 const armA = await runArm('none');
 const verdictA = classifyNoInjectArm(armA.stdout ?? '', armA.stderr ?? '');
 console.log(`  → ${verdictA.ok ? '成立' : '不成立'}：${verdictA.why}`);
+if (!verdictA.ok) {
+  console.log('--- A 臂 stdout ---\n' + (armA.stdout ?? '').slice(-3000));
+  console.log('--- A 臂 stderr ---\n' + (armA.stderr ?? '').slice(-3000));
+}
 
 console.log('B 臂：注入 wrapWorkerThreads + worker-bootstrap ...');
 const armB = await runArm('inject');

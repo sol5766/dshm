@@ -37,9 +37,12 @@ export CC="${OHOS_CLANG_DIR}/${OHOS_TRIPLE}-clang -fno-emulated-tls"
 export CXX="${OHOS_CLANG_DIR}/${OHOS_TRIPLE}-clang++ -fno-emulated-tls"
 
 # Host tools stay host tools (used for obj.host/*)
-export CC_host="gcc"
-export CXX_host="g++"
-export AR_host="ar"
+# 注意：本机沙箱下 Python subprocess 的 execvp 无法按 PATH 解析裸命令名
+# （Popen(["gcc"]) 直接 FileNotFoundError），因此必须给出绝对路径。
+# 允许外部覆盖，默认用 command -v 解析到绝对路径。
+export CC_host="${CC_host:-$(command -v gcc)}"
+export CXX_host="${CXX_host:-$(command -v g++)}"
+export AR_host="${AR_host:-$(command -v ar)}"
 
 export LD="${OHOS_CLANG_DIR}/ld.lld"
 export LDFLAGS="-fuse-ld=lld"

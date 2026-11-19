@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "DSHM Browser Bridge",
+  "version": "0.11.2",
+  "description": "Connect this browser to the local DSHM host bridge for webpage automation (navigate / read tree / click / read text / CDP eval).",
+  "permissions": ["debugger", "tabs", "scripting", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}

@@ -12,10 +12,12 @@
  *      rg→find/grep 参数转换、花括号展开、NDJSON 转换、exec 探测记忆。
  *
  * 用法：node tools/assert-fs-search-fallback.mjs
+ * 退出码：0 通过 / 1 有真实问题 / 3 环境不具备（核心树未就位，不算失败）
  */
 import vm from 'node:vm';
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,8 +25,18 @@ const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 // 被测树跟着配方走（hostcore/core-recipe.json 是唯一事实来源），不再写死版本号：
 // 曾经写死 0.1.6 路径，升级 0.1.7 后断言悄悄测旧树（绿但无效）——这类"测错对象"比红更危险。
 const RECIPE = JSON.parse(readFileSync(join(ROOT, 'hostcore', 'core-recipe.json'), 'utf8'));
-const FILE = join(ROOT, 'dist', 'core', 'work', `dsh-core-${RECIPE.coreVersion}`,
+const CORE_TREE = join(ROOT, 'dist', 'core', 'work', `dsh-core-${RECIPE.coreVersion}`);
+const FILE = join(CORE_TREE,
   'node_modules', '@deepseek-ai', 'dsh-tool-fs-search', 'lib', 'index.js');
+
+// 【前置守卫】核心树未物化时如实报"环境不具备"并 exit 3，与同族门禁（check-ptc-wiring /
+// check-core-openharmony-patches / check-undici-shim-exports …）一致；不要裸 readFileSync
+// 抛 ENOENT —— 那会把"没跑过 pack-core"误报成门禁红（2026-10-18 实测踩到）。
+if (!existsSync(FILE)) {
+  console.error(`前置条件缺失（exit 3，不算失败）：核心树未就位 —— ${CORE_TREE} 里没有 dsh-tool-fs-search/lib/index.js。`);
+  console.error('先跑 `node tools/pack-core.mjs --skip-install --place-in-app` 生成核心工作树，再跑本门禁。');
+  process.exit(3);
+}
 
 let pass = 0;
 let fail = 0;
@@ -42,6 +54,134 @@ function eq(actual, expected, label) {
 }
 
 const t = readFileSync(FILE, 'utf8');
+
+if (process.argv.includes('--tool-level')) {
+  const require = createRequire(FILE);
+  const missing = process.argv.find((value) => value.startsWith('--missing-import='))?.split('=')[1];
+  const source = missing ? t.replace(new RegExp(`^import \\{ ${missing} \\} from "node:[^"]+";\\n`, 'm'), '') : t;
+  const module = new vm.SourceTextModule(source);
+  const dependencies = new Map();
+  for (const specifier of module.dependencySpecifiers) {
+    if (specifier !== '@deepseek-ai/dsh-util-ripgrep') dependencies.set(specifier,
+      await import(specifier.startsWith('node:') ? specifier : require.resolve(specifier)));
+  }
+  await module.link(async (specifier) => {
+    const exports = specifier === '@deepseek-ai/dsh-util-ripgrep'
+      ? { resolveRgPath: async () => { throw new Error('force fallback'); }, spawnRipgrep: () => { throw new Error('unexpected rg spawn'); } }
+      : dependencies.get(specifier);
+    return new vm.SyntheticModule(Object.keys(exports), function () {
+      for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
+    });
+  });
+  await module.evaluate();
+  const fixture = mkdtempSync('/data/storage/el2/base/files/tmp/deveco/fssearch-');
+  const previousRoot = process.env.DSHM_PUBLIC_DOWNLOAD;
+  process.env.DSHM_PUBLIC_DOWNLOAD = fixture;
+  try {
+    mkdirSync(join(fixture, 'nested'));
+    mkdirSync(join(fixture, 'denied'));
+    writeFileSync(join(fixture, 'nested', 'match.txt'), 'needle\nother\nneedle again\n');
+    writeFileSync(join(fixture, '.hidden.txt'), 'needle hidden\n');
+    writeFileSync(join(fixture, 'denied', 'secret.txt'), 'needle secret\n');
+    const calls = [];
+    let cancelOnSpawn = false;
+    let controller = new AbortController();
+    const ctx = {
+      tools: { register: (tool) => calls.push(tool) },
+      systemPrompt: { section() {}, getSectionOrder() { return 0; } },
+      on() {},
+      workingDirectory: { ensure: async () => fixture },
+      subprocess: { spawn(options) {
+        const child = spawn(options.argv[0], options.argv.slice(1), { cwd: options.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = Buffer.alloc(0);
+        let stderr = Buffer.alloc(0);
+        let lossy = false;
+        child.stdout.on('data', (data) => {
+          const combined = Buffer.concat([stdout, data]);
+          lossy ||= combined.length > options.stdio.stdout.maxBytes;
+          stdout = combined.subarray(0, options.stdio.stdout.maxBytes);
+        });
+        child.stderr.on('data', (data) => { stderr = Buffer.concat([stderr, data]); });
+        const abort = () => child.kill('SIGTERM');
+        options.signal.addEventListener('abort', abort, { once: true });
+        const done = new Promise((resolve, reject) => {
+          child.on('error', reject);
+          child.on('close', (exitCode, signal) => {
+            options.signal.removeEventListener('abort', abort);
+            resolve({ exitCode, signal });
+          });
+        });
+        if (cancelOnSpawn) controller.abort();
+        return { done, collected: {
+          stdout: { readFrom: () => ({ text: stdout.toString(), lossy }) },
+          stderr: { readFrom: () => ({ text: stderr.toString(), lossy: false }) }
+        } };
+      } }
+    };
+    const caps = { maxResults: 2, maxMatches: 2, maxLineBytes: 2000, maxMetaBytes: 65536,
+      rawOutputMaxBytes: 2000000, graceMs: 1000, stderrMaxBytes: 65536, timeoutMs: 30000, sampleOverCapGlobResults: false };
+    module.namespace.applyGlobTool(ctx, caps);
+    module.namespace.applyGrepTool(ctx, caps);
+    const exec = { agent: {}, signal: controller.signal };
+    const glob = calls.find((tool) => tool.name === 'glob');
+    const grep = calls.find((tool) => tool.name === 'grep');
+    for (const path of [fixture, '.']) {
+      const result = await glob.execute({ pattern: 'nested/*.txt', path }, exec);
+      eq(result.paths, [path === '.' ? './nested/match.txt' : 'nested/match.txt'], `tool glob matching root ${path}`);
+      const matches = await grep.execute({ pattern: 'needle', path: path === '.' ? 'nested' : join(path, 'nested') }, exec);
+      eq(matches.matches.map((m) => [m.path, m.lineNumber]), [['nested/match.txt', 1], ['nested/match.txt', 3]], `tool grep matching root ${path}`);
+    }
+    eq((await glob.execute({ pattern: '*.absent', path: fixture }, exec)).paths, [], 'tool glob no matches');
+    eq((await grep.execute({ pattern: 'absent-token', path: fixture }, exec)).matches, [], 'tool grep no matches');
+    eq((await glob.execute({ pattern: '.hidden.txt', path: fixture }, exec)).paths, ['.hidden.txt'], 'tool glob explicit hidden file');
+    eq((await grep.execute({ pattern: 'needle', path: join(fixture, '.hidden.txt') }, exec)).matches[0]?.line, 'needle hidden', 'tool grep explicit hidden file');
+    chmodSync(join(fixture, 'denied'), 0);
+    for (const tool of [glob, grep]) {
+      try {
+        await tool.execute({ pattern: tool === glob ? '*' : 'needle', path: join(fixture, 'denied') }, exec);
+        ok(false, `tool ${tool.name} permission denial must fail`);
+      } catch (error) {
+        ok(error.code === 'SEARCH_FAILED' && /permission denied/i.test(error.message), `tool ${tool.name} permission denial: ${error.message}`);
+      }
+    }
+    chmodSync(join(fixture, 'denied'), 0o700);
+    for (let i = 0; i < 300; i++) writeFileSync(join(fixture, 'nested', `large-${i}.txt`), 'needle large\n');
+    const largeGlob = await glob.execute({ pattern: 'nested/*.txt', path: fixture }, exec);
+    eq(largeGlob.paths.length, 301, 'tool glob complete large result');
+    ok(glob.output.render({}, largeGlob)[0].text.includes('301'), 'tool glob large result render reports count');
+    const largeGrep = await grep.execute({ pattern: 'needle', path: join(fixture, 'nested') }, exec);
+    eq(largeGrep.matches.length, 302, 'tool grep complete large result');
+    ok(grep.output.render({}, largeGrep)[0].text.includes('Found 2 of 302'), 'tool grep inline cap reports full count');
+    for (const tool of [glob, grep]) {
+      const tiny = [];
+      const smallCtx = { ...ctx, tools: { register: (value) => tiny.push(value) } };
+      module.namespace[tool === glob ? 'applyGlobTool' : 'applyGrepTool'](smallCtx, { ...caps, rawOutputMaxBytes: 16 });
+      try {
+        await tiny[0].execute({ pattern: tool === glob ? '*' : 'needle', path: join(fixture, 'nested') }, exec);
+        ok(false, `tool ${tool.name} raw overflow must fail`);
+      } catch (error) {
+        ok(error.code === 'SEARCH_RAW_OUTPUT_OVERFLOW', `tool ${tool.name} raw overflow: ${error.message}`);
+      }
+    }
+    cancelOnSpawn = true;
+    for (const tool of [glob, grep]) {
+      controller = new AbortController();
+      try {
+        await tool.execute({ pattern: '*', path: fixture }, { ...exec, signal: controller.signal });
+        ok(false, `tool ${tool.name} cancellation must fail`);
+      } catch (error) {
+        ok(error.code === 'SEARCH_ABORTED', `tool ${tool.name} cancellation: ${error.message}`);
+      }
+    }
+  } finally {
+    chmodSync(join(fixture, 'denied'), 0o700);
+    if (previousRoot === undefined) delete process.env.DSHM_PUBLIC_DOWNLOAD;
+    else process.env.DSHM_PUBLIC_DOWNLOAD = previousRoot;
+    execFileSync('python3', ['-c', 'import os,shutil,sys; shutil.rmtree(sys.argv[1]); assert not os.path.exists(sys.argv[1])', fixture]);
+  }
+  console.log(`tool-level fssearch: ${pass} passed / ${fail} failed`);
+  process.exit(fail > 0 ? 1 : 0);
+}
 
 // ── A. 结构 ─────────────────────────────────────────────────────────────
 console.log('[1/3] 结构锚点');
@@ -70,6 +210,32 @@ ok(!/[^.](basename)\(/.test(t.slice(t.indexOf('let rgExecOk'), t.indexOf('async 
 ok(t.includes('rgExecOk = outcome.exitCode === 0;'), '探测：exitCode 0 判可用（未来放开自动回 rg）');
 ok(t.includes('if (signal && signal.aborted) return true;'), '探测：abort 竞态不记忆');
 
+// ── A2. 访问范围闸门（docs/137）：glob/grep 的**搜索根**也必须过判据 ────────
+// 本工具不过 ctx.fs（spawn ripgrep / 系统 find,grep），搜索根直接进 argv ⇒
+// ctx.fs 那道闸门管不到它。判据由 pack-core 从 dshm-fs-write-nonchmod 的
+// fs-fence.js **原样**搬来，这里钉住"搬来了"+"逐字节一致"+"在 spawn 之前"。
+const SCOPE_OPEN = '/* ==== DSHM-FS-SCOPE-BEGIN ====';
+const SCOPE_CLOSE = '/* ==== DSHM-FS-SCOPE-END ==== */';
+ok(t.includes(SCOPE_OPEN) && t.includes(SCOPE_CLOSE), '范围闸门：判据块的 BEGIN/END 标记在位');
+ok(t.includes('async function refuseOutOfScopeSearch(ctx, exec, toolName, requestedPath)'),
+  '范围闸门：搜索根判据薄壳（refuseOutOfScopeSearch）在位');
+{
+  const fenceSrc = readFileSync(join(ROOT, 'hostcore', 'plugins', 'dshm-fs-write-nonchmod', 'lib', 'fs-fence.js'), 'utf8');
+  const srcFrom = fenceSrc.indexOf(SCOPE_OPEN);
+  const srcTo = fenceSrc.indexOf(SCOPE_CLOSE);
+  const treeFrom = t.indexOf(SCOPE_OPEN);
+  const treeTo = t.indexOf(SCOPE_CLOSE);
+  ok(srcFrom >= 0 && srcTo > srcFrom && treeFrom >= 0 && treeTo > treeFrom, '范围闸门：两侧都能定位到判据块');
+  eq(t.slice(treeFrom, treeTo + SCOPE_CLOSE.length), fenceSrc.slice(srcFrom, srcTo + SCOPE_CLOSE.length),
+    '范围闸门：树里嵌入的判据与本仓 fs-fence.js 逐字节一致');
+  // 顺序：判根必须发生在 spawn **之前**（否则那条命令已经跑出去了）
+  for (const tool of ['glob', 'grep']) {
+    const call = t.indexOf(`await refuseOutOfScopeSearch(ctx, exec, "${tool}", input.path);`);
+    const spawn = t.indexOf(`runRipgrep(ctx, exec, "${tool}"`, call);
+    ok(call >= 0 && spawn > call, `范围闸门：${tool} 的判根在 runRipgrep **之前**`);
+  }
+}
+
 // ── B. 语法（ESM 全文解析；不 link，import 不解析）────────────────────────
 console.log('[2/3] 语法解析（vm.SourceTextModule）');
 // vm.SourceTextModule 需要 --experimental-vm-modules：起子进程跑，主进程无 flag 也能过
@@ -88,7 +254,7 @@ try {
 console.log('[3/3] 注入函数行为');
 const blockStart = t.indexOf('let rgExecOk = null;');
 // 终点锚：helpers 之后紧邻的原文是 runRipgrep 的 JSDoc（不能用 '\n/**'——helpers 自带 JSDoc 注释）
-const blockEnd = t.indexOf('\n/**\n* Run the packaged ripgrep binary', blockStart);
+const blockEnd = t.includes('/** DSHM_SEARCH_HELPERS_END */') ? t.indexOf('/** DSHM_SEARCH_HELPERS_END */', blockStart) : t.indexOf('\n/**\n* Run the packaged ripgrep binary', blockStart);
 ok(blockStart >= 0 && blockEnd > blockStart, '注入块可定位（let rgExecOk … 下一个 JSDoc 前）');
 if (blockStart >= 0 && blockEnd > blockStart) {
   const block = t.slice(blockStart, blockEnd);
@@ -228,6 +394,26 @@ if (blockStart >= 0 && blockEnd > blockStart) {
   const okCtx = { subprocess: { spawn: () => ({ done: Promise.resolve({ exitCode: 0 }) }) } };
   const api2 = factory(stubExists, stubParse, Buffer);
   eq(await api2.rgExecutable(okCtx, '/fake/rg', null), true, '探测：exit 0 → 可用（回 rg 路径）');
+}
+
+try {
+  const output = execFileSync(process.execPath, ['--experimental-vm-modules', fileURLToPath(import.meta.url), '--tool-level'], { encoding: 'utf8' });
+  console.log(output);
+  pass++;
+} catch (error) {
+  fail++;
+  console.error(error.stdout?.toString(), error.stderr?.toString() ?? error.message);
+}
+
+if (process.argv.includes('--self-test')) {
+  for (const name of ['existsSync', 'parse']) {
+    try {
+      execFileSync(process.execPath, ['--experimental-vm-modules', fileURLToPath(import.meta.url), '--tool-level', `--missing-import=${name}`], { stdio: 'pipe' });
+      ok(false, `missing ${name} import mutant must fail`);
+    } catch (error) {
+      ok(error.status !== 0 && error.stderr?.toString().includes(`${name} is not defined`), `missing ${name} import mutant rejected`);
+    }
+  }
 }
 
 console.log(`\nassert-fs-search-fallback：${pass} 通过 / ${fail} 失败`);

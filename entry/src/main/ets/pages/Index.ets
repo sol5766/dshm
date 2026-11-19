@@ -70,7 +70,7 @@ import {
   enterSession,
   selectRightPanel,
   setDrawer,
-  shellTracksOf,
+  sidebarPresentationOf,
   mainPanelOfSidebarPanel,
   sidebarPanelOfMainPanel,
   TrackPresentation,
@@ -200,7 +200,6 @@ import type { WorkspaceBrowserFacade } from '../view/WorkspaceBrowser';
 import type { FileTreeFacade } from '../view/FileTreePane';
 import { RightbarShell } from '../view/shell/RightbarShell';
 import { DetailPane } from '../view/DetailPane';
-import { NodeRuntime } from '../runtime/NodeRuntime';
 import { WorkspacePane } from '../view/WorkspacePane';
 import { hitOfKeyEvent } from '../view/ShortcutKeys';
 import type { ShortcutHit } from '../view/ShortcutKeys';
@@ -208,7 +207,18 @@ import { harmonySheetOptions, NativeButton } from '../view/NativePrimitives';
 // 端侧核心运行层（D6）：核心版本仓库与激活事务。运行时载体尚未接线，
 // 因此这里现在只用它的"仓库/状态"部分，不声称任何"已启动"。
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { BundledInstallResult, DshHost, HostStartResult, HostStatus, OpResult, RuntimeProbe, hostStateIsTransient } from 'hostruntime';
+import {
+  BundledInstallResult,
+  DshHost,
+  NodeRuntime,
+  HostStartResult,
+  HostStatus,
+  OpResult,
+  RuntimeProbe,
+  hostStateIsTransient,
+  resolveHostModulePaths
+} from 'hostruntime';
+import type { HostModulePaths } from 'hostruntime';
 
 /**
  * 把紧凑 JSON 美化以便人读写；失败时原样返回。
@@ -431,6 +441,12 @@ struct Index {
    * 一个 `boolean` 字段存不下"没存过"，于是双栏首启会被读成"展开"，与
    * `shellTracksOf(DOUBLE).sidebar = RAIL` 直接矛盾。故真值只有这一份原始值，
    * 生效值每次渲染由 `sidebarExpandedForMode(mode, stored)` 派生。
+   */
+  /*
+   * 侧栏收起状态（**只在本次运行内有效**，docs/330）。
+   *
+   * `undefined` = 用户这次没动过 ⇒ 常驻展开；`false` = 用户这次点了收起。
+   * **不落盘**：用户的诉求是"不主动收起就一直显示"，收起是一次动作而不是永久设定。
    */
   @State sidebarStored: boolean | undefined = undefined;
 
@@ -726,6 +742,14 @@ struct Index {
    */
   @State connectSettled: boolean = false;
   /**
+   * 自动重连窗口内累积的失败原因（**暂不显示**，见 docs/331）。
+   *
+   * 窗口内界面显示"正在连接"，只有窗口用完/次数用完时 `settleAutoConnect()`
+   * 才把它变成用户可见的错误结论 —— 否则旧 token 的第一次失败会立刻弹出
+   * 「连接异常」，而 250ms 后新 token 就到了。
+   */
+  private pendingConnectError: string = '';
+  /**
    * 内置核心是否正在解包（EntryAbility 广播；E99）。
    * 首启时它必须让页面显示「正在解包核心」而不是「还没有安装核心」。
    */
@@ -1014,8 +1038,6 @@ struct Index {
     });
     // 详情栏宽度记忆：读回用户上次拖出来的值（没有记录时保持默认）
     this.loadDetailWidth();
-    // 侧栏收起状态记忆：读回用户上次的选择（没有记录 ⇒ 默认展开）
-    this.loadSidebarExpanded();
     // 初始值 = 空态。所有真实数据都在 `applyHubSnapshot` 到达时落地；
     // 连接建立前界面显示的是各视图自己的空态文案（D3 §4），而不是编造的示例数据。
     this.diag = emptyDiagReport();
@@ -1325,8 +1347,39 @@ struct Index {
         clearInterval(timer);
         hilog.info(DOMAIN, TAG, 'DSHM-CONN 等待结束：waited=%{public}dms attempts=%{public}d state=%{public}s',
           waited, this.connectAttempts, state);
+        /* 窗口结束：这时才把"到底连上没有"变成对用户可见的结论 */
+        this.settleAutoConnect();
       }
     }, step);
+  }
+
+  /**
+   * 自动重连窗口结束时的**收尾**（docs/331）。
+   *
+   * 判据只有一条：**中枢到底连上没有**。
+   *   · 已 `LIVE` ⇒ 什么都不显示（窗口内的失败只是"旧 token 那次"，已自愈）；
+   *   · 仍没连上 ⇒ 这时才 `connectSettled = true` 并把原因交给横幅。
+   *
+   * 这样"进去就弹连接异常、点一下才好"就不会再出现：那次失败属于窗口内部，
+   * 用户看到的要么是"正在连接"、要么是"确实连不上"。
+   */
+  private settleAutoConnect(): void {
+    if (this.connectSettled) {
+      return;
+    }
+    const snap: HubSnapshot = SessionHub.shared().snapshot();
+    this.connectBusy = false;
+    if (snap.phase === HubPhase.LIVE) {
+      this.connectSettled = true;
+      this.pendingConnectError = '';
+      hilog.info(DOMAIN, TAG, 'DSHM-CONN 窗口结束时已连上 ⇒ 不显示错误');
+      return;
+    }
+    this.connectSettled = true;
+    this.hubError = this.pendingConnectError.length > 0
+      ? this.pendingConnectError
+      : '自动重连失败。若 Host 已重启，它的 token 会重新生成，请重新粘贴启动链接。';
+    hilog.info(DOMAIN, TAG, 'DSHM-CONN 窗口结束仍未连上 ⇒ 显示错误：%{public}s', this.hubError);
   }
 
   /**
@@ -1380,8 +1433,19 @@ struct Index {
       this.connectSettled = false;
       hub.connect().then((ok: boolean) => {
         this.connectBusy = false;
-        // 尝试已结束（成功或失败都算"结束"）：从这里开始，错误文本才是**结论**而不是中间态
-        this.connectSettled = true;
+        /*
+         * ⚠️ 2026-10-31 第三次修（docs/331）：**失败不算"已定论"**。
+         *
+         * 这段代码自己在上面的注释里写着「先到的那份凭据**通常是过期的**」：
+         * 页面 250ms 就能读到落盘的 baseUrl+token，而 dsh 每次启动都换新 token。
+         * 但原实现在这里无条件 `connectSettled = true` + 写 `hubError` ⇒
+         * 旧 token 的第一次失败**立刻**把「连接异常 / 刷新重试」横幅摆出来，
+         * 而 250ms 后新 token 就到了、其实是能连上的。
+         *
+         * 现在：失败时**保持"正在连接"**（`connectSettled` 仍为 false），
+         * 由轮询窗口继续用新 token 重试；只有窗口用完（或次数用完）才让横幅出现。
+         */
+        this.connectSettled = ok;
         const snap: HubSnapshot = hub.snapshot();
         /*
          * 【为什么这里一定要打日志（E62/E63）】`connect()` 内部会先做 token→cookie 兑换
@@ -1397,10 +1461,15 @@ struct Index {
           ? `已自动重连 ${snap.authority}，收到 ${snap.sessions.length} 个会话`
           : '自动重连失败，请检查 Host 是否仍在运行。';
         if (!ok) {
-          this.hubError = snap.lastError.length > 0
+          /*
+           * 先记下原因但**不显示**（`connectSettled` 还是 false ⇒ 界面显示"连接中"）。
+           * 轮询窗口结束时由 `settleAutoConnect()` 决定要不要把它变成结论。
+           */
+          this.pendingConnectError = snap.lastError.length > 0
             ? snap.lastError
             : '自动重连失败。若 Host 已重启，它的 token 会重新生成，请重新粘贴启动链接。';
         } else {
+          this.pendingConnectError = '';
           // 自动重连也报告一次：地址可能没变但 token 被轮换过（Host 重启），
           // 报告让存储里始终是**最近一次真正有效的**token。
           reportConnectedHost(this.rememberedUrl, this.rememberedToken);
@@ -3408,7 +3477,7 @@ struct Index {
        */
       const ctx = getContext(this) as common.UIAbilityContext;
       this.host = new DshHost(filesDir,
-        new NodeRuntime(`${resourceDir}/resources/app/main.js`, filesDir, ctx));
+        new NodeRuntime('', filesDir, ctx));
     }
     return this.host;
   }
@@ -3522,7 +3591,8 @@ struct Index {
       const ctx = getContext(this) as common.UIAbilityContext;
       const host: DshHost = this.coreHost(ctx.filesDir, ctx.resourceDir, ctx.cacheDir);
       this.coreNotice = '正在安装内置核心：解包约 2.5 万个文件，请勿退出应用……';
-      const result: BundledInstallResult = await host.installBundled(ctx.resourceDir, ctx.cacheDir);
+      const paths: HostModulePaths = await resolveHostModulePaths(ctx);
+      const result: BundledInstallResult = await host.installBundled(paths.resourceDir, ctx.cacheDir);
       this.coreNotice = result.note;
     } catch (e) {
       const err = e as Error;
@@ -4097,29 +4167,17 @@ const stopped: OpResult = await host.stop(`Index 核心操作：${id}`);
    * 现在：形态给默认（双栏 rail / 三栏 panel），用户展开或收起给偏好。
    */
   private toggleSidebarExpanded(): void {
-    // 翻的是**当前生效值**（用户看到的那个），存的是显式偏好 ⇒ 三态收敛为两态
-    const next: boolean = !sidebarExpandedForMode(this.mode, this.sidebarStored);
-    this.sidebarStored = next;
-    // 落盘：下次启动沿用它（与详情栏宽度同一套做法）。
-    // 【失败不弹提示】与宽度记忆同类：下次启动回到默认展开，不值得打断用户；
-    // 真要看落盘结果时去设置里的诊断。
-    const prefs: LocalPrefs = new LocalPrefs();
-    prefs.attach(getContext(this) as common.UIAbilityContext).then(() => {
-      prefs.saveSidebarExpanded(next);
-    });
-  }
-
-  /**
-   * 读回记住的侧栏展开偏好。
-   *
-   * 【原样存，不在这里解析】"没存过 ⇒ 展开"曾在这里被判成 `true`，于是双栏首启拿到的是
-   * "展开"（与形态默认矛盾）。现在这一层只搬运原始值（`boolean | undefined`），
-   * "没存过用什么"交给纯函数 `sidebarExpandedForMode`（有 fixture，且随形态变）。
-   */
-  private async loadSidebarExpanded(): Promise<void> {
-    const prefs: LocalPrefs = new LocalPrefs();
-    await prefs.attach(getContext(this) as common.UIAbilityContext);
-    this.sidebarStored = await prefs.loadSidebarExpanded();
+    /*
+     * ⚠️ 2026-10-31 第二次修（docs/330）：**收起只对本次运行有效，不落盘**。
+     *
+     * 之前这里会把 `next` 写进 preferences，于是平板上"点一次收起"变成**永久设定** ——
+     * 之后每次启动都是收起态，表现就是"侧栏不会常驻显示"。而用户口径是
+     * 「**不主动收起他就一直显示**」：收起是当下的一次动作，不该被记成偏好。
+     *
+     * 所以现在只改内存里的 `sidebarStored`（本次运行内仍然尊重用户的选择，
+     * 在 DOUBLE / TRIPLE 之间切换窗口大小也不会自己翻回来），重启后回到常驻展开。
+     */
+    this.sidebarStored = !sidebarExpandedForMode(this.mode, this.sidebarStored);
   }
 
   private setDrawerOpen(open: boolean): void {
@@ -4276,7 +4334,18 @@ const stopped: OpResult = await host.stop(`Index 核心操作：${id}`);
 
   private buildTabFacade(): TabContentFacade {
     const facade: TabContentFacade = {
-    browserInSidebar: shellTracksOf(this.mode).sidebar === TrackPresentation.PANEL,
+    /*
+     * ⚠️ 2026-10-31（docs/331）：这里**必须用"实际生效的呈现"**，不能用形态默认值。
+     *
+     * 原写法是 `shellTracksOf(this.mode).sidebar === TrackPresentation.PANEL` ——
+     * 而 `shellTracksOf(DOUBLE).sidebar` 恒为 `RAIL`。于是**双栏档（平板竖屏 / 窄一点的平板窗口）
+     * 下 `browserInSidebar` 恒为 false**：侧栏里不挂"工作区→会话树"，
+     * 用户看到的侧栏就是一条空窄条 —— 表现与"侧栏被收起"完全一样，
+     * 但它其实**一直是展开的**（宽度 240、呈现 PANEL），只是内容没挂进去。
+     * 这与"用户偏好 / 形态"那一整条判定链无关，所以前两次改纯函数都没治好。
+     */
+    browserInSidebar: sidebarPresentationOf(this.mode, sidebarExpandedForMode(this.mode, this.sidebarStored))
+      === TrackPresentation.PANEL,
     settingsSection: this.nav.settingsSection,
     settingsSections: this.panelRegistry.descriptors(PanelLocation.SETTINGS),
     onSelectSettingsSection: (sectionId: string) => this.selectSettingsSection(sectionId),

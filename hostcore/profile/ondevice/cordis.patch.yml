@@ -118,8 +118,9 @@
 #     → `dsh-terminal-bash` → `ctx.subprocess` → node-pty。交互式 PTY 会话，
 #     shellPath 由**本文件**配置 ⇒ 改成 zsh 是纯配置改动，零代码。
 #   · 链 1（agent 的 `bash` 工具）= `tool-bash` → `ctx.shell`(dsh-bash-local) →
-#     `ctx.subprocess` → node-pty，调用形态是 `bash -c "<cmd>"`（一次性）。
-#     它的 shellPath 写死在 main.js 的垫片里，**不读本配置** ⇒ 改这一行对链 1 无影响。
+#     `ctx.subprocess` → node-pty，调用形态是 `<shell> -c "<cmd>"`（一次性）。
+#     PC/2in1 由 `DSHM_BASH_EXECUTABLE` 指向系统可执行的原生 shell；手机/平板不设置
+#     该变量，仍由 guest VM 接管 `bash`。改本配置只影响侧边栏终端，不影响链 1。
 #   让链 1 也改走 zsh 是**不划算**的：zsh 与 bash 在 `-c`、展开、退出码、错误信息上
 #   都有语义差异，拿 zsh 当 bash 的替身只会让模型拿到更难解释的结果；垫片至少是刻意的。
 #   故链 1 按原样保留（见 main.js `bashShimLines()`）。
@@ -148,6 +149,28 @@
 #    dsh-terminal-bash、shellDialect: pwsh）在端侧必 ENOENT，显式关闭。
 - id: terminal-pwsh
   disabled: true
+#    持久终端 group 由 profile 整组覆盖；rc.2 只有 registry/panel/tool-terminal。
+#    旧版的两个同名 bash/pwsh backend 已合并为 panel，不再造 PowerShell 占位开关。
+#    group 子项必须与 bundle 声明一致，pack-core 与核心补丁门禁同时校验。
+#    用户层旧 bash/pwsh 行由 dshm-user-rows.js 的 PLATFORM_GUARD_ROWS 丢弃。
+# rc.2 的持久终端改由 panel 共用 terminal-controller；不得复活旧 bash backend，
+# 否则与新 panel 同占 shell backend，且模型终端不再显示于现有侧栏。
+# terminal-bash 上面的配置仍保留给独立 SDK 链，不用于 optional group。
+# 不固定 controller.shell：宿主 subprocess 提供原生默认 shell，手持档 VM 包装同一服务
+# 提供 guest 默认 shell；固定 /usr/bin/zsh 会把手机与普通平板带出 VM。
+- id: terminal-controller
+  config:
+    shellCandidates: ['sh', 'zsh', 'bash']
+- id: optional-persistent-terminals
+  config:
+    - id: optional-terminal-registry
+      name: '@deepseek-ai/dsh-terminal'
+    - id: optional-terminal-panel
+      name: '@deepseek-ai/dsh-terminal-panel'
+      config:
+        preferredShells: []
+    - id: optional-tool-terminal
+      name: '@deepseek-ai/dsh-tool-terminal'
 
 # 【P1-2（2026-09-26）过时覆盖已清理】原在这里的 `- id: tool-bash disabled: true`
 # 是 bring-up 期的权宜——当时端侧 `bash` 是 busybox 副本、必报 `applet not found`，
@@ -274,7 +297,8 @@
 #
 #    【历史】报告 5 §2.5 / 报告 7 §3 曾把整条链**默认禁用**（四行 disabled: true），
 #    因为点语音会红字报 `Local speech is unavailable for openharmony-arm64`。
-#    三条平台缺口至今未变：
+#    SenseVoice 路线下的三条平台缺口（**2026-10-18 起普通听写不再走 SenseVoice，
+#    这三条不再是阻塞项**，保留作历史与"为什么当年换实现"的证据）：
 #      ① `dsh-experimental-speech-to-text-sensevoice` 的 `resolveRuntime()` 白名单只有
 #         `darwin-arm64/x64`、`linux-arm64/x64`、`win32-x64`，**没有 openharmony**
 #         （lib/index.js:201-207 逐字可见）⇒ 直接抛 "unavailable for …"；
@@ -282,6 +306,14 @@
 #         （需要 `sherpa-onnx-openharmony-arm64`，上游不存在）；
 #      ③ 即便补上产物，`.node` 还要过签名域（与本项目 git/rg 同一条约束），
 #         且模型是 int8 228MB / fp32 894MB。
+#    ⇒ 【2026-10-18 的决定】不修 SenseVoice、也不把它搬进端侧：普通听写的识别本体
+#    改用 **HarmonyOS Core Speech Kit**（ArkTS 侧 `SystemSpeechRecognizer`，由
+#    `HmsSpeechBridge` 从文件队列取出请求后调用）⇒ ① 不适用（我们没有平台判定）、
+#    ② 不需要（引擎是系统 API，不是 .node 原生模块）、③ 不需要（无模型，无 228MB）。
+#    本 provider（`hostcore/speech-provider/index.js`）因此**只负责队列协议**：不再
+#    import `../speech-models/index.js`（在线模型下载器）、不做模型目录检查、不报
+#    下载进度、不在启动期自动准备；设备上**已存在**的旧模型目录
+#    （`$DSH_HOME/speech-to-text/sensevoice`）是用户数据，**不自动删除**。
 #
 #    【2026-09-26 为什么改为启用】目标是验证**麦克风授权通路**（模块权限 +
 #    WebView onPermissionRequest），而不是本地识别。读了上游代码确认"启用不会毁启动"：
@@ -296,11 +328,17 @@
 #    不会触发 getUserMedia ⇒ 因此本项的麦克风验证**不依赖**它，改由
 #    WebApp.ets 的「应用 → 麦克风自检」独立探针完成（见 MIC_PROBE_JS 注释）。
 #
-#    【代价】插件面板会列出语音组件；点麦克风会弹"需安装依赖"引导（预期行为，
-#    不是新 bug）。若只想保持界面干净，把这四行恢复 disabled: true 即可回退。
+#    【代价】插件面板会列出语音组件（预期行为，不是新 bug）。当年 provider 处于
+#    不可用态时，点麦克风会弹"需安装依赖"引导；**2026-10-18 起 provider 由系统识别
+#    接管、被报 ready**（见下面 preparation 那条）⇒ 那个引导不再出现。
+#    若只想保持界面干净，把这四行恢复 disabled: true 即可回退。
 #
 #    【2026-09-26 改为：把 sensevoice 的识别服务换成 HMOS 系统语音识别】
 #    目标形态与官方一致：点官方那个麦克风按钮就能说话、识别、出字。
+#    【2026-10-18 再进一步】识别本体换成 HarmonyOS **Core Speech Kit**：provider 显示名
+#    改为「HarmonyOS 系统语音识别」、语言只声明 `['zh-CN']`，且**不再下载/准备 228MB
+#    模型**（模型目录检查、下载进度、启动期自动准备整段删除；见本节开头的
+#    2026-10-18 说明与施工方案 Task 4）。
 #
 #    【为什么"改现有插件"而不是"新增一个 provider 插件"】真机实测否掉了后者：
 #    loader 解析裸包名要经过一张**由 bundle 依赖闭包构成的包表**
@@ -318,9 +356,11 @@
 #      usable = readiness.connected && provider.preparation.phase ∈ {ready, standby, waking}
 #    而服务端 snapshot() 写的是
 #      preparation: provider.preparation?.snapshot() ?? { phase: "ready" }
-#    ⇒ HMS provider **不提供 preparation** ⇒ 被报成 ready ⇒ 按钮可用。
-#    SenseVoice 恰恰因鸿蒙不在其平台白名单（lib/index.js:201-207）而永远进不了
-#    ready —— 这就是"点语音按钮只会跳设置"的根因。
+#    ⇒ provider **不提供 preparation** ⇒ 被报成 ready ⇒ 按钮可用。
+#    【2026-10-18 之后这不是权宜而是结构性事实】系统识别没有"准备中/需下载"阶段
+#    （模型下载路径已整段删除，见 `hostcore/speech-provider/index.js` 头注）⇒ 没有
+#    状态可报，也不需要用户先"准备"。SenseVoice 当年恰恰因鸿蒙不在其平台白名单
+#    （lib/index.js:201-207）而永远进不了 ready —— 那才是"点语音按钮只会跳设置"的根因。
 - id: speech-to-text
   config:
     # 【defaultProvider 必须在这里重复写一遍】本文件的覆盖是**整块替换** config
@@ -331,8 +371,8 @@
     # 【language 必须钉成 zh-CN】服务 config 的 language **默认是 "auto"**，
     # 而服务端 `selectedProvider()`（lib/index.js:135）会校验
     #   `provider.info.languages.includes(language)`
-    # HMS 的真实能力只有 zh-CN（真机 `listLanguages()` 只返回 ["zh-CN"]），
-    # 所以 provider 只声明 zh-CN ⇒ 用默认 "auto" 会报真机见过的错：
+    # 系统识别（Core Speech Kit）的真实能力只有 zh-CN（真机 `listLanguages()`
+    # 只返回 ["zh-CN"]），所以 provider 只声明 zh-CN ⇒ 用默认 "auto" 会报真机见过的错：
     #   Speech provider sensevoice-local does not support language: auto
     # 该字段用户可在设置页改（"识别语言"下拉，选项来自 provider.info.languages），
     # 因而合法值就是 zh-CN。
@@ -445,6 +485,44 @@
     - id: tool-fs-remove
       name: '@deepseek-ai/dshm-tool-fs-remove'
 
+# ⑦b 进程内 Python 工具（DSHM 自带插件，2026-10-16）
+#
+#    【缺口】宿主侧那份内嵌 CPython 一直是就绪的（`/dshm-python/status` → ready/stdlib 都真，
+#    `print(6*7)` 实测回 `42`），但**模型侧没有稳定入口**：`/dshm-python/*` 是 loopback
+#    端点而 `web_fetch` 按 SSRF 策略拒回环；`run_code` 在上游 alpha.4 是停用状态。
+#
+#    【本行做什么】把模型可见的 `python` 工具接到主进程内的桥（与随包 `python3` 垫片同一条通道、
+#    同一份 token 口径：`$DSHM_HOME/host-ready.json`）。工具本身不 spawn，PC 原生
+#    shell 与这条进程内入口可以各自独立诊断。
+#    实现与边界见 `hostcore/plugins/dshm-tool-python/lib/index.js` 头注（含"没有子进程/长任务
+#    会卡住宿主事件循环，桥用 SIGALRM 限时"这两条如实声明）。
+#
+#    【为什么是本层而不是 preset】与 ⑦ 同因：preset 的 plugins 列表在 isolate 作用域内，
+#    profile 的 patch 行按 id 够不着；本行挂在部署层，而工具注册表是 host+per-scope 分层，
+#    部署层注册进 global 层 ⇒ 每个 agent 都看得见（与 `tool-fs-remove` 逐字同形）。
+#
+#    【恢复条件】上游若把这套桥收进正式工具面（或 PTC 模式在全平台恢复），删掉本行 +
+#    pack-core 的 DSHM_PLUGIN_PACKAGES 里那一项即可。
+- insert:
+    - id: tool-python
+      name: '@deepseek-ai/dshm-tool-python'
+
+# ⑦c 浏览器自动化工具（DSHM 自带插件，2026-10-16）
+#
+#    【缺口】模型侧没有任何"操作 PC 浏览器"的入口；而调研（docs/173）与 PoC（docs/174）证明：
+#    设备本机浏览器（海泰等 Chromium 系）可加载自研扩展，扩展凭 chrome.debugger/scripting
+#    在浏览器内部完成 CDP 导航 / 注入 / 点击 / 读树 —— 不需要浏览器开放任何外部调试端口。
+#
+#    【本行做什么】注册 browser_* 工具（status / navigate / tree / click / text），接到宿主
+#    进程内的浏览器桥（HTTP /dshm-browser/*；扩展经 ws://127.0.0.1:19390/browser-bridge 连入）。
+#    实现与边界见 `hostcore/plugins/dshm-tool-browser/lib/index.js` 头注（需用户先加载扩展；
+#    debugger 独占与 WorkBuddy 的 Ultron 冲突时如实报错；无可用 http(s) 页面时 navigate 报错）。
+#
+#    【恢复条件】若上游出现官方浏览器工具面，删掉本行 + pack-core 清单里那一项即可。
+- insert:
+    - id: tool-browser
+      name: '@deepseek-ai/dshm-tool-browser'
+
 # ⑧ 默认工作区的"登记"（DSHM 自带插件，2026-10-03）
 #
 #    【缺口】本端"新建会话落在哪个目录"由客户端决定，官方 Web UI
@@ -464,25 +542,29 @@
 #    (dsh-api-workspace-controller/lib/index.js:609-641) 在 openharmony 落到
 #    `default: throw` 分支。两条都堵死 ⇒ 只能由本端在启动期登记一次。
 #
-#    【本行做什么（2026-10-07 收窄后）】插件把 ArkTS 认领到的 `Download/<包名>/`
-#    （env `DSHM_PUBLIC_DOWNLOAD`，见 hostruntime 的 buildHostEnv / NodeRuntime）经
-#    官方 API `workspaceRegistry.create()` 登记**一次** —— 且只在注册表**为空**时。
-#    两个作用：① 给"新建会话"一个落点；② 让上面那个 initializeDefault() 在
-#    「workspaceIds.length > 0」处**干净短路**，不再去跑本端必失败的目录探测。
+#    【本行做什么（2026-10-13 再收窄：**只撤不建**）】插件**不再登记任何工作区**。
+#    它只做一件事：若注册表里还留着本插件**早先**注入的那条
+#    （路径 = ArkTS 认领到的 `Download/<包名>/`，即 env `DSHM_PUBLIC_DOWNLOAD`），
+#    就调官方 `workspaceRegistry.delete(id)` 把它撤掉（只删注册表一行，
+#    目录与任何会话日志都不动；撤完允许为空）。
 #
-#    【边界】① 不改上游 dsh；② 不新增权限；③ 用户已有工作区时**一条都不加**，
-#    也**不改**任何既有登记（用户可随时在 UI 里改名/删除）；④ **绝不阻断启动**：
-#    apply() 同步返回，登记/撤回是自行吞错的浮空 promise，失败只打一行日志；
-#    ⑤ 没有 DSHM_PUBLIC_DOWNLOAD 时完全惰性（其它部署零副作用）。
+#    【为什么把"登记"整段删掉（2026-10-13 真机；docs/150）】上一版"只在注册表为空时
+#    登记一次"在**全新安装**上必然命中 —— 首启注册表就是空的 ⇒ 又替用户建了一条标题
+#    `下载` 的工作区，而那个目录用户从没选过（用户口径："不要替用户做选择"，
+#    这已是同类事故第三次）。去掉登记是**安全的**：全新安装首启 = 注册表空，
+#    官方客户端的 `restoreSelection()`（client.js:1598-1603）此时才调
+#    `initializeDefault()`，而它在本端（`process.platform === "linux"`）走
+#    `xdg-user-dir DOCUMENTS`（dsh-api-workspace-controller/lib/index.js:609-641）
+#    ⇒ 沙箱里必失败 ⇒ 客户端只弹一条 warning（"无法创建默认工作区，请通过'选择工作区'
+#    选择文件夹"），**不阻断、不建会话** —— 这正是官方语义：工作区由用户自己选。
+#    而"选择工作区"的入口在本端是好的（本文件 ⑤ 把官方 auto 目录面禁掉、改挂
+#    `ui-directory-picker-native` + `directory-picker-browse`，走系统目录选择器）。
 #
-#    ⚠ **2026-10-07 收窄（真机实证；docs/113）**：原实现**每次启动都登记**，
-#    真机上因此留下一条**用户没建过**的工作区 `com.dshm.dshclient`
-#    （`$DSH_HOME/storages/workspace.json` 实证：`sessionIds: []`、
-#    createdAt = 2026-10-03T09:48:26Z）。既然 43 号已证"只登记不足以决定新会话落点"，
-#    这一手就是**净噪声** ⇒ 改成：注册表非空时完全不碰；若其中有本插件早先注入的那条
-#    （路径 = 认领目录）且**它 0 会话**，则撤回该条登记（只删注册表一行，
-#    目录与任何会话日志都不动），且撤完必须仍有别的行（否则注册表变空会把
-#    initializeDefault() 的短路条件弄丢）。
+#    【边界】① 不改上游 dsh；② 不新增权限；③ 只可能命中"路径末两段 =
+#    `Download/<包名>`"那一条，绝不碰用户自己的工作区；④ **绝不阻断启动**：
+#    apply() 同步返回，撤回是自行吞错的浮空 promise，失败只打一行日志；
+#    ⑤ 读不到注册表 ⇒ 什么都不做（fail-closed）；没有 DSHM_PUBLIC_DOWNLOAD 时完全惰性
+#    （其它部署零副作用）。
 #
 #    【恢复条件】上游若给"默认工作区"提供不依赖空历史的配置（或
 #    defaultWorkspaceDirectory 支持 openharmony），删掉本行 + pack-core 的
@@ -675,3 +757,84 @@
 - insert:
     - id: dshm-office-system-preview
       name: '@deepseek-ai/dshm-office-system-preview'
+
+# ⑬c 云同步设置分区（2026-10-30，docs/319）
+#
+# 【为什么需要这一行】插件要真正被 activate，必须在 profile patch 里有一行 insert
+# （与上面 ⑬a office 插件同一机制）。纯客户端插件**不进** `dsh.profile.bundles`，
+# 而是靠这一行构造（office 插件同样是这么挂的）。
+#
+# 【位置纪律】必须写在 `dshm-user-rows` 自动生成区**之前**：那段由端侧「插件」页
+# 重写，写进去会被覆盖（真机踩过）。
+- insert:
+    - id: dshm-cloud-sync
+      name: '@deepseek-ai/dshm-cloud-sync'
+
+# ⑬d 原生朗读 / 分享动作条（2026-11-15）
+#
+# 【做什么】在官方助手消息的 `conversation.chat.assistant-actions` 列表槽上放
+# 「朗读」「分享」两枚按钮；正文由插件用会话标准 Hook `useChat` 取，
+# 合成/播放/面板/后台走 ArkTS 的 Speech Kit TextReader（失败降级 textToSpeech），
+# 分享走 Share Kit `systemShare`。插件本身不合成语音、不自绘面板。
+#
+# 【为什么是插件而不是 DOM 注入】动作条由官方 React 渲染；DOM 注入会被重渲染冲掉
+# （docs/311-319 的四版教训）。纯客户端插件只在 profile 里有一行 insert。
+- insert:
+    - id: dshm-read-aloud
+      name: '@deepseek-ai/dshm-read-aloud'
+
+
+# ⑬b 手持档 guest bash / 侧边栏终端（与 PC 共用同一棵核心）
+#    PC 原生 shell 可执行时插件完全惰性；只有进程内假壳 spawn 不起来且 VM
+#    资产齐备时才接管。资产目录由 ArkTS 从公共 hostruntime HSP 显式传入。
+- insert:
+    - id: dshm-vm-bash
+      name: '@deepseek-ai/dshm-vm-bash'
+
+
+# ⑪ web_fetch 的 User-Agent（2026-10-17，抓取成功率）。
+#
+# 【为什么要改】`dsh-web-fetch-http` 的默认 UA 是 `deepseek-harness/0.0.1 (+github…)` ——
+# 上游刻意"绝不伪装浏览器"，但这对**反爬中间件**等于自报家门：真机会话里 web_fetch 频繁
+# 403/302（用户原话："很多网站都有反爬，经常被封或者直接抓不到数据"）。
+# 本机 A/B 实测（同一 URL、同一时刻，只换 UA）：
+#   · `www.xiaohongshu.com/explore`：bot UA → **302**（被跳走）；浏览器 UA → **200**；
+#   · `www.zhihu.com/`：bot UA → **403**；浏览器 UA → **302**（正常登录跳转）。
+#   · `data.stats.gov.cn/easyquery.htm`：两者都 403 —— 那是 WAF 的 UrlACL（浏览器打开同样 403），
+#     UA 修不了，属"站点侧封禁"，如实留给模型换路子。
+#
+# 【换成什么】本机 ArkWeb 的**真实渲染引擎 UA**（从宿主日志 `ua=` 字段读回，真机实测串）——
+# 不编造别的浏览器：Chrome/144 + ArkWeb/7.0.0.109 就是这台设备上浏览器们实际发的那一串。
+# 【为什么只改 UA】provider 的 Config 里只有 `userAgent` 是这类可调项（其余是体量/超时上限）；
+# 其余 header（accept）保持原样。Accept-Language 之类如需再加，仍走这一行 config 即可。
+# 【恢复条件】删掉本块 ⇒ 回到上游默认（产品标识 UA）。
+- id: web-fetch-http
+  config:
+    userAgent: 'Mozilla/5.0 (PC; OpenHarmony 7.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 ArkWeb/7.0.0.109'
+
+# ⑮ 启动救援（随包内置，2026-11-08）
+#
+#    【解决什么】插件在加载阶段报错时，Web UI 只剩 `Failed to load plugins` 失败页，
+#    「设置 → 插件」也在这张页面里 ⇒ 用户知道是插件问题却没有入口停用它，
+#    过去只能卸载重装（数据与其它插件一起丢）。
+#
+#    【为什么这一行就够】`@deepseek-ai/dshm-boot-rescue` 是**纯宿主插件**：无 client 半身、
+#    零依赖、不声明 static inject（不会因缺服务 pending），宿主通过 `webServer.tapIndex`
+#    把 `rescue-client.js` 注入 index.html。其它插件全部失败时它仍会执行，在失败页上挂出
+#    「启动恢复中心」，把肇事行 id 写进 `.dshm-plugin-rows.yml`；用户划掉后台重开即可恢复，
+#    修好插件后还能在恢复中心里一键恢复。读写限定在 $DSH_HOME / $DSHM_HOME，失败只写日志。
+#
+#    【为什么放在种子层】老用户升级时 profile 的 `cordis.patch.yml` 每次启动都由核心种子
+#    重新拼装（用户自己的行在 `.dshm-plugin-rows.yml` 旁路保留）⇒ 新插件随升级自动到位，
+#    不需要用户手动安装，也不会覆盖用户已有的插件启停。
+#
+#    【恢复条件】删掉下面这个 insert 行 + pack-core 的 DSHM_PLUGIN_PACKAGES 里那一项。
+#
+#    【id 为什么带 -builtin（2026-11-12，docs/410）】行 id 曾与外部同名插件一致
+#    （都用 `dshm-boot-rescue`）。bundle patch 先于本文件应用、insert 只追加不去重、
+#    loader 又按 id 建实体索引 ⇒ 后写的内置 1.0.0 会**静默顶掉**用户安装的 1.1.0：
+#    外部 apply() 不执行、安全中心消失，而插件页启停切的是同 id 的内置那份。
+#    改成独立 id 后两者可以共存于配置层，由 `dshm-user-rows.js` 的让位行保证**只跑一套**。
+- insert:
+    - id: dshm-boot-rescue-builtin
+      name: '@deepseek-ai/dshm-boot-rescue'

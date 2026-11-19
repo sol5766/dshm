@@ -1,0 +1,21 @@
+{
+  "shortcuts": [
+    {
+      "shortcutId": "id_new_session",
+      "label": "$string:shortcut_new_session",
+      "icon": "$media:startIcon",
+      "visible": true,
+      "wants": [
+        {
+          "bundleName": "com.dshm.dshclient",
+          "moduleName": "phone",
+          "abilityName": "EntryAbility",
+          "parameters": {
+            "dshWindow": "main",
+            "dshAction": "new-session"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -5,7 +5,6 @@
     "description": "$string:module_desc",
     "mainElement": "EntryAbility",
     "deviceTypes": [
-      "phone",
       "tablet",
       "2in1"
     ],
@@ -13,20 +12,37 @@
     "installationFree": false,
     "pages": "$profile:main_pages",
     "srcEntry": "./ets/abilitystage/AppAbilityStage.ets",
+    /*
+     * 【应用级沉浸材质开关（API 26）—— 2026-10-11 接入】
+     *
+     * `ohos.arkui.UIMaterial.state` 是官方给的**应用级**沉浸光感（空间化材质：内容相关毛玻璃 /
+     * 按压弹性光效 / 滑动透明度渐变）总闸。仅**对本 entry 类型 module 生效**（官方原文）。
+     *
+     * 三档（`disable` / `default` / `enable`）：
+     *   · 不配 = `default`：Dialog / Toast / AlphabetIndexer / 文本选择菜单**默认开**材质；
+     *   · `enable`：在 `default` 之上**额外**给 Chip / Select / Menu / Toggle / Slider / bindSheet /
+     *     SelectionMenu 默认开，且**材质优先于组件自设的背景色 / 模糊 / 阴影 / 边框**；
+     *   · `disable`：全关 —— ⚠️ 它**会连带封死**主动调 `systemMaterial()`（并非"只是默认不开"）。
+     *
+     * 本仓取 `enable`（用户 2026-10-11 拍板"接入"）。两点须知：
+     *   ① 生效条件 = 设备 API ≥ 26；`compatibleSdkVersion` 为 `6.1.0(23)` ⇒ API 24 的平板上
+     *      这条 metadata **被平台忽略**，界面退回阴影层级那套（`HarmonyMaterial` 注释同义）；
+     *   ② 材质强弱**不是应用定的** —— 官方原文「同一材质的效果，会受到系统设置应用中**沉浸光感**配置项
+     *      的影响」⇒ 用户可在系统设置里调弱或关掉。
+     *   ③ ⚠ 只翻总闸**不够**：真机实测 2in1 的顶栏菜单（子窗渲染）**不会**因此自动变材质，
+     *      仍须在**声明点**显式挂 `systemMaterial`（见 `WebApp.ets` 的 `@Builder MenuTitle`）。
+     * 要改档位只动下面这一行 `value`。决策背景与取舍见 `docs/147`（菜单落地见 §13.5）。
+     */
+    "metadata": [
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "enable"
+      }
+    ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET",
         "reason": "$string:perm_internet_reason",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "always"
-        }
-      },
-      {
-        "name": "ohos.permission.GET_NETWORK_INFO",
-        "reason": "$string:perm_network_info_reason",
         "usedScene": {
           "abilities": [
             "EntryAbility"
@@ -45,20 +61,6 @@
         }
       },
       {
-        /*
-         * 【现在谁在用】`BackGroundAbility.onPrepareToTerminate()`（托盘后台进程被系统结束
-         * 时把事件送回主 Ability 做收尾）。**EntryAbility 已不再实现该回调** ——
-         * 2026-10-05 起系统「关闭窗口」回到官方行为（= 退出应用），不再拦成"最小化到后台"。
-         *
-         * 该权限在 SDK 权限表里是 `availableLevel: "normal"` + `grantMode: "system_grant"`
-         * ⇒ 普通应用可声明，安装时自动授予，无运行时弹窗。声明仍在是因为下面那个回调需要它：
-         * 不声明时系统**不会调用** `onPrepareToTerminate`，失败形态是「事件永远不来」，
-         * 看起来像"这段逻辑没写"而不像"权限没声明"。
-         *
-         * 【不能与 windowStageClose 同时用】SDK 明确：
-         * 「若应用注册了 `windowStageClose` 监听，本回调**不会执行**」。
-         * 本工程刻意**不**注册那个监听。
-         */
         "name": "ohos.permission.PREPARE_APP_TERMINATE",
         "reason": "$string:perm_prepare_terminate_reason",
         "usedScene": {
@@ -89,36 +91,6 @@
         }
       },
       {
-        "name": "ohos.permission.STORE_PERSISTENT_DATA",
-        "reason": "$string:perm_store_persist_reason",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "always"
-        }
-      },
-      {
-        "name": "ohos.permission.READ_WRITE_USER_FILE",
-        "reason": "$string:perm_user_file_reason",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "inuse"
-        }
-      },
-      {
-        "name": "ohos.permission.ACCESS_USER_FULL_DISK",
-        "reason": "$string:perm_full_disk_reason",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "always"
-        }
-      },
-      {
         "name": "ohos.permission.CUSTOM_SANDBOX",
         "reason": "$string:perm_custom_sandbox_reason",
         "usedScene": {
@@ -129,19 +101,128 @@
         }
       },
       {
-        // 语音输入（实验）：官方语音 UI 走浏览器 `navigator.mediaDevices.getUserMedia`，
-        // 录音发生在**内嵌 Web 组件**里，所以除了这里声明，还必须在 `Web()` 上挂
-        // `onPermissionRequest` 把 AUDIO_CAPTURE 放行（两件事缺一不可）：
-        //   ① 声明了但没挂回调 ⇒ WebView 一律 deny()，网页侧拿不到麦克风；
-        //   ② 挂了回调但没声明 ⇒ 系统层没有该权限，回调放行也会在底层失败。
-        // 该权限是 `user_grant`/`NORMAL`（非 system 权限），普通应用走运行时弹窗即可。
+        "name": "ohos.permission.kernel.IGNORE_LIBRARY_VALIDATION",
+        "reason": "$string:perm_ignore_library_validation_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.kernel.EXEMPT_ANONYMOUS_EXECUTABLE_MEMORY",
+        "reason": "$string:perm_executable_memory_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.STORE_PERSISTENT_DATA",
+        "reason": "$string:perm_store_persist_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.VIBRATE",
+        "reason": "$string:perm_vibrate_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.READ_PASTEBOARD",
+        "reason": "$string:perm_read_pasteboard_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_DOCUMENTS_DIRECTORY",
+        "reason": "$string:perm_documents_directory_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY",
+        "reason": "$string:perm_download_directory_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.READ_WRITE_DESKTOP_DIRECTORY",
+        "reason": "$string:perm_desktop_directory_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        /*
+         * 【2026-11-19 AGC 驳回项①】审核意见要求：按最小化原则，reason 必须填写
+         * 该权限实际使用的功能场景。本条 reason 已改为「用户选择本地任意文件夹作为
+         * 项目工作区后直接读写」；usedScene.when 由 always 收紧为 inuse（仅功能使用时）。
+         */
+        "name": "ohos.permission.ACCESS_USER_FULL_DISK",
+        "reason": "$string:perm_full_disk_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+      {
         "name": "ohos.permission.MICROPHONE",
         "reason": "$string:perm_microphone_reason",
         "usedScene": {
           "abilities": [
             "EntryAbility"
           ],
-          "when": "inuse"
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.GET_NETWORK_INFO",
+        "reason": "$string:perm_get_network_info_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.RUNNING_LOCK",
+        "reason": "$string:perm_running_lock_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
         }
       }
     ],
@@ -151,7 +232,9 @@
         "srcEntry": "./ets/entryability/EntryAbility.ets",
         "launchType": "specified",
         "description": "$string:EntryAbility_desc",
-        "icon": "$media:layered_image",
+        /* 2026-11-03：托盘常驻图标 = ability icon；分层图标会被当单色模板 ⇒ 换单张彩色 PNG。
+         * 只改这一项：startWindowIcon / logo_dark（启动画面）、侧边栏按钮一律不动。 */
+        "icon": "$media:app_icon",
         "label": "$string:EntryAbility_label",
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
@@ -171,12 +254,28 @@
          * 收发会话数据 —— 语义上就是数据传输。用 audioPlayback 之类去骗保活
          * 属于滥用系统能力（通知栏会显示"正在播放"），会被审核拒绝。
          *
-         * 为什么它是必须的：没有它，`onPrepareToTerminate` 的"关闭=切后台"
-         * 只是把窗口收起来 —— 进程随即被挂起，连接断、任务停，
-         * 与"关掉别停任务"的诉求相反。
+         * 为什么它是必须的：没有它，PC 档三键「关闭」把窗口收进后台后，
+         * 进程随即被挂起 —— 连接断、任务停，与"关了窗口别停任务"的诉求相反。
+         */
+        /*
+         * 会议模式（2026-10-18）：后台录音必须声明 audioRecording，
+         * 与真实场景一致（通知栏显示"正在录音"）。这不是新增权限 ——
+         * 权限面恒 17 条；backgroundModes 是能力声明，由
+         * platform/notify/MeetingKeepAlive 在会议开始时按类型申请。
          */
         "backgroundModes": [
-          "dataTransfer"
+          "dataTransfer",
+          "audioRecording",
+          /*
+           * PC / 2in1 的计算型后台任务。
+           *
+           * DATA_TRANSFER 按官方约束必须持续更新进度；首次进度超过 10 分钟未更新时，
+           * 系统会主动取消长时任务。MatePad Edge 的实测日志正好在每次启动约 10 分钟后
+           * 出现 `HandleSubscribeOnContinuousTaskStop`，随后进程进入整段冻结。
+           * 本应用后台跑的是 Agent / 模型计算，不是上传下载，因此 PC/2in1 应走
+           * taskKeeping。它仍由 KEEP_BACKGROUND_RUNNING 权限控制，不新增权限。
+           */
+          "taskKeeping"
         ],
         "exported": true,
         "skills": [
@@ -187,6 +286,34 @@
             "actions": [
               "ohos.want.action.home"
             ]
+          },
+          {
+            "entities": [
+              "entity.system.browsable"
+            ],
+            "actions": [
+              "ohos.want.action.viewData"
+            ],
+            "uris": [
+              {
+                "scheme": "dsh",
+                "host": "open"
+              }
+            ]
+          }
+        ],
+        /*
+         * 桌面快捷方式（长按图标 → 快捷方式列表 → 点击直达）。
+         *
+         * 目标动作经 wants.parameters 的 `dshAction` 传给 EntryAbility，由页面侧白名单
+         * 分发（`Index.ets` 的 `applyLaunchAction`；文档见 `docs/172` §5.2）。
+         * ⚠ 该 profile 里 `wants.bundleName` 必须与当前包名一致（正式为 com.dshm.dshclient）；
+         * Beta 出包脚本会在构建期临时改成 Beta 身份并在 `finally` 里逐字还原。
+         */
+        "metadata": [
+          {
+            "name": "ohos.ability.shortcuts",
+            "resource": "$profile:shortcuts_config"
           }
         ]
       },
@@ -213,11 +340,33 @@
         "name": "BackGroundAbility",
         "srcEntry": "./ets/backgroundability/BackGroundAbility.ets",
         "description": "$string:BackgroundAbility_desc",
-        "icon": "$media:layered_image",
+        /* 2026-11-03：托盘常驻图标 = ability icon；分层图标会被当单色模板 ⇒ 换单张彩色 PNG。
+         * 只改这一项：startWindowIcon / logo_dark（启动画面）、侧边栏按钮一律不动。 */
+        "icon": "$media:app_icon",
         "label": "$string:BackgroundAbility_label",
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true
+      },
+      {
+        /* 2026-11-03（第二进程接线；背景见 docs/348 / docs/349）：注册第二进程 ability。
+         * 之前只有 ArkTS 类、清单没注册 ⇒ `startAbility` 返回 10104001（ability not exist），
+         * 且失败被静默吞掉，现场表现为"标记被消费但什么都没发生"。
+         * `launchType: multiton` —— 必须允许与主实例并存的独立实例；
+         * 用默认 singleton 的话第二次启动只会走 onNewWant，拿不到第二进程。
+         *
+         * 【2026-11-08 并入 entry】entry 改为 tablet+2in1 双形态壳后，PC 也由本模块承载；
+         * SuperagentAbility 必须随 entry 声明，否则合并后 PC 侧超管入口会丢。 */
+        "name": "SuperagentAbility",
+        "srcEntry": "./ets/superagent/SuperagentAbility.ets",
+        "launchType": "multiton",
+        "process": ":superagent",
+        "exported": false,
+        "icon": "$media:app_icon",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "backgroundModes": ["taskKeeping"]
       }
     ],
     "extensionAbilities": [
@@ -232,6 +381,47 @@
             "resource": "$profile:backup_config"
           }
         ],
+      },
+      {
+        /*
+         * 端侧 A2A 智能体服务（docs/172 §5.4）。
+         *
+         * `type: "agent"` + metadata `ohos.extension.agent` 是官方接入三件套的两处；
+         * 第三处是 `resources/base/profile/agent_config.json`（AgentCard）。
+         * ⚠ 本项 `name`（AgentExtAbility）= 小艺开放平台"应用服务名称"，两边必须逐字一致。
+         * ⚠ 平台侧另需关联 AGC 已发布应用并导入 agent_config.json（用户操作，见 docs/172 §5.4）。
+         */
+        "name": "AgentExtAbility",
+        "description": "$string:agent_ext_desc",
+        /* 2026-11-03：与其它 ability 统一用彩色 app_icon（原为 startIcon = 旧鲸鱼图） */
+        "icon": "$media:app_icon",
+        "type": "agent",
+        "exported": true,
+        "srcEntry": "./ets/agentextability/AgentExtAbility.ets",
+        "metadata": [
+          {
+            "name": "ohos.extension.agent",
+            "resource": "$profile:agent_config"
+          }
+        ]
+      },
+      {
+        /*
+         * 桌面服务卡片（Form Kit，docs/178）：会话进度 + 余额/ token 用量。
+         * 标准桌面卡片不走实况窗那套 AGC 权益审批；锁屏/待机卡片才需要另申请。
+         * 五元组（bundle/module/ability/formName/dimension）一旦上线不要改：改了系统会删掉已添加卡片。
+         */
+        "name": "UsageFormAbility",
+        "srcEntry": "./ets/form/UsageFormAbility.ets",
+        "label": "$string:UsageFormAbility_label",
+        "description": "$string:UsageFormAbility_desc",
+        "type": "form",
+        "metadata": [
+          {
+            "name": "ohos.extension.form",
+            "resource": "$profile:form_config"
+          }
+        ]
       }
     ]
   }

@@ -4,7 +4,7 @@
  *
  * 【为什么存在】端侧有两条路都需要解 tar，而且都**不能 spawn**：
  *   1. `dshm-installer.js`（插件安装队列）从 registry 拉 npm tarball 落位；
- *   2. `main.js` 的工具链解包（CPython stdlib 25MB tar.gz / git apk）。
+ *   2. `main.js` 的工具链解包（CPython stdlib 25MB tar.gz / git 包）。
  * 第 2 条原先走的是 `spawn <busybox> ash -c "tar xmzf …"`：**在 PC/2in1 档可用，
  * 在手机/平板档必失败**——本档 SELinux 域下应用自带可执行文件一律 `EACCES`
  * （判决性读数见 `docs/104` §2/§3）。于是本档表现为：每次启动都删掉
@@ -115,6 +115,7 @@ function normalizeEntryPath(name, stripPrefixes) {
  * @param {{stripPrefixes?: string[], ignoreTypes?: string[]}} [opts]
  */
 function* walkTar(tarBuf, opts) {
+  if (tarBuf.length < BLOCK || tarBuf.length % BLOCK !== 0) throw new Error('Truncated tar archive');
   const stripPrefixes = (opts && opts.stripPrefixes) || [];
   let off = 0;
   let gnuLongName = null;
@@ -133,6 +134,9 @@ function* walkTar(tarBuf, opts) {
     const linkname = readStr(header, 157, 100);
     off += BLOCK;
     const padded = Math.ceil(size / BLOCK) * BLOCK;
+    if (!Number.isSafeInteger(size) || size < 0 || off + padded > tarBuf.length) {
+      throw new Error('Invalid or truncated tar entry');
+    }
     const body = tarBuf.subarray(off, off + size);
 
     if (type === 'L') { // GNU long name：正文是下一个条目的名字
@@ -178,6 +182,7 @@ function* walkTar(tarBuf, opts) {
         entrySize = n;
       }
     }
+    if (!Number.isSafeInteger(entrySize) || entrySize < 0 || entrySize > size) throw new Error('Invalid tar entry size');
 
     const segs = normalizeEntryPath(entryName, stripPrefixes);
     off += padded;
@@ -198,6 +203,15 @@ function newStats() {
 
 /** 把一条条目落盘。type 语义同 tar typeflag。 */
 function writeEntry(entry, destDir, stats) {
+  let current = path.resolve(destDir);
+  for (const segment of [null, ...entry.segs]) {
+    if (segment !== null) current = path.join(current, segment);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) throw new Error('Refusing tar output symlink');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
   const target = path.join(destDir, ...entry.segs);
   if (entry.type === '5') {
     fs.mkdirSync(target, { recursive: true });
@@ -239,12 +253,22 @@ function extractTar(tarBuf, destDir, opts) {
  */
 async function extractTarGzFile(archivePath, destDir, opts) {
   const o = opts || {};
+  const deadline = Date.now() + (o.timeoutMs || 120000);
   const yieldEvery = typeof o.yieldEvery === 'number' && o.yieldEvery > 0 ? o.yieldEvery : 64;
-  const raw = zlib.gunzipSync(fs.readFileSync(archivePath));
+  const maxOutputLength = o.maxOutputLength || 256 * 1024 * 1024;
+  if ((await fs.promises.stat(archivePath)).size > maxOutputLength) throw new Error('Archive exceeds extraction limit');
+  if (Date.now() > deadline) throw new Error('Archive extraction timed out');
+  const compressed = await fs.promises.readFile(archivePath);
+  if (Date.now() > deadline) throw new Error('Archive extraction timed out');
+  const raw = await new Promise((resolve, reject) => {
+    zlib.gunzip(compressed, { maxOutputLength }, (error, result) => error ? reject(error) : resolve(result));
+  });
+  if (Date.now() > deadline) throw new Error('Archive extraction timed out');
   const stats = newStats();
   let seen = 0;
   const breathe = () => new Promise((r) => setImmediate(r));
   for (const entry of walkTar(raw, o)) {
+    if (Date.now() > deadline) throw new Error('Archive extraction timed out');
     writeEntry(entry, destDir, stats);
     seen += 1;
     if (seen % yieldEvery === 0) {
@@ -252,8 +276,10 @@ async function extractTarGzFile(archivePath, destDir, opts) {
         o.onProgress(seen);
       }
       await breathe();
+      if (Date.now() > deadline) throw new Error('Archive extraction timed out');
     }
   }
+  if (Date.now() > deadline) throw new Error('Archive extraction timed out');
   return stats;
 }
 

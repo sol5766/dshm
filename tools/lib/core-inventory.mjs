@@ -20,8 +20,12 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
-/** 已知的插件来源 bundle（profile 的 dsh.profile.bundles 就是这两个）。 */
-export const BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+/** 已知的插件来源 bundle（含端侧显式启用的 CoT 翻译 bundle）。 */
+export const BUNDLES = [
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-web-app',
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle',
+]
 
 /**
  * 建立包索引：relPath（相对 node_modules，例如 `a/node_modules/b`）→ 绝对目录。

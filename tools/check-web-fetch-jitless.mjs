@@ -12,6 +12,9 @@
  *     自建 Agent 再传 `dispatcher`；undici 的 HTTP 解析器是 WASM 版 llhttp，
  *     而端侧 Host 以 `--jitless` 运行 ⇒ `WebAssembly` 是 undefined
  *     ⇒ 每次 fetch 都抛 `fetch failed / cause: WebAssembly is not defined`
+ *     （Node ≥ 24 换过措辞：`WebAssembly is not supported in this environment,
+ *      but is required for HTTP/1 parsing` —— 同一因果、不同文案，判据两条都要认，
+ *      见 2026-10-15 的 `docs/162`）
  *   · 我们的 `fetch-shim.js` 垫的是**全局 fetch**，因此对这条路径毫无作用
  *
  * 关键教训：**"Host 起来了、模型能回话"完全掩盖不了这条路径**。这个门禁就是为了
@@ -45,7 +48,7 @@
  * 退出码：0 通过 / 1 失败 / 3 环境不具备（缺核心树或该上游包，属跳过而非失败）。
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -80,7 +83,16 @@ export function classifyNoHookArm(stdout, stderr) {
   const all = `${stdout}\n${stderr}`;
   const { total, failed } = parseAssertions(all);
   const allPassed = Number.isFinite(total) && total > 0 && failed === 0;
-  const wasmCause = /WebAssembly is not defined/.test(all);
+  /*
+   * WASM 因果的**两种文案**都要认：
+   *   · Node 20/22：`ReferenceError: WebAssembly is not defined`
+   *   · Node ≥ 24 ：`WebAssembly is not supported in this environment, but is required for HTTP/1 parsing`
+   * 它们描述的是同一件事（`--jitless` ⇒ 没有 WebAssembly ⇒ undici 的 WASM llhttp 装不起来）。
+   * 只认前者会让本门禁在本机 Node 24 上**恒假红**（2026-10-15 实测：A 臂 4/4 失败且带
+   * Node 24 文案，B 臂 8/8 通过，判定却是"没有 WASM 因果证据"）。
+   * 放宽的只是**文案**，判据的牙仍在：必须出现 `WebAssembly` 且是"不可用/未定义"语义。
+   */
+  const wasmCause = /WebAssembly is not defined|WebAssembly is not supported in this environment/.test(all);
 
   if (allPassed) {
     return { ok: false, why: 'A 臂竟然全过 —— 说明被测路径已不再依赖 undici，本门禁失去意义，请重新审视' };
@@ -113,6 +125,7 @@ export function classifyHookedArm(stdout, stderr) {
 /* ───────────────────────── 自测（喂人造输出） ───────────────────────── */
 
 const WASM_CAUSE = '[probe] 真 undici 失败原因: WebAssembly is not defined';
+const WASM_CAUSE_NODE24 = '[probe] 真 undici 失败原因: WebAssembly is not supported in this environment, but is required for HTTP/1 parsing';
 
 function selfTest() {
   let pass = 0;
@@ -123,6 +136,8 @@ function selfTest() {
     classifyNoHookArm(`检查失败：\n${WASM_CAUSE}\n断言 8 条，失败 8 条。\n`, '').ok === true);
   t('A臂：上游报 fetch failed + WASM 因果 → 对照成立',
     classifyNoHookArm(`${WASM_CAUSE}\nweb fetch failed: TypeError: fetch failed code=WEB_PROVIDER_ERROR`, '').ok === true);
+  t('A臂：Node ≥ 24 措辞的 WASM 因果 → 同样成立（同一因果，不能因文案换代判假红）',
+    classifyNoHookArm(`检查失败：\n${WASM_CAUSE_NODE24}\n断言 4 条，失败 4 条。\n`, '').ok === true);
   t('A臂：**全过** → 必须判不成立（门禁失去意义）',
     classifyNoHookArm(`${WASM_CAUSE}\n断言 8 条，失败 0 条。`, '').ok === false);
   t('A臂：失败但**说不出原因**（无 WASM 因果）→ 判不成立（不拿来路不明的失败当证据）',
@@ -142,40 +157,40 @@ function selfTest() {
   t('B臂：断言数不足（提前中断）→ 判不成立', classifyHookedArm('断言 3 条，失败 0 条。', '').ok === false);
   t('B臂：没有汇总行 → 判不成立', classifyHookedArm('SyntaxError: boom', '').ok === false);
 
+  const selected = coreCandidates('', () => '{"coreVersion":"0.2.2-rc.2+dshm.1"}');
+  t('配方只产出当前版本一个候选', selected.length === 1 && selected[0].endsWith('dsh-core-0.2.2-rc.2+dshm.1'));
+  t('当前包缺失时不回退其它已存在的旧树', findProvider(selected, (p) => p.includes('dsh-core-9.9.9')) === null);
+  t('显式 --core 仍可选择历史版本做对照', coreCandidates('/explicit-core')[0] === resolve('/explicit-core'));
+  let rejected = false;
+  try { coreCandidates('', () => '{"coreVersion":"../old"}'); } catch { rejected = true; }
+  t('非法配方版本不得逃逸路径', rejected);
   console.log(`\n自测 ${pass + fail} 条，失败 ${fail} 条。`);
   return fail === 0 ? 0 : 1;
 }
 
-if (args.includes('--self-test')) {
-  process.exit(selfTest());
-}
-
 /* ───────────────────────── 找核心树与上游包 ───────────────────────── */
 
-function coreCandidates() {
-  const explicit = arg('--core', process.env.DSHM_CORE_DIR ?? '');
-  if (explicit !== '') {
-    return [resolve(explicit)];
+function coreCandidates(explicit = arg('--core', process.env.DSHM_CORE_DIR ?? ''), read = readFileSync) {
+  if (explicit !== '') return [resolve(explicit)];
+  // 缺少当前树/目标包时如实跳过，禁止回退旧树造成假绿。
+  const { coreVersion } = JSON.parse(read(join(ROOT, 'hostcore', 'core-recipe.json'), 'utf8'));
+  if (typeof coreVersion !== 'string' || !/^[0-9A-Za-z.+-]+$/.test(coreVersion)) {
+    throw new Error('core-recipe.json 的 coreVersion 非法');
   }
-  const work = join(ROOT, 'dist', 'core', 'work');
-  if (!existsSync(work)) {
-    return [];
-  }
-  return readdirSync(work)
-    .filter((n) => n.startsWith('dsh-core-'))
-    .sort()
-    .map((n) => join(work, n));
+  return [join(ROOT, 'dist', 'core', 'work', `dsh-core-${coreVersion}`)];
 }
 
-function findProvider() {
-  for (const core of coreCandidates()) {
+function findProvider(candidates = coreCandidates(), exists = existsSync) {
+  for (const core of candidates) {
     const p = join(core, 'node_modules', '@deepseek-ai', 'dsh-web-fetch-http', 'lib', 'index.js');
-    if (existsSync(p)) {
+    if (exists(p)) {
       return { core, provider: p };
     }
   }
   return null;
 }
+
+if (args.includes('--self-test')) process.exit(selfTest());
 
 const found = findProvider();
 if (found === null) {
@@ -193,7 +208,7 @@ if (found === null) {
  *   `ERR_UNSUPPORTED_ESM_URL_SCHEME: ... Received protocol 'd:'`
  * 崩在第一条断言之前 ⇒ B 臂永远"没有产出断言汇总"，门禁在 Windows 上整体失效（假红）。
  * `existsSync` 仍要用真实路径，所以两者分开存。 */
-const LOADER_PATH = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resources', 'app', 'undici-loader.mjs');
+const LOADER_PATH = join(ROOT, 'hostruntime', 'src', 'main', 'resources', 'resfile', 'resources', 'app', 'undici-loader.mjs');
 const LOADER = pathToFileURL(LOADER_PATH).href;
 
 if (process.env.DSHM_WEBFETCH_ARM !== undefined) {
@@ -218,9 +233,18 @@ if (process.env.DSHM_WEBFETCH_ARM !== undefined) {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const PORT = server.address().port;
-  /* 主机名**故意不用字面 IP**：靠注入的解析器把它钉到 loopback。
-   * 这正是上游 DNS 钉住的语义（URL 主机名不变，用于 Host/SNI）。 */
-  const base = `http://example.com:${PORT}`;
+  /*
+   * 0.2.1-rc.5 上游构造为 (limits, lookup)，第二参是注入的 DNS 钉住 ⇒ 用主机名
+   * example.com 测「URL 主机名不变、靠 lookup 钉到 loopback」。
+   * 0.2.2-rc.1 上游改为 process-wide dispatcher、构造只剩 (limits)，第二参被忽略
+   * ⇒ 再用主机名会走真实 DNS 并超时。此时改用字面 loopback：仍能真连本地服务，
+   * 并保留「UA 抵达 / 同源跳转 / 跨源跳转被拒」三条安全语义断言。
+   */
+  const ctorTakesLookup = HttpFetchProvider.length >= 2;
+  const base = ctorTakesLookup
+    ? `http://example.com:${PORT}`
+    : `http://127.0.0.1:${PORT}`;
+  console.log(`[${label}] DNS 形态=${ctorTakesLookup ? '注入 lookup（0.2.1）' : '字面 loopback（0.2.2 process-wide dispatcher）'}`);
 
   const limits = {
     maxBodyChars: 1e5, timeoutMs: 3e4, maxRedirects: 5,

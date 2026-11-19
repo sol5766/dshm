@@ -15,10 +15,11 @@
  */
 
 import { common, Want } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { display, window } from '@kit.ArkUI';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { FormFactor, readDeviceFacts } from '../system/DeviceFacts';
+import { FormFactor, readDeviceFacts, readFoldSnapshot } from '../system/DeviceFacts';
+import type { FoldSnapshot } from '../system/DeviceFacts';
 
 const DOMAIN: number = 0xD5A1;
 const TAG: string = 'platform/window';
@@ -31,6 +32,14 @@ export const PARAM_SESSION_ID: string = 'dshSessionId';
 export const PARAM_TITLE: string = 'dshTitle';
 /** Want 参数键：通知点击带来的路由 JSON（与 appstate 的 NotifyRoute 同构） */
 export const PARAM_ROUTE: string = 'dshRoute';
+/**
+ * Want 参数键：桌面快捷方式动作 id（来自 `shortcuts_config.json` 的 `wants.parameters`）。
+ *
+ * 【为什么平台层只透传不解释】动作 id 的语义属于产品面（`new-session` 等），
+ * 由页面侧白名单消费（见 `Index.ets` 的 `applyLaunchAction`）。与 `PARAM_ROUTE` 同一纪律：
+ * 参数键名是**跨窗口契约**，解析集中在 WindowRegistry 这一个文件，取值含义留给消费者。
+ */
+export const PARAM_ACTION: string = 'dshAction';
 
 /** 窗口种类 */
 export enum WindowKind {
@@ -45,6 +54,8 @@ export interface WindowParams {
   title: string;
   /** 通知路由 JSON（空串表示无）；解析归 appstate，避免 platform 认识产品页 */
   routeJson: string;
+  /** 桌面快捷方式动作 id（空串表示无）；只透传，白名单在页面侧 */
+  action: string;
 }
 
 /**
@@ -60,7 +71,8 @@ export function parseWindowParams(params: Record<string, Object> | undefined): W
     kind: kindRaw === WindowKind.SESSION ? WindowKind.SESSION : WindowKind.MAIN,
     sessionId: strOf(params, PARAM_SESSION_ID),
     title: strOf(params, PARAM_TITLE),
-    routeJson: strOf(params, PARAM_ROUTE)
+    routeJson: strOf(params, PARAM_ROUTE),
+    action: strOf(params, PARAM_ACTION)
   };
 }
 
@@ -188,6 +200,22 @@ export async function currentWindowId(): Promise<string> {
  * onWindowStageCreate）⇒ 一处调用等于所有窗口一起生效；`BackGroundAbility` 没有窗口，
  * 不受影响。
  *
+ * 【API 26 的两条路径（2026-10-11 接入）】`targetSdkVersion` 抬到 `26.0.0` 后多了一个
+ * **带回执**的版本：`setPreferredOrientationWithResult(orientation)` ⇒ `Promise<OrientationResult>`
+ * （`executionResult: ORIENTATION_APPLIED / ORIENTATION_IGNORED / ORIENTATION_PENDING`）。
+ * 选它是因为旧版 `setPreferredOrientation(...).then()` 的 promise **只表示"调用被受理"**，
+ * 拿不到"策略到底生效了没有"——系统旋转锁定时平台会**受理但忽略**，此时旧路径照样打
+ * "跟随屏幕旋转"，日志与事实相反（`docs/102` 的口径只能靠反推）。
+ * 三条约束决定这里写成**双路径**而不是直接换掉：
+ *   ① 该 API `@since 26.0.0` ⇒ 设备必须是 API ≥ 26（`deviceInfo.apiAvailable('26.0.0')` 守卫）；
+ *      手持档里 API 24 的平板（本仓 `compatibleSdkVersion = 6.1.1(24)`）**装得上也必须能跑**；
+ *   ② `deviceInfo.apiAvailable` **本身**就是 `@since 26.0.0` ⇒ 在 API 24 设备上该属性不存在，
+ *      调用即 `TypeError` ⇒ 必须包在 try 里（返回 false = 走旧路径），不能只看返回值；
+ *   ③ 该 API 声明 `@throws 801 / 1300002 / 1300003`（`Window.SessionManager`）⇒ 抛错时
+ *      **回退到旧路径**，而不是让"跟屏"整体失效。
+ * 两条路径最终设的都是同一个 `AUTO_ROTATION_RESTRICTED`，**PC/2in1 在上面就早退了**，
+ * 本轮改动对它零影响。
+ *
  * 失败只记日志：拿不到朝向不影响启动（降级为系统默认朝向）。
  */
 export function followScreenRotationOnHandheld(windowStage: window.WindowStage): void {
@@ -197,6 +225,68 @@ export function followScreenRotationOnHandheld(windowStage: window.WindowStage):
       return;
     }
     const win: window.Window = windowStage.getMainWindowSync();
+    if (!orientationResultApiReady()) {
+      applyPreferredOrientationLegacy(win, form);
+      return;
+    }
+    win.setPreferredOrientationWithResult(window.Orientation.AUTO_ROTATION_RESTRICTED)
+      .then((res: window.OrientationResult) => {
+        logOrientationExecution(form, res.executionResult);
+      })
+      .catch((err: BusinessError) => {
+        // 801（设备不支持该能力）/ 1300002（窗口状态异常）/ 1300003（窗口服务异常）
+        // ⇒ 退回无回执路径，保住"能跟屏"这件事本身。
+        hilog.warn(DOMAIN, TAG, '朝向结果 API 失败，回退无回执路径：%{public}s', err.message);
+        applyPreferredOrientationLegacy(win, form);
+      });
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '设置跟随旋转异常（降级为系统默认朝向）：%{public}s', e.message);
+  }
+}
+
+/**
+ * 本设备是否具备「带执行结果的偏好朝向」API（`@since 26.0.0`）。
+ *
+ * `deviceInfo.apiAvailable` **自己**也是 `@since 26.0.0` ⇒ 在 API 24 设备上它是 `undefined`，
+ * 直接调用会 `TypeError`。因此这里返回的是"能不能用"而不是"版本够不够"：
+ * 调用失败一律当 false（走旧路径），绝不把守卫写成会抛的形态。
+ */
+function orientationResultApiReady(): boolean {
+  try {
+    return deviceInfo.apiAvailable('26.0.0');
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * 把回执的三种取值翻成日志口径。
+ *
+ * `ORIENTATION_IGNORED` 是**正常路径而不是错误**：系统旋转锁定开启（或设备不支持传感器旋转）时，
+ * 平台受理调用但忽略策略 —— 这正是 `docs/102` 与用户口径「锁定就不转、解锁才转」在系统侧的
+ * 落点。旧路径拿不到这个区分，所以只能笼统记"跟随屏幕旋转"；这里把它如实分开记。
+ */
+function logOrientationExecution(form: FormFactor, result: window.OrientationExecutionResult): void {
+  if (result === window.OrientationExecutionResult.ORIENTATION_APPLIED) {
+    hilog.info(DOMAIN, TAG, '手持形态（%{public}s）：朝向跟随屏幕旋转已生效（受系统旋转锁定管辖）', form);
+    return;
+  }
+  if (result === window.OrientationExecutionResult.ORIENTATION_IGNORED) {
+    hilog.info(DOMAIN, TAG,
+      '手持形态（%{public}s）：朝向策略被系统忽略（系统旋转锁定开启或不支持传感器旋转）', form);
+    return;
+  }
+  hilog.info(DOMAIN, TAG, '手持形态（%{public}s）：朝向策略待生效（PENDING）', form);
+}
+
+/**
+ * 无回执的旧路径（设备 API < 26，或结果 API 抛错时的回退臂）。
+ *
+ * 异步失败与同步失败都只记日志：拿不到朝向不影响启动（降级为系统默认朝向）。
+ */
+function applyPreferredOrientationLegacy(win: window.Window, form: FormFactor): void {
+  try {
     win.setPreferredOrientation(window.Orientation.AUTO_ROTATION_RESTRICTED).then(() => {
       hilog.info(DOMAIN, TAG, '手持形态（%{public}s）：朝向跟随屏幕旋转（受系统旋转锁定管辖）', form);
     }).catch((err: BusinessError) => {
@@ -206,4 +296,140 @@ export function followScreenRotationOnHandheld(windowStage: window.WindowStage):
     const e = err as BusinessError;
     hilog.warn(DOMAIN, TAG, '设置跟随旋转异常（降级为系统默认朝向）：%{public}s', e.message);
   }
+}
+
+/* ── 折叠屏朝向（2026-10-28，用户口径："折叠屏单屏显示时设置 UI 要竖屏"）────────────
+ *
+ * 策略（与 `followScreenRotationOnHandheld` 并存，互不覆盖）：
+ *   · **非折叠屏**：本函数直接早退 ⇒ 既有行为（手机/平板跟屏、PC 早退）**一个字节不变**；
+ *   · 折叠屏**单屏**（物理折叠 或 宽度 < 600vp）：锁 `PORTRAIT`；
+ *   · 折叠屏**展开**：`AUTO_ROTATION_RESTRICTED`（= 原先那条跟屏策略，受系统旋转锁定管辖）。
+ *
+ * 【为什么要订阅事件】折叠/展开是**运行期**变化：不订阅就只在启动那一刻算一次，
+ * 展开后仍锁着竖屏（或折叠后仍可横过来）—— 正是用户报的那个毛病的两种表现。
+ * 订阅 `foldDisplayModeChange`（优先，反映"当前渲染在哪块屏"）与 `foldStatusChange`（物理态兜底）。
+ *
+ * 【为什么重算要去抖】折叠过程中两个事件会连着来好几拍，逐拍设朝向既无意义、也可能与系统
+ * 展开动画打架；150ms 合并成一拍（与页面侧 300ms 巡检同一思路，只求"最终态正确"）。
+ */
+const FOLD_REAPPLY_DEBOUNCE_MS: number = 150;
+
+let foldWin: window.Window | null = null;
+let foldListenersReady: boolean = false;
+let foldReapplyTimer: number = -1;
+
+/** 按当前折叠现场设置朝向。单屏 ⇒ 竖屏；展开 ⇒ 跟屏。失败只记日志（不阻断启动）。 */
+function applyFoldOrientation(win: window.Window, snap: FoldSnapshot): void {
+  const target: window.Orientation = snap.singleScreen
+    ? window.Orientation.PORTRAIT
+    : window.Orientation.AUTO_ROTATION_RESTRICTED;
+  const label: string = snap.singleScreen ? '单屏（锁竖屏）' : '展开（跟随屏幕旋转）';
+  try {
+    if (!orientationResultApiReady()) {
+      win.setPreferredOrientation(target).then(() => {
+        hilog.info(DOMAIN, TAG, '折叠屏朝向：%{public}s / mode=%{public}d / 宽=%{public}d vp', label,
+          snap.displayMode, Math.round(snap.widthVp));
+      }).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, '折叠屏朝向设置失败（降级系统默认）：%{public}s', err.message);
+      });
+      return;
+    }
+    win.setPreferredOrientationWithResult(target).then((res: window.OrientationResult) => {
+      hilog.info(DOMAIN, TAG, '折叠屏朝向：%{public}s / mode=%{public}d / 宽=%{public}d vp / 执行=%{public}d',
+        label, snap.displayMode, Math.round(snap.widthVp), res.executionResult);
+    }).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, '折叠屏朝向（回执路径）失败，回退无回执路径：%{public}s', err.message);
+      try {
+        win.setPreferredOrientation(target);
+      } catch (e2) {
+        const e3 = e2 as BusinessError;
+        hilog.warn(DOMAIN, TAG, '折叠屏朝向降级失败：%{public}s', e3.message);
+      }
+    });
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '折叠屏朝向异常（降级系统默认）：%{public}s', e.message);
+  }
+}
+
+/** 合并同一轮折叠里的多拍事件。 */
+function scheduleFoldReapply(): void {
+  if (foldReapplyTimer >= 0) {
+    clearTimeout(foldReapplyTimer);
+  }
+  foldReapplyTimer = setTimeout(() => {
+    foldReapplyTimer = -1;
+    const win = foldWin;
+    if (win === null) {
+      return;
+    }
+    applyFoldOrientation(win, readFoldSnapshot());
+  }, FOLD_REAPPLY_DEBOUNCE_MS);
+}
+
+/** 只注册一次；老系统没有这些事件时降级为"不感知折叠变化"，不影响启动。 */
+function installFoldListeners(): void {
+  if (foldListenersReady) {
+    return;
+  }
+  try {
+    display.on('foldDisplayModeChange', (mode: display.FoldDisplayMode) => {
+      hilog.info(DOMAIN, TAG, 'foldDisplayModeChange → %{public}d', mode);
+      scheduleFoldReapply();
+    });
+    display.on('foldStatusChange', (status: display.FoldStatus) => {
+      hilog.info(DOMAIN, TAG, 'foldStatusChange → %{public}d', status);
+      scheduleFoldReapply();
+    });
+    foldListenersReady = true;
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '折叠事件订阅失败（降级为启动期一次性判定）：%{public}s', e.message);
+  }
+}
+
+/**
+ * 折叠屏朝向入口（`EntryAbility.onWindowStageCreate` 调用，紧随 `followScreenRotationOnHandheld`）。
+ * **非折叠屏在这里一个字节都不动**（早退）。
+ */
+export function applyFoldableOrientation(windowStage: window.WindowStage): void {
+  let snap: FoldSnapshot;
+  try {
+    snap = readFoldSnapshot();
+  } catch (err) {
+    return;
+  }
+  if (!snap.foldable) {
+    return;
+  }
+  try {
+    foldWin = windowStage.getMainWindowSync();
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '折叠屏取主窗失败（不设朝向）：%{public}s', e.message);
+    return;
+  }
+  applyFoldOrientation(foldWin, snap);
+  installFoldListeners();
+}
+
+/** 窗口销毁时解绑（幂等）。 */
+export function releaseFoldableOrientation(): void {
+  if (foldReapplyTimer >= 0) {
+    clearTimeout(foldReapplyTimer);
+    foldReapplyTimer = -1;
+  }
+  if (!foldListenersReady) {
+    foldWin = null;
+    return;
+  }
+  try {
+    display.off('foldDisplayModeChange');
+    display.off('foldStatusChange');
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '折叠事件解绑失败：%{public}s', e.message);
+  }
+  foldListenersReady = false;
+  foldWin = null;
 }

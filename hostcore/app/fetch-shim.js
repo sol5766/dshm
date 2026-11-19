@@ -51,7 +51,9 @@ class DshmHeaders {
   constructor(init) {
     this._map = new Map();
     if (init instanceof DshmHeaders) {
-      init.forEach((value, name) => this.append(name, value));
+      for (const [name, cur] of init._map) {
+        for (const value of cur.values) this.append(name, value);
+      }
     } else if (Array.isArray(init)) {
       for (const pair of init) {
         if (Array.isArray(pair) && pair.length >= 2) this.append(pair[0], pair[1]);
@@ -76,7 +78,14 @@ class DshmHeaders {
        * 都覆盖到；不用 `instanceof Headers`——globalThis.Headers 可能已被我们替换，
        * 那样反而认不出原生那个。
        */
-      for (const [name, value] of init.entries()) this.append(name, value);
+      const hasSetCookie = typeof init.getSetCookie === 'function';
+      for (const [name, value] of init.entries()) {
+        if (hasSetCookie && String(name).toLowerCase() === 'set-cookie') continue;
+        this.append(name, value);
+      }
+      if (hasSetCookie) {
+        for (const value of init.getSetCookie()) this.append('set-cookie', value);
+      }
       /*
        * 【原生 Headers 的 set-cookie 特例】标准 Headers.entries() 会把多个
        * set-cookie 合并成一条，而 append(name, merged) 会把一个值当整体塞进去。
@@ -101,6 +110,17 @@ class DshmHeaders {
   get(name) {
     const cur = this._map.get(String(name).toLowerCase());
     return cur === undefined ? null : cur.values.join(', ');
+  }
+  /**
+   * Fetch 标准的多 Set-Cookie 读取面。
+   *
+   * `get('set-cookie')` 为兼容旧调用仍返回逗号合并串，但真实 Set-Cookie 的
+   * `Expires=Wed, ...` 本身含逗号，调用方无法安全拆回逐条值。B 站扫码登录
+   * 成功后正需要逐条读取 SESSDATA / bili_jct，缺此方法会在确认阶段失败。
+   */
+  getSetCookie() {
+    const cur = this._map.get('set-cookie');
+    return cur === undefined ? [] : cur.values.slice();
   }
   has(name) { return this._map.has(String(name).toLowerCase()); }
   delete(name) { this._map.delete(String(name).toLowerCase()); }
@@ -552,6 +572,10 @@ function mirrorTable() {
     mirrorTableCache = new Map([
       // 前缀式代理：镜像收到的必须是**完整原始 URL**（含 scheme 与主机）。
       ['raw.githubusercontent.com', `${p}/https://raw.githubusercontent.com`],
+      // codeload 是**装插件 / 装皮肤真正下字节**的那台（插件安装器直拼的 GitHub tarball
+      // 地址；皮肤市场走 pnpm 契约最后也落到这条）。2026-10-14 真机实测：4.6MB 直连
+      // 2m39s、经同一镜像 16.65s，解压后逐字节一致 ⇒ 与前缀式代理同一形态、同一张表。
+      ['codeload.github.com', `${p}/https://codeload.github.com`],
       // 已失效的备用代理。它自身的 URL 形态与前缀式代理一致
       // （`https://ghfast.top/https://raw.githubusercontent.com/...`），
       // 所以只换主机、路径原样保留即可。
@@ -578,12 +602,32 @@ function mirrorTarget(parsed, lookup) {
   const next = `${base}${parsed.pathname}${parsed.search}`;
   const n = (mirrorHits.get(host) || 0) + 1;
   mirrorHits.set(host, n);
-  // 只在头几次与每百次打一行：这两个主机是"插件每次拉数据"级别的频次，
+  // 只在头几次与每百次打一行：这几个主机是"插件每次拉数据"级别的频次，
   // 无节制地打会把 node-output.log 淹掉。要确认改写生效，看头三行就够。
   if (n <= 3 || n % 100 === 0) {
     console.error(`DSHM-MIRROR ${host} → ${base}（本进程第 ${n} 次）`);
   }
   return next;
+}
+
+/**
+ * 单个 URL 的镜像改写；**不改写就原样返回**（纯函数，带 `new URL` 的失败回退）。
+ *
+ * 【为什么需要这个口子】`globalThis.fetch` 不是端侧唯一的出网路：插件安装器
+ * （`dshm-installer.js`）用自己的 `node:https` 下 codeload tarball —— 它压根不经过
+ * `onceFetch`，也就吃不到那处改写。与其在安装器里再写一张镜像表（两份判据迟早漂移），
+ * 不如把判据留在本文件、只导出一个函数。判据与 `onceFetch` 里那一跳逐条同源：
+ * 开关 `DSHM_FETCH_MIRROR=0` 关、表外主机放行、前缀不可解析时回退原 URL。
+ *
+ * 【刻意不接受 `lookup`】那是「DNS 钉住」的调用方（上游 `web_fetch` 的 SSRF 防护）才有的
+ * 参数；安装器没有这条语义，传 `null` 即"不钉住"，与 `onceFetch` 的默认路径一致。
+ */
+function mirrorUrlFor(urlStr) {
+  try {
+    return mirrorTarget(new URL(urlStr), null) || urlStr;
+  } catch (error) {
+    return urlStr;
+  }
 }
 
 function onceFetch(url, init, headers, encoded, signal, redirectsLeft, timeoutMs, lookup, redirectMode) {
@@ -604,41 +648,64 @@ function onceFetch(url, init, headers, encoded, signal, redirectsLeft, timeoutMs
      * 改写结果只进 `target`（真正连出去的那个）。混用会让相对重定向解到镜像域上。
      */
     let target = parsed;
+    let mirrors = null; // 非空 = 这次真的改了地址（回退的前提）
     const mirrored = mirrorTarget(parsed, lookup);
     if (mirrored !== null) {
       try {
         target = new URL(mirrored);
+        mirrors = mirrored;
       } catch (error) {
         // 镜像表配错（如前缀里漏了 scheme）时退回原 URL，不让配置错误变成请求失败。
         console.error(`DSHM-MIRROR 改写结果无法解析，回退原 URL：${mirrored}`);
       }
     }
-    const mod = target.protocol === 'https:' ? https : http;
-    const options = {
-      method: init.method === undefined ? 'GET' : String(init.method).toUpperCase(),
-      headers: Object.fromEntries(headers.entries()),
-      signal,
-      timeout: timeoutMs,
-    };
     /*
-     * DNS 钉住透传（`web_fetch` 的 SSRF 防护依赖它）。
+     * 【镜像失败必须能回退直连】（2026-10-14 真机+本机实测）
      *
-     * 上游 `dsh-web-fetch-http` 先自己解析地址、再用 `createPinnedLookup(addresses)` 把**解析结果钉死**，
-     * 目的是防 DNS 重绑定（解析与连接之间被换掉）。它把这个 lookup 放进 undici 的 `Agent`，
-     * 由 undici 在连接时使用。我们的 undici 垫片把 Agent 里的 lookup 翻译到这里 ——
-     * 于是**钉住语义没有丢**：连接用的仍是上游校验过的那批地址。
+     * 镜像不是"上游"：它自己有配额、也会按出口 IP 拦人。实测同一时刻本机出口
+     * `https://gh-proxy.com/...` 一律 `403 Access to this resource is forbidden.`
+     * （raw 与 codeload 都一样），而两个原站直连都是 200 —— 若把改写当硬重定向，
+     * 那就是把"直连能通但慢"换成"直接不通"，比不改还坏。
+     *
+     * 回退面刻意只覆盖"能重放"的请求：`method` 是 GET/HEAD，或者 body 是已知
+     * 长度的 buffer（`encoded.stream` 为空）。流式 body 回退会重发一个已经被读掉
+     * 一半的体 ⇒ 宁可不退。
+     *
+     * 回退条件有两条：**连接层失败**（超时 / ECONNRESET / TLS）与**镜像给的 4xx/5xx**。
+     * 后者是关键的一条：镜像的 403/429 是它自己的话，不是上游的答复；直接把它透给
+     * 调用方，上游就会把"镜像限流"误判成"资源不存在"（装插件那条链真的会这样分诊）。
+     * 回退后的结果才是权威 —— 上游真 404 时它会照常回 404。
      */
-    if (lookup !== undefined && lookup !== null) {
-      options.lookup = lookup;
-    }
-    const req = mod.request(target, options, (res) => {
+    const bodyReplayable = encoded === undefined || encoded === null
+      || encoded.stream === null || encoded.stream === undefined;
+    const canFallback = mirrors !== null && bodyReplayable;
+    const attempt = (dest) => new Promise((res2, rej2) => {
+      const mod = dest.protocol === 'https:' ? https : http;
+      const options = {
+        method: init.method === undefined ? 'GET' : String(init.method).toUpperCase(),
+        headers: Object.fromEntries(headers.entries()),
+        signal,
+        timeout: timeoutMs,
+      };
+      /*
+       * DNS 钉住透传（`web_fetch` 的 SSRF 防护依赖它）。
+       *
+       * 上游 `dsh-web-fetch-http` 先自己解析地址、再用 `createPinnedLookup(addresses)` 把**解析结果钉死**，
+       * 目的是防 DNS 重绑定（解析与连接之间被换掉）。它把这个 lookup 放进 undici 的 `Agent`，
+       * 由 undici 在连接时使用。我们的 undici 垫片把 Agent 里的 lookup 翻译到这里 ——
+       * 于是**钉住语义没有丢**：连接用的仍是上游校验过的那批地址。
+       */
+      if (lookup !== undefined && lookup !== null) {
+        options.lookup = lookup;
+      }
+      const req = mod.request(dest, options, (res) => {
       const status = res.statusCode === undefined ? 0 : res.statusCode;
       const resHeaders = new DshmHeaders();
       for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) resHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]);
 
       if (REDIRECT_STATUS.has(status) && redirectMode === 'error') {
         res.resume();
-        reject(new TypeError('fetch failed: redirect not allowed (redirect: "error")'));
+        rej2(new TypeError('fetch failed: redirect not allowed (redirect: "error")'));
         return;
       }
       if (REDIRECT_STATUS.has(status) && redirectsLeft > 0) {
@@ -648,50 +715,120 @@ function onceFetch(url, init, headers, encoded, signal, redirectsLeft, timeoutMs
           const nextUrl = new URL(location, parsed).toString();
           const nextInit = { ...init };
           if (status === 303 && options.method !== 'HEAD') nextInit.method = 'GET';
-          resolve(onceFetch(nextUrl, nextInit, headers, undefined, signal, redirectsLeft - 1, timeoutMs, lookup, redirectMode));
+          res2(onceFetch(nextUrl, nextInit, headers, undefined, signal, redirectsLeft - 1, timeoutMs, lookup, redirectMode));
           return;
         }
       }
 
+      /*
+       * 【2026-11-10 终态收敛】流必须**每条路径都 settle**：end / error /
+       * aborted / 未收完的 close 四选一，且只认第一条。
+       *
+       * 现场（用户报"任务卡住但计时还在走"）的一个候选就在这里：只监听 end/error 时，
+       * 对端在回完 header 后直接断链（RST 或代理掐断）只会触发 `aborted`/`close`，
+       * ReadableStream 永远不 close/error ⇒ 上层 `reader.read()` 永久 pending，
+       * 而任务时间戳照走。宁可报一次可重试的传输错误，也不能让调用方无声挂死。
+       */
       const stream = new ReadableStream({
         start(controller) {
-          res.on('data', (chunk) => controller.enqueue(new Uint8Array(chunk)));
-          res.on('end', () => {
+          let settled = false;
+          const fail = (error) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
             try {
-              controller.close();
-            } catch (error) {
+              controller.error(error);
+            } catch (ignored) {
               // 已关闭（例如被 cancel）时忽略
             }
+          };
+          const finish = () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            try {
+              controller.close();
+            } catch (ignored) {
+              // 已关闭（例如被 cancel）时忽略
+            }
+          };
+          res.on('data', (chunk) => {
+            if (settled) {
+              return;
+            }
+            try {
+              controller.enqueue(new Uint8Array(chunk));
+            } catch (error) {
+              fail(error);
+            }
           });
-          res.on('error', (error) => controller.error(error));
+          res.on('end', finish);
+          res.on('error', fail);
+          res.on('aborted', () => fail(new Error(`fetch 连接被中断：${url}`)));
+          res.on('close', () => {
+            // complete=false ⇒ 响应体没收完就被关了，这是错误而不是 EOF。
+            if (res.complete !== true) {
+              fail(new Error(`fetch 连接提前关闭：${url}`));
+            }
+          });
         },
         cancel() { res.destroy(); },
       });
-      resolve(new DshmResponse(stream, {
+      res2(new DshmResponse(stream, {
         status,
         statusText: res.statusMessage === undefined ? '' : res.statusMessage,
         headers: resHeaders,
         url: parsed.toString(),
       }));
-    });
-    req.on('error', reject);
-    req.on('timeout', () => req.destroy(new Error(`fetch 超时（${timeoutMs} ms）：${url}`)));
-    if (encoded !== undefined && encoded !== null) {
-      if (encoded.stream !== null && encoded.stream !== undefined) {
-        const reader = encoded.stream.getReader();
-        const pump = () => reader.read().then((step) => {
-          if (step.done === true) {
-            req.end();
-            return;
-          }
-          req.write(Buffer.from(step.value), pump);
-        }, (error) => req.destroy(error));
-        pump();
-      } else if (encoded.data !== null) {
-        req.write(encoded.data);
+      });
+      req.on('error', rej2);
+      req.on('timeout', () => req.destroy(new Error(`fetch 超时（${timeoutMs} ms）：${url}`)));
+      if (encoded !== undefined && encoded !== null) {
+        if (encoded.stream !== null && encoded.stream !== undefined) {
+          const reader = encoded.stream.getReader();
+          const pump = () => reader.read().then((step) => {
+            if (step.done === true) {
+              req.end();
+              return;
+            }
+            req.write(Buffer.from(step.value), pump);
+          }, (error) => req.destroy(error));
+          pump();
+        } else if (encoded.data !== null) {
+          req.write(encoded.data);
+        }
       }
-    }
-    req.end();
+      req.end();
+    });
+    const fallback = (why, abandoned) => {
+      console.error(`DSHM-MIRROR 镜像不可用（${why}），回退直连：${url}`);
+      /*
+       * 丢掉的那份镜像响应要**显式取消**：既没读、又没 cancel 的话，底层 socket 会一直
+       * 挂到它自己结束（镜像那个 403 只有 37 B，无所谓；但镜像回 5xx 带大 body 时，
+       * 就是白白占着一条连接直到超时）。cancel 的 promise 也要吞掉 —— 流可能已经关了。
+       */
+      if (abandoned !== undefined && abandoned !== null
+        && abandoned.body !== undefined && abandoned.body !== null
+        && typeof abandoned.body.cancel === 'function') {
+        Promise.resolve(abandoned.body.cancel()).catch(() => {});
+      }
+      attempt(parsed).then(resolve, reject);
+    };
+    attempt(target).then((response) => {
+      if (canFallback && response.status >= 400) {
+        fallback(`HTTP ${response.status}`, response);
+        return;
+      }
+      resolve(response);
+    }, (error) => {
+      if (canFallback) {
+        fallback(error && error.message ? error.message : String(error));
+        return;
+      }
+      reject(error);
+    });
   });
 }
 
@@ -957,4 +1094,15 @@ function installFetchShim() {
   return true;
 }
 
-module.exports = { installFetchShim, dshmFetch, DshmHeaders, DshmFormData, DshmBlob, DshmFile, DshmResponse };
+/*
+ * 【为什么 `DshmRequest` 必须在这条导出里（2026-10-10 真事故）】
+ * `internal-undici-shim.cjs` 是 `const { dshmFetch, DshmHeaders, DshmRequest, ... } = fetchShim` 这样
+ * 解构的（内建 undici 的 `Request` 就是它）。本行此前**漏了 `DshmRequest`** ⇒ 那里拿到 `undefined`
+ * ⇒ 内建 undici 的导出面里 `Request: undefined` ⇒ `globalThis.Request`（Node 的惰性 getter 指向该模块）
+ * 物化出 `undefined` ⇒ `new Request(...)` 抛 `TypeError`。当时被 `installFetchShim()` 的
+ * 「缺哪个补哪个」掩盖住了（全局终值是 `DshmRequest`），但那条掩盖依赖**调用顺序**
+ * （`main.js` 先装内建 undici 垫片、后装 fetch 垫片），是隐形的。
+ * 门禁 `tools/check-internal-undici.mjs` 现在直接断言内建垫片的 `Request`/`Response`/`Headers`
+ * 等名字的值必须是函数（键在但值为 undefined 属同一类静默故障）。
+ */
+module.exports = { installFetchShim, dshmFetch, mirrorUrlFor, DshmHeaders, DshmRequest, DshmFormData, DshmBlob, DshmFile, DshmResponse };

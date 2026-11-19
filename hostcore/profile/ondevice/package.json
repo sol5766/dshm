@@ -10,7 +10,9 @@
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app"
       ],
-      "removeBundles": [],
+      "removeBundles": [
+        "@deepseek-ai/dsh-experimental-cot-translation-bundle"
+      ],
       "patchReload": "startup"
     }
   }

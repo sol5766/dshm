@@ -13,7 +13,7 @@
  */
 
 import { LayoutMode } from './Breakpoints';
-import { Sz } from './Tokens';
+import { Sz } from 'platform';
 
 /** 某形态下各条轨道如何呈现 */
 export enum TrackPresentation {
@@ -85,22 +85,47 @@ export function sidebarPresentationOf(mode: LayoutMode, expanded: boolean): Trac
 }
 
 /**
- * 侧栏展开状态的**取值规则**（P2-17；P5-2 修订为按形态给默认）。
+ * 侧栏展开状态的**取值规则**。
  *
- * 【为什么不能是一个常数 `true`】`shellTracksOf` 说双栏的侧栏是 rail、三栏才是 panel ——
- * "没存过"若一律读成展开，双栏首启就变成 240vp 的完整面板，与四形态 fixture 里登记的
- * `nav: 'rail'` 直接矛盾（也把 600vp 窗口的主区挤到 360vp）。P2-17 当时只写了
- * `undefined ⇒ true`，P5-2 让它跟随形态。
+ * ⚠️ 2026-10-31 重写（docs/325）：旧规则是「没存过 ⇒ `mode !== DOUBLE`」，
+ * 即双栏默认 rail、三栏默认 panel。它造成一个用户可见的硬伤：
  *
- * 【为什么这个三态判断要放在纯模型里】偏好层（`LocalPrefs`）只回答"有没有存过"，
- * 返回 `boolean | undefined`；"没存过时用什么"是**产品语义**。放在这里的好处是
- * 它可以被 fixture 直接钉住，而不必依赖真机上的 preferences。
+ *   平板/PC 上选了工作区 → 布局重算 → `mode` 在 DOUBLE / TRIPLE 之间跳 →
+ *   侧栏**在展开与收起之间自己翻转**，而用户根本没碰那个按钮
+ *   （用户原话："怎么选完工作区自己还回去了"）。
+ *
+ * 根因不是选工作区这个动作，而是**"形态"参与了展开与否的判定**：
+ * 只要有第二个因素能决定同一件事，它就会在用户没操作时把状态改掉。
+ *
+ * ⇒ 全新规则，只有一个输入：
+ *   · 用户**显式点过**按钮（`stored` 有值）→ 就是那个值，形态怎么变都不动它；
+ *   · 从没点过 → **默认常驻展开**（PC / 平板一直显示侧栏）；
+ *   · 单栏（手机）例外：那个档位没有"并排的侧栏"，呈现由 `sidebarPresentationOf`
+ *     统一给 OVERLAY，本函数的返回值在那里**不参与**呈现判定（见该函数）。
+ *
+ * 换句话说：**展开与否只由左侧边栏那个按钮决定**，形态不再有能力把它收回去。
+ *
+ * @param mode 当前形态（保留在签名里：单栏的语义差异由 `sidebarPresentationOf` 承担，
+ *             且调用方已经按 `mode` 传参，改签名会波及四处调用点而无收益）
+ * @param stored 用户显式偏好；`undefined` = 从没点过
  */
 export function sidebarExpandedForMode(mode: LayoutMode, stored: boolean | undefined): boolean {
+  /*
+   * ⚠️ 2026-10-31 第二次修（docs/330，用户第二次反馈平板侧栏仍会收起）：
+   *
+   * 规则本身没问题（只认显式偏好、否则常驻），但**"显式偏好"是跨启动持久化的** ——
+   * 平板上只要历史上点过一次收起，`stored` 就永远是 `false`，于是每次启动都收起。
+   * 用户的原话是「**不主动收起他就一直显示**」：收起应当只对**当前这次运行**有效，
+   * 而不是变成一条永久设定。
+   *
+   * ⇒ 现在 `stored` 只在**本次运行内**有意义（见 `Index.toggleSidebarExpanded`：
+   * 收起写内存、不落盘；`loadSidebarExpanded` 也不再被调用）。本函数保持纯函数形态，
+   * 便于 fixture 直接钉住"任何形态 + 任何未显式收起的状态 ⇒ 展开"。
+   */
   if (stored !== undefined) {
     return stored;
   }
-  return mode !== LayoutMode.DOUBLE;
+  return true;
 }
 
 /**

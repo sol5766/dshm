@@ -1,0 +1,7 @@
+{
+  "name": "dshm-host",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSHM 端侧 Host 入口（在 libnode.so.127 里运行；不属于任何 npm 包发布物）",
+  "main": "main.js"
+}

@@ -112,6 +112,36 @@ export default function coreDecisionTest() {
       expect(doomed.includes('0.9.0')).assertTrue();
     });
 
+    /*
+     * ── 清理：**正在跑的那棵永远不删**（2026-10-08 真机实证） ──────────────
+     *
+     * 设备实况：首启只解包、从未激活 ⇒ `state.json` 不存在、`state.current` 为空，
+     * 而 `DshHost.start()` 此时取的是 `newestVersion(installed)`。
+     * 原判据只保护 current/previous ⇒ 会把**正在跑的那棵**算进"可删"。
+     */
+    it('never_evicts_the_tree_that_would_start', 0, () => {
+      const s: CoreState = emptyState();
+      const doomed = evictionCandidates(s, ['1.1.0', '1.0.0', '0.9.0'], 0);
+      expect(doomed.includes('1.1.0')).assertFalse(); // start() 会启动它
+      expect(doomed.includes('1.0.0')).assertTrue();
+      expect(doomed.includes('0.9.0')).assertTrue();
+    });
+
+    it('protects_newest_when_current_is_not_installed', 0, () => {
+      const s: CoreState = { current: '0.9.0', previous: '', history: [] };
+      const doomed = evictionCandidates(s, ['1.1.0', '1.0.0'], 0);
+      expect(doomed.includes('1.1.0')).assertFalse(); // 已不在的 current 不作数，按最新保护
+      expect(doomed.includes('1.0.0')).assertTrue();
+    });
+
+    it('keeps_versions_named_by_the_caller', 0, () => {
+      // 回退到旧侧载包时：刚装进来的那一版可能比设备上已有的更旧，必须点名保护
+      const s: CoreState = { current: '1.1.0', previous: '', history: [] };
+      const doomed = evictionCandidates(s, ['1.1.0', '1.0.0', '0.9.0'], 0, ['0.9.0']);
+      expect(doomed.includes('0.9.0')).assertFalse();
+      expect(doomed.includes('1.0.0')).assertTrue();
+    });
+
     // ── 状态序列化：坏文件不能让应用起不来 ──────────────────────────────
     it('tolerates_broken_state_json', 0, () => {
       const s = parseState('{ this is not json');
@@ -205,13 +235,14 @@ export default function coreDecisionTest() {
     });
 
     it('host_env_pairs_are_complete_and_wellformed', 0, () => {
-      const env: string[] = buildHostEnv('/cores/1', '/home', '/sandbox', 3120, 'ondevice');
+      const env: string[] = buildHostEnv('/cores/1', '/home', '/sandbox', 3120, 'ondevice', '', 'desktop');
       // 这几项是 main.js 的实际入口契约；DSHM_HOME 缺失时它会直接 reportConfigError
       expect(env.includes('DSHM_CORE_DIR=/cores/1')).assertTrue();
       expect(env.includes('DSHM_HOME=/home')).assertTrue();
       expect(env.includes('DSHM_SANDBOX_HOME=/sandbox')).assertTrue();
       expect(env.includes('DSHM_PORT=3120')).assertTrue();
       expect(env.includes('DSHM_PROFILE=ondevice')).assertTrue();
+      expect(env.includes('DSHM_DEVICE_FORM=desktop')).assertTrue();
       for (let i = 0; i < env.length; i++) {
         expect(isWellFormedEnvPair(env[i])).assertTrue();
       }

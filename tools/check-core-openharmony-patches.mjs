@@ -40,7 +40,8 @@
  *
  *   · `patchVoiceInputNativeCapture()`（tools/pack-core.mjs:421-566）→ `DSHM_NATIVE_CAPTURE`
  *   · `patchVoiceInputNoiseSuppression()`（:568-629）→ `DSHM_ECHO_CANCELLATION_OFF` / `DSHM_NOISE_SUPPRESSION_OFF`
- *   · `patchSensevoiceForHms()`（:725-795）→ `DSHM_HMS_PROVIDER`
+ *   · `patchSensevoiceForHms()`（:803-874）→ `DSHM_HMS_PROVIDER`
+ *     （2026-10-18 起该函数**只**拷 provider 本体，不再拷 `hostcore/speech-models/index.js`）
  *   · `embedProfile()`（:797-805）+ `embedDshmToolPackages()`（:974-1042）→ `DSHM_PUBLIC_DOWNLOAD`
  *   · `patchLinkForSandbox()`（:1904-1983）→ `DSHM_LINK_SANDBOX`
  *   · `patchCredentialsOwnerCheck()`（:2003-2027）→ `DSHM_CREDENTIALS_MODE_EXEMPT`
@@ -58,12 +59,32 @@
  *
  *   【2026-10-06 新增 ⑬（+dshm.10）】同一族的洞，但打的是上游的**包管理器调用点**：
  *   · `patchProfilePnpmBridge()` → `DSHM_PROFILE_PNPM_BRIDGE`
- *     —— 在 `@deepseek-ai/dsh-plugin-manager/lib/types/operations.js` 的
- *     `runProfilePnpm()` 里分叉出一条**不走 spawn** 的进程内队列通道（手机/平板档
+ *     —— 在 `@deepseek-ai/dsh-plugin-manager` 的 `runProfilePnpm()` 里分叉出一条
+ *     **不走 spawn** 的进程内队列通道（手机/平板档
  *     没有任何可 execve 的 shell ⇒ `execa("pnpm", …)` 必 `spawn pnpm EACCES`，
  *     「设置 → 插件 → 安装/卸载」100% 失败；完整因果见
  *     `hostcore/plugins/dshm-profile-pnpm/lib/index.js` 头注与 docs/110）。
  *     目标文件是**固定名** ⇒ 判据写死路径；反向判据 = 上游锚点仍在。
+ *     **+dshm.47 起是两个文件**：上游一次构建出两份同源实现，`lib/types/operations.js`
+ *     （独立入口，CLI 那侧）与 `lib/index.js`（包 main，**服务/Web 侧真正走的那份**）
+ *     都要有分叉 —— 只打前者时手持档「项目地址安装」仍 `spawn pnpm EACCES`（真机实证）。
+ *
+ *   【2026-10-10 新增 ㉔（+dshm.31）】闸门（docs/137）自己的**误伤**，见 docs/139：
+ *   · `patchAgentInstructionsScopeWalk()` → `DSHM_SCOPE_WALK_TOLERANT`
+ *     —— 上游 `dsh-agent-instructions` 的 `findProjectRoot()` 从会话 cwd 逐级向上探
+ *     `<dir>/.git`，而 `existsAsMarker()` 只把 `FS_NOT_FOUND` 当"这里没有标记"、其余一律 `throw`
+ *     ⇒ 闸门对面外路径抛的 `FS_PERMISSION_DENIED`（真机 `/storage/Users/.git`）把这跳打成致命错，
+ *     而它是在 `compose()` 里被 await 的（`agent/pre-step`）⇒ **每轮都是"本轮运行失败"**。
+ *     目标文件是**固定名** ⇒ 判据写死路径；反向判据 = 上游两处原文（助手段 + 单码判断行）。
+ *
+ *   【2026-10-14 新增 ㉕（+dshm.48）】同一族的洞，打的是**安装地址的解析入口**：
+ *   · `patchInstallSpecNormalize()` → `DSHM_INSTALL_SPEC_NORMALIZE`
+ *     —— 「设置 → 插件 → 项目地址」里粘贴的 GitHub **页面地址**（`/tree/…`、`/blob/…`、
+ *     `?tab=…`、尾斜杠、`owner/repo` 简写）在上游 `HOSTED_REPOSITORY_URL` 处被判
+ *     `invalid-spec`（UI 文案：「无法识别这个包名或地址」）；且 `inspect()` / `installBundle()`
+ *     还把**原始 spec** 交给连接检查与 `pnpm add` ⇒ 归一化必须同时落在 parse 头与两个入口。
+ *     目标文件是**固定名** ⇒ 判据写死路径；反向判据 = 三个上游锚点仍在。
+ *     行为用例（37 条 + 恒等函数对照臂）在 `tools/check-install-spec-normalize.mjs`。
  *
  * ---------------------------------------------------------------------------
  * 【2026-10-05 第二轮扩容：再纳入 6 个"只有打包期 `die()` 兜底"的打包步骤】
@@ -121,6 +142,7 @@ import {
   existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -175,7 +197,7 @@ const PDF_MARKER = 'DSHM_MAP_COMPAT';
 const PDF_MAIN_SITE_RE = /(^|\n)\t\t\/\* DSHM_MAP_COMPAT \*\//g;
 // worker：同一份源码被 JSON.stringify 塞进 Blob 分片数组（pack-core.mjs:2626-2632）⇒ 标记被 `\n` 两个字面字符夹住
 const PDF_WORKER_SITE = '\\n/* DSHM_MAP_COMPAT */\\n';
-const PDF_FACTORY_ANCHOR = 'factory: (require) => {';
+const PDF_FACTORY_ANCHOR = 'factory:require=>{';
 // 反向：注入后这个"裸 Blob 数组首元素"形态必须消失（pack-core.mjs:2626 的 blobAnchor 被整体替换）
 const PDF_BARE_BLOB_ANCHOR = 'new Blob([_dsh_pdf_worker_default, ';
 
@@ -204,13 +226,115 @@ const DSH_MARKET_PATCHED = 'mkt.provideMarketBridge(hostCtx, profileContext);';
  * ⑬ profile 包通道（2026-10-06，+dshm.10）：`dsh-plugin-manager` 的 `runProfilePnpm()`
  * 里分叉出**不走 spawn** 的进程内通道（见 pack-core 的 `patchProfilePnpmBridge()`）。
  * 与 ⑫ 的差别：目标文件是**固定名**（不带构建哈希）⇒ 路径可以写死。
+ *
+ * 【2026-10-14 扩成两个站点（+dshm.47）】上游一次构建出**两份同源实现**：
+ *   · `lib/types/operations.js` —— 独立入口（`…/dsh-plugin-manager/operations`，CLI 那侧），
+ *     4 空格缩进 / 单引号字面量；
+ *   · `lib/index.js` —— 包 main，**服务/Web 侧真正走的那份**：`PluginManager.runPnpm()`
+ *     调的就是它自己的 `runProfilePnpm()`。
+ * 只打前者时，手持档「设置 → 插件 → 项目地址安装」仍然 `execa("pnpm", …)` ⇒
+ * `spawn pnpm EACCES`（真机实证：fport 直打 `pluginManager/installBundle` 回
+ * `{"exitCode":1,"output":"Command failed with EACCES: pnpm add …","kind":"permission"}`）。
+ * 两份的文件风格不同（缩进与字面量引号）⇒ 锚点**逐站点**给，两个都必须有标记。
  */
-const PROFILE_PNPM_LIB = 'dsh-plugin-manager/lib/types/operations.js';
+const PROFILE_PNPM_SITES = [
+  {
+    rel: 'dsh-plugin-manager/lib/types/operations.js',
+    /*
+     * 【2026-10-16 alpha.4 同步】上游在这一句上加了 `await`，且整段缩进从 4 空格变 8 空格：
+     *   旧：`    if (preflight.length > 0)\n        return rejected(preflight, 'nothing was installed');\n`
+     *   新：`        if (preflight.length > 0)\n            return await rejected(preflight, 'nothing was installed');\n`
+     * `tools/pack-core.mjs` 的注入锚点已改成**形状正则**（await 可选 + 缩进取捕获组），
+     * 这里跟着记成新形态（判据仍要求"注入位仍可识别"）。
+     */
+    anchor: '        if (preflight.length > 0)\n'
+      + "            return await rejected(preflight, 'nothing was installed');\n",
+  },
+  {
+    rel: 'dsh-plugin-manager/lib/index.js',
+    // 同上：alpha.4 起该站点的 `if` 由 1 个 tab 变 2 个 tab，且加了 `await`
+    anchor: '\t\tif (preflight.length > 0) return await rejected(preflight, "nothing was installed");\n',
+  },
+];
 const PROFILE_PNPM_MARKER = 'DSHM_PROFILE_PNPM_BRIDGE';
-/** 注入必须落在这一行**之后**（上游兼容性预检的"拒绝安装"分支 —— 它就是注入锚点）。 */
-const PROFILE_PNPM_ANCHOR = "    if (preflight.length > 0)\n"
-  + "        return rejected(preflight, 'nothing was installed');\n";
+/** 插件**检查**通道（view / registry / git 预检）的注入标记与三条调用片段。 */
+const PLUGIN_MANAGER_MARKER = 'DSHM_PLUGIN_MANAGER_BRIDGE';
+const PLUGIN_MANAGER_FRAGMENTS = [
+  'bridgeViewProfilePackage(dir, parsed.spec, options, environment)',
+  'bridgeReadProfileRegistry(dir, process.env)',
+  'shouldSkipGithubConnection(spec, process.env)',
+];
+/** 被替换/紧跟的上游原文即各站点的 `anchor`（兼容性预检的"拒绝安装"分支，注入点在它之后）。 */
 const PROFILE_PNPM_PATCHED = 'dshmPnpm.bridgeRunProfilePnpm(args, {';
+/**
+ * 桥接分支的收尾必须是**非空才带** `incompatible`（+dshm.49，2026-10-14 真机 P0）。
+ *
+ * 【为什么单拎这一条】上游 execa 路径的收尾是
+ * `...incompatible.length > 0 ? { incompatible } : {}`（lib/index.js 的 `return`），
+ * 而消费侧是 `if (run.incompatible !== void 0) throw new ManagementFailure("incompatible-version", …)`
+ * （同级 installBundle 的循环里）。桥接分支最初写成了无条件
+ * `… truncated, logPath, incompatible }` ⇒ 空数组也带上 ⇒ **任意失败**（404 / 网络 /
+ * 权限）都被改判成"版本不兼容"，真机实证：拿 codeload 拿不到的仓库回
+ * `{"code":"incompatible-version","incompatible":[]}`。
+ */
+const PROFILE_PNPM_INCOMPAT_OK = '...incompatible.length > 0 ? { incompatible } : {}';
+/**
+ * +dshm.49 之前的坏形态（**桥接分支**无条件带）。它必须一个站点都不出现。
+ *
+ * 【为什么必须带上 `exitCode: bridged.exitCode` 这个前缀】`truncated, logPath,
+ * incompatible };` 这个尾串**上游原文自己就有一处** —— `operations.js` 的
+ * `rejected()` 辅助函数（预检拒绝分支）收尾就是 `return { exitCode: 1, …,
+ * truncated, logPath, incompatible };`，**不归本补丁管**。只判裸尾串会把那处
+ * 上游原文误认成"补丁被回退"（+dshm.49 首次跑就踩：211 绿 / 1 红假报）。
+ * 判据锚到桥接分支自己的形态上，上游那处与它天然不冲突。
+ */
+const PROFILE_PNPM_INCOMPAT_LEGACY = 'exitCode: bridged.exitCode, output: output.toString("utf8"), truncated, logPath, incompatible };';
+
+/**
+ * ㉕「项目地址安装」的 GitHub 地址归一化（+dshm.48，2026-10-14）—— 两个站点、四种判据。
+ *
+ * 【为什么站点是这两个】上游一次构建出两份同源实现（与 ⑬ 同族）：
+ *   · `lib/index.js` —— 包 main，**服务/Web 侧真正走的那份**。它内联了一份 `parseInstallSpec`，
+ *     且 `inspect()` / `installBundle()` 各自把**原始 spec 变量**再交给
+ *     `checkGithubConnection(…)` 与 `runPnpm(["add", spec, …])` ⇒ **只改 parse 内部不够**：
+ *     入口那两个变量也得归一，否则连接检查与 pnpm argv 拿到的还是原始页面地址。
+ *   · `lib/types/install-spec.js` —— `operations`（CLI）入口的解析器。
+ *
+ * 【上游为什么会拒】`HOSTED_REPOSITORY_URL` 只认"Host + 恰好两段路径"：
+ * `https://github.com/o/r/tree/main`（四段）、`…/r/`（尾斜杠）、`…/r?tab=…`（查询串）都被判
+ * `invalid-spec` —— 而这正是用户在浏览器地址栏里复制出来的形态（真机实证 +dshm.47）。
+ *
+ * 【判据分工】本门禁只判**注入形态 + 入口调用次数 + 上游锚点仍在**（静态、可离线）；
+ * 归一化**行为**（37 条用例表 + 恒等函数对照臂）由 `tools/check-install-spec-normalize.mjs` 钉着。
+ */
+const INSTALL_SPEC_SITES = [
+  {
+    rel: 'dsh-plugin-manager/lib/index.js',
+    /** `parseInstallSpec()` 头部被换成的形态。 */
+    parseHead: 'function parseInstallSpec(raw) {\n\tconst spec = dshmNormalizeInstallSpec(raw);\n',
+    /** 入口调用行（`inspect()` / `installBundle()` 各一次 ⇒ 恰好 2 处）。 */
+    entryCall: '\t\t\tspec = dshmNormalizeInstallSpec(spec);\n',
+    entryCalls: 2,
+    /*
+     * 插入型补丁的"反向" = **上游锚点仍在**（注入建立在它们之上）：上游若挪走/改写这两个入口头，
+     * pack-core 的 die() 与本判据会一起红，而不是补丁静默失效。
+     */
+    anchors: [
+      ['\t\tasync inspect(spec, options, signal) {\n\t\t\tlet parsed;\n', 'inspect() 入口头'],
+      ['installBundle(spec, options) {\n\t\t\tconst requestId = options?.requestId;\n', 'installBundle() 同步注册控制保持官方入口'],
+    ],
+  },
+  {
+    rel: 'dsh-plugin-manager/lib/types/install-spec.js',
+    parseHead: 'export function parseInstallSpec(raw) {\n    const spec = dshmNormalizeInstallSpec(raw);\n',
+    entryCall: null,
+    entryCalls: 0,
+    anchors: [
+      ['export function parseInstallSpec(raw) {', 'CLI 侧解析器函数头'],
+    ],
+  },
+];
+const INSTALL_SPEC_MARKER = 'DSHM_INSTALL_SPEC_NORMALIZE';
 
 /* ═══════════ ④ 扩容（2026-10-05）：其余 10 个注入函数的清单门禁 ═══════════
  *
@@ -230,6 +354,12 @@ const PROFILE_PNPM_PATCHED = 'dshmPnpm.bridgeRunProfilePnpm(args, {';
 /* 组 1/2 的目标文件（同一文件的三个注入函数共用） */
 const VOICE_CLIENT = 'node_modules/@deepseek-ai/dsh-experimental-client-ui-voice-input/lib/client.js';
 const SENSE_LIB = 'node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/index.js';
+/*
+ * 注入进来的 provider 实现本体（pack-core 把 `hostcore/speech-provider/index.js`
+ * 拷成这个名字）。2026-10-18 起它**不得**再含运行期模型下载路径 —— 反向判据见 ③ 组的
+ * 第二个 site（施工方案 Task 4）。
+ */
+const SENSE_HMS = 'node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/hms-provider.js';
 const SESSION_LIB = 'node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js';
 const CRED_LIB = 'node_modules/@deepseek-ai/dsh-credentials-local/lib/index.js';
 const APP_BOOT_MAIN = 'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js';
@@ -238,6 +368,16 @@ const FS_LOCAL_LIB = 'node_modules/@deepseek-ai/dsh-fs-local/lib/index.js';
 const ATTACH_LIB = 'node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js';
 const PRESET_DIR = 'node_modules/@deepseek-ai/dsh-web-app/presets';
 const PROFILE_DIR = 'profiles/ondevice';
+
+// pack-core.mjs 的 patchAgentInstructionsScopeWalk()（P0，2026-10-10，见 docs/139）——
+// 标记恰好 2 处：判据助手 1 + existsAsMarker 的 catch 1。
+const AGENT_INSTR_LIB = 'node_modules/@deepseek-ai/dsh-agent-instructions/lib/index.js';
+const AGENT_INSTR_MARK = 'DSHM_SCOPE_WALK_TOLERANT';
+const AGENT_INSTR_HELPER_FWD = 'function isScopeDeniedProviderPathError(error) {';
+const AGENT_INSTR_CATCH_FWD = '\t\tif (isMissingProviderPathError(error) || isScopeDeniedProviderPathError(error)) return false;';
+// 反向（注入前的上游原文，逐字含 tab 缩进）
+const AGENT_INSTR_HELPER_UPSTREAM = 'function isMissingProviderPathError(error) {\n\treturn error instanceof Error && "code" in error && error.code === "FS_NOT_FOUND";\n}\nasync function nodeStatFile(path, signal) {';
+const AGENT_INSTR_CATCH_UPSTREAM = '\t\tif (isMissingProviderPathError(error)) return false;';
 
 /* ── 撤除守卫（coreVersion +dshm.6，2026-10-05）：已**撤除**的无效补丁不得复活 ──
  *
@@ -258,10 +398,10 @@ const DEDUP_MARKERS = ['DSHM_DOC_LOAD_DEDUP', 'dshmLoadKeyRef', 'dshmAbortRef', 
 // 上游原文形态（撤除后必须恢复）：effect 的 started 早退行 + 三个加载调用点用 owner 的 `signal`。
 // 这三条调用点**逐字**取自 pack-core 原 dedupDocumentLoad() 的 `callAnchors`（即"被 replace 掉的上游原文"）。
 const DEDUP_UPSTREAM_RESTORED = [
-  ['const started = current !== void 0;', 'effect 的 started 早退行（上游原文）'],
-  ['if (mode === "text-pages") loadPage(tab.id, file, 1, signal, meta.value?.version);', '加载调用点①（上游形态：用 owner 的 signal）'],
-  ['else if (mode === "bytes-complete") loadAll(tab.id, file, signal, meta.value?.version);', '加载调用点②（上游形态：整读用 owner 的 signal ⇒ 不再有面板自持 abort）'],
-  ['else prepareRenderer(tab.id, signal, selected.id, meta.value?.version);', '加载调用点③（上游形态）'],
+  ['const started=current!==void 0;', 'effect 的 started 早退行（rc.2 压缩发布原文）'],
+  ['if(mode===`text-pages`)loadPage(tab.id,file,1,signal,meta.value?.version);', '加载调用点①（owner signal）'],
+  ['else if(mode===`bytes-complete`)loadAll(tab.id,file,signal,meta.value?.version);', '加载调用点②（owner signal）'],
+  ['else prepareRenderer(tab.id,signal,selected.id,meta.value?.version)', '加载调用点③（owner signal）'],
 ];
 
 /* ── 逐字抄自 pack-core 替换模板的"上游原文"（反向判据专用） ── */
@@ -274,8 +414,10 @@ const SESSION_CALL_UPSTREAM_2 = '\t\t\tawait link(tmp, finalPath);';
 const SESSION_OLD_HELPER_HEAD = 'async function dshmPublishExclusive(fsImpl, from, to) {\n\tlet exists = true;\n\ttry {\n\t\tawait fsImpl.access(to);';
 // pack-core.mjs:2016 —— 凭据检查的两行原文（**必须连行成对否掉**：单否第二行会命中豁免后那行 ⇒ 恒红）
 const CREDENTIALS_UPSTREAM = '\tif (process.platform === "win32") return;\n\tif ((mode & GROUP_OTHER_BITS) === 0) return;';
-// pack-core.mjs:2240-2244 —— fs-local 的 createIfAbsent 发布段原文
-const FS_LOCAL_UPSTREAM = '\t\tif (createIfAbsent !== void 0) try {\n\t\t\tawait linkFile(tempPath, absolutePath);\n\t\t} catch (error) {\n\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);\n\t\t}';
+// pack-core.mjs 的 patchFsLocalLink() —— fs-local 的 createIfAbsent 发布段原文（两种上游形态都必须 0 处）
+// 0.2.2-rc.1 起上游把 createIfAbsent 收进 options、displayPath 改成独立变量；旧形态保留用于回退重打 rc.5 树。
+const FS_LOCAL_UPSTREAM_NEW = '\t\tif (options.createIfAbsent) try {\n\t\t\tawait linkFile(tempPath, absolutePath);\n\t\t} catch (error) {\n\t\t\tawait throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget);\n\t\t}';
+const FS_LOCAL_UPSTREAM_OLD = '\t\tif (createIfAbsent !== void 0) try {\n\t\t\tawait linkFile(tempPath, absolutePath);\n\t\t} catch (error) {\n\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);\n\t\t}';
 // pack-core.mjs 的 patchFsLocalPermissionHint() —— fs-local 权限错误人话化（P1-2，2026-10-06，见 docs/109）
 const FS_LOCAL_PERM_MARK = 'DSHM_FS_LOCAL_PERMISSION_HINT';
 const FS_LOCAL_PERM_STAT_FWD = '\t\tif (isPermissionError(error)) throw new FsError(`cannot ${verb} "${target.displayPath}": permission denied`, "FS_PERMISSION_DENIED", { cause: error });';
@@ -338,6 +480,45 @@ function presetWorkflowStructural(text) {
 }
 
 /**
+ * `ptc.patch.yml` 的反向判据（`patchPtcPresetWorkflowEnabled()`，2026-10-16 用户拍板第 2 件）：
+ * 这两行**必须已摘掉 `disabled: true`、并且带上启用标记**。
+ *
+ * 与 `presetWorkflowStructural()` 正好相反 —— 那一份管 standard/cordis（必须禁用），
+ * 这一份只管 ptc（必须启用）。两组判据互不代管，谁把方向搞反都会当场红。
+ */
+function ptcWorkflowEnabledStructural(text) {
+  const fails = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = /^(\s*)- id: (workflow-ptc|tool-workflow)\s*$/.exec(lines[i]);
+    if (m === null) continue;
+    if (i + 1 >= lines.length || !/^\s+name:\s/.test(lines[i + 1])) {
+      fails.push(`第 ${i + 1} 行的 ${m[2]} 之后没有 name: 行（上游 preset 结构已变，门禁需同步复核）`);
+      continue;
+    }
+    const nameIndent = lines[i + 1].match(/^\s*/)[0].length;
+    let disabled = false;
+    let marker = false;
+    for (let k = i + 2; k < lines.length; k += 1) {
+      const l = lines[k];
+      if (l.trim() === '') continue;
+      const ind = l.match(/^\s*/)[0].length;
+      if (ind < nameIndent) break;                        // 离开该条目
+      if (ind === nameIndent && /^\s*- /.test(l)) break;  // 同级的另一行
+      if (l.includes('DSHM_PTC_WORKFLOW_ENABLED')) { marker = true; }
+      if (ind === nameIndent && /^\s+disabled:\s*true/.test(l)) { disabled = true; }
+    }
+    if (disabled) {
+      fails.push(`第 ${i + 1} 行的 ${m[2]} 仍带 disabled: true（PTC 模式的 run_code 会被整条摘掉）`);
+    }
+    if (!marker) {
+      fails.push(`第 ${i + 1} 行的 ${m[2]} 缺少启用标记 DSHM_PTC_WORKFLOW_ENABLED（补丁没跑到？）`);
+    }
+  }
+  return fails;
+}
+
+/**
  * `dsh-app-boot` 的 `error.message = …` / `if (stack !== void 0) error.stack = …` 必须**逐条被
  * try/catch 包住**（上游形态 = 裸赋值）。
  *
@@ -371,7 +552,7 @@ function appBootReadonlyStructural(text) {
 function nativeCaptureStructural(text) {
   const fails = [];
   const iMark = text.lastIndexOf('DSHM_NATIVE_CAPTURE@');
-  const iExit = text.lastIndexOf('return module.exports;');
+  const iExit = Math.max(text.lastIndexOf('return module.exports;'), text.lastIndexOf('return module.exports}'));
   if (iMark < 0 || iExit < 0 || iMark > iExit) {
     fails.push('注入段不在 module factory 内（`return module.exports;` 之前）—— 2026-10 的历史事故形态：'
       + '追加到文件末尾会让 `Recording` 不在作用域、覆盖静默失效（真机 diag-native 永远为空）');
@@ -405,8 +586,11 @@ function nativeCaptureStructural(text) {
 
 // pack-core.mjs:1533-1535 —— allowOriginList() 的唯一目标文件
 const CONN_LIB = 'node_modules/@deepseek-ai/dsh-client-connection/lib/index.js';
-// pack-core.mjs:1553-1559 —— allowOriginList() 的 before：**整块 6 行**、含 tab 缩进，注入后必消失
+// 0.2.1-alpha.2 起上游把同源判定抽成独立函数 isSameAuthorityOrigin()；下列常量两个版本各一条：
+//   · ORIGIN_UPSTREAM       = alpha.1 的**内联块**原文（0.2.1-alpha.2 树里本就没有；仍否掉，防回退）
+//   · ORIGIN_UPSTREAM_ALPHA2= alpha.2 的函数体原文（单行 return ⇒ 注入后必消失）
 const ORIGIN_UPSTREAM = '\tconst origin = header$1(request.headers, "origin");\n\tif (origin === void 0) return true;\n\ttry {\n\t\treturn new URL(origin).host === hostUrl.host;\n\t} catch {\n\t\treturn false;\n\t}';
+const ORIGIN_UPSTREAM_ALPHA2 = '\tif (scheme === void 0) return false;\n\tconst hostUrl = parseAuthority(host, scheme);\n\treturn hostUrl !== void 0 && originUrl.host === hostUrl.host;\n}';
 // pack-core.mjs:1565 —— after 里的循环头（上游是整串 `new URL(origin).host === hostUrl.host`）
 const ORIGIN_SPLIT = 'for (const rawOrigin of String(origin).split(",")) {';
 // pack-core.mjs:1549 —— 旧标记：HDSH→DSHM 改名前的树会带它；pack-core 为增量重打包**仍认它**
@@ -633,6 +817,71 @@ function addonFlockStructural(text) {
   return fails;
 }
 
+/* ── ⑲ 宿主稳健性（2026-10-14 / +dshm.46）：node-pty 的 socket 守卫 + client-hmr 的轮询关闭 ── */
+
+// pack-core.mjs patchNodePtySocketGuard() —— 目标：node-pty 的 unixTerminal.js（**树根相对**）
+const NODE_PTY_TERMINAL = 'node_modules/node-pty/lib/unixTerminal.js';
+// pack-core.mjs 的 before（上游原文，被 replace 掉；20 空格缩进、LF-only、无尾换行）
+const NODE_PTY_GUARD_ANCHOR = '                    // Destroying the socket now will cause the close event to fire\n'
+  + '                    _this._socket.destroy();';
+// pack-core.mjs 的 after（注入形态：只容忍"fork 失败 ⇒ _socket 还没赋值"这一条路径）
+const NODE_PTY_GUARD_BLOCK = '                    if (_this._socket !== undefined && _this._socket !== null) {\n'
+  + '                        _this._socket.destroy();\n'
+  + '                    }';
+
+// pack-core.mjs patchClientHmrPoll() —— 目标：dsh-client-hmr 的 lib/index.js（**树根相对**）
+const CLIENT_HMR_LIB = 'node_modules/@deepseek-ai/dsh-client-hmr/lib/index.js';
+// pack-core.mjs 的 before（上游原文：effect 一挂上就同步 + 起 setInterval 轮询）
+const CLIENT_HMR_POLL_UPSTREAM = '\tctx.effect(() => {\n\t\tsyncWatches();';
+// pack-core.mjs 的 after 里的惰性门（默认关；只有 DSHM_CLIENT_HMR_POLL=1 才启用）
+const CLIENT_HMR_POLL_GATE = '\t\tif (process.env.DSHM_CLIENT_HMR_POLL !== "1") return () => {};';
+
+/**
+ * node-pty socket 守卫的**语义**判据（不只判"标记在"）。
+ *
+ * 只判"上游原文消失"是不够的：把整个 `setTimeout` 段删掉也能让上游原文消失，
+ * 但那会顺手废掉上游"macOS High Sierra 上 socket 可能永不关闭"的原始兜底。
+ * 判据要求三件事同时成立：**定时器还在、守卫在定时器回调体内、destroy 调用还在守卫里**。
+ *
+ * 【为什么不用"destroy 出现次数"当判据】`--self-test` 的 (a) 段会把上游原文**追加**到
+ * 文件末尾做变异，那次追加必然多出一处 `_this._socket.destroy();`；任何计数型判据都会
+ * 连带把 (a) 段顶红，而 (a) 段要求"只该反向判据红"（实测过：fails=2 ⇒ 自检 FAIL）⇒ 只能判结构。
+ */
+function nodePtyGuardStructural(text) {
+  const fails = [];
+  const re = /var timeout_1 = setTimeout\(function \(\) \{\n\s+timeout_1 = null;[\s\S]{0,400}?if \(_this\._socket !== undefined && _this\._socket !== null\) \{\n\s+_this\._socket\.destroy\(\);\n\s+\}\n\s+\}, DESTROY_SOCKET_TIMEOUT_MS\);/;
+  if (!re.test(text)) {
+    fails.push('DESTROY_SOCKET_TIMEOUT_MS 的定时器回调里找不到"socket 守卫 + destroy"的完整形态'
+      + '（守卫被挪出定时器/被删，或上游重写了这段）—— 端侧一次失败的 pty 探针仍会在 200ms 后'
+      + '抛出未捕获 TypeError（定时器边界，谁都接不住）打死宿主');
+  }
+  return fails;
+}
+
+/**
+ * client-hmr 轮询关闭的**语义**判据：关掉的必须只有"挂 bundle 监视 + 起轮询"这一个 effect。
+ *
+ * 反向风险是"为了指标好看把整个 HMR 功能删掉"：`/plugins/events` 那条 SSE effect 是
+ * 客户端模块表同步的通道，端侧**仍在用**（连接首帧 graph + `onGraphChanged` / `onRebuilt`
+ * 推送），关轮询一个字都不该碰它。同理，`setInterval(pollWatches, …)` 这个**订阅点**必须留着 ——
+ * 惰性门只决定"跑不跑"，删掉订阅点等于把 `DSHM_CLIENT_HMR_POLL=1` 这条恢复通道也一起废了。
+ */
+function clientHmrPollStructural(text) {
+  const fails = [];
+  if (!text.includes('\t}, "client-hmr: /plugins/events channel");')) {
+    fails.push('`/plugins/events` 那条 effect 不见了 —— 关轮询只该关 bundle 监视那一条；'
+      + 'SSE 通道（graph 首帧 + rebuilt 推送）端侧在真用，误删会让浏览器半边收不到模块表');
+  }
+  if (!text.includes('ctx.clientModules.onRebuilt(')) {
+    fails.push('onRebuilt 订阅不见了（同上：它是 /plugins/events 通道的一部分）');
+  }
+  if (!text.includes('setInterval(pollWatches, pollIntervalMs);')) {
+    fails.push('`setInterval(pollWatches, pollIntervalMs);` 订阅点不见了 —— 惰性门只该决定"跑不跑"，'
+      + '不该把订阅点删掉（删了以后 DSHM_CLIENT_HMR_POLL=1 也开不起来）');
+  }
+  return fails;
+}
+
 const INJECTED_PATCHES = [
   /* ── ① 语音 · 原生采集（追加式） ── */
   {
@@ -644,7 +893,7 @@ const INJECTED_PATCHES = [
       rel: VOICE_CLIENT,
       markers: [['DSHM_NATIVE_CAPTURE', 1]],
       forward: [
-        ['/* DSHM_NATIVE_CAPTURE@v3-permission-window: ', '注入段头（v3 版本标记；版本不符时 pack-core 会先删旧段）'],
+        ['/* DSHM_NATIVE_CAPTURE@v4-capture-lifecycle: ', '注入段头（v4 生命周期回收）'],
         ['const origAmplitude = Recording.prototype.amplitude;', 'amplitude 覆盖（原生 RMS 频谱，否则波形柱恒为最小）'],
         ['const origStart = Recording.prototype.start;', 'start 覆盖（改用 startNativeCapture 桥）'],
         ['const origStop = Recording.prototype.stop;', 'stop 覆盖（取 takeNativeCapture 的 WAV）'],
@@ -676,12 +925,16 @@ const INJECTED_PATCHES = [
     }],
   },
 
-  /* ── ③ 语音 · HMS provider（替换式 + 两个 cpSync 产物） ── */
+  /* ── ③ 语音 · 系统识别 provider（替换式 + 一个 cpSync 产物） ── */
   {
-    key: 'HMS 语音 provider',
+    key: '系统语音识别 provider',
     fn: 'patchSensevoiceForHms()',
-    note: 'pack-core.mjs:725-795；标记名与上表一致。除导出语句替换外还会 cpSync 两个文件进包，'
-      + '一并断言存在且与仓库源逐字节一致（mirrors）。',
+    note: 'pack-core.mjs:803-874；标记名与上表一致。除导出语句替换外还会 cpSync 一个文件进包'
+      + '（`hostcore/speech-provider/index.js` → `lib/hms-provider.js`），一并断言存在且与仓库源逐字节一致（mirrors）。'
+      + '【2026-10-18 收窄】不再拷 `hostcore/speech-models/index.js`（228MB SenseVoice 模型的在线下载器，'
+      + '施工方案 Task 4）：识别改由 HarmonyOS Core Speech Kit 在 ArkTS 侧完成，provider 只负责文件队列协议 ⇒'
+      + ' 树里**允许没有** speech-models/index.js（故它从 present/mirrors 中移除；旧树里残留的那份无人引用，无害）。'
+      + '替代的守卫是第二个 site：树内 hms-provider.js **不得**再出现三个模型下载路径的引用点。',
     sites: [{
       rel: SENSE_LIB,
       markers: [['DSHM_HMS_PROVIDER', 1]],
@@ -690,16 +943,38 @@ const INJECTED_PATCHES = [
         ['export { Config, hmsApply as apply, hmsProviderInject as inject, name };', '导出重写为 HMS 实现（插件形状不变）'],
       ],
       reverse: [
-        ['export { Config, apply, inject, name };', 'pack-core.mjs:786 的 before（被 replace 掉的上游导出语句）'],
+        ['export { Config, apply, inject, name };', 'pack-core.mjs:865 的 before（被 replace 掉的上游导出语句）'],
+      ],
+    }, {
+      /*
+       * 【2026-10-18 新增的反向断言（施工方案 Task 4）】树内 provider 实现**不得**再含
+       * 运行期模型下载路径。这三条不是"某类语句不许出现"的泛化判据，而是本次搬迁
+       * **逐个删掉的具体引用点**：
+       *   · `ensureAssets(` / `missingAssets(` —— `hostcore/speech-models/index.js` 的两个导出，
+       *     旧 provider 在 transcribe（缺就先下）、`createPreparation()`（状态机）、启动期诊断
+       *     三处调用；删掉后该模块连 import 都不再需要；
+       *   · `preparation: prep` —— `ctx.speechToText.register({ … })` 里的那一行：系统识别没有
+       *     "准备中/需下载"阶段，缺省 preparation 时上游 snapshot() 直接报 `{ phase: "ready" }`
+       *     （`dsh-experimental-speech-to-text/lib/index.js:108`）。
+       * 【为什么必须有它】这三条一旦回来，正向判据（`DSHM_HMS_PROVIDER` 标记、导出替换、
+       * `hms-provider.js` 与源逐字节一致）**全都还是绿的** —— 唯有这条能把"只搬了一半
+       * （例如留着 import、只删了调用）"抓出来；而那种形态在端侧表现为插件
+       * `failed to import` / 语音按钮永久不可用。
+       */
+      rel: SENSE_HMS,
+      markers: [],
+      forward: [],
+      reverse: [
+        ['ensureAssets(', '模型下载器的导出（provider 已不再 import、也不再调用）'],
+        ['missingAssets(', '模型齐备检查（同上，2026-10-18 删除）'],
+        ['preparation: prep', 'provider 注册里的 preparation 行（系统识别无"准备"阶段，2026-10-18 删除）'],
       ],
     }],
     present: [
       ['node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/hms-provider.js', '注入的实现本体'],
-      ['node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/speech-models/index.js', 'provider 无条件 import 的在线下载器'],
     ],
     mirrors: [
       ['node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/hms-provider.js', 'hostcore/speech-provider/index.js'],
-      ['node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/speech-models/index.js', 'hostcore/speech-models/index.js'],
     ],
   },
 
@@ -713,12 +988,26 @@ const INJECTED_PATCHES = [
       + '（:974）装的两个自带插件里 —— 因此拆成"端侧 profile"与"自带插件包"两组，两边都管。',
     sites: [{
       rel: `${PROFILE_DIR}/cordis.patch.yml`,
-      markers: [['DSHM_PUBLIC_DOWNLOAD', 3]],
+      /* 反恒真：pwsh 子项那两条判据必须**锚定 YAML 行首**（`\n` + 行内缩进）。
+       * 不能用裸 `- id: optional-terminal-pwsh` —— 本文件上方那段 D52 说明注释里
+       * 就写着这个字面量（用来讲"这里断言 ×0"），裸判据会被自己的注释顶红。
+       * 两种形态都要盖住：顶层行（列 0）与 group config 里的 4 空格子项。 */
+      markers: [
+        ['DSHM_PUBLIC_DOWNLOAD', 3],
+        ['\n- id: optional-terminal-pwsh', 0],
+        ['\n    - id: optional-terminal-pwsh', 0],
+      ],
       forward: [
         ["- id: tool-fs-remove\n      name: '@deepseek-ai/dshm-tool-fs-remove'", '⑦ 删除/覆盖工具的自带插件 insert 行'],
         ["- id: dshm-workspace-claim\n      name: '@deepseek-ai/dshm-workspace-claim'", '⑧ 默认工作区登记的自带插件 insert 行'],
+        ["- id: optional-persistent-terminals\n  config:", '整组覆盖持久终端 group，避免 PowerShell 占位开关'],
+        ["- id: optional-terminal-registry\n      name: '@deepseek-ai/dsh-terminal'\n    - id: optional-terminal-panel\n      name: '@deepseek-ai/dsh-terminal-panel'\n      config:\n        preferredShells: []\n    - id: optional-tool-terminal\n      name: '@deepseek-ai/dsh-tool-terminal'", 'rc.2 profile 三行必须与 bundle 新布局一致，不可复活旧 shell backend'],
+        ["- id: terminal-controller\n  config:\n    shellCandidates: ['sh', 'zsh', 'bash']", '原生 sh/zsh/bash 候选保留，默认 shell 由 subprocess 原生或 guest 执行环境决定'],
+        ["- id: terminal-bash\n  config:\n    shellPath: /usr/bin/zsh\n    shellArgs: ['-i']", '独立 SDK bash 链仍保留，不因 panel 迁移盲删'],
       ],
-      reverse: [],
+      reverse: [
+        ['\n    - id: optional-terminal-bash', 'rc.2 持久终端不得覆盖回旧 bash backend'],
+      ],
     }, {
       rel: `${PROFILE_DIR}/package.json`,
       markers: [],
@@ -737,18 +1026,18 @@ const INJECTED_PATCHES = [
     key: '自带插件包',
     fn: 'embedDshmToolPackages()',
     note: 'pack-core.mjs:974-1042；上表没列这一处（把它的标记记到了 embedProfile 名下）。'
-      + '反向判据 = 树内 5 个 dshm-* 目录与 hostcore/plugins/<同名> 逐字节一致：'
+      + '反向判据 = mirrors 里 6 个 dshm-* 目录（会议 AI 通道已于 docs/328 剥离，见冻结备份）与 hostcore/plugins/<同名> 逐字节一致：'
       + 'cpSync(force) **不删**目标里多出的文件 ⇒ 陈旧残留/被手改只能靠这条抓。',
     sites: [{
       rel: 'node_modules/@deepseek-ai/dshm-workspace-claim/lib/index.js',
-      markers: [['DSHM_PUBLIC_DOWNLOAD', 5]],
+      markers: [['DSHM_PUBLIC_DOWNLOAD', 4], ['registry.create(', 0]],
       forward: [
-        ['process.env.DSHM_PUBLIC_DOWNLOAD || ""', '默认工作区根只认 ArkTS 认领到的目录（没有就完全惰性）'],
-        ['const DEFAULT_TITLE = "下载";', '2026-10-07：登记标题不退化成本应用包名（否则工作区列表里像一条垃圾记录）'],
-        ['if (!Array.isArray(list)) {', '2026-10-07：读不出注册表就 fail-closed（既不新增也不撤回），绝不替用户加一条'],
-        ['const emptyMine = mine.filter((w) => Array.isArray(w.sessionIds) && w.sessionIds.length === 0);', '2026-10-07：只撤「本插件自己那条 + 0 会话」'],
-        ['if (emptyMine.length === 0 || emptyMine.length >= list.length) {', '2026-10-07：撤完必须仍非空（空了 initializeDefault() 会去跑本端必失败的目录探测）'],
-        ['return registry.create(target, DEFAULT_TITLE).then((workspace) => {', '2026-10-07：登记只在注册表为空时发生'],
+        ['process.env.DSHM_PUBLIC_DOWNLOAD || ""', '认领目录只认 ArkTS 给的 DSHM_PUBLIC_DOWNLOAD（没有就完全惰性）'],
+        ['if (!Array.isArray(list)) {', '读不出注册表就 fail-closed（不撤回也不新增），绝不替用户加一条'],
+        ['const ours = list.filter((w) => isOurRow(w && w.path, target));', '只可能命中"指向认领目录"的记录（按路径末两段判，绝不碰用户自己的工作区）'],
+        ['if (ours.length === 0) {', '2026-10-13（docs/150）：没有指向认领目录的记录 ⇒ 一行都不碰；登记分支已整段删除（`registry.create(` 期望 0 次），撤完允许为空'],
+        ['setTitle("应用专属目录")', '2026-10-18：官方 initializeDefault 自动建的"标题=包名"那条只改显示名、不删（删了客户端会重建；见内测平报复报）'],
+        ['const legacy = ours.filter((w) => {', '只撤"标题精确为 `下载`（旧插件的写死标题）"那类历史自建行，官方建的不误删'],
       ],
       reverse: [],
     }, {
@@ -759,9 +1048,27 @@ const INJECTED_PATCHES = [
         ['publish: no user-visible download directory is available', 'env 为空时明确报错，而不是往代写目录落盘'],
       ],
       reverse: [],
+    }, {
+      /* 2026-10-16（r47 自检报告的缺口）：Agent 侧唯一一条不依赖 shell / guest VM 的 Python 入口。 */
+      rel: 'node_modules/@deepseek-ai/dshm-tool-python/lib/index.js',
+      markers: [
+        ['ctx.tools.register(defineTool({', 1],
+        ["name: 'python'", 1],
+        ['/dshm-python/run-get?', 2],   // 头注 1 + 代码路径 1
+        ['/dshm-python/exec?', 2],      // 同上
+        ['host-ready.json', 5],         // token/端口口径与随包 python3 垫片同源
+      ],
+      forward: [
+        ["from '@deepseek-ai/dsh-tools'", '工具注册走官方 defineTool（与 publish/remove 同法）'],
+        ['const timeoutSec = clampTimeoutSec(args.timeoutSec);', '超时口径经 clamp（1..300，默认 120）再进桥'],
+        ['`python 桥拒绝执行：${reason}`', '桥回 ok:false 时必须抛出真因，不许把空输出当成功'],
+        ['<exit-code>${String(value.exitCode)}</exit-code>', '渲染里 rc 归一（桥的 "None" ⇒ 0）并如实带出退出码'],
+      ],
+      reverse: [],
     }],
     mirrors: [
       ['node_modules/@deepseek-ai/dshm-tool-fs-remove', 'hostcore/plugins/dshm-tool-fs-remove'],
+      ['node_modules/@deepseek-ai/dshm-tool-python', 'hostcore/plugins/dshm-tool-python'],
       ['node_modules/@deepseek-ai/dshm-workspace-claim', 'hostcore/plugins/dshm-workspace-claim'],
       ['node_modules/@deepseek-ai/dshm-fs-write-nonchmod', 'hostcore/plugins/dshm-fs-write-nonchmod'],
       ['node_modules/@deepseek-ai/dshm-office-system-preview', 'hostcore/plugins/dshm-office-system-preview'],
@@ -807,12 +1114,14 @@ const INJECTED_PATCHES = [
     }],
   },
 
-  /* ── ⑧ preset 里禁用 workflow-ptc / tool-workflow（插入式，4 个 preset 全查） ── */
+  /* ── ⑧ preset 里禁用 workflow-ptc / tool-workflow（插入式；ptc 那一份归 ⑧b，方向相反） ── */
   {
     key: 'preset 禁用 PTC',
     fn: 'patchAgentPresetWorkflow()',
-    note: 'pack-core.mjs:2052-2129；标记名与上表一致。注意 **ptc.patch.yml 的 0 次是预期**'
-      + '（上游本来就带 disabled: true ⇒ 走"已禁用"分支，不注入标记），minimal.patch.yml 干脆不声明这两个工具。',
+    note: 'pack-core.mjs 的 patchAgentPresetWorkflow()；标记名与上表一致。**ptc.patch.yml 已从本组移出**'
+      + '（2026-10-16 用户拍板「PTC 模式必须有 run_code」⇒ 那份文件归 ⑧b 的"恢复启用"补丁管，方向正好相反；'
+      + '本函数也显式 `continue` 跳过它，保证第二遍 pack 不会把 disabled 插回去）。'
+      + 'minimal.patch.yml 干脆不声明这两个工具。',
     sites: [
       {
         rel: `${PRESET_DIR}/standard.patch.yml`,
@@ -829,13 +1138,6 @@ const INJECTED_PATCHES = [
         structural: presetWorkflowStructural,
       },
       {
-        rel: `${PRESET_DIR}/ptc.patch.yml`,
-        markers: [['DSHM_WORKFLOW_DISABLED', 0]],
-        forward: [],
-        reverse: [],
-        structural: presetWorkflowStructural,
-      },
-      {
         rel: `${PRESET_DIR}/minimal.patch.yml`,
         markers: [['DSHM_WORKFLOW_DISABLED', 0]],
         forward: [],
@@ -843,6 +1145,25 @@ const INJECTED_PATCHES = [
         structural: presetWorkflowStructural,
       },
     ],
+  },
+
+  /* ── ⑧b ptc 预设里**恢复启用** workflow-ptc / tool-workflow（移出 disabled + 标记，只这一份） ── */
+  {
+    key: 'PTC 预设恢复启用',
+    fn: 'patchPtcPresetWorkflowEnabled()',
+    note: '2026-10-16 用户拍板「1 2 3 都做」第 2 件。上游 alpha.4 把这两行在 ptc 预设里写成 `disabled: true`'
+      + '（bundle 级 cordis.patch.yml 那份是**根 plane**，预设之下不生效 —— 真机 `agentPresets/read(\'ptc\')` 的'
+      + '合成结果里这两行就是 disabled）⇒ "PTC 模式"没有 `run_code`。端侧已有同进程 PTC 运行时'
+      + '（`dshm-ptc-runtime-inproc`，`language === \'typescript\'` 正是 dsh-workflow-ptc 的硬要求），'
+      + '所以只对**这一份预设**摘掉 disabled；standard/cordis 仍由 ⑧ 停用。',
+    sites: [{
+      rel: `${PRESET_DIR}/ptc.patch.yml`,
+      markers: [['DSHM_PTC_WORKFLOW_ENABLED', 2], ['DSHM_WORKFLOW_DISABLED', 0]],
+      forward: [['# DSHM_PTC_WORKFLOW_ENABLED: 端侧有同进程 PTC 运行时（dshm-ptc-runtime-inproc）⇒ 这条恢复启用',
+        '注入的注释行（workflow-ptc + tool-workflow 各一条，缩进与原 disabled 行一致）']],
+      reverse: [],
+      structural: ptcWorkflowEnabledStructural,
+    }],
   },
 
   /* ── ⑨ app-boot 只读 stack/message（插入式，两份副本各 3 处） ── */
@@ -874,7 +1195,10 @@ const INJECTED_PATCHES = [
         ['const linkUnsupported = code === "EPERM" || code === "EACCES"', '链接类错误判定（鸿蒙 EPERM/EACCES）'],
         ['code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EXDEV";', '链接类错误判定的其余码'],
       ],
-      reverse: [[FS_LOCAL_UPSTREAM, 'pack-core.mjs:2240-2244 的 before（整段 5 行，含缩进）']],
+      reverse: [
+        [FS_LOCAL_UPSTREAM_NEW, 'pack-core.mjs patchFsLocalLink() 的 0.2.2-rc.1+ before（整段 5 行，含缩进）'],
+        [FS_LOCAL_UPSTREAM_OLD, 'pack-core.mjs patchFsLocalLink() 的 0.2.1-rc.5 及更早 before（整段 5 行，含缩进）'],
+      ],
     }],
   },
 
@@ -887,7 +1211,27 @@ const INJECTED_PATCHES = [
       + '反向 4 条（逐字，含 tab 缩进）：stat 那条旧 v8 注、readFileAbortable 的三参函数头、两个三参调用点'
       + ' —— 少翻一处，真机就还会看到裸 EPERM（本组就是 docs/108→109 那次缺口的守卫）。'
       + '**不许**泛化成「树里不得出现 EPERM」：同一文件里 EPERM 到处都有（link 回退、chmod 分支）。',
-    sites: [{
+    sites: ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(RECIPE.coreVersion.split('+')[0]) ? [{
+      rel: FS_LOCAL_LIB,
+      markers: [[FS_LOCAL_PERM_MARK, 0]],
+      forward: [
+        ['import { FileSystem, FsError, FsTargetKey, FsVersion, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";', '原生 errno 归一化来自共享 fs 服务'],
+        ['\t\tinfo = await stat(target.targetKey);\n\t} catch (error) {\n\t\tthrow fsErrorFromErrno(verb, target.displayPath, error);', 'stat 权限错误由原生归一化处理'],
+        ['async function readFileAbortable(absolutePath, displayPath, verb, signal) {', '原生 readFileAbortable 的 displayPath 参数'],
+        ['\t\tif (isAbortError(error)) throw new FsError(`${verb} aborted`, "FS_ABORTED");\n\t\tthrow fsErrorFromErrno(verb, displayPath, error);', '先保留 abort，再归一化读取错误'],
+        ['\tconst raw = await readFileAbortable(target.targetKey, target.displayPath, "read", signal);', '原生 read 调用点'],
+        ['\tconst buffer = await readFileAbortable(absolutePath, displayPath, "edit", signal);', '原生 edit 调用点'],
+      ],
+      reverse: [[FS_LOCAL_PERM_HEAD_OLD, 'rc.1 三参 readFileAbortable 不得回归']],
+    }, {
+      rel: 'node_modules/@deepseek-ai/dsh-fs/lib/index.js',
+      markers: [],
+      forward: [
+        ['case "EACCES":\n\t\tcase "EPERM": return new FsError(`${failure}: permission denied`, "FS_PERMISSION_DENIED", { cause: error });', 'EPERM/EACCES 保留 cause 并分类为权限错误'],
+        ['default: return new FsError(`${failure}: ${error.message}`, "FS_IO_ERROR", { cause: error });', '包括 EBUSY 在内的其他 errno 分类为 I/O 错误并保留 cause'],
+      ],
+      reverse: [],
+    }] : [{
       rel: FS_LOCAL_LIB,
       markers: [[FS_LOCAL_PERM_MARK, 4]],
       forward: [
@@ -937,7 +1281,7 @@ const INJECTED_PATCHES = [
   {
     key: 'Origin 列表',
     fn: 'allowOriginList()',
-    note: 'pack-core.mjs:1532-1581；标记 `DSHM_ORIGIN_LIST`。'
+    note: 'tools/pack-core.mjs 的 allowOriginList()；标记 `DSHM_ORIGIN_LIST`。'
       + '注意 `tools/check-origin-fence.mjs` 钉的是**行为**（多值 Origin 的放行语义），'
       + '**不**断言树内标记存在 ⇒ 两者不重复（一个管语义、一个管"这棵树里到底有没有这段改动"）。'
       + `反向判据两条：pack-core:1553-1559 的整块 before（6 行，含 tab 缩进）逐字否掉；`
@@ -948,10 +1292,38 @@ const INJECTED_PATCHES = [
       markers: [['DSHM_ORIGIN_LIST', 1], [ORIGIN_MARKER_OLD, 0]],
       forward: [
         [ORIGIN_SPLIT, '按逗号切分的多值 Origin 循环（上游是按**整串** `new URL(origin)` 解析）'],
-        ['if (new URL(candidate).host === hostUrl.host) return true;', '任一项同源即放行（跨源项仍然不认 ⇒ 没放宽安全边界）'],
+        ['originUrl = new URL(candidate);', '逐候选单独解析（上游是整串 `new URL(origin)` 一次解析）'],
+        ['if (hostUrl !== void 0 && originUrl.host === hostUrl.host) return true;', '任一项同源即放行（跨源项仍然不认 ⇒ 没放宽安全边界）'],
         ['/* 单个非法候选不足以否决整条请求，继续看下一项 */', '非法候选被吞掉继续看下一项（与上游 catch{return false} 正相反）'],
       ],
-      reverse: [[ORIGIN_UPSTREAM, 'pack-core.mjs:1553-1559 的 before（整串同源判定，6 行含 tab 缩进）']],
+      reverse: [[ORIGIN_UPSTREAM_ALPHA2, '0.2.1-alpha.2 的函数体原文（单行 return，注入后必消失）'], [ORIGIN_UPSTREAM, 'alpha.1 的内联块原文（本版树里本就没有，仍否掉防回退）']],
+    }],
+  },
+
+  /* ── ㉔ agent-instructions 的「向上找项目根」容忍面外探测（替换式，2 处；P0，见 docs/139） ── */
+  {
+    key: '项目根探测容忍',
+    fn: 'patchAgentInstructionsScopeWalk()',
+    note: 'pack-core.mjs 的 patchAgentInstructionsScopeWalk()；标记 `DSHM_SCOPE_WALK_TOLERANT` **恰好 2 处**'
+      + '（判据助手 1 + existsAsMarker 的 catch 1）。'
+      + '**为什么要有它**：上游 findProjectRoot() 从会话 cwd 逐级向上探 `<dir>/.git`，'
+      + '而 existsAsMarker() 只把 FS_NOT_FOUND 当"这里没有标记"、其余一律 throw ⇒ '
+      + 'docs/137 的闸门（面外 ⇒ FS_PERMISSION_DENIED）让这跳炸掉，'
+      + '而它被 compose() 在 agent/pre-step 里 await ⇒ 每轮都是"本轮运行失败"'
+      + '（真机报文：路径在 DSHM 的允许范围之外，已拒绝访问：/storage/Users/.git）。'
+      + '反向 2 条（逐字，含 tab 缩进）：helper 段原文、单码判断行 —— '
+      + '少翻任意一处，真机就还会整轮失败（本组就是这次真机故障的守卫）。',
+    sites: [{
+      rel: AGENT_INSTR_LIB,
+      markers: [[AGENT_INSTR_MARK, 2]],
+      forward: [
+        [AGENT_INSTR_HELPER_FWD, '判据助手 isScopeDeniedProviderPathError（只认闸门那一个码）'],
+        [AGENT_INSTR_CATCH_FWD, 'existsAsMarker 的 catch：面外探测 ⇒ 当作"没有标记"而不是上抛'],
+      ],
+      reverse: [
+        [AGENT_INSTR_HELPER_UPSTREAM, 'isMissingProviderPathError + 紧随其后的 nodeStatFile 原文（注入的助手插在两者之间 ⇒ 该串必消失）'],
+        [AGENT_INSTR_CATCH_UPSTREAM, 'existsAsMarker catch 的单码判断行原文（注入后变成两码，该行必消失）'],
+      ],
     }],
   },
 
@@ -1120,6 +1492,191 @@ const INJECTED_PATCHES = [
       reverse: [],
       structural: treeInfoStructural,
     }],
+  },
+
+  /* ── ⑱ 持久终端 bundle 的行（摘掉 pwsh 占位开关，2026-10-13 / docs/150） ── */
+  {
+    key: '终端 bundle 行',
+    fn: 'patchTerminalBundleRows()',
+    note: 'pack-core.mjs 的 patchTerminalBundleRows()；目标文件是 **bundle 自带**的那份补丁'
+      + '（`@deepseek-ai/dsh-experimental-terminal-bundle/cordis.patch.yml`），**不是**端侧 profile。'
+      + '理由：`@deepseek-ai/dsh-plugin-manager` 的 `declaredRows()` 用 `bundlePatchPaths() → '
+      + 'loadOverlayPatches()` 枚举 **bundle 自带**补丁的 insert 行，再用 `ctx.loader.entries()` 里'
+      + '同 id 的活条目反查 `entryId`；profile 的 D52 整组覆盖把该 id 从合成树里摘掉后，'
+      + '这条行反查不到活条目 ⇒ 客户端 `RowSwitch()` 判 `row.entryId === void 0` ⇒ **开关点不动**。'
+      + '所以死开关必须从**源头**（bundle 自带补丁）摘掉，而不是只覆盖 profile。'
+      + '标记 `DSHM_TERMINAL_BUNDLE_PWSH_DROPPED`（注释行，幂等）；反向判据锚定 YAML 行首缩进。',
+    sites: [{
+      rel: 'node_modules/@deepseek-ai/dsh-experimental-terminal-bundle/cordis.patch.yml',
+      markers: [
+        ['DSHM_TERMINAL_BUNDLE_PWSH_DROPPED', 1],
+        ['\n        - id: optional-terminal-pwsh', 0],
+      ],
+      forward: [
+        ['- id: optional-terminal-registry', '该 group 的第一条子项（保留）'],
+        ...(['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(RECIPE.coreVersion.split('+')[0]) ? [
+          ["- id: optional-terminal-panel\n          name: '@deepseek-ai/dsh-terminal-panel'\n          config:\n            preferredShells: !!js \"process.platform === 'win32' ? ['pwsh', 'powershell'] : []\"",
+            'rc.2 panel 行逐字保留，PowerShell 偏好仅限 Windows'],
+        ] : [
+          ["- id: optional-terminal-bash\n          name: '@deepseek-ai/dsh-terminal-bash'\n          disabled: !!js process.platform === 'win32'",
+            '真正的 bash 行逐字未动（仍按平台二选一）'],
+        ]),
+        ['- id: optional-tool-terminal', '该 group 的最后一条子项（保留）'],
+      ],
+      /*
+       * 反向判据只能取 pwsh 行的**独有尾巴**：`- id:` 那行本身已被上面那条 ×0 标记管着，
+       * 若这里再写 `        - id: optional-terminal-pwsh\n…`，两个判据就互相包含 ⇒
+       * `--self-test` 的 (a) 段（只把这一条上游原文塞回去）会连带把标记判据也顶红，
+       * 而 (a) 段要求"只该这一条红"（实测踩过：fails=2 ⇒ 自检 FAIL）。
+       * 尾巴里的 `!== 'win32'` 与 `shellDialect: pwsh` 都是 pwsh 行独有（bash 行是 `=== 'win32'`），
+       * 与真正的 bash 行不会混淆。
+       */
+      reverse: [
+        ["          name: '@deepseek-ai/dsh-terminal-bash'\n          disabled: !!js process.platform !== 'win32'\n          config:\n            shellDialect: pwsh",
+          '被摘掉的 pwsh 占位行的 name/disabled/config/shellDialect 四行逐字（`- id:` 行由上面那条 ×0 标记管）'],
+        ...(['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(RECIPE.coreVersion.split('+')[0]) ? [
+          ['        - id: optional-terminal-bash\n', 'rc.2 不得复活旧 shell 后端行'],
+        ] : []),
+      ],
+    }],
+  },
+
+  /* ── ⑰ 默认工作区提示收口（2026-10-13，+dshm.38） ── */
+  {
+    key: '默认工作区提示',
+    fn: 'patchDefaultWorkspaceToast()',
+    note: 'pack-core.mjs 的 patchDefaultWorkspaceToast()（见 docs/153）。用户要求"三端首次安装都不再弹"'
+      + '「无法创建默认工作区」。上游 `client.js:1607-1614` 的 `initializeDefaultWorkspace()` 首建失败即 '
+      + '`notify({ kind: "defaultWorkspaceFailed" })` ⇒ `:4519` 渲染成 `t("defaultWorkspace.failed")`；'
+      + '而端侧 `defaultWorkspaceDirectory()`（`dsh-api-workspace-controller/lib/index.js:609-641`）在 '
+      + 'openharmony 落 `default:` 分支必抛 ⇒ 该 warning 结构性必然出现。修法：只把 catch 体里那一行 '
+      + 'notify 换成静默 return（try/catch 语义原样保留，不建会话、不阻断启动）。'
+      + '反恒真：reverse 逐字否掉上游那行 notify。',
+    sites: [{
+      rel: 'node_modules/@deepseek-ai/dsh-client-ui-workspace/lib/client.js',
+      markers: [['DSHM_NO_DEFAULT_WORKSPACE_TOAST', 1]],
+      forward: [
+        ['\t\t\t\t} catch (_error) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t}\nclearArchivedCurrent()',
+          'catch 体里只剩静默 return（notify 行已删；紧跟 clearArchivedCurrent 的头注）'],
+      ],
+      reverse: [
+        ['if (!signal.aborted) this.notify({ kind: "defaultWorkspaceFailed" });',
+          '被删掉的上游 notify 行（逐字）'],
+      ],
+    }],
+  },
+
+  /* ── ⑲ 宿主稳健性：node-pty 的 socket 守卫 + client-hmr 的轮询关闭（2026-10-14 / +dshm.46） ── */
+  {
+    key: '宿主稳健性',
+    fn: 'patchNodePtySocketGuard() / patchClientHmrPoll()',
+    note: 'pack-core.mjs 的 patchNodePtySocketGuard() 与 patchClientHmrPoll() —— 两处都是'
+      + '"只在打包那一刻 die() 兜底"的替换型注入，故一并纳入 ④ 段。'
+      + '【①】node-pty：`pty.fork()` **失败**时 `_socket` 还没被赋值，而 node-pty 在 `fork()` 之前'
+      + '就订好了 200ms 的 `DESTROY_SOCKET_TIMEOUT_MS` 定时器，回调里无条件 `_this._socket.destroy()` ⇒'
+      + '一次失败的 pty 探针（`hostcore/app/main.js` 的 `runtimeFacts()`）会在 200ms 后把'
+      + '**未捕获 TypeError** 抛出定时器边界，谁都接不住（真机链：`BOOT_40_PROFILE_BOOT +1053ms` →'
+      + '`[DEP0168]` → 恰好 +200ms `unixTerminal.js TypeError` → `BOOT_50_DSH_INIT … 没有 webServer` ⇒'
+      + '宿主退出；这就是"点侧边栏终端就闪退"的上游形状）。'
+      + '【②】dsh-client-hmr：上游 `dsh-web-app` 的 bundle patch **总是挂载**它，而它的"idle"实现是'
+      + '`setInterval(pollWatches, pollIntervalMs=500)` —— 每 500ms 把 client graph 里每条 bundle 都'
+      + '`statSync` 一遍；端侧核心树解在 el2、且**没有** `dev:web` 重建器 ⇒ 纯白工还占死事件循环'
+      + '（真机 CPU profile：一次 `LOOP-GAP 4262ms` 内 `statSync×23117=4114ms`，下一段'
+      + '`LOOP-GAP 11503ms` 内 `statSync×23185=8016ms`，同时段 WebView 渲染进程 `exitSig:9` 被 OOM 杀）。'
+      + '反向判据 = 两处**上游原文**（node-pty 的 `before` 锚点 / client-hmr 的"effect 一挂上就 syncWatches"）。',
+    sites: [
+      {
+        rel: NODE_PTY_TERMINAL,
+        markers: [['DSHM_NODE_PTY_SOCKET_GUARD', 1]],
+        forward: [
+          [NODE_PTY_GUARD_BLOCK, '守卫形态：`_socket` 未赋值时跳过 destroy（只放宽失败路径）'],
+        ],
+        reverse: [
+          [NODE_PTY_GUARD_ANCHOR, 'pack-core.mjs 的 before（被 replace 掉的锚点原文）'],
+        ],
+        structural: nodePtyGuardStructural,
+      },
+      {
+        rel: CLIENT_HMR_LIB,
+        markers: [['DSHM_CLIENT_HMR_POLL_OFF', 1]],
+        forward: [
+          [CLIENT_HMR_POLL_GATE, '惰性门：默认不挂 bundle 监视、不起轮询（DSHM_CLIENT_HMR_POLL=1 才跑）'],
+          ['\t\t// DSHM_CLIENT_HMR_POLL_OFF', '门上的注释行（与人读的标记同源）'],
+        ],
+        reverse: [
+          [CLIENT_HMR_POLL_UPSTREAM, 'pack-core.mjs 的 before（上游"effect 一挂上就 syncWatches"形态）'],
+        ],
+        structural: clientHmrPollStructural,
+      },
+    ],
+  },
+  /* ── ⑳ 终端键盘 resize 守卫（2026-10-18 / +dshm.73） ── */
+  {
+    key: '终端键盘 resize 守卫',
+    fn: 'patchTerminalKeyboardResizeGuard()',
+    note: 'pack-core.mjs 的 patchTerminalKeyboardResizeGuard() —— 手机软键盘弹出会改变 Web 可视高度，'
+      + 'xterm 的 ResizeObserver 若照常 fitScreen → xterm.resize → model.resize，就会在输入/删除时'
+      + '反复重排并给 PTY 发 SIGWINCH，表现为输入预览乱跳。原生壳在键盘期给 <html> 挂 '
+      + '`dshm-keyboard-open`，本补丁让 measure() 直接返回；键盘收起后观察器自然再测一次。'
+      + '反向判据 = 上游 measure() 的原始首行必须消失。',
+    sites: [{
+      rel: 'node_modules/@deepseek-ai/dsh-client-ui-sidebar-terminal/lib/client.terminal.js',
+      markers: [['DSHM_KEYBOARD_RESIZE_GUARD', 1]],
+      forward: [
+        ["classList.contains('dshm-keyboard-open')", '键盘态门在 measure() 内'],
+      ],
+      reverse: [
+        [['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(RECIPE.coreVersion.split('+')[0])
+          ? 'const measure=()=>{if(!current.current.visible'
+          : 'const measure = () => {\n\t\t\t\t\tif (!current.current.visible',
+          '对应版本上游 measure() 原始首行已消失'],
+      ],
+    }],
+  },
+  /* ── ㉑ web 深嵌套兜底（2026-10-17 / +dshm.61）：dsh-tool-web 的 renderBody() ── */
+  {
+    key: 'web 深嵌套兜底',
+    fn: 'patchWebToolDeepHtmlFallback()',
+    note: 'pack-core.mjs 的 patchWebToolDeepHtmlFallback() —— 上游在两条失败路径（深度超过'
+      + 'MAX_CONVERSION_DEPTH=512 / turndown 抛错）上把整页替换成一句 "HTML content omitted"，'
+      + '真机会话实录（国家统计局目录页 HTTP 200）整页丢失 ⇒ 改为线性纯文本兜底。'
+      + '反向判据 = 上游那句"整段省略"文案必须在树里 ×0（兜底函数注释刻意不写全该字面量）。',
+    sites: [
+      {
+        rel: 'node_modules/@deepseek-ai/dsh-tool-web/lib/index.js',
+        markers: [['DSHM_SHALLOW_HTML_FALLBACK', 1]],
+        forward: [
+          ['function salvageDeepHtmlText(html) {', '兜底函数本体在（线性扫标签 + 反转义实体）'],
+          ['text: salvageDeepHtmlText(content),', '两条失败分支都改走兜底提取（原"整页省略"分支被替换）'],
+          ['Frameset srcs (fetch these directly)', 'frameset 页面把 frame src 一并带出（老政府站常见，模型据此直取子页）'],
+        ],
+        reverse: [
+          ['"[HTML content omitted: unable to convert safely.]"', '上游"整段省略"字面量已消失（×0）'],
+        ],
+      },
+    ],
+  },
+  /* ── ㉒ web 请求头（2026-10-17 / +dshm.67）：dsh-web-fetch-http 的 requestOnce ── */
+  {
+    key: 'web 请求头',
+    fn: 'patchWebFetchHeaders()',
+    note: 'pack-core.mjs 的 patchWebFetchHeaders() —— UA 已在 profile 改成浏览器 UA（docs/177），'
+      + '这里再补浏览器正常会带的 Accept-Language 与同源 Referer，降低反爬中间件的低分判定。'
+      + '反向判据 = 上游那个只含 user-agent/accept 的 headers 原文必须消失。',
+    sites: [
+      {
+        rel: 'node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js',
+        markers: [['DSHM_WEB_FETCH_HEADERS', 1]],
+        forward: [
+          ['"accept-language": "zh-CN,zh;q=0.9,en;q=0.8",', '补 Accept-Language（zh-CN 优先）'],
+          ['"referer": url.origin + "/"', '补同源 Referer'],
+        ],
+        reverse: [
+          ['\t\t\t"accept": "text/html,application/xhtml+xml,text/*;q=0.9,application/json;q=0.8"\n\t\t};',
+            '上游只含 user-agent/accept 的 headers 原文已消失'],
+        ],
+      },
+    ],
   },
 ];
 
@@ -1451,43 +2008,198 @@ function audit(scope) {
     }
   }
 
-  /* ── ⑬ profile 包通道：`runProfilePnpm()` 的进程内分叉（插入型，目标文件名固定） ── */
-  {
-    const text = read(PROFILE_PNPM_LIB);
+  /* ── ⑬ profile 包通道：`runProfilePnpm()` 的进程内分叉（插入型，固定文件名，**两个站点**） ── */
+  for (const site of PROFILE_PNPM_SITES) {
+    const text = read(site.rel);
     if (text === null) {
-      bad(`profile 包通道补丁：缺文件 ${PROFILE_PNPM_LIB}`);
+      bad(`profile 包通道补丁：缺文件 ${site.rel}`);
+      continue;
+    }
+    // 与 ⑫ 同源：仓库侧是 LF，端侧树可能是 CRLF ⇒ 先归一再判（否则锚点判据会假红）
+    const norm = text.replace(/\r\n/g, '\n');
+    const n = countOf(norm, PROFILE_PNPM_MARKER);
+    if (n === 1) {
+      ok(`profile 包通道补丁 · ${site.rel}：${PROFILE_PNPM_MARKER} ×1`);
+    } else if (n === 0) {
+      bad(`profile 包通道补丁 · ${site.rel}：没有 ${PROFILE_PNPM_MARKER} —— pack-core 的 `
+        + 'patchProfilePnpmBridge() 没跑到（或产物是旧树）⇒ 手持档「设置 → 插件」的安装/卸载仍走 '
+        + '`spawn pnpm`，而本档没有可 execve 的 shell ⇒ 用户看到的还是 `spawn pnpm EACCES`');
+      // 标记都没有，后面的片段判据必然也命中不了：只报这一条，不刷屏。
+      continue;
     } else {
-      // 与 ⑫ 同源：仓库侧是 LF，端侧树可能是 CRLF ⇒ 先归一再判（否则锚点判据会假红）
+      bad(`profile 包通道补丁 · ${site.rel}：${PROFILE_PNPM_MARKER} 出现 ${n} 次（规定 1 次）—— 重复注入`);
+    }
+    if (norm.includes(PROFILE_PNPM_PATCHED)) {
+      ok(`profile 包通道补丁 · ${site.rel}：已调用插件的 bridgeRunProfilePnpm(args, …)`);
+    } else {
+      bad(`profile 包通道补丁 · ${site.rel}：找不到 ${JSON.stringify(PROFILE_PNPM_PATCHED)} —— `
+        + '注入段形态已变（标记在但调用没了 ⇒ 分叉是个空壳），门禁需与 pack-core 的 injection 同步复核');
+    }
+    /*
+     * 插入型补丁的"反向"：没有要否掉的原文，改判**上游锚点仍在**。它同时是"注入位置
+     * 有依据"的证据 —— 上游若把兼容性预检的拒绝分支挪走/改写，锚点会先消失，
+     * 那时 pack-core 的 die 与这里的判据会一起红，而不是静默失效。
+     */
+    if (norm.includes(site.anchor)) {
+      ok(`profile 包通道补丁 · ${site.rel}：上游锚点在（preflight 拒绝分支仍在，注入位置有依据）`);
+    } else {
+      bad(`profile 包通道补丁 · ${site.rel}：上游锚点 ${JSON.stringify(site.anchor)} 不见了`
+        + ' —— 上游改了 runProfilePnpm 的预检结构，注入位置失去依据');
+    }
+    /*
+     * 返回形状：`incompatible` **必须非空才带**（+dshm.49）。这一条与上面那条标记判据
+     * 是同族的"形态判据" —— 标记在、调用在，但收尾口径退回旧形态时，产物仍然"看着有
+     * 分叉"，却会把任意失败改判成 incompatible-version。
+     */
+    if (norm.includes(PROFILE_PNPM_INCOMPAT_LEGACY)) {
+      bad(`profile 包通道补丁 · ${site.rel}：桥接分支**无条件**带 incompatible`
+        + `（${JSON.stringify(PROFILE_PNPM_INCOMPAT_LEGACY)}）—— 上游把它读成`
+        + ' incompatible-version ⇒ 404/网络/权限失败全被改判成"版本不兼容"；'
+        + `必须是 ${JSON.stringify(PROFILE_PNPM_INCOMPAT_OK)}`);
+    } else if (norm.includes(PROFILE_PNPM_INCOMPAT_OK)) {
+      ok(`profile 包通道补丁 · ${site.rel}：incompatible 非空才带（失败不会被改判成"版本不兼容"）`);
+    } else {
+      bad(`profile 包通道补丁 · ${site.rel}：找不到 ${JSON.stringify(PROFILE_PNPM_INCOMPAT_OK)}`
+        + ' —— 桥接分支的收尾形态已变（可能是上游改了口径，也可能是注入串被改坏），'
+        + '门禁需与 pack-core 的 profilePnpmBridgeInjection() 同步复核');
+    }
+  }
+
+  /* ── ⑭ 插件检查通道：`view` / `registry` / git 预检的进程内分叉（插入型，同一文件三处） ──
+   *
+   * 【为什么必须有这条（2026-11-03，docs/358）】手机/平板档「设置 → 插件 → 安装」必失败：
+   * inspect 先 `execa(pnpm view …)`，而本档没有可 exec 的 shell、`toolchain/pnpmroot` 又为空
+   * ⇒ EACCES ⇒ 界面弹「无法获取插件信息」，`installBundle` 永不被调用。
+   * 桥本体（`@deepseek-ai/dshm-profile-pnpm` 的 view/registry/git 三个导出）一直在，
+   * 缺的只是 pack-core 的注入 —— 这条门禁就是防它再次静默缺失。
+   */
+  {
+    const rel = 'dsh-plugin-manager/lib/index.js'; // 与 PROFILE_PNPM_SITES 同口径：相对 @deepseek-ai/
+    const text = read(rel);
+    if (text === null) {
+      bad(`插件检查通道补丁：缺文件 ${rel}`);
+    } else {
       const norm = text.replace(/\r\n/g, '\n');
-      const n = countOf(norm, PROFILE_PNPM_MARKER);
-      if (n === 1) {
-        ok(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：${PROFILE_PNPM_MARKER} ×1`);
+      const n = countOf(norm, PLUGIN_MANAGER_MARKER);
+      if (n === 4) {
+        ok(`插件检查通道补丁 · ${rel}：${PLUGIN_MANAGER_MARKER} ×4（view / viewProfilePackage / registry / git）`);
       } else if (n === 0) {
-        bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：没有 ${PROFILE_PNPM_MARKER} —— pack-core 的 `
-          + 'patchProfilePnpmBridge() 没跑到（或产物是旧树）⇒ 手持档「设置 → 插件」的安装/卸载仍走 '
-          + '`spawn pnpm`，而本档没有可 execve 的 shell ⇒ 用户看到的还是 `spawn pnpm EACCES`');
-        // 标记都没有，后面的片段判据必然也命中不了：只报这一条，不刷屏。
+        bad(`插件检查通道补丁 · ${rel}：没有 ${PLUGIN_MANAGER_MARKER} —— pack-core 的 `
+          + 'patchPluginManagerInspectBridge() 没跑到（或产物是旧树）⇒ 手持档插件入口仍会弹'
+          + '「无法获取插件信息：Command failed with EACCES: pnpm view …」');
       } else {
-        bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：${PROFILE_PNPM_MARKER} 出现 ${n} 次（规定 1 次）—— 重复注入`);
+        bad(`插件检查通道补丁 · ${rel}：${PLUGIN_MANAGER_MARKER} 出现 ${n} 次（规定 4 次：view / viewProfilePackage / registry / git）`);
       }
-      if (n === 1) {
-        if (norm.includes(PROFILE_PNPM_PATCHED)) {
-          ok(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：已调用插件的 bridgeRunProfilePnpm(args, …)`);
+      for (const frag of PLUGIN_MANAGER_FRAGMENTS) {
+        if (norm.includes(frag)) {
+          ok(`插件检查通道补丁 · ${rel}：已接 ${JSON.stringify(frag)}`);
         } else {
-          bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：找不到 ${JSON.stringify(PROFILE_PNPM_PATCHED)} —— `
-            + '注入段形态已变（标记在但调用没了 ⇒ 分叉是个空壳），门禁需与 pack-core 的 injection 同步复核');
+          bad(`插件检查通道补丁 · ${rel}：找不到 ${JSON.stringify(frag)} —— 注入段形态已变`
+            + '（标记在但调用没了 ⇒ 分叉是个空壳），门禁需与 pack-core 的 '
+            + 'patchPluginManagerInspectBridge() 同步复核');
         }
-        /*
-         * 插入型补丁的"反向"：没有要否掉的原文，改判**上游锚点仍在**。它同时是"注入位置
-         * 有依据"的证据 —— 上游若把兼容性预检的拒绝分支挪走/改写，锚点会先消失，
-         * 那时 pack-core 的 die 与这里的判据会一起红，而不是静默失效。
-         */
-        if (norm.includes(PROFILE_PNPM_ANCHOR)) {
-          ok(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：上游锚点在（preflight 拒绝分支仍在，注入位置有依据）`);
+      }
+    }
+    /*
+     * 【2026-11-07 真机回归：只补 lib/index.js 不够】上游有**两份同源实现**，
+     * 官方插件页「添加插件 → 检查安装包」在 Host 侧走的是 operations 入口
+     * （`lib/types/operations.js` 的 `namedSpecManifest()`）⇒ 那一份没桥时仍
+     * `execa(pnpm view …)` ⇒ 用户看到的还是「spawn pnpm EACCES」。
+     */
+    const rel2 = 'dsh-plugin-manager/lib/types/operations.js';
+    const text2 = read(rel2);
+    if (text2 === null) {
+      bad(`插件检查通道补丁：缺文件 ${rel2}`);
+    } else {
+      const norm2 = text2.replace(/\r\n/g, '\n');
+      if (countOf(norm2, PLUGIN_MANAGER_MARKER) >= 1
+        && norm2.includes('bridgeViewProfilePackage(dir, parsed.spec, options, environment)')) {
+        ok(`插件检查通道补丁 · ${rel2}：view 已接进程内 registry 通道`);
+      } else {
+        bad(`插件检查通道补丁 · ${rel2}：缺 view 桥 —— namedSpecManifest() 仍 spawn pnpm `
+          + '⇒ 手持档「添加插件」仍会报 spawn pnpm EACCES');
+      }
+    }
+    /*
+     * 【2026-11-07 真机回归：插件页真正的 spawn 点是 viewProfilePackage()】
+     * 截图报错参数是 `name version description dsh --json` —— 那是 inspect() 的字段，
+     * 走的是 `viewProfilePackage()`，**不是** namedSpecManifest()（后者参数是
+     * `name version engines peerDependencies`）。两处实现都必须带桥，否则报错原样不变。
+     */
+    /* 【语法守卫（2026-11-07 P0）】注入型补丁必须让模块仍能解析：上一版把
+       `async function viewProfilePackage(…) {` 这行删掉了 ⇒ return 落在函数外 ⇒
+       三端 `tool-plugin-manager` 永久 waiting for pluginManager。文本断言看不出来，这里跑 node。 */
+    for (const [relV, tagV] of [
+      ['dsh-plugin-manager/lib/index.js', 'view-profile'],
+      ['dsh-plugin-manager/lib/types/operations.js', 'view-profile-operations'],
+    ]) {
+      const textV = read(relV);
+      if (textV === null) {
+        bad(`插件检查通道补丁：缺文件 ${relV}`);
+        continue;
+      }
+      const normV = textV.replace(/\r\n/g, '\n');
+      if (normV.includes(`${PLUGIN_MANAGER_MARKER}:${tagV}`)
+        && normV.includes('bridgeViewProfilePackage(dir, spec, options, process.env)')) {
+        ok(`插件检查通道补丁 · ${relV}：viewProfilePackage() 已接进程内通道`);
+      } else {
+        bad(`插件检查通道补丁 · ${relV}：viewProfilePackage() 没有桥 —— 插件页「无法获取插件信息」`
+          + '仍会走 `execa(pnpm view …)` ⇒ 手持档继续报 spawn pnpm EACCES');
+      }
+      const abs = join(CORE, relV);
+      if (existsSync(abs)) {
+        const r = spawnSync(process.execPath, ['--check', abs], { encoding: 'utf8' });
+        if (r.status === 0) {
+          ok(`插件检查通道补丁 · ${relV}：注入后语法可解析（node --check）`);
         } else {
-          bad(`profile 包通道补丁 · ${PROFILE_PNPM_LIB}：上游锚点 ${JSON.stringify(PROFILE_PNPM_ANCHOR)} 不见了`
-            + ' —— 上游改了 runProfilePnpm 的预检结构，注入位置失去依据');
+          bad(`插件检查通道补丁 · ${relV}：注入后**语法不通过** ⇒ 模块加载失败，三端会表现成`
+            + '`tool-plugin-manager … waiting for pluginManager`：'
+            + String(r.stderr || '').split('\n').slice(0, 3).join(' '));
         }
+      }
+    }
+  }
+
+  /* ── ㉕ 安装地址归一化：`parseInstallSpec()` 头部 + （main 侧）两个入口各一行（插入型，**两个站点**） ── */
+  for (const site of INSTALL_SPEC_SITES) {
+    const text = read(site.rel);
+    if (text === null) {
+      bad(`安装地址归一化：缺文件 ${site.rel}`);
+      continue;
+    }
+    const n = countOf(text, INSTALL_SPEC_MARKER);
+    if (n === 1) {
+      ok(`安装地址归一化 · ${site.rel}：${INSTALL_SPEC_MARKER} ×1`);
+    } else if (n === 0) {
+      bad(`安装地址归一化 · ${site.rel}：没有 ${INSTALL_SPEC_MARKER} —— pack-core 的 `
+        + 'patchInstallSpecNormalize() 没跑到（或产物是旧树）⇒ 手持档/PC 档「设置 → 插件 → 项目地址」'
+        + '粘贴 GitHub 页面地址（/tree/… · ?tab=… · 尾斜杠）仍旧判 invalid-spec，'
+        + 'UI 报「无法识别这个包名或地址」');
+      // 标记都没有，后面的片段判据必然也命中不了：只报这一条，不刷屏。
+      continue;
+    } else {
+      bad(`安装地址归一化 · ${site.rel}：${INSTALL_SPEC_MARKER} 出现 ${n} 次（规定 1 次）—— 重复注入`);
+    }
+    if (text.includes(site.parseHead)) {
+      ok(`安装地址归一化 · ${site.rel}：parseInstallSpec 头部已归一（const spec = dshmNormalizeInstallSpec(raw)）`);
+    } else {
+      bad(`安装地址归一化 · ${site.rel}：找不到注入后的 parseInstallSpec 头部 —— `
+        + '注入段形态已变（标记在但头部没换），门禁需与 pack-core 的 injection 同步复核');
+    }
+    if (site.entryCall !== null) {
+      const calls = countOf(text, site.entryCall);
+      if (calls === site.entryCalls) {
+        ok(`安装地址归一化 · ${site.rel}：入口归一化调用 ×${calls}（inspect / installBundle 各一次）`);
+      } else {
+        bad(`安装地址归一化 · ${site.rel}：入口归一化调用 ${calls} 处，规定 ${site.entryCalls} 处 —— `
+          + '少一处就说明某个入口仍把**原始 spec** 交给连接检查 / `pnpm add`（只改 parse 内部不够）');
+      }
+    }
+    for (const [lit, label] of site.anchors) {
+      if (text.includes(lit)) ok(`安装地址归一化 · ${site.rel}：上游锚点在（${label}，注入位置有依据）`);
+      else {
+        bad(`安装地址归一化 · ${site.rel}：上游锚点不见了（${label}）—— ${JSON.stringify(lit.slice(0, 60))}… `
+          + '上游改了安装入口的结构，注入位置失去依据');
       }
     }
   }
@@ -1532,7 +2244,7 @@ function runGuard() {
     process.exit(3);
   }
   const { notes, fails } = audit(CORE);
-  console.log('════════ 核心树端侧补丁门禁（23 处注入 + 1 处撤除守卫：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · 市场宿主桥 · profile 包通道 · fs-local link · fs-local 权限文案 · attachment link · attachment 失败 cause · Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单 · 撤除守卫[DSHM_DOC_LOAD_DEDUP 不得复活]） ════════');
+  console.log('════════ 核心树端侧补丁门禁（30 处注入 + 1 处撤除守卫：资源地址装甲 · PDF Map · 终端 openharmony · 语音原生采集 · 录音约束 · HMS provider · profile/自带插件 · session link · 凭据 660 · preset workflow · app-boot 只读 stack · 市场宿主桥 · profile 包通道 · 安装地址归一化 · 项目根探测容忍 · fs-local link · fs-local 权限文案 · attachment link · attachment 失败 cause · Origin 列表 · sharp 调度器 · system 平台包 · 端侧 preset · 平台别名 · 树内清单 · 宿主稳健性[node-pty socket 守卫 / client-hmr 轮询关闭] · 终端键盘 resize 守卫[xterm 键盘期不 fit/resize] · web 深嵌套兜底[tool-web 不再整页丢弃] · web 请求头[Accept-Language/Referer] · 撤除守卫[DSHM_DOC_LOAD_DEDUP 不得复活]） ════════');
   console.log(`核心树：${CORE}`);
   for (const n of notes) console.log(n);
   if (fails.length > 0) {
@@ -1541,7 +2253,7 @@ function runGuard() {
     console.log(`\nRESULT: ${notes.length} passed, ${fails.length} failed`);
     process.exit(1);
   }
-  console.log(`\nRESULT: ${notes.length} passed, 0 failed —— 23 处端侧注入补丁都在树里，且上游原文/未注入形态均已消失`
+  console.log(`\nRESULT: ${notes.length} passed, 0 failed —— 30 处端侧注入补丁都在树里，且上游原文/未注入形态均已消失`
     + '；另有 1 处**撤除守卫**（`DSHM_DOC_LOAD_DEDUP` 已于 coreVersion +dshm.6 撤除 ⇒ 标记必须 0 处、上游原文形态必须已恢复）。'
     + '（树内清单 dshm-core.json 是生成物，只按形状判：存在 + 字段/类型 + 配方一致 + 内部一致）。');
 }
@@ -1553,8 +2265,10 @@ const SELFTEST_FILES = [
   ...ARMOR_SITES.map((s) => s.rel),
   PDF_REL,
   `${SUBPROCESS_LIB}/index.js`,
-  // ⑬ profile 包通道（固定文件名，直接进自检副本）
-  PROFILE_PNPM_LIB,
+  // ⑬ profile 包通道（固定文件名，**两个站点**都要进自检副本）
+  ...PROFILE_PNPM_SITES.map((s) => s.rel),
+  // ㉕ 安装地址归一化（固定文件名，**两个站点**都要进自检副本）
+  ...INSTALL_SPEC_SITES.map((s) => s.rel),
   // 撤除守卫（④ 段）：它的判据也走 scope 相对读取 ⇒ 临时副本里必须有这个文件
   DEDUP_REL,
 ];
@@ -1748,6 +2462,17 @@ function selfTest() {
         only: /未带 disabled: true/,
       },
       {
+        /*
+         * M7b：⑧b「PTC 预设恢复启用」的反向判据必须自己也有牙 —— 只把 `disabled: true`
+         * 塞回标记注释后面（标记与正向片段一个都没动）⇒ 结构判据要单独红。
+         */
+        name: 'M7b ptc 预设里的启用标记被"重新禁用"（标记与片段全在）→ 结构反向单独红',
+        run: () => mutateTree(`${PRESET_DIR}/ptc.patch.yml`,
+          (t) => t.replace(/(# DSHM_PTC_WORKFLOW_ENABLED:[^\n]*\n)/g, '$1                disabled: true\n')),
+        expect: /仍带 disabled: true/,
+        only: /仍带 disabled: true/,
+      },
+      {
         name: 'M8 app-boot 多出一处裸赋值（3 处标记一个没少）→ 结构反向单独红',
         run: () => mutateTree(APP_BOOT_MAIN,
           (t) => t + '\nfunction dshmProbe(error, message) {\n\terror.message = message;\n}\n'),
@@ -1775,9 +2500,9 @@ function selfTest() {
         name: 'M10 撤除守卫的 4 条正向判据：上游原文被逐条改写（标记一个都不加）→ 4 条各自红',
         run: () => mutate(DEDUP_REL, (t) => t
           .replace(DEDUP_UPSTREAM_RESTORED[0][0], 'const started = current !== void 0, dshmKeepLocal = started;')
-          .replace(DEDUP_UPSTREAM_RESTORED[1][0], DEDUP_UPSTREAM_RESTORED[1][0].replace(', signal,', ', ownerSignal,'))
-          .replace(DEDUP_UPSTREAM_RESTORED[2][0], DEDUP_UPSTREAM_RESTORED[2][0].replace(', signal,', ', ownerSignal,'))
-          .replace(DEDUP_UPSTREAM_RESTORED[3][0], DEDUP_UPSTREAM_RESTORED[3][0].replace('tab.id, signal,', 'tab.id, ownerSignal,'))),
+          .replace(DEDUP_UPSTREAM_RESTORED[1][0], DEDUP_UPSTREAM_RESTORED[1][0].replace(',signal,', ',ownerSignal,'))
+          .replace(DEDUP_UPSTREAM_RESTORED[2][0], DEDUP_UPSTREAM_RESTORED[2][0].replace(',signal,', ',ownerSignal,'))
+          .replace(DEDUP_UPSTREAM_RESTORED[3][0], DEDUP_UPSTREAM_RESTORED[3][0].replace('tab.id,signal,', 'tab.id,ownerSignal,'))),
         expect: /找不到恢复后的上游原文/,
         only: /撤除守卫/,
       },
@@ -1795,15 +2520,84 @@ function selfTest() {
         expect: /没有 DSHM_MARKET_BRIDGE_BOOT/,
         only: /市场宿主桥补丁/,
       },
-      /* ── M12：⑬ profile 包通道 —— 注入段被整体删掉（上游锚点仍在）⇒ 只该这一组红 ── */
+      /*
+       * ── M12：⑬ profile 包通道 —— 注入段被整体删掉（上游锚点仍在）⇒ 只该这一组红 ──
+       *
+       * **两个站点各一条**（2026-10-14 扩站点时同步扩的自检）：两份产物的收尾缩进不同
+       * （4 空格 / tab）⇒ 删除用的正则也必须各写一份。用错形态会匹配不到、变异体静默不生效，
+       * 那种情况下 `expect` 永远红不了 —— 门禁就成摆设了，所以两条都必须在。
+       */
       {
-        name: 'M12 profile 包通道的注入段被整体删掉（锚点仍在）→ ⑬红',
-        run: () => mutate(PROFILE_PNPM_LIB, (t) => t.replace(
+        name: 'M12a profile 包通道的注入段被整体删掉（types/operations.js，4 空格形态）→ ⑬红',
+        run: () => mutate(PROFILE_PNPM_SITES[0].rel, (t) => t.replace(
           /[ \t]*\/\* DSHM_PROFILE_PNPM_BRIDGE[\s\S]*?\n    \}\n/,
           '\n',
         )),
         expect: /没有 DSHM_PROFILE_PNPM_BRIDGE/,
         only: /profile 包通道补丁/,
+      },
+      {
+        name: 'M12b profile 包通道的注入段被整体删掉（lib/index.js，tab 形态）→ ⑬红',
+        run: () => mutate(PROFILE_PNPM_SITES[1].rel, (t) => t.replace(
+          /[ \t]*\/\* DSHM_PROFILE_PNPM_BRIDGE[\s\S]*?\n\t\}\n/,
+          '\n',
+        )),
+        expect: /没有 DSHM_PROFILE_PNPM_BRIDGE/,
+        only: /profile 包通道补丁/,
+      },
+      /*
+       * ── M12c：⑬ 的**返回形状**判据（+dshm.49）──
+       *
+       * 它模拟的正是本轮真机 P0 的形态：标记在、调用在、注入段也在，**只有收尾那一行**
+       * 退回旧口径（无条件带空 `incompatible`）。M12a/M12b 那种"整体删掉"覆盖不到它 ——
+       * 少了这条，"标记在就算过"仍是个洞。
+       */
+      {
+        name: 'M12c profile 包通道的收尾退回"无条件带 incompatible"（+dshm.49 前的坏形态）→ ⑬红',
+        run: () => mutate(PROFILE_PNPM_SITES[1].rel, (t) => {
+          if (!t.includes(PROFILE_PNPM_INCOMPAT_OK)) {
+            throw new Error(`变异锚点不存在：${JSON.stringify(PROFILE_PNPM_INCOMPAT_OK)}（判据与产物已脱钩）`);
+          }
+          return t.replace(PROFILE_PNPM_INCOMPAT_OK, 'incompatible');
+        }),
+        expect: /桥接分支\*\*无条件\*\*带 incompatible/,
+        only: /profile 包通道补丁/,
+      },
+      /*
+       * ── M13：㉕ 安装地址归一化 —— 标记被抹 / 入口调用被抹 ⇒ 只该这一组红 ──
+       *
+       * M13a/M13b 删的是**标记注释块**（`/* DSHM_INSTALL_SPEC_NORMALIZE … *\/`）：
+       * 它模拟"产物是没打过这条补丁的旧树"，是本门禁最核心的那条正向判据。
+       * M13c 删的是 `lib/index.js` 里那两行**入口归一化调用** —— 这是本轮真机实证的坑
+       * （只改 `parseInstallSpec()` 内部时，`inspect()` / `installBundle()` 仍把原始页面地址
+       * 交给连接检查与 `pnpm add`）⇒ 少了它，判据必须红。
+       */
+      {
+        name: 'M13a 安装地址归一化的注入段被删掉（lib/index.js，tab 形态）→ ㉕红',
+        run: () => mutate(INSTALL_SPEC_SITES[0].rel, (t) => t.replace(
+          /[^\S\n]*\/\* DSHM_INSTALL_SPEC_NORMALIZE[\s\S]*?\*\/\n/,
+          '',
+        )),
+        expect: /没有 DSHM_INSTALL_SPEC_NORMALIZE/,
+        only: /安装地址归一化/,
+      },
+      {
+        name: 'M13b 安装地址归一化的注入段被删掉（types/install-spec.js，4 空格形态）→ ㉕红',
+        run: () => mutate(INSTALL_SPEC_SITES[1].rel, (t) => t.replace(
+          /[^\S\n]*\/\* DSHM_INSTALL_SPEC_NORMALIZE[\s\S]*?\*\/\n/,
+          '',
+        )),
+        expect: /没有 DSHM_INSTALL_SPEC_NORMALIZE/,
+        only: /安装地址归一化/,
+      },
+      {
+        name: 'M13c 入口归一化调用被抹掉（lib/index.js 两行）→ ㉕红（只改 parse 内部不够）',
+        run: () => mutate(INSTALL_SPEC_SITES[0].rel, (t) => t.replace(
+          /[^\S\n]*spec = dshmNormalizeInstallSpec\(spec\);\n/g,
+          '',
+        )),
+        expect: /入口归一化调用 0 处/,
+        only: /安装地址归一化/,
       },
     ];
 
@@ -1828,9 +2622,9 @@ function selfTest() {
       restoreAll();
       mutate(DEDUP_REL, (t) => t
         .replace(DEDUP_UPSTREAM_RESTORED[0][0], 'const started = current !== void 0, dshmKeepLocal = started;')
-        .replace(DEDUP_UPSTREAM_RESTORED[1][0], DEDUP_UPSTREAM_RESTORED[1][0].replace(', signal,', ', ownerSignal,'))
-        .replace(DEDUP_UPSTREAM_RESTORED[2][0], DEDUP_UPSTREAM_RESTORED[2][0].replace(', signal,', ', ownerSignal,'))
-        .replace(DEDUP_UPSTREAM_RESTORED[3][0], DEDUP_UPSTREAM_RESTORED[3][0].replace('tab.id, signal,', 'tab.id, ownerSignal,')));
+        .replace(DEDUP_UPSTREAM_RESTORED[1][0], DEDUP_UPSTREAM_RESTORED[1][0].replace(',signal,', ',ownerSignal,'))
+        .replace(DEDUP_UPSTREAM_RESTORED[2][0], DEDUP_UPSTREAM_RESTORED[2][0].replace(',signal,', ',ownerSignal,'))
+        .replace(DEDUP_UPSTREAM_RESTORED[3][0], DEDUP_UPSTREAM_RESTORED[3][0].replace('tab.id,signal,', 'tab.id,ownerSignal,')));
       const res = audit(scope);
       const positives = res.fails.filter((f) => /找不到恢复后的上游原文/.test(f));
       const markerOk = res.notes.filter((n) => /撤除守卫：.* ×0（撤除后未复活）/.test(n)).length;
@@ -1853,7 +2647,13 @@ function selfTest() {
           const res = audit(scope);
           const probe = JSON.stringify(lit.slice(0, 70));
           const hit = res.fails.some((f) => f.includes('上游原文仍在') && f.includes(probe));
-          const onlyReverse = res.fails.length > 0 && res.fails.every((f) => f.includes('上游原文仍在'));
+          /*
+           * `onlyReverse` 允许同时出现"树内副本与仓库源不一致"——本用例是**往树内副本里
+           * 追加字面量**，凡带 mirrors 的站点必然连镜像判据一起红；那是同一次变异的
+           * 必然伴随，不是"别的判据也在红"。
+           */
+          const onlyReverse = res.fails.length > 0
+            && res.fails.every((f) => f.includes('上游原文仍在') || f.includes('与仓库源不一致'));
           case_(`自检·只塞回上游原文即红：[${group.key}] ${label.split('：')[0]}`, hit && onlyReverse,
             `fails=${res.fails.length}${res.fails.length ? ' :: ' + res.fails[0].slice(0, 110) : '（没红 —— 恒真的摆设）'}`);
         }
@@ -2039,6 +2839,27 @@ function selfTest() {
           return p;
         },
         expect: /树内多出 stale-leftover\.txt/,
+      },
+      {
+        name: '自检·node-pty 的守卫被挪出 DESTROY_SOCKET_TIMEOUT_MS 回调 ⇒ 红（结构判据；计时器兜底与守卫必须同时在场）',
+        run: () => mutateTree(NODE_PTY_TERMINAL, (t) => t.replace('var timeout_1 = setTimeout(function () {',
+          'var timeout_1 = null;\n                var _detached_timer_body = function () {')),
+        expect: /定时器回调里找不到/,
+        only: /定时器回调里找不到/,
+      },
+      {
+        name: '自检·client-hmr 的轮询订阅点被整段删掉 ⇒ 红（结构判据：惰性门只该决定"跑不跑"）',
+        run: () => mutateTree(CLIENT_HMR_LIB,
+          (t) => t.replace('\t\tconst timer = setInterval(pollWatches, pollIntervalMs);\n', '')),
+        expect: /订阅点不见了/,
+        only: /订阅点不见了/,
+      },
+      {
+        name: '自检·client-hmr 的 /plugins/events SSE effect 被误删 ⇒ 红（关轮询不该碰端侧在用的通道）',
+        run: () => mutateTree(CLIENT_HMR_LIB,
+          (t) => t.replace('\t}, "client-hmr: /plugins/events channel");', '\t}, "client-hmr: ???");')),
+        expect: /条 effect 不见了/,
+        only: /条 effect 不见了/,
       },
     ];
     for (const c of shapeCases) {

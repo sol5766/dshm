@@ -1,6 +1,31 @@
 {
   "apiType": "stageMode",
   "buildOption": {
+    /*
+     * 【不要 strip libnode（2026-11-05）】hvigor 默认对 .so 跑 strip，会把构建期自签的
+     * `.codesign` 段一起剥掉（实测：仓内 126,818,360 B 带签名 ⇒ 打进包后又变回
+     * 126,809,264 B 无签名），于是 exec 域 `dlopen(libnode)` 仍是 Permission denied。
+     * 这里把它排除出 strip，签名才能活到设备上。
+     */
+    "nativeLib": {
+      "debugSymbol": {
+        "strip": true,
+        "exclude": [
+          "**/libnode.so.137"
+        ]
+      }
+    },
+    "resOptions": {
+      "copyCodeResource": {
+        "enable": false
+      }
+    },
+    "externalNativeOptions": {
+      "path": "./src/main/cpp/CMakeLists.txt",
+      "abiFilters": [
+        "arm64-v8a"
+      ]
+    }
   },
   "buildOptionSet": [
     {

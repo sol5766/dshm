@@ -159,7 +159,7 @@ function makeTimerSet() {
 		if (typeof handler !== "function") throw new TypeError("timer handler must be a function");
 		let handle;
 		const invoke = () => {
-			registry.delete(handle);
+			if (kind === "timeout") registry.delete(handle);
 			if (settled) return;
 			handler(...args);
 		};

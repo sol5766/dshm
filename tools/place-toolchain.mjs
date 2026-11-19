@@ -8,12 +8,13 @@
  *         核心扩展（_ssl/_socket/zlib/_sqlite3 …）静态内建进 libpython（musl 变体
  *         特性），lib-dynload 仅 3 个可选模块；运行只依赖系统 musl loader
  *         （busybox 同 loader 已实测可跑）。
- *   · git/*.apk —— Alpine v3.21 main aarch64：git-2.47.3-r0 + so 闭包 14 包
+ *   · git/*.tar.gz —— Alpine v3.21 main aarch64：git-2.47.3-r0 + so 闭包 14 包
  *         （libcurl/openssl/pcre2/zlib/...）+ ca-certificates-bundle。
- *         apk = tar.gz，端侧 busybox tar 直接解。
+ *         源文件是 Alpine v2 包，端侧 busybox tar 直接解。**扩展名一律 .tar.gz**：
+ *         应用市场审核按**路径**判"包内带 apk 相关目录/文件"就判"安装失败"，见 docs/148。
  *
  * 【为什么原样放归档而不是解开的目录】hmfs 禁 symlink（D6 §4.1.3），Windows 侧
- * 解包会把 git-core 里 180+ 个指向 git 本体的 symlink 变成 1.3GB 拷贝；apk/tar.gz
+ * 解包会把 git-core 里 180+ 个指向 git 本体的 symlink 变成 1.3GB 拷贝；tar.gz
  * 原样带 symlink 元数据进 HAP，端侧 busybox tar 解包时 symlink 失败仅告警跳过，
  * 真身 ELF 全在（main.js finishToolchainExtraction 复制补齐关键 symlink）。
  *
@@ -24,11 +25,19 @@ import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
+import { devecoPath, devecoSdkHomeCandidates } from './lib/deveco-home.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PY_SRC = join(ROOT, 'third_party', 'python');
-const GIT_SRC = join(ROOT, 'third_party', 'git', 'apks');
-const DEST = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'toolchain');
+const GIT_SRC = join(ROOT, 'third_party', 'git', 'packages');
+/*
+ * 【2026-11-02 修正】目标必须是**共享 HSP**（hostruntime）的 resfile，不是 entry。
+ * 依据：端侧 `main.js` 的 `RES_ROOT = resolve(__dirname,'..','..')`，而 main.js 本身就装在
+ * HSP 的 `resfile/resources/app/` 里 ⇒ 它读的是 **HSP** 的 resfile。放 entry 侧的话
+ * 归档会随包发出去、但端侧永远找不到（本轮实测：entry 里多出 26.4MB python + git 副本，
+ * 而 HSP 里本来就有同样一份）。放错位置既浪费体积又不生效。
+ */
+const DEST = join(ROOT, 'hostruntime', 'src', 'main', 'resources', 'resfile', 'toolchain');
 
 // main.js 的 PYTHON_TARBALL_REL 与此对应；改名时两处同步
 const PY_NAME = 'cpython-3.12.14-aarch64-musl.tar.gz';
@@ -40,7 +49,7 @@ const PY_SRC_FILE = 'cpython-3.12.14-aarch64-musl-install_only_stripped.tar.gz';
  * 【为什么必须签】端侧 execve 对**第三方 ELF** 一律拒绝（签名域策略），与权限位/
  * 创建者无关——rg 已实证：构建期 `binary-sign-tool sign -selfSign 1` 后
  * `exec 探测` 由 `rg=denied` 变为 `rg=ok`。git / python3.12 同属"要被 exec 的
- * 独立 ELF"，只是它们躺在**归档**里（apk / tar.gz），解包发生在设备上，
+ * 独立 ELF"，只是它们躺在**归档**里（tar.gz），解包发生在设备上，
  * 所以构建期要先把归档解到临时目录 → 签名 → 重新打包。
  *
  * 【为什么连 .so 一起签】git 依赖 musl loader 与一批 so（libcurl/libssl/…）：
@@ -71,17 +80,34 @@ const SIGN_MARKER_PREFIX = 'dshm-signed-v1';
  */
 const SIGN_MARKER_FILE = 'dshm-signed.txt';
 
+/**
+ * 找 ELF 自签名工具，**原生优先**。
+ *
+ * 【为什么原生优先】鸿蒙 PC 的 CLT 里 `binary-sign-tool` 是**原生 ELF**（2.9 MB），
+ * 根本没有 jar 也没有 JDK（本机实测：全机无 java，`jbr/` 不存在）。旧实现只认
+ * `binary-sign-tool.jar` + `java`，于是**永远不会命中** ⇒ 每次构建都走"跳过签名"
+ * 分支（早期是静默跳过，现在是 exit 1）。docs/225 记着这一条曾经修过，但代码里没有留下。
+ *
+ * 【两种形态的调用差异】原生不接受 jar 专有的 `-mode localSign`，参数顺序也敏感：
+ *   native: binary-sign-tool sign -inFile <in> -outFile <out> -selfSign 1
+ *   jar   : java -jar binary-sign-tool.jar sign -mode localSign -selfSign 1 -inFile … -outFile … -signAlg …
+ * 由 sign-tar-elf.py 按"路径是否以 .jar 结尾"分派。
+ */
 function findBinarySignTool() {
-  const sdkHome = process.env.DEVECO_SDK_HOME ?? process.env.OHOS_SDK_HOME ?? '';
+  const nativeCandidates = devecoSdkHomeCandidates()
+    .map((h) => join(h, 'default', 'openharmony', 'toolchains', 'lib', 'binary-sign-tool'))
+    .filter((p) => existsSync(p));
+  if (nativeCandidates.length > 0) {
+    return { native: true, tool: nativeCandidates[0], java: '' };
+  }
   const java = [
     process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin', 'java.exe') : '',
-    'C:\\Program Files\\Huawei\\DevEco Studio\\jbr\\bin\\java.exe',
-  ].filter((p) => p.length > 0 && existsSync(p));
-  const jar = [
-    sdkHome ? join(sdkHome, 'default', 'openharmony', 'toolchains', 'lib', 'binary-sign-tool.jar') : '',
-    'C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\lib\\binary-sign-tool.jar',
-  ].filter((p) => p.length > 0 && existsSync(p));
-  return java.length > 0 && jar.length > 0 ? { java: java[0], jar: jar[0] } : null;
+    devecoPath(join('jbr', 'bin', 'java.exe')),
+  ].filter((p) => p !== null && p.length > 0 && existsSync(p));
+  const jar = devecoSdkHomeCandidates()
+    .map((h) => join(h, 'default', 'openharmony', 'toolchains', 'lib', 'binary-sign-tool.jar'))
+    .filter((p) => existsSync(p));
+  return java.length > 0 && jar.length > 0 ? { native: false, tool: jar[0], java: java[0] } : null;
 }
 
 /**
@@ -94,11 +120,10 @@ function bundledPythonCandidates() {
   const probes = [
     /* `.dsh` runtime 里的 python（本机实测可用，带 tarfile） */
     join(home, '.dsh', 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies', 'python', 'python.exe'),
-    /* DevEco 自带的（若存在） */
-    process.env.DEVECO_SDK_HOME
-      ? join(process.env.DEVECO_SDK_HOME, '..', 'tools', 'python', 'python.exe') : '',
-    'C:\\Program Files\\Huawei\\DevEco Studio\\tools\\python\\python.exe',
-  ].filter((p) => p.length > 0);
+    /* DevEco 自带的（若存在）。**不写死安装根**：DevEco 2026-10-10 从 C 盘搬到 D 盘，
+       见 tools/lib/deveco-home.mjs。注意 DevEco 26 已不再随包带 python ⇒ 这本就返回 null。 */
+    devecoPath(join('tools', 'python', 'python.exe')),
+  ].filter((p) => p !== null && p.length > 0);
   for (const p of probes) {
     try {
       if (p.length > 0 && existsSync(p)) out.push(p);
@@ -154,21 +179,118 @@ if (!existsSync(src)) {
 copyFileSync(src, join(DEST, 'python', PY_NAME));
 console.log(`placed   : python/${PY_NAME}  (${(statSync(join(DEST, 'python', PY_NAME)).size / 1048576).toFixed(1)}MB)`);
 
-const apks = readdirSync(GIT_SRC).filter((n) => n.endsWith('.apk')).sort();
-if (apks.length === 0) {
-  console.error(`place-toolchain: ${GIT_SRC} 下没有 apk
+const pkgs = readdirSync(GIT_SRC).filter((n) => n.endsWith('.tar.gz')).sort();
+if (pkgs.length === 0) {
+  console.error(`place-toolchain: ${GIT_SRC} 下没有 tar.gz 归档
   取法：见 docs/device-validation.md 工具链批次（Alpine v3.21 main aarch64，git-2.47.3-r0 闭包）`);
   process.exit(1);
 }
-for (const name of apks) {
+for (const name of pkgs) {
   copyFileSync(join(GIT_SRC, name), join(DEST, 'git', name));
 }
-console.log(`placed   : git/*.apk  ×${apks.length}  (${(apks.reduce((s, n) => s + statSync(join(DEST, 'git', n)).size, 0) / 1048576).toFixed(1)}MB)`);
+console.log(`placed   : git/*.tar.gz  ×${pkgs.length}  (${(pkgs.reduce((s, n) => s + statSync(join(DEST, 'git', n)).size, 0) / 1048576).toFixed(1)}MB)`);
+
+/*
+ * ── tmux / gh（2026-11-02，docs/342）────────────────────────────────────
+ *
+ * 为什么走"每个 Alpine 包一个 tar.gz"而不是合并成一个大归档：
+ * 端侧解包逻辑是**把目录里所有归档依次解到同一个 root**（git 就是这么做的，
+ * 43 个包解进 gitroot）。沿用同一形状 ⇒ main.js 只需照抄 git 的三处改动，
+ * 不需要新的解包器，也不会因为"一个包里坏一个文件"整包失败。
+ *
+ * 为什么从 dist/alpine-stage 取而不是 third_party：
+ * 这些包由 `tools/fetch-alpine-toolchain.mjs` 按需从 Alpine CDN 采集（含 so: 依赖解析），
+ * 体积 16MB/7 包，不必入库；缺了就跳过并告警（不阻断其他人构建 git/python）。
+ */
+const ALPINE_STAGE = join(ROOT, 'dist', 'alpine-stage');
+/** bash/procps 单独采集目录（2026-11-03）：保持与既有 stage 分离，避免互相覆盖。 */
+const ALPINE_STAGE_BP = join(ROOT, 'dist', 'alpine-stage-bp');
+/** sub = 端侧解包目录名；pkgs = 该 root 需要的 Alpine 包（顺序无关）。 */
+const EXTRA_ROOTS = [
+  { sub: 'tmux', pkgs: ['tmux', 'libevent', 'libncursesw', 'ncurses-terminfo-base'] },
+  { sub: 'gh', pkgs: ['github-cli', 'libssl3', 'libcrypto3'] },
+  /*
+   * 【bash 真身（2026-11-03，把"垫片"换成"环境组件"第 1 项）】
+   * 旧形态：`bin/bash` 是 463 B 文本垫片 → busybox hush（busybox 未编 bash applet）。
+   * 现在：Alpine bash 5.2.37 真 ELF + 它的依赖库（readline / libncursesw / terminfo /
+   * utmps / skalibs）。端侧解包仍走"同目录多归档依次解到同一 root"的既有形状。
+   */
+  { sub: 'bash', pkgs: ['bash', 'readline', 'libncursesw', 'ncurses-terminfo-base', 'utmps-libs', 'skalibs-libs'] },
+];
+const extraArchives = [];
+
+/*
+ * ── npm / pnpm（2026-11-02，第一批"绕过 pnpm 假壳"）──────────────────────
+ *
+ * 【为什么要随包】端侧 `bin/pnpm` 是安装队列假壳，`pnpm install/build` 全废。
+ * 而 pnpm 本体就是**纯 JS**（9.15.9 的 `bin/pnpm.cjs`），只要有能跑的 node 就能执行 ——
+ * 宿主侧实测 `node v24.2.0` 可用（env-probe 证据），于是这条路不需要任何 ACL。
+ *
+ * 【为什么锁 pnpm 9 而不是 12】pnpm 12 的 npm 包已改成"下载平台预编译二进制"的引导器，
+ * openharmony-arm64 没有对应产物 ⇒ 直接失败（本机实测报
+ * `pnpm does not provide a pre-built binary for openharmony-arm64`）。9.15.9 是纯 JS 实现。
+ *
+ * 来源：`node tools/fetch-alpine-toolchain.mjs` 之外单独取的 npm registry 包，
+ * 解到 `dist/npm-stage/{npm,pnpm}`（不入库）。
+ */
+const NPM_STAGE = join(ROOT, 'dist', 'npm-stage');
+const JS_TOOL_ROOTS = [
+  { sub: 'npm', dir: join(NPM_STAGE, 'npm'), probe: 'bin/npm-cli.js' },
+  { sub: 'pnpm', dir: join(NPM_STAGE, 'pnpm'), probe: 'bin/pnpm.cjs' },
+];
+for (const spec of JS_TOOL_ROOTS) {
+  const out = join(DEST, spec.sub);
+  mkdirSync(out, { recursive: true });
+  if (!existsSync(join(spec.dir, spec.probe))) {
+    console.error(`place-toolchain: ⚠ 缺 ${spec.dir}/${spec.probe} —— 跳过 ${spec.sub}`);
+    continue;
+  }
+  const name = `${spec.sub}-js.tar.gz`;
+  try {
+    execFileSync('tar', ['-czf', join(out, name), '-C', spec.dir, '.'], { stdio: 'pipe' });
+    extraArchives.push(join(out, name));
+    console.log(`placed   : ${spec.sub}/${name}  (${(statSync(join(out, name)).size / 1048576).toFixed(1)}MB)`);
+  } catch (e) {
+    console.error(`place-toolchain: ⚠ 打包 ${spec.sub} 失败：${String(e && e.message ? e.message : e).slice(0, 120)}`);
+  }
+}
+for (const spec of EXTRA_ROOTS) {
+  const dir = join(DEST, spec.sub);
+  mkdirSync(dir, { recursive: true });
+  let bytes = 0;
+  let made = 0;
+  for (const pkg of spec.pkgs) {
+    /* bash/procps 从独立采集目录取；其余仍从既有 stage 取 */
+    const srcDir = existsSync(join(ALPINE_STAGE_BP, pkg))
+      ? join(ALPINE_STAGE_BP, pkg)
+      : join(ALPINE_STAGE, pkg);
+    if (!existsSync(srcDir)) {
+      continue;
+    }
+    const name = `${pkg}-alpine.tar.gz`;
+    const out = join(dir, name);
+    try {
+      /* -C 进包目录、打包 `.`：与 Alpine apk 的内部布局一致（usr/…、lib/… 直接在根） */
+      execFileSync('tar', ['-czf', out, '-C', srcDir, '.'], { stdio: 'pipe' });
+      bytes += statSync(out).size;
+      made += 1;
+      extraArchives.push(out);
+    } catch (e) {
+      console.error(`place-toolchain: ⚠ 打包 ${pkg} 失败：${String(e && e.message ? e.message : e).slice(0, 120)}`);
+    }
+  }
+  if (made > 0) {
+    console.log(`placed   : ${spec.sub}/*.tar.gz  ×${made}  (${(bytes / 1048576).toFixed(1)}MB)`);
+  } else {
+    console.error(`place-toolchain: ⚠ ${spec.sub} 无归档（先跑 node tools/fetch-alpine-toolchain.mjs --out dist/alpine-stage）`
+      + ' —— 跳过该 root，不影响 git/python');
+  }
+}
 
 /*
  * ── 构建期自签名（报告 4 ③）─────────────────────────────────────────────
  * 只签"要被 exec / 被动态链接加载"的 ELF：
- *   · git apk：usr/bin/git、usr/libexec/git-core/*（43 个可执行）、usr/lib/*.so*
+ *   · git 归档：usr/bin/git、usr/libexec/git-core/*（43 个可执行）、usr/lib/*.so*
  *   · python 归档：bin/*（8 个）+ lib/*.so*（10 个）
  * 【为什么 python 也要签】报告指出"真 python3.12 可从桥模式切回真身"——那需要
  * python3.12 本身能 execve 通过；桥模式（libpython 在进程内 dlopen）只是替代通道。
@@ -229,10 +351,11 @@ if (tool === null) {
   const signer = join(ROOT, 'tools', 'sign-tar-elf.py');
   const targets = [
     join(DEST, 'python', PY_NAME),
-    ...apks.map((n) => join(DEST, 'git', n)),
+    ...pkgs.map((n) => join(DEST, 'git', n)),
+    ...extraArchives,   // tmux / gh（含其 .so：gh 动态链接，库不签也会被拒）
   ];
   try {
-    const out = execFileSync(hostPython, [signer, tool.jar, tool.java, ...targets],
+    const out = execFileSync(hostPython, [signer, tool.tool, tool.java || '-', ...targets],
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     for (const line of out.split('\n')) {
       if (line.trim().length > 0) console.log(`           ${line.trim()}`);
@@ -260,6 +383,16 @@ if (tool === null) {
   writeFileSync(join(DEST, 'git', SIGN_MARKER_FILE), `${markerGit}\n`, 'utf8');
   writeFileSync(join(DEST, 'python', SIGN_MARKER_FILE), `${markerPy}\n`, 'utf8');
   console.log(`sign     : 已写版本标记 python=${markerPy} git=${markerGit}（端侧据此强制重解归档）`);
+  /* tmux / gh：按目录各写一份摘要标记（与 python/git 同口径，绝不共用总和） */
+  for (const spec of [...EXTRA_ROOTS, ...JS_TOOL_ROOTS.map((x) => ({ sub: x.sub }))]) {
+    const dir = join(DEST, spec.sub);
+    let any = false;
+    try { any = readdirSync(dir).some((f) => f.endsWith('.tar.gz')); } catch { any = false; }
+    if (!any) continue;
+    const marker = `${SIGN_MARKER_PREFIX}+${archiveDigest(spec.sub)}`;
+    writeFileSync(join(dir, SIGN_MARKER_FILE), `${marker}\n`, 'utf8');
+    console.log(`sign     : 已写版本标记 ${spec.sub}=${marker}`);
+  }
 }
 
 /*
@@ -331,17 +464,9 @@ if (pyMembers.size !== 1) {
 console.log(`dest     : ${DEST}`);
 
 /*
- * —— el1 libs 段（entry/libs/arm64-v8a/libpython3.12.so.1.0）——
- * 【为什么 libpython 必须进 libs/】exec 管控调查结论（E16/E17b，2026-09-22）：
- * dlopen 只放行 HAP 安装的 libs/<abi>/ 目录（koffi/sharp 全家同一通道，E18 佐证）；
- * resfile/ 与解包后的 el2 files/ 一律 "No error information"。内嵌 CPython 桥
- * （entry/src/main/cpp/python_runner.cpp → libpython_runner.so）在运行时从这里
- * dlopen libpython（DSHM_PYTHON_LIB），字节取自 python 归档直接解出
- * （历史 elf/ 副本已随体积回收移除）。
- * 【体积】+22MB 进 HAP。
+ * 【2026-11-02 移除：不再把 libpython 写进 entry/libs】
+ * `check-mobile-upgrade-migration` 的判据是"libpython 只随共享 HSP 一份，entry HAP 不重复携带"。
+ * 旧代码每次跑都往 entry/libs/arm64-v8a/ 复制一份 22MB，跑一次就红一次
+ * （本轮实测：581MB 那版就是这么来的；删掉后回到 560MB 且门禁转绿）。
+ * 端侧 dlopen 用的是 HSP 里那份，entry 侧这份从来没有消费者。
  */
-const LIBS_ABI = join(ROOT, 'entry', 'libs', 'arm64-v8a');
-mkdirSync(LIBS_ABI, { recursive: true });
-const pyLibBytes = pyMembers.get('python/lib/libpython3.12.so.1.0');
-writeFileSync(join(LIBS_ABI, 'libpython3.12.so.1.0'), pyLibBytes);
-console.log(`placed   : libs/arm64-v8a/libpython3.12.so.1.0  (${(pyLibBytes.length / 1048576).toFixed(1)}MB, el1 dlopen 通道)`);

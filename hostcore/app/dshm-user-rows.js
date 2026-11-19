@@ -98,6 +98,40 @@ const SKIN_MARKET_PACKAGE = 'dsh-skin-market';
 const BOOT_FAIL_MARKER = '.dshm-boot-failed';
 
 /**
+ * 平台守卫行的 id（成对出现，必须一起处理）。
+ *
+ * 【为什么要有这个名单】`dsh-experimental-terminal-bundle` 的 `cordis.patch.yml` 里原来有
+ * 一对**同名**守卫行：`optional-terminal-bash` / `optional-terminal-pwsh`，两行 `name` 都是
+ * `@deepseek-ai/dsh-terminal-bash`，靠上游的 `disabled: !!js process.platform === 'win32'`
+ * （鸿蒙 ⇒ false，启用）/ `disabled: !!js process.platform !== 'win32'`（鸿蒙 ⇒ true，禁用）
+ * 这对**平台表达式**二选一。
+ *
+ * 【D52（2026-10-13）已从根上摘掉 pwsh】端侧 profile 种子
+ * （`hostcore/profile/ondevice/cordis.patch.yml`）现在把该 group 的 `config` **整组覆盖成
+ * 「registry / bash / tool-terminal 三条」** ⇒ 合成后的挂载树里**根本不存在**
+ * `optional-terminal-pwsh` 这个 id，开关不再出现（点不到自然炸不了）。详见种子文件里
+ * `- id: optional-persistent-terminals` 上方的注释。
+ *
+ * 【那这份名单还兜什么】兜"种子之外仍会被写进 patch 的字面量行"两类：
+ *   ① 设备上**现存的旧 cordis.patch.yml**：上一版种子里还留着
+ *      `- id: optional-terminal-pwsh / disabled: true` 这行；新种子已无此 key，而 carry
+ *      阶段会"保种子没有的顶层 id" ⇒ 不拦就会被原样捞回来，重新变成一条可点开关；
+ *   ② 用户层/市场**后来写下的字面量行**：插件市场 `patch.ts` 的 enableRow/disableRow、
+ *      设置→插件的 writePluginEnabled 写的是 `disabled: false|true`，而 `applyEntryPatches`
+ *      对非 insert 行走 `target[key] = value`（**整行覆盖**）⇒ 写过一次就把 `!!js` 压成字面量
+ *      ⇒ pwsh 行被强行启用 ⇒ 与 bash 行撞同一个 "shell" backend ⇒
+ *      `@deepseek-ai/dsh-terminal` 的 `registerBackend()` 报 `DUPLICATE_BACKEND` ⇒ fiber failed。
+ *
+ * 两个 id 一律在 carry/prefilter 阶段丢弃 ⇒ 下轮启动只剩种子（组覆盖）的权威取值。
+ * `optional-terminal-bash` 也留在名单里：它是同一对守卫的另一半，用户层若对它写死
+ * `disabled: true` 会与种子"显式启用"打架，一并丢弃最省事。
+ *
+ * 【PC 档零影响】PC 档 `disabled: !!js` 求值结果与名单里的字面量本就一致（win32 ⇒
+ * bash 禁用 / pwsh 启用），丢弃用户层同名行不影响任何既有行为。
+ */
+const PLATFORM_GUARD_ROWS = new Set(['optional-terminal-pwsh', 'optional-terminal-bash']);
+
+/**
  * 解析包的入口候选（相对包根的路径，不带 ./ 前缀，已去重）。
  * exports 优先（Node 语义），无 exports 回退 main（默认 index.js）。
  *
@@ -183,6 +217,29 @@ function entryCandidates(pkg) {
   } else if (typeof pkg.typings === 'string' && pkg.typings.length > 0) {
     return out;
   } else {
+    /*
+     * CLI wrapper / 平台二进制包不一定是可 require 的 JS 包：
+     *   · @openai/codex 只有 `bin/codex.js`，没有 main/exports；
+     *   · @openai/codex-linux-arm64 只有 vendor/ 下 ELF，通过 os/cpu 限制平台。
+     * 旧逻辑在两者上都回退 index.js，导致完整包被判“入口文件缺失”。
+     */
+    if (typeof pkg.bin === 'string' && pkg.bin.length > 0) {
+      push(pkg.bin);
+      return out;
+    }
+    if (pkg.bin !== null && typeof pkg.bin === 'object' && !Array.isArray(pkg.bin)) {
+      for (const value of Object.values(pkg.bin)) {
+        if (typeof value === 'string' && value.length > 0) {
+          push(value);
+        }
+      }
+      if (out.length > 0) {
+        return out;
+      }
+    }
+    if (Array.isArray(pkg.os) || Array.isArray(pkg.cpu)) {
+      return out; // 平台资产包：按设计可能没有 JS 根入口
+    }
     push('index.js');
   }
   return out;
@@ -303,6 +360,12 @@ function prefilterUserRows(rowsText, profileDir) {
       j += 1;
     }
     const id = rawId;
+    // 平台守卫行（见 PLATFORM_GUARD_ROWS）：用户行里出现即丢弃，权威取值只在种子。
+    if (PLATFORM_GUARD_ROWS.has(id)) {
+      dropped.push({ id, reason: 'platform-guard' });
+      i = j;
+      continue;
+    }
     const disabled = block.some((b) => /^\s+disabled:\s*true\b/.test(b));
     const reason = disabled ? '' : userRowLoadable(profileDir, id);
     if (reason.length === 0) {
@@ -487,6 +550,14 @@ function carryForeignTopLevelEntries(seedText, prevText, io) {
     if (key === SKIN_MARKET_PACKAGE) {
       continue;
     }
+    /*
+     * 【平台守卫行不由 carry 供给】见 PLATFORM_GUARD_ROWS 注释：上游那对行靠 `!!js`
+     * 平台表达式二选一，用户层写下的字面量会整行覆盖它 ⇒ 两行同时启用会 DUPLICATE_BACKEND。
+     * 这里把用户层里的同名守卫行也丢掉，让种子的权威取值每次都赢。
+     */
+    if (PLATFORM_GUARD_ROWS.has(key)) {
+      continue;
+    }
     kept.push(entry);
   }
   /*
@@ -527,6 +598,108 @@ function carryForeignTopLevelEntries(seedText, prevText, io) {
   return deduped.join('\n');
 }
 
+/** 内置救援插件的 entry id（与 `hostcore/profile/ondevice/cordis.patch.yml` ⑮ 逐字一致）。 */
+const RESCUE_ID_BUILTIN = 'dshm-boot-rescue-builtin';
+/** 外部同名插件的 entry id（上游约定：行 id 与包名一致）。 */
+const RESCUE_ID_EXTERNAL = 'dshm-boot-rescue';
+/**
+ * 内置救援插件版本。**必须与 `hostcore/plugins/dshm-boot-rescue/package.json` 的 version 一致**，
+ * 由 `tools/check-boot-rescue-id.mjs` 断言 —— 两处漂移会让"谁让位给谁"判错。
+ */
+const RESCUE_BUILTIN_VERSION = '1.0.0';
+
+/** 读外部救援插件版本（未安装 / 包半残 ⇒ 空串，不抛）。 */
+function readExternalRescueVersion(profileDir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'node_modules', RESCUE_ID_EXTERNAL, 'package.json'), 'utf8'));
+    return pkg !== null && typeof pkg === 'object' && typeof pkg.version === 'string' ? pkg.version : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+/** 只比数字段（1.1.0 vs 1.0.0）；解析不出就按"相等"处理，宁可保留内置也不冒失让位。 */
+function compareLooseVersion(a, b) {
+  const parse = (v) => String(v).split(/[.+-]/).slice(0, 3).map((x) => {
+    const n = parseInt(x, 10);
+    return Number.isFinite(n) ? n : 0;
+  });
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) {
+    const dx = x[i] === undefined ? 0 : x[i];
+    const dy = y[i] === undefined ? 0 : y[i];
+    if (dx > dy) { return 1; }
+    if (dx < dy) { return -1; }
+  }
+  return 0;
+}
+
+/**
+ * 决定内置救援插件是否让位。
+ * @returns {{ text: string, external: string, note: string }} text 为要拼进 patch 的让位行
+ */
+function resolveRescueYield(profileDir, io) {
+  /*
+   * 先确认这一版种子真的带内置救援行：回退到旧核心 / 旧 profile 时如果没有这一行，
+   * 让位行会变成"指向不存在条目"的告警（loader 只告警不报错，但日志会脏）。
+   */
+  let seedHasBuiltin = false;
+  try {
+    seedHasBuiltin = fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8').includes(RESCUE_ID_BUILTIN);
+  } catch (e) {
+    seedHasBuiltin = false;
+  }
+  if (!seedHasBuiltin) {
+    return { text: '', external: '', note: `种子不含 ${RESCUE_ID_BUILTIN}（旧核心？）⇒ 不写让位行` };
+  }
+  const external = readExternalRescueVersion(profileDir);
+  if (external === '') {
+    return { text: '', external: '', note: `外部未安装 ⇒ 内置 ${RESCUE_BUILTIN_VERSION} 生效（id=${RESCUE_ID_BUILTIN}）` };
+  }
+  if (compareLooseVersion(external, RESCUE_BUILTIN_VERSION) < 0) {
+    return {
+      text: '',
+      external,
+      note: `外部 ${external} 低于内置 ${RESCUE_BUILTIN_VERSION} ⇒ 内置生效（id=${RESCUE_ID_BUILTIN}，外部 id=${RESCUE_ID_EXTERNAL} 未被覆盖）`,
+    };
+  }
+  return {
+    text: `- id: ${RESCUE_ID_BUILTIN}\n  disabled: true`,
+    external,
+    note: `外部 ${external} 已安装 ⇒ 内置让位（id=${RESCUE_ID_BUILTIN} 置 disabled；安全中心由外部实现提供）`,
+  };
+}
+
+/**
+ * 把历史上指向**裸 id** 的救援停用行迁到内置独立 id。
+ *
+ * 只在"外部包不存在"时迁移：那时用户当年停用的必然是我们的内置插件。外部在的时候
+ * 那一行属于外部包，动它等于替用户决定别人的插件，一律不碰。备份后整行替换，失败不阻塞启动。
+ */
+function migrateRescueRows(rowsPath, hasExternal, io) {
+  if (hasExternal) { return false; }
+  const iLog = typeof (io || {}).log === 'function' ? io.log : () => {};
+  let text = '';
+  try {
+    text = fs.readFileSync(rowsPath, 'utf8');
+  } catch (e) {
+    return false;
+  }
+  const re = new RegExp(`^(-+\\s*id:\\s*)${RESCUE_ID_EXTERNAL}\\s*$`, 'm');
+  if (!re.test(text)) { return false; }
+  const next = text.replace(new RegExp(`^(-+\\s*id:\\s*)${RESCUE_ID_EXTERNAL}\\s*$`, 'gm'), `$1${RESCUE_ID_BUILTIN}`);
+  try {
+    fs.writeFileSync(`${rowsPath}.dshm-migrate.bak`, text, 'utf8');
+    fs.writeFileSync(rowsPath, next, 'utf8');
+    iLog(`用户插件行：救援停用行 id 已迁移 ${RESCUE_ID_EXTERNAL} → ${RESCUE_ID_BUILTIN}（备份 .dshm-migrate.bak）`);
+    return true;
+  } catch (e) {
+    iLog('救援停用行迁移失败（忽略，行仍保留原 id）：' + e.message);
+    return false;
+  }
+}
+
 /**
  * 把用户行拼到 profile 的 patch 文件末尾（E91 原逻辑）+ 预处理（D27 新增）。
  * io 注入 log/diag（与 dshm-installer.installSpec 的注入模式一致）：
@@ -545,6 +718,25 @@ function composeUserRows(profileDir, io) {
     iLog(`用户插件行：已从旧名 ${USER_ROWS_FILENAME.replace('.dshm-', '.hdsh-')} 迁移`);
   }
   const rowsPath = path.join(profileDir, USER_ROWS_FILENAME);
+  /*
+   * ── 内置救援插件让位（2026-11-12，docs/410）─────────────────────────────
+   *
+   * 【事故】外部 `dshm-boot-rescue@1.1.0` 与内置行**共用 entry id `dshm-boot-rescue`**。
+   * `dsh-app-boot` 的 bundle patches 先于 profile patch 应用，`applyPatches` 的 insert
+   * 只 push 不去重，`cordis-plugin-loader` 又用 `tree.store[options.id]` 按 id 建索引
+   * ⇒ 后写的内置 1.0.0 静默顶掉外部 1.1.0：外部 apply() 永不执行、安全中心消失，
+   * 而插件页因为共用同一个 id，「启停」切的是内置那一份，选不了运行版本。
+   * 真机取证：`dshm-boot-rescue.log` 165 行全部是 `@1.0.0`，从无 1.1.0。
+   *
+   * 【修法】内置行改用独立 id `dshm-boot-rescue-builtin`（种子与内置包 patch 同步改），
+   * 外部包在且版本不低于内置时，写一行 `disabled: true` 让内置让位 —— 两者永不共存，
+   * 也就不会出现 `/dshm-boot-rescue` 路由双注册。外部缺失/损坏/更旧时内置照常生效。
+   */
+  const rescue = resolveRescueYield(profileDir, opts);
+  if (rescue.note.length > 0) {
+    iDiag(`【救援插件】${rescue.note}`);
+  }
+  migrateRescueRows(rowsPath, rescue.external !== '', opts);
   // ── 市场配置托管行（P0）：包在才写，包不在自动清（见 ensureMarketRows）──
   const profileName = typeof opts.profile === 'string' && opts.profile.length > 0 ? opts.profile : 'ondevice';
   const hasMarket = ensureMarketRows(profileDir, profileName, opts);
@@ -570,7 +762,7 @@ function composeUserRows(profileDir, io) {
   } catch (e) {
     pendingCarried = '';
   }
-  if (rows.length === 0 && !hasMarket && pendingCarried.length === 0) {
+  if (rows.length === 0 && !hasMarket && pendingCarried.length === 0 && rescue.text.length === 0) {
     return;
   }
   let seed = '';
@@ -606,7 +798,7 @@ function composeUserRows(profileDir, io) {
       }
     }
   }
-  if (keptText.length === 0 && marketText.length === 0 && pendingCarried.length === 0) {
+  if (keptText.length === 0 && marketText.length === 0 && pendingCarried.length === 0 && rescue.text.length === 0) {
     iLog(`用户插件行全部未通过预检（${dropped.length} 行），本次不拼接`);
     return;
   }
@@ -626,7 +818,8 @@ function composeUserRows(profileDir, io) {
   const sanitized = sanitize(keptText);
   // 市场行排在用户行**之前**：它是本机托管的配置，用户行（含同名包的自定义行）在后、
   // 按"后写覆盖先写"的既有约定取得更高优先级——保持用户意图最后生效。
-  const bodyParts = [marketText, sanitized].filter((s) => s.length > 0);
+  // 救援让位行同理排在用户行之前：用户若在插件页显式重开内置，那条用户行照样最后生效。
+  const bodyParts = [marketText, rescue.text, sanitized].filter((s) => s.length > 0);
   // pendingCarried 已在上方（提前返回判定处）算好：那里读的是**覆盖后的种子**，
   // 与这里的 seed 同一个文件，所以直接复用，不再重复解析。
   const carried = pendingCarried;
@@ -1133,6 +1326,8 @@ module.exports = {
   cleanupQuarantineResidue,
   writeBootFailMarker,
   quarantineAfterBootFailure,
+  // 平台守卫行名单（供回归用例断言：用户层同名行必被丢弃）
+  PLATFORM_GUARD_ROWS,
   // 缺陷 4 的保留逻辑：导出供回归用例直接验证（防以后被静默改坏）
   carryForeignTopLevelEntries,
 };

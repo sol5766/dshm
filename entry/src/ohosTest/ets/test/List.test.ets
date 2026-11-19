@@ -20,4 +20,5 @@ export default function testsuite() {
   onDeviceProbeTest();
   // 判据类纯函数（核心版本激活/回滚/清理、插件三态、诊断分流、空态分档）
   coreDecisionTest();
+  // 会议纯逻辑（方案 Task 2）：累计转写去重合并、时长、文件名时间戳、Markdown 结构
 }

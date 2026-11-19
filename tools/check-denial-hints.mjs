@@ -126,6 +126,10 @@ try {
     join(pkgRoot, 'dshm-tool-fs-remove', 'lib', 'index.js'));
   copyFileSync(join(REMOVE_PLUGIN, HINTS_REL),
     join(pkgRoot, 'dshm-tool-fs-remove', HINTS_REL));
+  /* 2026-10-10（docs/137）：插件现在多一层 `./fs-fence.js`（文件访问范围闸门）——
+   * 必须一并搬进舞台，否则插件在 import 期就 ERR_MODULE_NOT_FOUND（那不是被测行为）。 */
+  copyFileSync(join(REMOVE_PLUGIN, "lib", "fs-fence.js"),
+    join(pkgRoot, "dshm-tool-fs-remove", "lib", "fs-fence.js"));
   /*
    * 两个桩只补**导出面**，不含任何行为：`defineTool` 原样返回定义；`FsError` 只要带 code。
    * 判据全部落在插件自己的代码上。

@@ -497,6 +497,49 @@ function makePkg(profileDir, name, pkgJson, files) {
     check('anchorDirs 里声明残缺的仍移除', after2.dsh.profile.bundles.length === 0, JSON.stringify(after2.dsh.profile.bundles));
   }
 
+  // ── 15. 平台守卫行：用户层的 optional-terminal-* 必被丢弃（种子权威） ──
+  {
+    check('导出 PLATFORM_GUARD_ROWS', mod.PLATFORM_GUARD_ROWS instanceof Set);
+    check('名单含 pwsh 与 bash 两行',
+      mod.PLATFORM_GUARD_ROWS.has('optional-terminal-pwsh')
+      && mod.PLATFORM_GUARD_ROWS.has('optional-terminal-bash'),
+      JSON.stringify([...mod.PLATFORM_GUARD_ROWS]));
+
+    // (a) prefilterUserRows：用户行里出现守卫 id（哪怕带 disabled: false）必须丢弃
+    const { profileDir } = makeProfileDir();
+    const rows = [
+      '# 用户行文件里的守卫覆盖（不该存在）',
+      '- id: optional-terminal-pwsh',
+      '  disabled: false',
+      '',
+      '- id: optional-terminal-bash',
+    ].join('\n');
+    const pre = mod.prefilterUserRows(rows, profileDir);
+    check('prefilter 丢弃 pwsh 守卫行', !pre.keptText.includes('optional-terminal-pwsh'), pre.keptText);
+    check('prefilter 丢弃 bash 守卫行', !pre.keptText.includes('optional-terminal-bash'), pre.keptText);
+    check('prefilter 丢弃计数 = 2',
+      pre.dropped.filter((d) => d.reason === 'platform-guard').length === 2,
+      JSON.stringify(pre.dropped));
+
+    // (b) carryForeignTopLevelEntries：种子**没有**的守卫行（optional-terminal-bash）
+    //     被用户层写下时必须丢弃 —— 这条只有守卫生效，种子去重路径管不到。
+    const seed = [
+      '- id: optional-terminal-pwsh',
+      '  disabled: true',
+    ].join('\n');
+    const prev = [
+      '- id: optional-terminal-bash',
+      '  disabled: true',
+      '- id: some-third-party-plugin',
+      '  config:',
+      '    k: v',
+    ].join('\n');
+    const carried = mod.carryForeignTopLevelEntries(seed, prev, { log: () => {} });
+    check('carry 丢弃种子没有的守卫行 bash', !carried.includes('optional-terminal-bash'), carried);
+    // 负控制臂：非守卫的普通外国行仍必须被 carry（守卫不能把一切都吞掉）
+    check('负控制：普通外国行仍被 carry', carried.includes('some-third-party-plugin'), carried);
+  }
+
   console.log(`\ncheck-user-rows-preflight：${pass} 项通过，${fail} 项失败`);
   process.exit(fail > 0 ? 1 : 0);
 })();

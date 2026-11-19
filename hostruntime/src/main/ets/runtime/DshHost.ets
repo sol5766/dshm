@@ -19,6 +19,7 @@
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { process } from '@kit.ArkTS';
 import { ActivationDecision, ActivationAction, CoreHealth, CoreState, CoreVersionRecord } from '../core/Types';
 import { CoreStore, CorePluginRow, CorePluginTotals, CoreTreeInfo, OpResult } from '../core/CoreStore';
 import { newestVersion } from '../core/Naming';
@@ -55,6 +56,8 @@ interface HostReadyRuntime {
 interface HostReadyFile {
   /** 入口脚本写下的本机启动链接（含 token） */
   url?: string;
+  /** 写文件的那个进程 pid（用于拒绝上一次进程遗留的旧 token，见 readCurrentPidReadyUrl） */
+  pid?: number;
   /** 入口脚本准备好的**可写工作区**（E98：建会话时传给 Host，避免默认工作区落在 `/`） */
   workspace?: string;
   runtime?: HostReadyRuntime;
@@ -126,10 +129,23 @@ export class DshHost {
   private transient: HostState | null = null;
   private lastFailureNote: string = '';
 
-  constructor(filesDir: string, port: RuntimePort) {
+  constructor(filesDir: string, port: RuntimePort, profile?: string, portOverride?: number) {
     this.store = new CoreStore(filesDir);
     this.port = port;
+    /*
+     * 【profile / 端口可覆盖（2026-11-02，docs/346 §4 方案 A）】
+     * 默认仍是 ondevice + 按包名推导端口（历史行为一个字节不变）。
+     * superagent 走**独立进程 + 独立 profile + 独立端口**，由调用方（SuperagentAbility）
+     * 显式给 'superagent' / 3082 —— 官方要求"与工作 profile 隔离"，这是端侧唯一能落地的形态。
+     */
+    this.profile = (profile !== undefined && profile.length > 0) ? profile : DshHost.PROFILE;
+    this.portOverride = portOverride;
   }
+
+  /** 本实例使用的 profile（默认 ondevice）。 */
+  private readonly profile: string;
+  /** 显式端口（undefined = 按包名推导）。 */
+  private readonly portOverride: number | undefined;
 
   store_(): CoreStore {
     return this.store;
@@ -243,7 +259,7 @@ export class DshHost {
 
   /** profile 目录（用户行的落点；dsh 读取的用户 patch 层也在这一层）。 */
   private profileDir(): string {
-    return `${this.store.homeDir()}/profiles/${DshHost.PROFILE}`;
+    return `${this.store.homeDir()}/profiles/${this.profile}`;
   }
 
   /**
@@ -369,7 +385,24 @@ export class DshHost {
     if (this.port.isRunning()) {
       this.transient = null;
       this.lastFailureNote = '';
-      return { ok: true, note: '核心已在运行', handle: this.handle };
+      /*
+       * 【"在跑"但本实例没有句柄 ⇒ 从 host-ready.json 把句柄捡回来（2026-11-10）】
+       * 典型场景：上一次 `start()` 在**端口预算内没等到应答**而失败，宿主其实还在起；
+       * 上层据此重试一次时，本实例的 `handle` 仍是 null。旧实现直接返回 `ok:true`
+       * 但 `handle:null`，上层只能把它当"未返回可用 Host"→ 又是一次失败发布。
+       * 入口脚本在就绪后会把带 token 的地址写进 `host-ready.json`，这里读回来即可
+       * 真正接上；读不到就如实保持 null（由上层继续等，不猜地址）。
+       */
+      if (this.handle === null) {
+        this.handle = this.handleFromReadyFile();
+      }
+      return {
+        ok: true,
+        note: this.handle === null
+          ? '核心已在运行（启动链接尚未落盘，稍后可从 host-ready.json 取回）'
+          : '核心已在运行',
+        handle: this.handle,
+      };
     }
     const probe: RuntimeProbe = await this.port.probe();
     if (!probe.available) {
@@ -408,7 +441,7 @@ export class DshHost {
     this.clearStaleStopRequest();
     try {
       const handle: HostHandle = await this.port.start(
-        this.store.coreDir(target), this.store.homeDir(), DshHost.PROFILE);
+        this.store.coreDir(target), this.store.homeDir(), this.profile, this.portOverride);
       this.handle = handle;
       this.transient = null;
       return { ok: true, note: `核心 ${target} 已启动`, handle: handle };
@@ -490,7 +523,7 @@ return { ok: false, message: `切换前必须停下当前核心，但停止失�
     let candidate: HostHandle | null = null;
     let failure: string = '';
     try {
-      candidate = await this.port.start(this.store.coreDir(version), this.store.homeDir(), DshHost.PROFILE);
+      candidate = await this.port.start(this.store.coreDir(version), this.store.homeDir(), this.profile, this.portOverride);
       this.handle = candidate;
     } catch (e) {
       failure = (e as Error).message;
@@ -576,6 +609,72 @@ return { ok: false, message: `回滚前停止当前核心失败：${stopped.mess
       this.lastFailureNote = `回滚后启动 ${target} 失败：${(e as Error).message}`;
       return { ok: false, message: this.lastFailureNote };
     }
+  }
+
+  /**
+   * 读 `host-ready.json` 里**属于本次进程**的启动地址（pid 不符/读不到都返回空串）。
+   *
+   * 【为什么必须校验 pid】文件可能是**上一次进程**留下的：dsh 每次启动换 token，
+   * 拿旧 token 去接只会换回 401（用户看到的「host 拒绝了本次令牌」）。
+   * `NodeRuntime.readAuthUrl()` 用的是同一道判据（pid 恒等），语义在这里保持一致。
+   */
+  private readCurrentPidReadyUrl(): string {
+    try {
+      const p: string = `${this.store.homeDir()}/host-ready.json`;
+      if (!fs.accessSync(p)) {
+        return '';
+      }
+      const parsed = JSON.parse(fs.readTextSync(p)) as HostReadyFile;
+      const url: string | undefined = parsed.url;
+      if (typeof url !== 'string' || url.length === 0) {
+        return '';
+      }
+      const pidInFile: string = `${parsed.pid}`;
+      if (pidInFile !== `${process.pid}`) {
+        hilog.info(DOMAIN, TAG, 'host-ready.json 属于旧进程（pid 不符），本实例句柄仍按未知处理');
+        return '';
+      }
+      return url;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /**
+   * 用入口脚本落盘的地址重建句柄（宿主已在跑、但本实例没有 handle 时用）。
+   *
+   * 【为什么从 URL 里取端口，而不是按包名推导】本层不知道包名（那是 NodeRuntime 的知识），
+   * 而 `host-ready.json` 里的地址就是**这次进程真正在听的**那个端口 —— 直接用它，
+   * 不会出现"按包名算 3120、实际听 3121"的串台。解析不出来就返回 null（不猜）。
+   */
+  private handleFromReadyFile(): HostHandle | null {
+    const url: string = this.readCurrentPidReadyUrl();
+    if (url.length === 0) {
+      return null;
+    }
+    const schemeEnd: number = url.indexOf('://');
+    if (schemeEnd < 0) {
+      return null;
+    }
+    const authorityStart: number = schemeEnd + 3;
+    let authorityEnd: number = url.length;
+    for (let i: number = authorityStart; i < url.length; i++) {
+      const ch: string = url.charAt(i);
+      if (ch === '/' || ch === '?' || ch === '#') {
+        authorityEnd = i;
+        break;
+      }
+    }
+    const authority: string = url.substring(authorityStart, authorityEnd);
+    const colon: number = authority.lastIndexOf(':');
+    if (colon <= 0) {
+      return null;
+    }
+    const port: number = Number(authority.substring(colon + 1));
+    if (!(port > 0 && port < 65536)) {
+      return null;
+    }
+    return { port: port, url: url };
   }
 
   /**

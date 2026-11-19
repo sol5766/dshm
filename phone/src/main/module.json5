@@ -1,0 +1,297 @@
+{
+  "module": {
+    "name": "phone",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "phone"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "srcEntry": "./ets/abilitystage/AppAbilityStage.ets",
+    /*
+     * 【应用级沉浸材质开关（API 26）—— 2026-10-11 接入】
+     *
+     * `ohos.arkui.UIMaterial.state` 是官方给的**应用级**沉浸光感（空间化材质：内容相关毛玻璃 /
+     * 按压弹性光效 / 滑动透明度渐变）总闸。仅**对本 entry 类型 module 生效**（官方原文）。
+     *
+     * 三档（`disable` / `default` / `enable`）：
+     *   · 不配 = `default`：Dialog / Toast / AlphabetIndexer / 文本选择菜单**默认开**材质；
+     *   · `enable`：在 `default` 之上**额外**给 Chip / Select / Menu / Toggle / Slider / bindSheet /
+     *     SelectionMenu 默认开，且**材质优先于组件自设的背景色 / 模糊 / 阴影 / 边框**；
+     *   · `disable`：全关 —— ⚠️ 它**会连带封死**主动调 `systemMaterial()`（并非"只是默认不开"）。
+     *
+     * 本仓取 `enable`（用户 2026-10-11 拍板"接入"）。两点须知：
+     *   ① 生效条件 = 设备 API ≥ 26；当前 `compatibleSdkVersion` 为 `6.1.0(23)`
+     *      ⇒ API 23/24 手机上这条 metadata **被平台忽略**，界面退回阴影层级那套；
+     *   ② 材质强弱**不是应用定的** —— 官方原文「同一材质的效果，会受到系统设置应用中**沉浸光感**配置项
+     *      的影响」⇒ 用户可在系统设置里调弱或关掉。
+     *   ③ ⚠ 只翻总闸**不够**：平板桌面模式的菜单（子窗渲染）**不会**因此自动变材质，
+     *      仍须在**声明点**显式挂 `systemMaterial`（见 `WebApp.ets` 的 `@Builder MenuTitle`）。
+     * 要改档位只动下面这一行 `value`。决策背景与取舍见 `docs/147`（菜单落地见 §13.5）。
+     */
+    "metadata": [
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "enable"
+      }
+    ],
+    "requestPermissions": [
+
+      {
+        "name": "ohos.permission.INTERNET",
+        "reason": "$string:perm_internet_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      
+      
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
+        "reason": "$string:perm_keep_background_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.FILE_ACCESS_PERSIST",
+        "reason": "$string:perm_file_access_persist_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.STORE_PERSISTENT_DATA",
+        "reason": "$string:perm_store_persist_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
+      /*
+       * 【移动版权限面：固定 9 条】
+       *
+       * 本移动包的 `requestPermissions` 固定为以下 9 条：
+       *   INTERNET / KEEP_BACKGROUND_RUNNING / FILE_ACCESS_PERSIST /
+       *   STORE_PERSISTENT_DATA / VIBRATE / READ_PASTEBOARD / MICROPHONE /
+       *   GET_NETWORK_INFO / RUNNING_LOCK
+       * 其中需要 ACL 审批的只有 `READ_PASTEBOARD`；`VIBRATE`、`FILE_ACCESS_PERSIST`
+       * 是 normal / system_grant，`MICROPHONE` 是 normal / user_grant。
+       * `GET_NETWORK_INFO` / `RUNNING_LOCK` 是 normal / system_grant。
+       * HAP 包内原生库不需要 `ALLOW_EXTERNAL_NATIVE_CODE`，本应用不申请。
+       * `MICROPHONE` 与 `READ_PASTEBOARD` 还需要在用户操作时做运行时授权。
+       * 任何第 10 条权限都不得加入：ACL 未获批准时声明受限权限会让整包按
+       * `PERMISSION_ACL_RULE` 拒装。
+       *
+       * 【9 条够不够用：够，但要知道边界】移动权限包的宿主域是 `u:r:debug_hap:s0`（降级域），
+       * 两条实测结论（2026-10-14，设备内嵌 python 桥逐条探针）：
+       *   · 应用数据区里的 ELF **不能 `execve`**（`ash`/`bash`/`rg`/`python3` 全 `EPERM`）
+       *     ⇒ 需要"起进程"的路线一律改**进程内**等价实现（`docs/115` 的解包、插件的
+       *     `runProfilePnpm` / 市场桥都是这个形态）。
+       *   · **拿不到可执行内存**：anon `mmap(RWX)`、`mprotect(RX|RWX)` 一律 `EINVAL(22)`；
+       *     `memfd_create(MFD_EXEC)` 内核不支持，`memfd+mprotect(RX)` 被 SELinux
+       *     execmem 拒成 `EACCES(13)` ⇒ **任何 JIT 引擎在本包内都不可能起来**。
+       *     ⇒ 手持档 VM 那条通道走 **TCI 解释档**（`docs/154`），不是 JIT 档。
+       *
+       * 改动本数组后**必跑** `node tools/check-permission-surface.mjs`（CI 里也有一步）。
+       */
+      {
+        // 复制、粘贴和会议录音开始/结束时的轻触反馈。normal / system_grant，
+        // 不弹运行时授权框；无马达或系统关闭触感时由业务侧静默降级。
+        "name": "ohos.permission.VIBRATE",
+        "reason": "$string:perm_vibrate_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+      {
+        // “编辑 → 粘贴”会读取系统剪贴板纯文本。该权限是 system_basic / user_grant：
+        // 必须同时有 AGC ACL 审批、Profile allowed-acls、manifest 声明和运行时授权。
+        "name": "ohos.permission.READ_PASTEBOARD",
+        "reason": "$string:perm_read_pasteboard_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+      {
+        // 语音输入（实验）：官方语音 UI 走浏览器 `navigator.mediaDevices.getUserMedia`，
+        // 录音发生在**内嵌 Web 组件**里，所以除了这里声明，还必须在 `Web()` 上挂
+        // `onPermissionRequest` 把 AUDIO_CAPTURE 放行（两件事缺一不可）：
+        //   ① 声明了但没挂回调 ⇒ WebView 一律 deny()，网页侧拿不到麦克风；
+        //   ② 挂了回调但没声明 ⇒ 系统层没有该权限，回调放行也会在底层失败。
+        // 该权限是 `user_grant`/`NORMAL`（非 system 权限），普通应用走运行时弹窗即可。
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:perm_microphone_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+    
+      {
+        "name": "ohos.permission.GET_NETWORK_INFO",
+        "reason": "$string:perm_get_network_info_reason",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "always" }
+      },
+      {
+        "name": "ohos.permission.RUNNING_LOCK",
+        "reason": "$string:perm_running_lock_reason",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "always" }
+      }
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "launchType": "specified",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        /*
+         * 【长时任务类型声明 —— 这是 `startBackgroundRunning` 能成功的前提】
+         *
+         * 实测：不声明本字段时
+         * `backgroundTaskManager.startBackgroundRunning` 直接失败
+         * （`platform/keepalive: startBackgroundRunning failed`），
+         * 光有 `ohos.permission.KEEP_BACKGROUND_RUNNING` **不够**。
+         *
+         * 取值取自 SDK 的 module schema（`toolchains/modulecheck/module.json`）：
+         * `enum: [dataTransfer, audioPlayback, audioRecording, location,
+         *         bluetoothInteraction, multiDeviceConnection, wifiInteraction, ...]`
+         *
+         * 为什么选 `dataTransfer`：本应用在后台做的是维持与 Host 的长连接、
+         * 收发会话数据 —— 语义上就是数据传输。用 audioPlayback 之类去骗保活
+         * 属于滥用系统能力（通知栏会显示"正在播放"），会被审核拒绝。
+         *
+         * 为什么它是必须的：窗口或页面不可见但任务仍在运行时，没有它进程会被挂起，
+         * 连接与任务随之中断。
+         */
+        "backgroundModes": [
+          "dataTransfer"
+        ],
+        "exported": true,
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "ohos.want.action.home"
+            ]
+          },
+          {
+            /*
+             * 官方账号授权完成页在 login_source=desktop 时会跳转 `dsh://open`，
+             * 让桌面客户端回到前台。DSHM 三端都是原生壳，必须自己声明并消费该 URI；
+             * 否则浏览器的「返回 DeepSeek Harness」按钮只有一次无接收方的跳转。
+             */
+            "entities": [
+              "entity.system.browsable"
+            ],
+            "actions": [
+              "ohos.want.action.viewData"
+            ],
+            "uris": [
+              {
+                "scheme": "dsh",
+                "host": "open"
+              }
+            ]
+          }
+        ],
+        /*
+         * 桌面快捷方式（长按图标 → 快捷方式列表 → 点击直达）。
+         *
+         * 目标动作经 wants.parameters 的 `dshAction` 传给 EntryAbility，由页面侧白名单
+         * 分发（`WebApp.ets` 的 `applyLaunchAction`；文档见 `docs/172` §5.2）。
+         * 该 profile 里 `wants.bundleName` 必须与 AppScope/app.json5 的移动包名
+         * `com.dshm.dshclient` 保持一致（会议快捷方式已随 docs/328 剥离移除，现只剩 new_session 一条）。
+         */
+        "metadata": [
+          {
+            "name": "ohos.ability.shortcuts",
+            "resource": "$profile:shortcuts_config"
+          }
+        ]
+      },
+    ],
+    "extensionAbilities": [
+      {
+        "name": "EntryBackupAbility",
+        "srcEntry": "./ets/entrybackupability/EntryBackupAbility.ets",
+        "type": "backup",
+        "exported": false,
+        "metadata": [
+          {
+            "name": "ohos.extension.backup",
+            "resource": "$profile:backup_config"
+          }
+        ],
+      },
+      {
+        /*
+         * 端侧 A2A 智能体服务（docs/172 §5.4）。
+         *
+         * `type: "agent"` + metadata `ohos.extension.agent` 是官方接入三件套的两处；
+         * 第三处是 `resources/base/profile/agent_config.json`（AgentCard）。
+         * ⚠ 本项 `name`（AgentExtAbility）= 小艺开放平台"应用服务名称"，两边必须逐字一致。
+         * ⚠ 平台侧另需关联 AGC 已发布应用并导入 agent_config.json（用户操作，见 docs/172 §5.4）。
+         */
+        "name": "AgentExtAbility",
+        "description": "$string:agent_ext_desc",
+        "icon": "$media:startIcon",
+        "type": "agent",
+        "exported": true,
+        "srcEntry": "./ets/agentextability/AgentExtAbility.ets",
+        "metadata": [
+          {
+            "name": "ohos.extension.agent",
+            "resource": "$profile:agent_config"
+          }
+        ]
+      },
+      {
+        /*
+         * 桌面服务卡片（Form Kit，docs/178）：会话进度 + 余额/ token 用量。
+         * 标准桌面卡片不走实况窗那套 AGC 权益审批；锁屏/待机卡片才需要另申请。
+         * 五元组（bundle/module/ability/formName/dimension）一旦上线不要改：改了系统会删掉已添加卡片。
+         */
+        "name": "UsageFormAbility",
+        "srcEntry": "./ets/form/UsageFormAbility.ets",
+        "label": "$string:UsageFormAbility_label",
+        "description": "$string:UsageFormAbility_desc",
+        "type": "form",
+        "metadata": [
+          {
+            "name": "ohos.extension.form",
+            "resource": "$profile:form_config"
+          }
+        ]
+      }
+    ]
+  }
+}

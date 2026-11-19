@@ -1,0 +1,21 @@
+{
+  "name": "@deepseek-ai/dshm-tool-browser",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM PC 工程的浏览器自动化工具：把模型可见的 browser_* 工具接到宿主进程内的浏览器桥；默认不注册海泰内核不支持的 browser_screenshot。见 lib/index.js 头注与 docs/226。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5"
+  }
+}

@@ -1,0 +1,121 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, copyFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { gunzipSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
+import { guestExtraToolBootstrapScript, stageGuestPackages } from '../hostcore/plugins/dshm-vm-bash/lib/vm.js';
+import { QgaSession } from '../hostcore/plugins/dshm-vm-bash/lib/qga.js';
+
+const root = mkdtempSync(join(tmpdir(), 'guest-provision-'));
+for (const dir of ['usr/bin', 'usr/local/bin', 'usr/local/sbin', 'tmp', 'opt', 'mnt/share/vm/guestpkgs']) {
+  mkdirSync(join(root, dir), { recursive: true });
+}
+const script = guestExtraToolBootstrapScript().replace(/\/(usr|tmp|opt|mnt)\//g, `${root}/$1/`).replaceAll('-C / ', `-C ${root} `);
+const run = (text, env = {}) => spawnSync('sh', ['-c', text], { encoding: 'utf8', timeout: 10000, env: { ...process.env, ...env } });
+assert.equal(run(script).status, 0);
+const helper = join(root, 'usr/local/sbin/dshm-ensure-guest-tool');
+assert.ok(existsSync(join(root, 'usr/bin/python3')));
+assert.ok(existsSync(join(root, 'usr/bin/pnpm')));
+assert.ok(existsSync(join(root, 'usr/local/bin/git')));
+const missing = run(`sh ${helper} pnpm`);
+assert.notEqual(missing.status, 0);
+assert.ok(!existsSync(join(root, 'usr/local/sbin/dshm-guest-tool-pnpm')));
+assert.ok(!existsSync(join(root, 'tmp/.dshm-guest-tool-pnpm.lock')));
+copyFileSync('hostruntime/src/main/resources/resfile/vm/guestpkgs/pnpm-9.15.9-guest.tar.gz', join(root, 'mnt/share/vm/guestpkgs/pnpm-9.15.9-guest.tar.gz'));
+writeFileSync(join(root, 'usr/bin/node'), '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
+const installed = run(`sh ${helper} pnpm`, { PATH: `${root}/usr/bin:${process.env.PATH}` });
+assert.equal(installed.status, 0, installed.stderr);
+assert.ok(existsSync(join(root, 'opt/dshm/pnpm/bin/pnpm.cjs')));
+assert.ok(!existsSync(join(root, 'tmp/.dshm-guest-tool-pnpm.lock')));
+assert.ok(existsSync(join(root, 'usr/local/sbin/dshm-guest-tool-pnpm')));
+const source = readFileSync(helper, 'utf8');
+assert.ok(source.includes('git:libcurl-*'));
+assert.ok(source.includes('curl-v2'));
+assert.ok(!source.includes('*:git-'));
+writeFileSync(join(root, 'usr/local/sbin/dshm-guest-tool-git'), 'old');
+writeFileSync(join(root, 'usr/bin/git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+const missingGit = run(`sh ${helper} git --version`);
+assert.notEqual(missingGit.status, 0);
+assert.match(missingGit.stderr, /missing archive libcurl/);
+assert.ok(!existsSync(join(root, 'usr/local/sbin/dshm-guest-tool-git-curl-v2')));
+const pyRoot = join(root, 'opt/dshm/python');
+const pythonArchive = 'hostruntime/src/main/resources/resfile/toolchain/python/cpython-3.12.14-aarch64-musl.tar.gz';
+const archiveBytes = readFileSync(pythonArchive);
+const tarBytes = gunzipSync(archiveBytes);
+let expectedPython;
+for (let offset = 0; offset + 512 <= tarBytes.length;) {
+  const header = tarBytes.subarray(offset, offset + 512);
+  const name = header.subarray(0, 100).toString().split('\0')[0];
+  const size = parseInt(header.subarray(124, 136).toString(), 8) || 0;
+  if (name === 'python/bin/python3.12') expectedPython = tarBytes.subarray(offset + 512, offset + 512 + size);
+  offset += 512 + Math.ceil(size / 512) * 512;
+}
+assert.ok(expectedPython);
+assert.equal(expectedPython.subarray(0, 4).toString('hex'), '7f454c46');
+assert.equal(expectedPython.readUInt16LE(18), 183);
+const phoff = Number(expectedPython.readBigUInt64LE(32));
+let interpreter = '';
+for (let index = 0; index < expectedPython.readUInt16LE(56); index++) {
+  const offset = phoff + index * expectedPython.readUInt16LE(54);
+  if (expectedPython.readUInt32LE(offset) !== 3) continue;
+  const start = Number(expectedPython.readBigUInt64LE(offset + 8));
+  const size = Number(expectedPython.readBigUInt64LE(offset + 32));
+  interpreter = expectedPython.subarray(start, start + size).toString().replace(/\0$/, '');
+}
+assert.equal(interpreter, '/lib/ld-musl-aarch64.so.1');
+const workVm = join(root, 'mnt/share/vm');
+const rootfs = join(workVm, 'rootfs.qcow2');
+writeFileSync(rootfs, 'existing user rootfs');
+stageGuestPackages('hostruntime/src/main/resources/resfile/vm', workVm);
+assert.deepEqual(readFileSync(join(workVm, 'guestpkgs/cpython-3.12.14-aarch64-musl.tar.gz')), archiveBytes);
+assert.equal(readFileSync(rootfs, 'utf8'), 'existing user rootfs');
+assert.throws(() => stageGuestPackages(join(root, 'missing-resfile/vm'), workVm), /source missing/);
+stageGuestPackages('hostruntime/src/main/resources/resfile/vm', workVm);
+assert.equal(readFileSync(rootfs, 'utf8'), 'existing user rootfs');
+const pythonExec = `exec ${root}/opt/dshm/python/bin/python3.12 "$@"`;
+assert.ok(source.includes(pythonExec));
+writeFileSync(helper, source.replace(pythonExec, 'printf "PYTHON_EXEC_BOUNDARY\\n"; exit 0'));
+const pythonRun = run(`sh ${helper} python3 -V`);
+assert.equal(pythonRun.status, 0, pythonRun.stderr);
+assert.match(pythonRun.stdout, /PYTHON_EXEC_BOUNDARY/);
+assert.deepEqual(readFileSync(join(pyRoot, 'bin/python3.12')), expectedPython);
+assert.ok(readFileSync(join(pyRoot, 'lib/python3.12/encodings/__init__.py')).length > 0);
+assert.ok(existsSync(join(root, 'usr/local/sbin/dshm-guest-tool-python3')));
+const pythonBytes = readFileSync(join(pyRoot, 'bin/python3.12'));
+assert.equal(run(script).status, 0);
+assert.deepEqual(readFileSync(join(pyRoot, 'bin/python3.12')), pythonBytes);
+const readyPnpm = run(`sh ${helper} pnpm`, { PATH: `${root}/usr/bin:${process.env.PATH}` });
+assert.equal(readyPnpm.status, 0, readyPnpm.stderr);
+
+const session = new QgaSession('/unused');
+let polls = 0;
+session.call = async (command) => command === 'guest-exec' ? { pid: 42 }
+  : { exited: ++polls >= 12, exitcode: 0 };
+const started = Date.now();
+const result = await session.exec('/bin/sh', ['-c', 'true'], 10000, 10);
+assert.equal(result.polls, 12);
+assert.ok(Date.now() - started >= 180);
+if (process.argv.includes('--self-test')) {
+  const broken = script.replace('"${1:-}" =', '"$1" =');
+  assert.notEqual(broken, script);
+  writeFileSync(helper, source.replace('"${1:-}" =', '"$1" =').replace('if ready;', 'if false;'));
+  const failed = run(`sh ${helper} pnpm`, { PATH: `${root}/usr/bin:${process.env.PATH}` });
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /parameter.*not set|unbound variable/);
+  writeFileSync(helper, source);
+  const qgaSource = readFileSync(new URL('../hostcore/plugins/dshm-vm-bash/lib/qga.js', import.meta.url), 'utf8');
+  const mutant = qgaSource.replace('Math.min(Math.max(pollMs, pollMs * 2 ** Math.min(4, Math.floor(polls / 5))), 1000)', 'pollMs');
+  assert.notEqual(mutant, qgaSource);
+  const { QgaSession: BrokenSession } = await import(`data:text/javascript;base64,${Buffer.from(mutant).toString('base64')}`);
+  const brokenSession = new BrokenSession('/unused');
+  let count = 0;
+  brokenSession.call = async (command) => command === 'guest-exec' ? { pid: 42 } : { exited: ++count >= 12, exitcode: 0 };
+  const before = Date.now();
+  await brokenSession.exec('/bin/sh', [], 10000, 10);
+  assert.ok(Date.now() - before < 180);
+}
+console.log('PASS guest production bootstrap fixture: missing archive, pnpm payload, empty argv, lock release, bounded polling');
+console.log(`CPython archive sha256=${createHash('sha256').update(archiveBytes).digest('hex')}; ELF AArch64 interpreter=${interpreter}; execution boundary intercepted, no guest runtime claim`);
+console.log(`Fixture retained: ${root}`);

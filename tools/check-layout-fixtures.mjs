@@ -27,6 +27,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { devecoRootCandidates } from './lib/deveco-home.mjs';
 
 const ROOT = process.cwd();
 const WORK = join(ROOT, 'dist', 'layout-fixtures');
@@ -105,9 +106,15 @@ function findTscCandidates() {
   const clt = process.env.DEVECO_CLI_CLT_PATH;
   if (clt) list.push(join(clt, 'codelinter', 'node_modules', 'typescript', 'bin', 'tsc'));
   list.push('/home/node/deveco-clt/command-line-tools/codelinter/node_modules/typescript/bin/tsc');
-  const programFiles = process.env.ProgramFiles ?? process.env.PROGRAMFILES;
-  if (programFiles !== undefined && programFiles.length > 0) {
-    const tools = join(programFiles, 'Huawei', 'DevEco Studio', 'tools');
+  // 【2026-10-10 改】不再只试 `%ProgramFiles%\Huawei\DevEco Studio\tools`：DevEco 被从 C 盘
+  // 搬到 `D:\Program Files\Huawei\DevEco Studio` 后那一条恒落空 ⇒ 脚本 exit 3（"没跑成"）。
+  // 统一解析口见 tools/lib/deveco-home.mjs。
+  for (const devEcoRoot of devecoRootCandidates()) {
+    // 【2026-11-10 修】CLT 布局（/data/service/hnp/hmos-clt.org/hmos-clt_1.0.0）**没有 tools/ 前缀**：
+    // typescript 在 <CLT>/codelinter/node_modules/...。原来只试 <root>/tools/... ⇒ 恒落空 ⇒ exit 3。
+    list.push(join(devEcoRoot, 'codelinter', 'node_modules', 'typescript', 'bin', 'tsc'));
+    const tools = join(devEcoRoot, 'tools');
+    list.push(join(tools, 'codelinter', 'node_modules', 'typescript', 'bin', 'tsc'));
     list.push(join(tools, 'hvigor', 'hvigor', 'node_modules', 'typescript', 'bin', 'tsc'));
     list.push(join(tools, 'hvigor', 'hvigor-ohos-plugin', 'node_modules', 'typescript', 'bin', 'tsc'));
     list.push(join(tools, 'ohpm', 'node_modules', 'typescript', 'bin', 'tsc'));
@@ -149,6 +156,30 @@ function buildAndLoad() {
   const globals = join(SRC, 'globals.d.ts');
   writeFileSync(globals, GLOBALS_DTS, 'utf8');
 
+  /*
+   * 【2026-11-10 补】`platform` 是仓库内的 HSP 模块（`platform/src/main/ets/Index.ets` 再导出
+   * `ui/Tokens` 的 Sp/Radius/Border/Fs/Lh/Dur/Sz/Breakpoint/SemanticColor），而
+   * `appstate/ui/{Tokens,Breakpoints,LayoutController,ShellTracks}.ets` 都从 'platform' 取令牌。
+   * 本 fixture 把源文件拍平到 dist 后裸模块 `platform` 无处可解析 ⇒ tsc TS2307 ⇒ exit 1。
+   * 这不是"源码不合法 TS"，是本 harness 缺了一层模块解析；而它长期以 exit 3 收场（找不到 tsc），
+   * 于是这个真实缺口一直没暴露。
+   *
+   * 做法：把 **同一份** `platform/src/main/ets/ui/Tokens.ets` 原样放进 node_modules/platform，
+   * 让 tsc 与真实包解析到同一个源文件（不是写个假 stub —— 那会让几何断言失去意义）。
+   * 该文件零 import，可直接当 TS 编译；令牌改错值，fixture 会如实报错。
+   */
+  const platformTokens = join(ROOT, 'platform/src/main/ets/ui/Tokens.ets');
+  if (!existsSync(platformTokens)) {
+    console.error('缺文件：platform/src/main/ets/ui/Tokens.ets（fixture 的令牌来源）');
+    process.exit(2);
+  }
+  const platformDir = join(SRC, 'node_modules', 'platform');
+  mkdirSync(platformDir, { recursive: true });
+  cpSync(platformTokens, join(SRC, 'platform.ts'));
+  tsFiles.push(join(SRC, 'platform.ts'));
+  // 只给 tsc 一个类型入口（.d.ts 不产 JS），真身仍是被编译的 platform.ts。
+  writeFileSync(join(platformDir, 'index.d.ts'), "export * from '../../platform';\n", 'utf8');
+
   try {
     execFileSync(process.execPath, [
       tsc,
@@ -166,6 +197,16 @@ function buildAndLoad() {
     console.error(out.trim() || '(无输出)');
     process.exit(1);
   }
+
+  /*
+   * 编译期用 index.d.ts 解析，运行期还得让 `require('platform')` 落到同一份产物：
+   * 在 OUT 下补一个同名包，转出 ../../platform.js（tsc 已把 platform.ts 编好）。
+   */
+  const outPlatform = join(OUT, 'node_modules', 'platform');
+  mkdirSync(outPlatform, { recursive: true });
+  writeFileSync(join(outPlatform, 'package.json'),
+    `${JSON.stringify({ name: 'platform', version: '0.0.0', main: 'index.js' }, null, 2)}\n`, 'utf8');
+  writeFileSync(join(outPlatform, 'index.js'), "module.exports = require('../../platform.js');\n", 'utf8');
 
   // 运行时垫片：`Tokens.ets` 在**模块顶层**就调 ArkUI 全局 `$r(...)` 取系统资源，
   // 而 Node 里没有这个全局（实测：直接 require 会 `ReferenceError: $r is not defined`）。
@@ -1473,33 +1514,58 @@ console.log('\n## P0 页面框架：面板注册表 + 导航状态（页面 ≠ 
   {
     const { sidebarExpandedForMode, sidebarTrackWidthOf } = ST;
 
-    // 三态取值（P2-17 起；P5-2 改成**按形态**给默认）
-    t.eq('没存过 + 三栏 ⇒ 默认展开（shellTracksOf 说三栏的侧栏是 panel）',
-      sidebarExpandedForMode('triple', undefined), true);
-    t.eq('没存过 + 双栏 ⇒ 默认收起（放不下两条展开轨道）',
-      sidebarExpandedForMode('double', undefined), false);
-    t.eq('没存过 + 单栏 ⇒ 展开无意义，取值仍为 true（呈现恒为浮层）',
+    /*
+     * 2026-10-31 规则重写（docs/325）：**形态不再参与展开与否的判定**。
+     *
+     * 旧规则「没存过 ⇒ mode !== DOUBLE」导致真机上"选完工作区侧栏自己收回去"
+     * （布局重算让 mode 在 double/triple 之间跳，侧栏跟着翻转）。
+     * 现在只有两个输入：用户显式偏好（有就用它）、否则常驻展开。
+     */
+    t.eq('没存过 + 三栏 ⇒ 常驻展开', sidebarExpandedForMode('triple', undefined), true);
+    t.eq('没存过 + 双栏 ⇒ **同样常驻展开**（不再默认收起）',
+      sidebarExpandedForMode('double', undefined), true);
+    t.eq('没存过 + 单栏 ⇒ 取值 true（呈现恒为浮层，此值不参与判定）',
       sidebarExpandedForMode('single', undefined), true);
-    t.eq('存过 true ⇒ 展开（**覆盖形态默认**：双栏也照给）',
-      sidebarExpandedForMode('double', true), true);
+    t.eq('存过 true ⇒ 展开', sidebarExpandedForMode('double', true), true);
     t.eq('存过 false ⇒ 保持收起（下次启动不擅自展开）',
       sidebarExpandedForMode('triple', false), false);
+    /*
+     * **核心回归**：同一个"存过"值在两种形态下必须给出同一结果 ——
+     * 这正是"形态把侧栏收回去"的反面。旧实现在没存过时会 fail 这一条。
+     */
+    t.eq('**形态不再影响展开态**（double / triple 对同一 stored 结果相同）',
+      sidebarExpandedForMode('double', undefined) === sidebarExpandedForMode('triple', undefined)
+      && sidebarExpandedForMode('double', false) === sidebarExpandedForMode('triple', false),
+      true);
 
-    // 轨道宽度 = 实际呈现的宽度（这是 P5-2 修的那条：此前它按形态默认算）
+    // 轨道宽度 = 实际呈现的宽度
     t.eq('三栏 + 没存过 ⇒ 完整面板宽', sidebarTrackWidthOf('triple', undefined), 240);
     t.eq('三栏 + 收起 ⇒ **rail 宽（腾出的 184vp 真给主区）**',
       sidebarTrackWidthOf('triple', false), 56);
-    t.eq('双栏 + 没存过 ⇒ rail 宽（默认就是收起的）',
-      sidebarTrackWidthOf('double', undefined), 56);
+    t.eq('双栏 + 没存过 ⇒ **完整面板宽（常驻，不再退成 rail）**',
+      sidebarTrackWidthOf('double', undefined), 240);
+    t.eq('双栏 + 用户收起 ⇒ rail 宽', sidebarTrackWidthOf('double', false), 56);
     t.eq('双栏 + 用户展开 ⇒ 完整面板宽', sidebarTrackWidthOf('double', true), 240);
     t.eq('单栏 ⇒ 0（抽屉与底部标签都不占侧边宽度）',
       sidebarTrackWidthOf('single', undefined), 0);
     t.eq('单栏即便"展开"也是 0（那个档位没有并排的侧栏）',
       sidebarTrackWidthOf('single', true), 0);
-    // 与决策里的 nav 宽度**故意不同**：决策是"按形态该留多少"，这里是"现在实际多宽"
-    t.eq('rail 宽与 rail 呈现一致（56 = Sz.NAV_RAIL）',
-      sidebarTrackWidthOf('double', undefined) === 56 && ST.sidebarPresentationOf('double', undefined) === 'rail',
-      true);
+    /*
+     * 【docs/330：收起不得跨启动持久化】纯函数判不了这件事 —— 它只回答"给定 stored 返回什么"。
+     * 真正让平板上侧栏"永远不常驻"的，是**启动时把 preferences 里旧存的 `false` 读回来**
+     * （用户历史上点过一次收起，那条 `false` 就永久生效了）。
+     * 这里直接钉住宿主的接线：`Index.ets` 不得再调用 `loadSidebarExpanded()` /
+     * `saveSidebarExpanded()` —— 收起只是一次运行内的动作。
+     */
+    {
+      // 【2026-11-10 修】原来写的是未定义的 `read()`（本文件只 import 了 `readFileSync`）。
+      // 该分支此前永远到不了：门禁在找 tsc 时就 exit 3，把这个 ReferenceError 一起盖住了。
+      const idx = readFileSync(join(ROOT, 'entry/src/main/ets/pages/Index.ets'), 'utf8');
+      t.eq('宿主启动时不再读回侧栏旧偏好（否则"点过一次收起"会永久生效）',
+        !idx.includes('loadSidebarExpanded'), true);
+      t.eq('宿主点收起时不再落盘（收起只对本次运行有效）',
+        !idx.includes('saveSidebarExpanded'), true);
+    }
   }
   // 侧栏 2（工作区 / 设置；核心席位按 E110 不可用）、右栏 7（详情 / 文件 / 轨迹 / 工具 / 子代理 / 交付物 / 预览）—— 可用清单与形态无关，只与注册表有关
   t.eq('**三种形态的面板清单一致**（信息架构不随设备变）',

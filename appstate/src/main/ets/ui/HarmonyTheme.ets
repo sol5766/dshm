@@ -25,7 +25,7 @@
  * 本文件里出现的每个系统资源名都是**编译期验证过存在**的，不是"看起来像"。
  */
 
-import { Border, Dur, Fs, Lh, Radius, Sp, Sz } from './Tokens';
+import { Border, Dur, Fs, Lh, Radius, Sp, Sz } from 'platform';
 
 // ───────────────────────── ① 语义颜色 ─────────────────────────
 
@@ -181,6 +181,11 @@ export interface ShadowLevel {
 }
 
 export class HarmonyElevation {
+  // 【防御性约定：radius 不要写 0】本仓唯一 `.shadow()` 调用点（`NativePrimitives.ets`）
+  // 会把这里的 `radius` 直接透给 ArkUI；`radius: 0` 在部分版本上语义含混（可能退化为
+  // "有阴影但不模糊"而非"无阴影"），要"无阴影"请**整段不调用 `.shadow()`**，不要靠置零。
+  // ⚠️ 来源是经验式推断，**在官方 changelog（7.0.0.17–.22/.24 的 ArkUI 条目）里查无此条**
+  // （见 `docs/147` §6②），故仅作防御性约定，不当作已证事实。
   /** 贴地（列表项、内联卡片）：几乎只有一层分隔感 */
   static readonly FLAT: ShadowLevel = { radius: 4, offsetY: 1, alpha: 0.04 };
   /** 抬起（Composer、浮动操作区） */
@@ -192,26 +197,41 @@ export class HarmonyElevation {
 // ───────────────────────── ③b 材质（Material） ─────────────────────────
 
 /**
- * 材质层：**当前不启用系统沉浸光感**，用系统阴影 + 半透明表面表达层次。
+ * 材质层：系统沉浸光感**已按应用级开关接入**（`module.json5` 的 `ohos.arkui.UIMaterial.state = enable`，
+ * 2026-10-11 接入）；设备不具备该能力（API < 26）时，层次退回系统阴影 + 半透明表面。
  *
- * 【这是一个已决策项，不是待办】（2026-09-14，项目负责人决定）
+ * 【口径沿革】（2026-09-14 决定不启用 → 2026-10-11 抬 target 后启用）
  * 官方「沉浸光感」（空间化材质：内容相关毛玻璃、按压弹性光效、滑动透明度渐变，
- * 覆盖 Popup/Menu/BindSheet/Dialog 等浮层）明确要求 **`targetAPIVersion >= 26`**，
- * 而本仓 `build-profile.json5` 固定在 `compatibleSdkVersion: 6.1.1(24)`。
- * 决定是：**API 暂定保持 24，后期再考虑升级** ⇒ 现在**不**引入需要 26 的 API。
+ * 覆盖 Popup/Menu/BindSheet/Dialog 等浮层）要求 **`targetAPIVersion >= 26`**。
+ * ⚠️ 两句旧注释**都已过期**，别照抄：① "本仓固定在 `compatibleSdkVersion: 6.1.1(24)` ⇒ 不能用"
+ * （`docs/147` 已把 `targetSdkVersion` 抬到 `26.0.0(26.0.0)`，`compatibleSdkVersion` 仍是
+ * `6.1.1(24)`，安装面不变）；② "`IMMERSIVE_ENABLED` 保持 false 是产品决定"（用户已拍板接入）。
  *
  * 【为什么把这条写进代码而不是只写进文档】否则半年后总有人问"为什么不用沉浸光感"，
  * 或者更糟——有人以为可以顺手开一下，写出一个在目标设备上不生效的材质。
- * 这里用常量把事实固定下来，视图层可以据此分支，且**升级时只改这一处**。
+ * 这里用常量把事实固定下来，视图层可以据此分支，且**启用时只改这几处**。
  *
- * 升级后要动的地方（一次性列清楚）：① 本常量置 true；② `build-profile.json5` 提 target；
- * ③ 按官方《沉浸光感功耗优化》克制地只用在常驻外壳（Composer / Toolbar / 面板头 / 命令面板 /
- * 模型选择 / 浮动操作区 / 底部导航），**不要全页滥用**（官方明确它耗大量 GPU）。
+ * 已完成的四步（启用时要动的地方，一次性列清楚）：① 本常量置 true；② 确认 `build-profile.json5`
+ * 的 target ≥ 26（已满足，见 `docs/147`）；③ 按官方《沉浸光感功耗优化》克制地只用在常驻外壳
+ * （Composer / Toolbar / 面板头 / 命令面板 / 模型选择 / 浮动操作区 / 底部导航），
+ * **不要全页滥用**（官方明确它耗大量 GPU）；④ **应用级开关**已声明（`module.json5` 的
+ * `module.metadata.ohos.arkui.UIMaterial.state = enable`，仅 entry 生效，见 `docs/147` §5）。
+ *
+ * 【两条必须记住的语义】（否则会按错的方向排查）
+ *   · 档位差别不是"开 / 关"三档：不配 = `default`（Dialog/Toast/AlphabetIndexer/文本选择菜单默认开）；
+ *     `enable` = 在 `default` 之上**额外**覆盖 Chip/Select/Menu/Toggle/Slider/bindSheet/SelectionMenu，
+ *     且**材质优先于组件自设的背景色 / 模糊 / 阴影 / 边框**（现有 `$r('sys.color.*')` 底色的浮层会被盖掉）；
+ *     `disable` = 全关，且**会连带封死**主动调 `systemMaterial()`——它不"只是默认不开"。
+ *   · 光感**强弱不是应用定的**：官方原文「同一材质的效果，会受到系统设置应用中**沉浸光感**配置项的
+ *     影响」⇒ 表现随用户系统设置变化，不随本仓代码变化。
+ *
+ * 【对本仓的实际影响面】渲染面是 Web 画布（`pages/WebApp` 的 WebView）⇒ 材质**只影响原生浮层**
+ * （对话框 / 菜单 / Sheet / 文本选择菜单），不给 Web 界面换皮。
  */
 export class HarmonyMaterial {
-  /** 是否可用系统沉浸光感（受 targetAPIVersion 限制） */
-  static readonly IMMERSIVE_ENABLED: boolean = false;
-  /** 不可用时的替代：层次由阴影层级表达（见 `HarmonyElevation`） */
+  /** 应用级沉浸材质开关**已接**（`module.json5` 的 `UIMaterial.state = enable`）；设备 API < 26 时被平台忽略 */
+  static readonly IMMERSIVE_ENABLED: boolean = true;
+  /** 设备不具备沉浸材质能力时的替代：层次由阴影层级表达（见 `HarmonyElevation`） */
   static readonly FALLBACK_IS_SHADOW: boolean = true;
 }
 

@@ -125,6 +125,7 @@ function startHost(tag) {
         DSHM_SANDBOX_HOME: SANDBOX,
         DSHM_PORT: String(PORT),
         DSHM_PROFILE: 'ondevice',
+        DSHM_PLATFORM: 'ohos',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -222,6 +223,31 @@ try {
   }
   const snapshotBefore = before.parsed?.result?.value;
   console.log(`baseline: ${(snapshotBefore?.entries ?? []).length} entries`);
+
+  // ── 1b. 自带插件的行**必须全部启用**（2026-10-16 事故的守卫）─────────────────
+  // 上游兼容闸门（dsh-app-boot 的 `evaluatePluginCompatibility`）按 manifest 的 dsh peer 判：
+  // **精确钉法**忘跟着内核升 ⇒ 那一行被整条停用。这几个自带行里 `dshm-fs-write-nonchmod`
+  // 是端侧 profile 里 `fs` 服务的唯一提供者（它 replace 掉上游 `fs-sandbox`）⇒ 被停用会让
+  // `session-controller` 永远 pending、界面报「session controller 不可用」。
+  // 判据取 inventory 的 `moduleName`（行 id 与包名在两代实现间变过，包名才是稳定标识）。
+  const BUNDLED_PLUGIN_ROWS = [
+    '@deepseek-ai/dshm-ptc-runtime-inproc',
+    '@deepseek-ai/dshm-tool-fs-remove',
+    '@deepseek-ai/dshm-workspace-claim',
+    '@deepseek-ai/dshm-fs-write-nonchmod',
+    // 2026-10-19：会议 AI 通道曾在此（profile ⑭ 的 insert 行）。
+    // 2026-10-31（docs/328）会议模式整体剥离上架包 ⇒ 行与插件都已移除，判据同步删除。
+  ];
+  const disabledBundledRows = BUNDLED_PLUGIN_ROWS.filter((pkgName) => {
+    const hit = (snapshotBefore?.entries ?? []).find((e) => String(e.moduleName ?? '').includes(pkgName));
+    return hit === undefined || hit.enabled !== true;
+  });
+  if (disabledBundledRows.length > 0) {
+    die('FAIL: 自带插件行未全部启用（多半是 peerDependencies 的精确钉法没跟着内核版本升，'
+      + '被上游兼容闸门停用）：\n  · ' + disabledBundledRows.join('\n  · '), 1);
+  }
+  console.log(`baseline: 自带插件行 ${BUNDLED_PLUGIN_ROWS.length}/${BUNDLED_PLUGIN_ROWS.length} 启用`);
+
   const targetRow = pickTargetRow(snapshotBefore);
   if (targetRow === undefined) {
     const enabled = (snapshotBefore?.entries ?? []).filter((e) => e.enabled === true)

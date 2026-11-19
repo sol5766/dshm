@@ -20,6 +20,7 @@
 
 import { supportedVersionsText, tableStats, upstreamCapturedAt } from 'dshcompat';
 import type { TableStats } from 'dshcompat';
+import { readAppVersionText } from 'platform';
 import { AboutInfo } from './Settings';
 
 /**
@@ -33,7 +34,10 @@ import { AboutInfo } from './Settings';
 export function aboutInfo(): AboutInfo {
   const stats: TableStats = tableStats();
   return {
-    appVersion: '1.1.0 (1010000)',
+    // 【2026-10-15】原来这里写死 `'1.1.0 (1010000)'` ⇒ 包发到 1.1.2 时界面还显示 1.1.0。
+    // 版本号是**运行时事实**，只能问系统（`platform/readAppVersionText()`，与包名同一来源）；
+    // 读不到返回空串，`SettingsDevice.aboutRow()` 如实显示「—」，绝不退回写死的值。
+    appVersion: readAppVersionText(),
     supportedUpstream: supportedVersionsText(),
     compatCapturedAt: upstreamCapturedAt(),
     endpointStats: `${stats.endpoints} 个端点 / ${stats.streamEndpoints} 个流式 / ${stats.capabilities} 个能力`

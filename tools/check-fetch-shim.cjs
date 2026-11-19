@@ -95,6 +95,15 @@ async function check(name, fn) {
       setTimeout(() => res.end('late'), 3000);
       return;
     }
+    if (req.url === '/set-cookie') {
+      res.setHeader('Set-Cookie', [
+        'SESSDATA=a%2Cb%2Cc; Path=/; HttpOnly',
+        'bili_jct=deadbeef; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/',
+      ]);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"code":0}');
+      return;
+    }
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -141,12 +150,36 @@ async function check(name, fn) {
   });
 
   // ② 安装垫片
-  const { installFetchShim, DshmFormData, DshmHeaders } = require('../hostcore/app/fetch-shim.js');
+  const { installFetchShim, mirrorUrlFor, DshmFormData, DshmHeaders } = require('../hostcore/app/fetch-shim.js');
   const { Readable } = require('node:stream');
   const installed = installFetchShim();
   assert.strictEqual(installed, true, 'installFetchShim() 应返回 true（WASM 不可用时必须覆盖原生 fetch）');
   assert.strictEqual(typeof globalThis.fetch, 'function', '安装后 fetch 应为函数');
   console.log('垫片已安装\n');
+
+  await check('Headers.getSetCookie() 返回逐条 Set-Cookie', async () => {
+    const headers = new DshmHeaders();
+    headers.append('Set-Cookie', 'SESSDATA=a; Path=/; HttpOnly');
+    headers.append('Set-Cookie', 'bili_jct=b; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/');
+    assert.deepStrictEqual(headers.getSetCookie(), [
+      'SESSDATA=a; Path=/; HttpOnly',
+      'bili_jct=b; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/',
+    ]);
+    assert.strictEqual(headers.get('set-cookie').split(';').length > 2, true);
+    const clone = new DshmHeaders(headers);
+    assert.deepStrictEqual(clone.getSetCookie(), headers.getSetCookie(), '复制时不得合并 set-cookie');
+  });
+
+  await check('垫片 fetch 保留服务端逐条 Set-Cookie', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/set-cookie`);
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(typeof response.headers.getSetCookie, 'function');
+    const cookies = response.headers.getSetCookie();
+    assert.strictEqual(cookies.length, 2, JSON.stringify(cookies));
+    assert.match(cookies[0], /^SESSDATA=/);
+    assert.match(cookies[1], /^bili_jct=/);
+    assert.match(cookies[1], /Expires=Wed, 21 Oct 2026 07:28:00 GMT/);
+  });
 
   /*
    * ③④ 真实 HTTPS GET：验证"非 WASM 路径可用"（走 node:https 的 TLS，不经 undici 的 llhttp）。
@@ -366,6 +399,22 @@ async function check(name, fn) {
       rejected = true;
     }
     assert.strictEqual(rejected, true, '中止后应 reject');
+  });
+
+  /*
+   * `mirrorUrlFor()`：给**不走 globalThis.fetch** 的调用方用的改写口（插件安装器用
+   * `node:https` 下 codeload tarball，吃不到本垫片自动那一跳）。判据单份留在垫片里，
+   * 这里的断言只钉两件**离线可判**的事：导出面在（漏了它就退回"安装器自己维护第二张表"）、
+   * 以及**不该改写/没法改写时原样返回**（表外主机、非 URL 串）—— 后者是"绝不抛"的契约：
+   * 安装链路宁可慢，也不能因为这个口子把下载打死。
+   * 表内主机的改写口径由 `tools/check-fetch-mirror.cjs` ①c 行为断言（那里有本地镜像）。
+   */
+  await check('mirrorUrlFor：导出面在，且表外/非法输入原样返回（绝不抛）', async () => {
+    assert.strictEqual(typeof mirrorUrlFor, 'function', 'mirrorUrlFor 没有导出（安装器吃不到改写）');
+    const outside = 'https://registry.npmmirror.com/dshmarket';
+    assert.strictEqual(mirrorUrlFor(outside), outside);
+    assert.strictEqual(mirrorUrlFor('not-a-url'), 'not-a-url');
+    assert.strictEqual(mirrorUrlFor(''), '');
   });
 
   server.close();

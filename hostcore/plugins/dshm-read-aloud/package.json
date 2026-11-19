@@ -1,0 +1,33 @@
+{
+  "name": "@deepseek-ai/dshm-read-aloud",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧插件：在官方助手消息的动作条上加「朗读」与「分享」。朗读走 ArkTS 桥到 Speech Kit TextReader（失败降级 Core Speech Kit textToSpeech），分享走 Share Kit；插件本身不合成语音、不自绘面板。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-chat"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  }
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 门禁：`entry/src/main/resources/resfile/` 里**只能有一份**核心容器，且必须与本次产出、
+ * 门禁：共享 HSP `hostruntime/src/main/resources/resfile/` 里**只能有一份**核心容器，且必须与本次产出、
  * 与 `hostcore/core-recipe.json` 的 `coreVersion` 三者一致。
  *
  * ── 为什么需要（两条真实事故，2026-10-05）──────────────────────────
@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const RESFILE = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile');
+const RESFILE = join(ROOT, 'hostruntime', 'src', 'main', 'resources', 'resfile');
 const RECIPE = join(ROOT, 'hostcore', 'core-recipe.json');
 
 function fail(msg) {
@@ -80,6 +80,24 @@ if (!existsSync(produced)) {
   }
 }
 
+/*
+ * 【核心容器**只能**在 hostruntime 的 resfile】（docs/334 复核踩到的坑）
+ *
+ * `--place-in-app` 初版把目标写成了 entry 的 resfile ⇒ `entry-default.hap`
+ * 从 66 MB 涨到 **161 MB**（整个 .app 507 MB → 607 MB）。
+ * 核心由共享 HSP `hostruntime` 承载，两个 HAP 都不该带它 —— 多打的 95 MB 纯属浪费，
+ * 而且会给"核心是否随包"这件事制造两个真相。
+ */
+for (const mod of ['entry', 'phone']) {
+  const dir = join(ROOT, mod, 'src', 'main', 'resources', 'resfile');
+  if (!existsSync(dir)) continue;
+  const stray = readdirSync(dir).filter((n) => n.startsWith('dsh-core-') && n.endsWith('.zip'));
+  if (stray.length > 0) {
+    fail(`${mod} 的 resfile 里出现了核心容器（应只在 hostruntime）：${stray.join(', ')} —— ` +
+      '每份约 95 MB，会把该 HAP 整体撑大');
+  }
+}
+
 if (process.exitCode === undefined) {
-  console.log('✅ 通过：resfile 只有 1 份容器，且与配方、与本次产出完全一致。');
+  console.log('✅ 通过：resfile 只有 1 份容器，且与配方、与本次产出完全一致；entry/phone 未误带核心。');
 }

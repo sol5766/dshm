@@ -28,6 +28,26 @@ ROOT = Path(__file__).resolve().parent.parent
 # 改为按 DSHM_HDC → PATH → DevEco 工具链目录 依次解析；产物目录相对仓库根。
 
 
+def _deveco_sdk_roots():
+    """DevEco 安装根下的 sdk 目录候选（不写死某一台机器的盘符/安装位置）。
+
+    2026-10-10：DevEco 从 C 盘 Program Files/Huawei/DevEco Studio 搬到了 D 盘同名路径，
+    写死的候选当场失效（本函数就是那次事故的修法）。这里按盘符扫，判据与
+    `tools/lib/deveco-home.mjs` 一致：**根下必须真的有 tools/hvigor/bin/hvigorw.js** ——
+    只看目录存在会把卸载后残留的空目录当成安装根。
+    """
+    out = []
+    for letter in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
+        drive = Path(letter + ':/')
+        if not drive.exists():
+            continue
+        for rel in ('Program Files/Huawei/DevEco Studio', 'Huawei/DevEco Studio'):
+            root = drive / rel
+            if (root / 'tools' / 'hvigor' / 'bin' / 'hvigorw.js').exists():
+                out.append(str(root / 'sdk'))
+    return out
+
+
 def _find_hdc():
     """按 DSHM_HDC → PATH → DevEco Studio 自带工具链 找 hdc。找不到返回原占位串（跑起来自然报错）。"""
     env = os.environ.get('DSHM_HDC')
@@ -39,9 +59,8 @@ def _find_hdc():
     roots = [
         os.environ.get('DEVECO_SDK_HOME'),
         os.environ.get('OHOS_SDK_HOME'),
-        r'C:\Program Files\Huawei\DevEco Studio\sdk',
         '/home/node/deveco-clt/command-line-tools/sdk',
-    ]
+    ] + _deveco_sdk_roots()
     names = ('hdc.exe', 'hdc')
     for root in roots:
         if not root or not Path(root).is_dir():

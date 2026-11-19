@@ -38,7 +38,34 @@
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { dshmFetch } = require('./fetch-shim.js');
+const { dshmFetch, DshmRequest } = require('./fetch-shim.js');
+
+/**
+ * undici 的 `Request`（Fetch 请求对象）。
+ *
+ * 【为什么补它（2026-10-10，第三次同类事故）】上游核心升到 0.2.1-alpha.2 时把 `openai`
+ * 6.40 → 7.19，7.x 新增的 `internal/auth/x509-transport-capability.mjs` **第 4 行**写死
+ * `import { Agent, ProxyAgent, Request, fetch } from 'undici'`（`sendX509Request()` 里先
+ * `new Request(url, opts)` 再 `fetch(request, { dispatcher, redirect: 'manual' })`）。
+ * ESM 具名导入在**解析期**就校验导出存在性 ⇒ 缺这一个名字会让**整个 openai 7.x 模块图**
+ * `failed to import`（loader 只打一行 "failed to import"，不带 reason）。
+ * 前两次同类事故见本文件 `EnvHttpProxyAgent` / `ProxyAgent` 段（dshmarket、dsh-codearts-auth），
+ * 这是**同一族**的第三次；发现它的是 `tools/check-undici-shim-exports.mjs`（扫核心树 + 已装插件）。
+ *
+ * 【为什么直接复用 `DshmRequest`，不另写一个】端侧的 `globalThis.Request` 本来**就是它**：
+ * `fetch-shim.js:installFetchShim()` 按「缺哪个补哪个」把它装成全局，`internal-undici-shim.cjs`
+ * 给内建 undici 的也是同一个类。复用 ⇒ 「经 undici 名字拿到的 Request」与「全局 Request」是
+ * **同一实现、同一语义**；另写一个只为过解析期的仿制品正是本文件反复拒绝的做法。
+ *
+ * 【能不能真用（不是空壳）】`dshmFetch` 会把 Request 形态展开成 init（`fetch-shim.js` 里读
+ * `input.url / method / headers / body / signal / redirect` 那一支）⇒
+ * `fetch(new Request(url, { method, headers, body }))` 是**真发 POST、真带体**。这条由门禁的
+ * 本地回环探针断言（对照臂：把 method/body 吞掉的假实现必须判红）。
+ *
+ * 【取值口径】原生可用就用原生（本机 Node 24：`globalThis.Request` 是真正的 undici Request）；
+ * 端侧 jitless 下它由我们的垫片提供（`DshmRequest`）—— 两种形态都能被 `dshmFetch` 正确消费。
+ */
+export const Request = typeof globalThis.Request === 'function' ? globalThis.Request : DshmRequest;
 
 /**
  * 上游用到的 undici `Agent` 的最小实现。
@@ -189,6 +216,7 @@ export async function fetch(input, init) {
 
 export default {
   fetch,
+  Request,
   Agent,
   Dispatcher,
   EnvHttpProxyAgent,

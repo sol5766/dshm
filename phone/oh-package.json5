@@ -1,0 +1,15 @@
+{
+  "name": "phone",
+  "version": "1.0.0",
+  "description": "DSHM 手机入口 HAP",
+  "main": "",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "connection": "file:../connection",
+    "appstate": "file:../appstate",
+    "dshcompat": "file:../dshcompat",
+    "platform": "file:../platform",
+    "hostruntime": "file:../hostruntime"
+  }
+}

@@ -31,7 +31,7 @@ oh_modules/
 /hvigor/
 
 # ── 工具链原始归档（体积大；由 tools/place-toolchain.mjs 从 third_party/ 放置）──
-# 【为什么不入库】third_party/ 是"手工取得的原始素材"（apk / tar.gz），
+# 【为什么不入库】third_party/ 是"手工取得的原始素材"（Alpine 包 / tar.gz），
 # 入库会让仓库膨胀几十 MB 且与上游版本脱钩；新克隆按 README 备齐即可。
 __pycache__/
 *.pyc
@@ -42,6 +42,9 @@ __pycache__/
 /entry/src/main/resources/resfile/*.zip
 # place-toolchain 放置并自签名的归档（跑 tools/place-toolchain.mjs 重建）
 /entry/src/main/resources/resfile/toolchain/
+# place-vm-assets 放置的 guest 虚拟机数据件（kernel/rootfs/固件/guest 包闭包/署名文本；
+# 跑 tools/place-vm-assets.mjs 重建。对应的 .so 已被上面的 /entry/libs/ 覆盖）
+/entry/src/main/resources/resfile/vm/
 # place-host-app 从 hostcore/app 复制出的入口脚本
 /entry/src/main/resources/resfile/resources/app/
 
@@ -88,3 +91,39 @@ Thumbs.db
 
 # ── 内部构建报告（含本机取样值）────────────────────────────────────────
 /hostkit/BUILD-REPORT.md
+
+# ── 凭据与本机环境（P0-3 / docs/388：release 私钥与环境变量绝不入库）──────
+# 【为什么必须显式列出】`.certs/` 里是 AGC 正式签名用的 .p12 私钥与 .p7b 证书，
+# `.env` 是本机环境变量；两者此前**没有任何 ignore 保护**（实测
+# `git check-ignore -v .certs .env` 返回 rc=1），一次 `git add -A && git commit`
+# 就会把私钥写进仓库历史。仓库里"代码永不提交"的纪律不能替代配置层防线。
+# `signing/` 自带 .gitignore 是同款做法，这里补齐另外两个入口。
+# `.env.example` 一类**模板**若将来引入，用 `!.env.example` 显式放行。
+/.certs/
+/.env
+/.env.*
+
+# ── 本机运行物与私有资产（2026-11-19 推送审计）──────────────────────────
+# AGC-operations 含 .env / AGC 私钥 / 证书 / API 客户端凭据；signing 含签名物料。
+# 二者整体不入库（此前仅为未跟踪，`git add -A` 会被带入）。
+/AGC-operations/
+/signing/
+# 本地记忆与 IDE 缓存（含本机绝对路径）
+/.workbuddy/
+/.bitfun/
+/.deveco/
+/.opencode/
+/.dsh/
+# 本机产物 / 临时
+/outputs/
+/demo.zip
+
+# 构建中间物与预编译大库（2026-11-19）：.cxx 为 CMake 产物；hostruntime/libs 237MB（libnode 148MB）
+**/.cxx/
+/hostruntime/libs/
+/phone/libs/
+
+# hostruntime resfile 的大件（与 entry resfile 同口径）：核心容器 / 工具链归档 / VM 镜像
+/hostruntime/src/main/resources/resfile/*.zip
+/hostruntime/src/main/resources/resfile/toolchain/
+/hostruntime/src/main/resources/resfile/vm/

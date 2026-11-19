@@ -21,7 +21,7 @@
  * 无需真机、无需模拟器就能测四形态与断点边界（计划 §16/§17 的 layout fixture）。
  */
 
-import { Breakpoint, Sz } from './Tokens';
+import { Breakpoint, Sz } from 'platform';
 import {
   detailPanelAvailable,
   LayoutMode,

@@ -73,6 +73,7 @@
  * 说明：全部断言都跑在 `--inner` 那个 jitless 子进程里（外层只搭舞台、起进程、按退出码
  * 收结论），所以 `--verbose` 会自动透传给内层。
  */
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -112,20 +113,29 @@ const VENDOR_WASM_TOKEN_COUNT = 3;
 
 /* ───────────────────────── 外层：舞台 + jitless 子进程 ───────────────────────── */
 
-/** 找核心树：`dist/core/work/dsh-core-*` 里含 `@deepseek-ai/dsh-ptc-runtime` 的最新一个。 */
-function findCoreTree() {
-  const work = join(ROOT, "dist", "core", "work");
-  if (!existsSync(work)) return undefined;
-  const candidates = readdirSync(work)
-    .filter((entry) => entry.startsWith("dsh-core-"))
-    .sort()
-    .reverse();
-  for (const entry of candidates) {
-    const scope = join(work, entry, "node_modules", "@deepseek-ai");
-    if (!existsSync(join(scope, "dsh-ptc-runtime")) || !existsSync(join(scope, "cordis"))) continue;
-    return scope;
+/** 只验证配方指定的核心；目标缺失时不得悄悄拿旧树冒充通过。 */
+function findCoreTree(root = ROOT, read = readFileSync, exists = existsSync) {
+  const { coreVersion } = JSON.parse(read(join(root, "hostcore", "core-recipe.json"), "utf8"));
+  if (typeof coreVersion !== "string" || !/^[0-9A-Za-z.+-]+$/.test(coreVersion)) {
+    throw new Error("core-recipe.json 的 coreVersion 非法");
   }
-  return undefined;
+  const scope = join(root, "dist", "core", "work", `dsh-core-${coreVersion}`, "node_modules", "@deepseek-ai");
+  return CORE_PACKAGES.every((name) => exists(join(scope, name))) ? scope : undefined;
+}
+
+function selfTestCoreSelection() {
+  const root = resolve("/ptc-selection-fixture");
+  const scope = (version) => join(root, "dist", "core", "work", `dsh-core-${version}`, "node_modules", "@deepseek-ai");
+  const target = "0.2.2-rc.2+dshm.1";
+  const selected = scope(target);
+  const files = new Set(CORE_PACKAGES.flatMap((name) => [join(selected, name), join(scope("9.9.9+dshm.99"), name)]));
+  const read = () => JSON.stringify({ coreVersion: target });
+  assert.equal(findCoreTree(root, read, (path) => files.has(path)), selected);
+  files.delete(join(selected, "dsh-ptc-runtime"));
+  assert.equal(findCoreTree(root, read, (path) => files.has(path)), undefined);
+  assert.throws(() => findCoreTree(root, () => '{"coreVersion":"../old"}', () => true), /coreVersion 非法/);
+  assert.throws(() => findCoreTree(root, () => '{"coreVersion":null}', () => true), /coreVersion 非法/);
+  console.log("PASS：配方选树自检 4/4（拒绝旧树回退与非法版本）");
 }
 
 /**
@@ -908,7 +918,9 @@ async function innerMain() {
 
 /* ───────────────────────── 入口 ───────────────────────── */
 
-if (process.argv.includes(INNER_FLAG)) {
+if (process.argv.includes("--self-test") && !process.argv.includes(INNER_FLAG)) {
+  selfTestCoreSelection();
+} else if (process.argv.includes(INNER_FLAG)) {
   try {
     await innerMain();
   } catch (error) {

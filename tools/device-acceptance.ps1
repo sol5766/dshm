@@ -3,6 +3,7 @@
 # 用法（在仓库根目录）：
 #   powershell -NoProfile -File tools\device-acceptance.ps1
 #   powershell -NoProfile -File tools\device-acceptance.ps1 -SkipInstall   # 已装最新包，只重启取证据
+#   powershell -NoProfile -File tools\device-acceptance.ps1 -Target 62T0225B18039433  # 多台在线时指定设备
 #   （环境里有 pwsh 的话，把 powershell 换成 pwsh 亦可）
 #
 # 它做什么：
@@ -26,6 +27,7 @@
 
 param(
   [switch]$SkipInstall,
+  [string]$Target = '',
   [int]$BootWaitSeconds = 45,
   [int]$HilogEarlySeconds = 8
 )
@@ -34,11 +36,16 @@ $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+# 【为什么不写死】首候选原先写死 `D:\Huawei\DevEco Studio\...`（更早的安装位置）。2026-10-10 用户把
+# DevEco 装到 `D:\Program Files\Huawei\DevEco Studio`。解析口收在 tools/lib/deveco-home.ps1
+# （候选列表 + **必须真的含 tools\hvigor\bin\hvigorw.js** 才算命中），可用 DEVECO_HOME 覆盖。
+. (Join-Path $PSScriptRoot 'lib\deveco-home.ps1')
+
 # hdc：显式指定优先，其次按本机常见安装位置探测（E386：写死单一路径会让人误判成"环境受限"）
 function Resolve-Hdc {
   if ($env:DSHM_HDC -and (Test-Path $env:DSHM_HDC)) { return $env:DSHM_HDC }
   $cands = @(
-    'D:\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe',
+    (Get-DevEcoPath 'sdk\default\openharmony\toolchains\hdc.exe'),
     (Join-Path $env:LOCALAPPDATA 'OpenHarmony\Sdk')
   )
   foreach ($c in $cands) {
@@ -48,7 +55,7 @@ function Resolve-Hdc {
         ForEach-Object { Join-Path $_.FullName 'toolchains\hdc.exe' } |
         Where-Object { Test-Path $_ } | Select-Object -First 1
       if ($hit) { return $hit }
-    } elseif (Test-Path $c) { return $c }
+    } elseif ($c -and (Test-Path $c)) { return $c }
   }
   return $null
 }
@@ -57,12 +64,26 @@ if (-not $hdc) {
   Write-Host '找不到 hdc：请设置 DSHM_HDC 指向 hdc.exe' -ForegroundColor Red
   exit 2
 }
+# 【为什么要 -Target（2026-10-18 加，与 update-device.ps1 同源）】多台设备在线时裸 `hdc shell`
+# 会被拒：`[Fail]ExecuteCommand need connect-key?`。本脚本原先固定走裸 hdc，PC+手机同时
+# 在线时整个验收就装死。$targs 只在指定/多台时才带 -t，单设备行为不变。
+$targs = if ($Target -ne '') { @('-t', $Target) } else { @() }
 
 # 设备侧可读的应用文件目录（shell 身份可读；注意不是 /data/storage/... 那条沙箱视图路径，那条 hdc 读不到）
-$devFiles = '/data/app/el2/100/base/com.dshm.dshclient/haps/entry/files'
+# 包名跟随本工作区（beta = com.dshm.dshmbeta；正式区 = com.dshm.dshclient），不写死：
+# beta 工作区里写死正式包名会让整套验收读错应用（2026-10-18 实测）。
+$bundle = ''
+$profileText = Get-Content -LiteralPath (Join-Path $root 'build-profile.json5') -Raw -ErrorAction SilentlyContinue
+if ($profileText -match '"bundleName"\s*:\s*"([^"]+)"') { $bundle = $Matches[1] }
+if ($bundle -eq '') {
+  $appText = Get-Content -LiteralPath (Join-Path $root 'AppScope\app.json5') -Raw -ErrorAction SilentlyContinue
+  if ($appText -match '"bundleName"\s*:\s*"([^"]+)"') { $bundle = $Matches[1] }
+}
+if ($bundle -eq '') { throw '无法从 build-profile.json5 / AppScope/app.json5 解析 bundleName' }
+$devFiles = "/data/app/el2/100/base/$bundle/haps/entry/files"
 
 function Run-Hdc([string]$cmd) {
-  return ((& $hdc shell $cmd 2>&1) -join "`n")
+  return ((& $hdc @targs shell $cmd 2>&1) -join "`n")
 }
 # 摘录一个阶段的行。
 # 【为什么不能只读 hilog】hilog 环形缓冲实测覆盖只有约 8–10 秒，且本机 ArkTS 侧 hilog 根本
@@ -95,7 +116,7 @@ function Save-Log([string]$name, [string]$pattern) {
 # 拉设备侧文件并按 UTF-8 解码（E387：`hdc shell cat` 会经控制台 GBK 解码，中文全乱 ⇒ 必须 recv 后读）
 function Pull-DeviceFile([string]$remote, [string]$name) {
   $local = Join-Path $out $name
-  & $hdc file recv $remote $local 2>&1 | Out-Null
+  & $hdc @targs file recv $remote $local 2>&1 | Out-Null
   if (Test-Path $local) { return [System.IO.File]::ReadAllText($local, [Text.Encoding]::UTF8) }
   return ''
 }
@@ -118,13 +139,13 @@ function Sync-DeviceLogs {
 }
 function Save-Ui([string]$name, [string]$clickAt) {
   if ($clickAt.Length -gt 0) {
-    & $hdc shell "uitest uiInput click $clickAt" 2>&1 | Out-Null
+    & $hdc @targs shell "uitest uiInput click $clickAt" 2>&1 | Out-Null
     Start-Sleep -Seconds 2
   }
-  & $hdc shell "uitest dumpLayout -p /data/local/tmp/acc-$name.json" 2>&1 | Out-Null
-  & $hdc file recv "/data/local/tmp/acc-$name.json" (Join-Path $out "$name.json") 2>&1 | Out-Null
-  & $hdc shell "rm -f /data/local/tmp/acc-$name.jpeg; snapshot_display -f /data/local/tmp/acc-$name.jpeg" 2>&1 | Out-Null
-  & $hdc file recv "/data/local/tmp/acc-$name.jpeg" (Join-Path $out "$name.jpeg") 2>&1 | Out-Null
+  & $hdc @targs shell "uitest dumpLayout -p /data/local/tmp/acc-$name.json" 2>&1 | Out-Null
+  & $hdc @targs file recv "/data/local/tmp/acc-$name.json" (Join-Path $out "$name.json") 2>&1 | Out-Null
+  & $hdc @targs shell "rm -f /data/local/tmp/acc-$name.jpeg; snapshot_display -f /data/local/tmp/acc-$name.jpeg" 2>&1 | Out-Null
+  & $hdc @targs file recv "/data/local/tmp/acc-$name.jpeg" (Join-Path $out "$name.jpeg") 2>&1 | Out-Null
 }
 
 # 按文本自动定位并点击（E261）。
@@ -132,10 +153,10 @@ function Save-Ui([string]$name, [string]$clickAt) {
 # 它看起来像"功能坏了"。做法：dump 布局 → 找 attributes.text 匹配的节点 → 取 bounds → 点中心。
 # 注意 dump 出的文本是「当前界面」的：设置对话框**不在主界面上**，得先点「账号菜单」展开菜单才看得到「设置」。
 function Click-Text([string]$text) {
-  & $hdc shell "uitest dumpLayout -p /data/local/tmp/find.json" 2>&1 | Out-Null
+  & $hdc @targs shell "uitest dumpLayout -p /data/local/tmp/find.json" 2>&1 | Out-Null
   $local = Join-Path $env:TEMP 'dshm-find.json'
   if (Test-Path $local) { Remove-Item $local -Force }
-  & $hdc file recv "/data/local/tmp/find.json" $local 2>&1 | Out-Null
+  & $hdc @targs file recv "/data/local/tmp/find.json" $local 2>&1 | Out-Null
   if (-not (Test-Path $local)) { return $false }
   try {
     $doc = [System.IO.File]::ReadAllText($local, [Text.Encoding]::UTF8) | ConvertFrom-Json
@@ -164,7 +185,7 @@ function Click-Text([string]$text) {
   if (-not $m.Success) { return $false }
   $cx = [int](([int]$m.Groups[1].Value + [int]$m.Groups[3].Value) / 2)
   $cy = [int](([int]$m.Groups[2].Value + [int]$m.Groups[4].Value) / 2)
-  & $hdc shell "uitest uiInput click $cx $cy" 2>&1 | Out-Null
+  & $hdc @targs shell "uitest uiInput click $cx $cy" 2>&1 | Out-Null
   Start-Sleep -Seconds 2
   return $true
 }
@@ -175,7 +196,21 @@ if ($targets.Contains('[Empty]') -or $targets.Trim().Length -eq 0) {
   Write-Host '没有设备（hdc list targets = [Empty]）。接上设备后重跑本脚本。' -ForegroundColor Yellow
   exit 3
 }
-Write-Host ('设备：' + $targets.Trim())
+$online = @(($targets -split '\s+') | Where-Object { $_ -ne '' })
+if ($Target -ne '') {
+  if ($online -notcontains $Target) {
+    Write-Host ("指定设备 $Target 不在线。当前在线：$($online -join ', ')") -ForegroundColor Red
+    exit 3
+  }
+  $dev = $Target
+} elseif ($online.Count -gt 1) {
+  $dev = $online[0]
+  $targs = @('-t', $dev)
+  Write-Host "NOTE 有 $($online.Count) 台设备在线，本次按首台处理（$dev）。要装另一台请加 -Target <key>。" -ForegroundColor Yellow
+} else {
+  $dev = $online[0]
+}
+Write-Host ('设备：' + $dev)
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $out = Join-Path $root ('dist\acceptance\' + $stamp)
@@ -189,12 +224,22 @@ if (-not $SkipInstall) {
   if (-not $hap) { Write-Host '找不到 HAP，请先 devecocli build' -ForegroundColor Red; exit 4 }
   Write-Host ('安装：' + $hap.Name)
 }
-& $hdc shell 'aa force-stop com.dshm.dshclient' 2>&1 | Out-Null
+& $hdc @targs shell "aa force-stop $bundle" 2>&1 | Out-Null
 if (-not $SkipInstall) {
-  & $hdc install -r $hap.FullName 2>&1 | Select-Object -Last 1 | Write-Host
+  & $hdc @targs install -r $hap.FullName 2>&1 | Select-Object -Last 1 | Write-Host
 }
-& $hdc shell 'hilog -r' 2>&1 | Out-Null
-& $hdc shell 'aa start -b com.dshm.dshclient -a EntryAbility' 2>&1 | Select-Object -First 1 | Write-Host
+& $hdc @targs shell 'hilog -r' 2>&1 | Out-Null
+for ($i = 0; $i -lt 20; $i++) {
+  $alive = ((& $hdc @targs shell "pidof $bundle" 2>&1) -join ' ').Trim()
+  if ($alive -eq '' -or $alive -match 'not found' -or $alive -match 'error') { break }
+  Start-Sleep -Milliseconds 500
+}
+$startOut = (((& $hdc @targs shell "aa start -b $bundle -a EntryAbility" 2>&1) -join ' ')).Trim()
+Write-Host $startOut
+if ($startOut -notmatch 'start ability successfully') {
+  Write-Host '启动失败：本轮证据无效（后面的读数可能是上一轮的）。' -ForegroundColor Red
+  exit 5
+}
 
 # hilog 只在启动后几秒内还有启动事件，先抢一份早窗；剩下的时间留给界面就绪
 $early = [Math]::Min($HilogEarlySeconds, [Math]::Max(0, $BootWaitSeconds - 2))
@@ -279,7 +324,7 @@ Add-Verdict '本次启动后无异常退出 / 无崩溃关键字' ($errHit.Lengt
 $lines = @()
 $lines += '# 设备验收报告（' + $stamp + '）'
 $lines += ''
-$lines += ('设备：' + $targets.Trim())
+$lines += ('设备：' + $dev)
 $lines += ('hdc：' + $hdc)
 $lines += ('运行核心：' + $coreVer)
 $lines += ''

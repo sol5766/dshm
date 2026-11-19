@@ -24,20 +24,113 @@
 // 【2026-10-03 改：不再需要 abilityAccessCtrl】本文件已**不申请任何权限**（见下方
 // 权限说明注释）。`common` 仍用于选择器上下文，`bundleManager` 仍用于定位
 // `Download/<包名>/`；原先导入的那两个权限类型也已一并删除。
-import { common, bundleManager } from '@kit.AbilityKit';
-import { picker } from '@kit.CoreFileKit';
+import { abilityAccessCtrl, common, bundleManager } from '@kit.AbilityKit';
+import type { PermissionRequestResult, Permissions } from '@kit.AbilityKit';
+import { Environment, picker } from '@kit.CoreFileKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { fileUri } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 // 形态事实（手机/平板 vs 2in1）：判据只对前者收口，见 isHandheldForm() 的长注释。
-import { FormFactor, readDeviceFacts } from './DeviceFacts';
+import { FormFactor, readDeviceFacts, isFoldableDevice } from './DeviceFacts';
 // 目录授权的持久化与跨启动恢复：手持档"选完能读、重启也能读"的唯一开关，见 docs/105。
 import { GrantOutcome, rememberFolderGrant } from './FolderGrants';
 
 const DOMAIN: number = 0xD5A1;
 const TAG: string = 'platform/filepicker';
+const FOLDER_SELECTION_SYSCAP: string = 'SystemCapability.FileManagement.UserFileService.FolderSelection';
+
+/**
+ * 当前设备是否真的有系统文件夹选择能力。
+ *
+ * 该能力在 2in1 上从 API 13 可用，但 phone / tablet 到 API 26 才进入系统能力表。
+ * 不能只看 API 版本：同为 API 23，2in1 可用而手机/平板不可用。
+ */
+export function folderSelectionAvailable(): boolean {
+  try {
+    return canIUse(FOLDER_SELECTION_SYSCAP);
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '系统目录选择能力查询失败，按不可用处理：code=%{public}d msg=%{public}s',
+      e.code, e.message);
+    return false;
+  }
+}
+
+/** 把用户最终选中的公共目录映射到声明里的 user_grant 权限。 */
+function publicDirectoryPermission(path: string): Permissions | undefined {
+  const normalized: string = path.replace(/\\/g, '/').toLowerCase();
+  if (normalized.indexOf('/documents') >= 0) {
+    return 'ohos.permission.READ_WRITE_DOCUMENTS_DIRECTORY';
+  }
+  if (normalized.indexOf('/download') >= 0) {
+    return 'ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY';
+  }
+  if (normalized.indexOf('/desktop') >= 0) {
+    return 'ohos.permission.READ_WRITE_DESKTOP_DIRECTORY';
+  }
+  return undefined;
+}
+
+/**
+ * 用户选中公共目录后按需申请对应 user_grant，并用 Environment 的正向读数确认生效。
+ * 手机 HAP 不声明三条公共目录权限，因此直接跳过；不做启动期批量弹窗。
+ */
+export async function requestPublicDirectoryPermission(context: common.Context,
+  path: string): Promise<boolean> {
+  const facts = readDeviceFacts();
+  if (facts.form === FormFactor.PHONE || facts.form === FormFactor.UNKNOWN) {
+    return false;
+  }
+  const permission: Permissions | undefined = publicDirectoryPermission(path);
+  if (permission === undefined) {
+    return false;
+  }
+  try {
+    const manager: abilityAccessCtrl.AtManager = abilityAccessCtrl.createAtManager();
+    const result: PermissionRequestResult =
+      await manager.requestPermissionsFromUser(context, [permission]);
+    const granted: boolean = result.authResults.length > 0 && result.authResults[0] === 0;
+    if (!granted) {
+      hilog.info(DOMAIN, TAG, '公共目录权限未授予：%{public}s', permission);
+      return false;
+    }
+    let publicDir: string = '';
+    if (permission === 'ohos.permission.READ_WRITE_DOCUMENTS_DIRECTORY') {
+      publicDir = Environment.getUserDocumentDir();
+    } else if (permission === 'ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY') {
+      publicDir = Environment.getUserDownloadDir();
+    } else {
+      publicDir = Environment.getUserDesktopDir();
+    }
+    hilog.info(DOMAIN, TAG, '公共目录权限已授予：%{public}s pathLen=%{public}d',
+      permission, publicDir.length);
+    return publicDir.length > 0;
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '公共目录权限申请失败（沿用 picker 授权）：%{public}s code=%{public}d',
+      e.message, e.code);
+    return false;
+  }
+}
+
+/** 文件夹选择器错误码是否表示用户主动取消（不是故障，不能触发默认工作区切换）。 */
+export function isFolderPickerCancelCode(code: number): boolean {
+  // 13900020 = 参数错误（部分系统用它表示用户取消）；其他实现直接给 0/undefined。
+  return code === 13900020 || code === 0;
+}
+
+/**
+ * 手持档文件夹选择器的统一兜底判据。
+ *
+ * Kirin 平板 / 手机在部分 ROM 上会先让能力预检为真，随后 select() 才返回
+ * 801、202 或厂商自定义错误码。除用户主动取消外，结果都相同：该设备拿不到
+ * 可用的文件夹选择授权，直接使用现有的 Download/<bundle> 工作区。
+ */
+export function shouldAutoFallbackFolderPicker(code: number, handheld: boolean): boolean {
+  return handheld && !isFolderPickerCancelCode(code);
+}
 
 /**
  * ── 本路线**不申请任何权限**（2026-10-03 定稿，就地更正上一版方案）──
@@ -46,17 +139,18 @@ const TAG: string = 'platform/filepicker';
  * （权限名见 `dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md` §4.2 的"已废弃"一行），
  * 以换取任意 Download/Documents 子树的**路径级**读写。**该方案已废弃**，两条硬理由：
  *
- *   ① 【权限零差异铁律】新构建的包必须与作者成品 HAP
- *      （`/tmp/DSHM-1.0.0-arm64-signed.hap`，`requestPermissions` 恰 **11 项**）
- *      **逐项一致**，否则装不上。多声明任何一项都直接破坏这条等价关系。
- *   ② 【ACL 白名单只有 5 条】用户的 AGC profile
+ *   ① 【权限面恒 8 条】本包的 `requestPermissions` 只有 **8 条**（已获批的 2 条 ACL +
+ *      6 条免申请权限），见 `entry/src/main/module.json5` 的"权限面铁律"。多声明任何
+ *      一条受限条目都会破坏与发布 profile 的对齐 ⇒ 设备侧 `PERMISSION_ACL_RULE` 拒装。
+ *   ② 【ACL 审批面只有已获批的 2 条】用户的 AGC profile
  *      （`.cert-work/com_dshm_dshclient.p7b`）`acls.allowed-acls` 只有
- *      `FILE_ACCESS_PERSIST` / `READ_WRITE_USER_FILE` / `ACCESS_USER_FULL_DISK` /
- *      `CUSTOM_SANDBOX` / `ALLOW_EXTERNAL_NATIVE_CODE`；任何**超出**这 5 条的 ACL
+ *      `FILE_ACCESS_PERSIST` / `ALLOW_EXTERNAL_NATIVE_CODE`；任何**超出**它们的 ACL
  *      需求都会导致 `grant request permissions failed`（**已实测踩过**，
- *      见 `.cert-work/apply_profile_dshm.py` 头注）。而这两项在官方文档里自相矛盾
- *      （列为 normal 用户授权，正文又要求"继续采用受限权限申请方式"）⇒ 真机上
- *      很可能仍在 ACL 射程内，正是上一条禁令要挡的形态。
+ *      见 `.cert-work/apply_profile_dshm.py` 头注）。
+ *
+ *      【2026-10-14 用户拍板】其余受限条目**永久删除** —— 源码、包体、文档都不再出现，
+ *      也不再申请；官方给出的等价路线正是本文件这条路（picker 选目录 +
+ *      `FILE_ACCESS_PERSIST` 持久化），落点判据在下面 `probePathWritable()`。
  *
  * ⇒ 落点改为 `DocumentPickerMode.DOWNLOAD`：官方 FAQ `faqs-local-file-manager-67`
  * 与安全控件 `DownloadFileButton` 口径一致——**这条路不需要任何权限**，
@@ -129,10 +223,10 @@ export interface PickedFolder {
 /**
  * 拉起系统**文件夹**选择器，用于把设备上的真实项目目录选作工作区。
  *
- * 【平台边界（SDK 原文）】`DocumentSelectMode` 的注释明确写着
- * "Only 2-in-1 devices are supported" ⇒ **手机/平板拿不到文件夹选择**。
- * 所以调用方必须准备好回退路径（我们的做法：回退到"浏览沙箱目录"，
- * 并把原因说清楚），而不是让按钮点了没反应。
+ * 【平台边界（API 26 能力表实测）】`FolderSelection` 在 2in1 上从 API 13 可用，
+ * phone / tablet 到 API 26 才可用。因此必须用 `canIUse()` 按设备能力判断，
+ * 不能只按 API 版本或设备形态猜。能力缺失时回退到官方 DOWNLOAD 模式建立的
+ * `Download/<包名>` 专属工作区，而不是让按钮点了没反应。
  *
  * 【路径怎么来】选择器给的是 `file://docs/...` URI，而 Host 是 Node、按**路径**干活，
  * 因此用 `fileUri.FileUri(uri).path` 换成真实路径。转换失败就返回空路径，
@@ -142,6 +236,25 @@ export async function pickFolder(context: common.Context): Promise<PickedFolder>
   // 【2026-10-03 更正】这里原本先申请一次"公共目录路径级权限"。**已删除**：
   // 本路线不申请任何权限（权限零差异铁律 + ACL 白名单只有 5 条，理由见文件顶部注释）。
   // 用户若选了写不进去的目录，下面的探写会失败并自动退到 `publicDownloadFolder()` 兜底。
+  if (!folderSelectionAvailable()) {
+    const fallback: PickedFolder = await publicDownloadFolder(context);
+    if (fallback.outcome === PickOutcome.PICKED && fallback.path.length > 0) {
+      return {
+        outcome: PickOutcome.PICKED,
+        uri: fallback.uri,
+        path: fallback.path,
+        name: fallback.name,
+        reason: ''
+      };
+    }
+    return {
+      outcome: PickOutcome.FAILED,
+      uri: '',
+      path: '',
+      name: '',
+      reason: `当前系统没有系统文件夹选择能力，专属下载目录也无法建立：${fallback.reason}`
+    };
+  }
   let uris: string[] = [];
   try {
     const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
@@ -151,12 +264,30 @@ export async function pickFolder(context: common.Context): Promise<PickedFolder>
     uris = await view.select(options);
   } catch (err) {
     const e = err as BusinessError;
-    const cancelled: boolean = isCancelCode(e.code);
+    const cancelled: boolean = isFolderPickerCancelCode(e.code);
     hilog.info(DOMAIN, TAG, 'pickFolder rejected: code=%{public}d', e.code);
+    if (shouldAutoFallbackFolderPicker(e.code, isHandheldForm())) {
+      hilog.info(DOMAIN, TAG, '目录选择自动使用默认工作区');
+      const fallback: PickedFolder = await publicDownloadFolder(context);
+      if (fallback.outcome === PickOutcome.PICKED && fallback.path.length > 0) {
+        return {
+          outcome: PickOutcome.PICKED,
+          uri: fallback.uri,
+          path: fallback.path,
+          name: fallback.name,
+          reason: ''
+        };
+      }
+      return {
+        outcome: PickOutcome.FAILED,
+        uri: '', path: '', name: fallback.name,
+        reason: `默认工作区无法建立：${fallback.reason}`
+      };
+    }
     return {
       outcome: cancelled ? PickOutcome.CANCELLED : PickOutcome.FAILED,
       uri: '', path: '', name: '',
-      reason: cancelled ? '' : `文件夹选择器不可用（该能力仅 2in1 支持）：${e.message}（code=${e.code}）`
+      reason: cancelled ? '' : `系统文件夹选择器不可用：${e.message}（code=${e.code}）`
     };
   }
   if (uris.length === 0) {
@@ -176,6 +307,8 @@ export async function pickFolder(context: common.Context): Promise<PickedFolder>
       reason: '已选中文件夹，但拿不到它的真实路径（Host 需要路径而不是 URI），因此无法作为工作区。'
     };
   }
+  // 公共目录是 user_grant：只在用户明确选中后申请，成功后再走持久授权与探写。
+  await requestPublicDirectoryPermission(context, realPath);
   // 【2026-10-03 新增；2026-10-06 收口】非手持档（2in1 / PC）走探写："Host 能不能在这个目录里真写"。
   // 【为什么必须探】Host 是 Node、按 POSIX 路径干活（`dsh-fs-local` 是纯 node:fs，
   // 自身不做任何路径转换/沙箱判断），而"能读"不等于"能写"：本应用拿不到路径级写权时，
@@ -193,16 +326,24 @@ export async function pickFolder(context: common.Context): Promise<PickedFolder>
   //   ② 用户自己的目录 + 这一次的持久授权**已确认生效**（`checkPersistentPermission` 为真；
   //      重启后由 `restoreFolderGrants()` 重新启用）。
   // 两类都不满足才回落到应用专属目录 —— 那时回落是**如实**的：这条路径重启后确实读不到。
-  // 其它档（2in1 / PC）：沿用 ArkTS 探写，**逐字不动**（PC 上宿主本来就读得到 picker 目录，
-  // 不需要授权持久化 ⇒ 这一档不为 PC 记授权、不引入新动作）。
+  // 【2026-10-14 更正：三端同一套授权链】旧口径"PC 上宿主本来就读得到 picker 目录
+  // （docs/30 实测）"在 **8 条权限面**下**已不成立**：PC 档实测与手持档**逐字同构** ——
+  // 同一进程里宿主能列出 `harness`/`test`，`aa force-stop` 后重启，同一条调用就报
+  // `Errno 1 Operation not permitted`（现场读数见 docs/157）。根因不是平台边界，而是
+  // picker 授权**只活一次进程**：PC 档此前既不登记（`rememberFolderGrant`）、启动也不
+  // `activatePermission` ⇒ 重启必然失权。现在**三端都**走"登记 + persist + check"，
+  // PC 再用探写多兜一层"能读不能写"的保护。见 `EntryAbility.onCreate` 的启动恢复。
   const handheld: boolean = isHandheldForm();
   const claimed: PickedFolder | undefined = handheld ? await publicDownloadFolder(context) : undefined;
   const owned: boolean = claimed !== undefined && claimed.outcome === PickOutcome.PICKED
     && isPathWithin(realPath, claimed.path);
-  const granted: GrantOutcome = handheld
-    ? await rememberFolderGrant(context, uri, realPath)
-    : { persisted: false, note: '非手持档：不记授权' };
-  const acceptable: boolean = handheld ? (owned || granted.persisted) : probePathWritable(realPath);
+  const granted: GrantOutcome = await rememberFolderGrant(context, uri, realPath);
+  // 【判据为什么是"或"而不是"与"】`persisted` 回答的是"重启后还认不认"，探写回答的是
+  // "现在能不能写"：两者都会在**正常**情况下为真，也都会在**正常**的边界下为假
+  //（check 看门狗超时 ≠ 授权没建起来；只读目录 ≠ 这条路径不可用）。任一为真即采纳；
+  // 两者皆假才判"这条路径重启后读不到"——那是**如实的**，此时才回落并说明原因。
+  const acceptable: boolean = handheld ? (owned || granted.persisted)
+    : (granted.persisted || probePathWritable(realPath));
   if (!acceptable) {
     hilog.warn(DOMAIN, TAG,
       '所选目录不可用 path=%{public}s handheld=%{public}s granted=%{public}s',
@@ -216,8 +357,9 @@ export async function pickFolder(context: common.Context): Promise<PickedFolder>
           ? `所选目录（${realPath}）没能建立跨启动的目录授权（${granted.note}）：手机/平板上`
             + `选择器给的授权只对本次运行有效，重启后宿主会读不到它；已改用本应用在系统`
             + `「文件管理 → 下载」下的专属目录，它在文件管理器里可见且 agent 可读写删。`
-          : `所选目录（${realPath}）Host 只能读、不能写入/删除；已改用本应用在系统`
-            + `「文件管理 → 下载」下的专属目录，它在文件管理器里可见且 agent 可读写删。`
+          : `所选目录（${realPath}）没能建立跨启动的目录授权（${granted.note}），`
+            + `且宿主现在也写不进它；已改用本应用在系统「文件管理 → 下载」下的专属目录，`
+            + `它在文件管理器里可见且 agent 可读写删。`
       };
     }
     // 兜底也拿不到 ⇒ 保持原行为（返回用户选的路径）。宁可"能读不能写"，
@@ -244,10 +386,14 @@ export function probePathWritable(path: string): boolean {
   if (path.length === 0) {
     return false;
   }
-  const probe: string = `${path}/${WRITE_PROBE_NAME}`;
+  let ownedDir: string = '';
+  let probe: string = '';
   let file: fs.File | undefined = undefined;
   let created: boolean = false;
   try {
+    // SDK没有公开EXCL；唯一临时目录将探针与所有既存平面文件隔离。
+    ownedDir = fs.mkdtempSync(`${path}/dshm-write-probe-XXXXXX`);
+    probe = `${ownedDir}/${WRITE_PROBE_NAME}`;
     file = fs.openSync(probe, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
     created = true;
     fs.writeSync(file.fd, 'ok');
@@ -255,10 +401,12 @@ export function probePathWritable(path: string): boolean {
     file = undefined;
     fs.unlinkSync(probe);
     created = false; // 已自行清理 ⇒ 别让 finally 再删一次（否则会打一条无意义的"清理失败"）
+    fs.rmdirSync(ownedDir);
+    ownedDir = '';
     return true;
   } catch (err) {
     const e = err as BusinessError;
-    hilog.info(DOMAIN, TAG, '探写失败（按不可写处理）：code=%{public}d msg=%{public}s', e.code, e.message);
+    hilog.info(DOMAIN, TAG, '探写未确认（可能仅不可建目录）：code=%{public}d msg=%{public}s', e.code, e.message);
     return false;
   } finally {
     if (file !== undefined) {
@@ -275,6 +423,13 @@ export function probePathWritable(path: string): boolean {
         fs.unlinkSync(probe);
       } catch (cleanupErr) {
         hilog.warn(DOMAIN, TAG, '探写残留清理失败（不影响判据）');
+      }
+    }
+    if (ownedDir.length > 0) {
+      try {
+        fs.rmdirSync(ownedDir);
+      } catch (cleanupErr) {
+        hilog.warn(DOMAIN, TAG, '本次探测目录清理失败');
       }
     }
   }
@@ -307,10 +462,15 @@ export function probePathWritable(path: string): boolean {
  *   ② 用户目录 + `checkPersistentPermission()` 为真（重启后由 `restoreFolderGrants()` 启用）。
  *   两类都不满足才回落到应用专属目录 —— 那时回落是**如实**的：这条路径重启后确实读不到。
  *
- * ── 为什么只对手机 / 平板生效（PC 不许被改坏）────────────────────────────
- * 2in1 / PC 上宿主**能**读 picker 目录（同仓 docs/30 实测），不需要授权持久化 ⇒ 那一支
- * **逐字不动**（也不为 PC 记授权、不引入新动作）。设备事实读不到时也返回 false
- * （退回 2in1 行为）——保守方向：宁可少收口，也不误伤桌面。
+ * ── 它现在还管什么（2026-10-14 收窄后的用途）──────────────────────────────
+ * 两件事：① **产品行为分派** —— 是否给出"本应用公共下载目录"兜底与对应的文案
+ *（PC 上没有那条兜底路线，文案逐字不同）；② **界面呈现** —— 顶部栏三键配色、底部手势区
+ * 沉浸、跟屏旋转等（见各调用点）。
+ * 【2026-10-14 更正】它**不再**决定"要不要持久化目录授权"：那条链（登记 + persist +
+ * 启动 `activatePermission`）**三端同一套**。旧注释写的"2in1 / PC 上宿主能读 picker 目录
+ * ⇒ 不需要持久化"是 docs/30 时代的读数，在 8 条权限面下已不成立（PC 档实测与手持档
+ * 逐字同构，见 docs/157）。设备事实读不到时仍返回 false（退回 2in1 行为）——保守方向：
+ * 宁可少分派产品行为，也不误伤桌面。
  */
 export function isHandheldForm(): boolean {
   try {
@@ -319,6 +479,32 @@ export function isHandheldForm(): boolean {
   } catch (e) {
     const err = e as BusinessError;
     hilog.warn(DOMAIN, TAG, '形态读取失败（按非手持处理，保持 2in1 旧行为）：%{public}s', err.message);
+    return false;
+  }
+}
+
+/**
+ * 本机是否为**直板手机**形态（平板 / 折叠屏**都不算**）。
+ *
+ * ── 与 `isHandheldForm()` 的分工（2026-10-13 用户裁决）──────────────────────
+ * 手持档（手机 / 平板）共用整套"窄屏"适配（抽屉侧栏、浮动 ⊞、朝向跟随、底部手势区沉浸…），
+ * 两边都该有。但**设置面板的手机化布局**只对直板机成立：官方那套"左侧 188px 竖向导航 +
+ * 右侧内容"在平板宽度下本来就放得下，改成顶部横条反而白丢一截内容高度。用户原话：
+ * "平板端其实设置的 UI 用 PC 端的，因为平板的宽度是足够的，只有手机端的才需要横过来"；
+ * 随后追加（同日）："设置的 UI 手机只是直板机是横着的，折叠机也是 PC 竖着的 UI"。
+ *
+ * 判据 = 手机形态 **且非折叠屏**（`isFoldableDevice()`：折叠屏展开后宽度与平板相当 ⇒ 同平板）。
+ * 与 `isHandheldForm()` **同源**读 `readDeviceFacts()`；读不到设备事实 / 折叠能力时返回 false
+ * （= 不当直板机处理 ⇒ 平板、折叠屏、桌面都走官方布局）。保守方向：宁可少收口，也不误伤
+ * 平板与桌面 —— 这个函数只用来**缩小**适配面，绝不能因为读失败而把适配面放大。
+ */
+export function isPhoneForm(): boolean {
+  try {
+    const form: FormFactor = readDeviceFacts().form;
+    return form === FormFactor.PHONE && !isFoldableDevice();
+  } catch (e) {
+    const err = e as BusinessError;
+    hilog.warn(DOMAIN, TAG, '形态读取失败（按非直板机处理，平板/折叠屏/桌面走官方布局）：%{public}s', err.message);
     return false;
   }
 }
@@ -365,6 +551,43 @@ export function isPathWithin(child: string, parent: string): boolean {
  * ② Node/koffi 侧是否与 `fileIo` 同权（文档完全未涉及 node），以及归属授权是否覆盖
  * `unlink`——**唯一判据是真机跑一次 `bash rm`**（见 30 号文档 §7.2）。
  */
+/**
+ * 给"不受我们控制的系统 await"加硬超时。
+ *
+ * 【为什么必须自己实现】`DocumentViewPicker.save()` 是系统 API，没有超时参数；
+ * 一旦它不返回，调用方就无限期挂住。启动链上任何这样的点都等于"应用卡死"。
+ *
+ * 超时用**带固定标记的 Error** 拒绝，让调用方能把"超时"与"系统报错"分开处理
+ * （两者的处置不同：超时是一种可接受的回退，报错要如实上报）。
+ */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled: boolean = false;
+    const timer: number = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(new Error(`__DSHM_TIMEOUT__ ${ms}ms`));
+    }, ms);
+    p.then((value: T) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    }).catch((err: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 export async function publicDownloadFolder(context: common.Context): Promise<PickedFolder> {
   const bundleName: string = readBundleName();
   if (bundleName.length === 0) {
@@ -382,11 +605,33 @@ export async function publicDownloadFolder(context: common.Context): Promise<Pic
   }
   // ② 用 DOWNLOAD 模式建立归属（自动创建 Download/<包名>/，跳过文件选择界面）
   let createdUri: string = '';
+  /*
+   * 【2026-11-01 真机日志实证：首次启动卡死在启动页】
+   *
+   * 现象（手机端首次安装）：点图标后一直停在启动页；`hilog` 里
+   * **没有 `startHost 设备事实` / `startHost 返回` 两行**，只有零星
+   * `host-ready.json 属于旧进程（pid 不符）`。⇒ 启动链根本没走到 spawn，
+   * 而是挂在 `start()` 里 spawn **之前**唯一的 await —— 本函数。
+   *
+   * 而本函数的 ① 分支（直拼 Download/<包名> 探写）在首启必然不命中（目录还不存在），
+   * 于是走 ② 的 `view.save()`。这一步：
+   *   · 之前**没有任何日志**（成功才由调用方打，失败才 warn）⇒ 卡住时日志一片空白；
+   *   · **没有超时** ⇒ 系统侧不返回就无限期 await；
+   * 用户第二次进入时目录已被创建，① 命中，于是"杀掉重进就好"——与真机表现完全一致。
+   *
+   * 修法：**进入前先打日志**（下次一眼定位）+ **给 save() 加硬超时**。
+   * 超时按"认领失败"处理（返回空串），Host 回退沙箱工作区 —— 应用仍能启动，
+   * 用户不至于卡在启动页。这符合本文件既有的"认领失败不阻断启动"纪律。
+   */
+  const CLAIM_SAVE_TIMEOUT_MS: number = 6000;
+  hilog.info(DOMAIN, TAG,
+    '公共目录：未命中已存在的专属目录，改用 DOWNLOAD 模式建立归属（最多等 %{public}d ms）',
+    CLAIM_SAVE_TIMEOUT_MS);
   try {
     const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
     options.pickerMode = picker.DocumentPickerMode.DOWNLOAD;
     const view: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
-    const uris: string[] = await view.save(options);
+    const uris: string[] = await withTimeout(view.save(options), CLAIM_SAVE_TIMEOUT_MS);
     if (uris.length > 0) {
       createdUri = uris[0];
       path = pathOfUri(createdUri);
@@ -402,6 +647,20 @@ export async function publicDownloadFolder(context: common.Context): Promise<Pic
     }
   } catch (err) {
     const e = err as BusinessError;
+    /*
+     * 超时与"系统报错"分开处理：超时的正确处置是**回退**（Host 走沙箱工作区），
+     * 而不是把错误抛到启动链上。日志里必须留痕，否则下次又会看到"卡死但没日志"。
+     */
+    const msg: string = e.message === undefined ? '' : e.message;
+    if (msg.indexOf('__DSHM_TIMEOUT__') >= 0) {
+      hilog.warn(DOMAIN, TAG,
+        'DOWNLOAD 模式 %{public}d ms 未返回 ⇒ 判为认领超时，回退沙箱工作区（不阻断启动）',
+        CLAIM_SAVE_TIMEOUT_MS);
+      return {
+        outcome: PickOutcome.FAILED, uri: '', path: '', name: bundleName,
+        reason: `公共下载目录认领超时（DOWNLOAD 模式 ${CLAIM_SAVE_TIMEOUT_MS} ms 未返回）。`
+      };
+    }
     hilog.warn(DOMAIN, TAG, 'DOWNLOAD 模式不可用：code=%{public}d msg=%{public}s', e.code, e.message);
     return {
       outcome: PickOutcome.FAILED, uri: '', path: '', name: bundleName,
@@ -512,6 +771,34 @@ export function readBundleName(): string {
   }
 }
 
+/**
+ * 本应用的版本文本（`<versionName> (<versionCode>)`）——「关于」页客户端版本的**唯一**来源。
+ *
+ * 【为什么必须问系统】它曾经在 `appstate/model/StubData2.ets` 里**写死**成
+ * `'1.1.0 (1010000)'`：包已经发到 `1.1.2/1010002`，界面还显示 1.1.0。上架自检把这条
+ * 列为 P0 —— 用户看到的版本与实际不符。同一轮里商店文案的 `appDesc` 也犯过同一个病
+ * （写着 `本版本 1.1.0（versionCode 1010000）`），两处都是"手抄版本号"的后果。
+ *
+ * 【口径】与 `readBundleName()` 同一个来源（`bundleManager.getBundleInfoForSelfSync`）、
+ * 同一套 try-catch 口径，故放在同一处、只此一份。**读不到就返回空串**，由 UI 如实显示
+ * 「—」：宁可显示"未知"，也不显示一个写死的假版本。
+ */
+export function readAppVersionText(): string {
+  try {
+    const flags: number = bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT;
+    const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(flags);
+    const name: string = info.versionName;
+    if (name === undefined || name === null || name === '') {
+      return '';
+    }
+    return `${name} (${info.versionCode})`;
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '取版本失败：code=%{public}d msg=%{public}s', e.code, e.message);
+    return '';
+  }
+}
+
 /** URI → 真实路径；失败返回空串（沿用 `pickFolder` 的"不拿 URI 冒充路径"口径）。 */
 function pathOfUri(uri: string): string {
   try {
@@ -553,7 +840,7 @@ export async function pickDocument(context: common.Context): Promise<PickedFile>
     // 用户取消在多数系统上表现为一次 reject（错误码 13900020 / 或 message 含 cancel）。
     // 取消不提示错误，因此必须与真正的失败分开：
     hilog.info(DOMAIN, TAG, 'select rejected: code=%{public}d', e.code);
-    const cancelled: boolean = isCancelCode(e.code);
+    const cancelled: boolean = isFolderPickerCancelCode(e.code);
     return outcomeOf(cancelled ? PickOutcome.CANCELLED : PickOutcome.FAILED, '',
       cancelled ? '' : `无法拉起文件选择器：${e.message}（code=${e.code}）`);
   }
@@ -561,12 +848,6 @@ export async function pickDocument(context: common.Context): Promise<PickedFile>
     return outcomeOf(PickOutcome.CANCELLED, '', '');
   }
   return await readPickedFile(uris[0]);
-}
-
-/** 判断一个错误码是否表示「用户取消」。 */
-function isCancelCode(code: number): boolean {
-  // 13900020 = 参数错误（部分系统用它表示用户取消）；其他实现直接给 0/undefined。
-  return code === 13900020 || code === 0;
 }
 
 /** 读取一个已选中的 URI 并把内容编码成 base64。 */

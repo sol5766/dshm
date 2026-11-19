@@ -479,6 +479,33 @@ export class SessionHub {
 
   // ── 状态 ──
   private phase: HubPhase = HubPhase.IDLE;
+
+  /**
+   * 启动宽限期计时器（docs/330）。
+   *
+   * 【它解决什么】实测用户反馈「刚进去左下角就提示连接失败，点一下重连才好」。
+   * 根因不是连接坏了（`Connection` 的自动重连是**无限持续**的，一次失败必然会被后续重试治愈），
+   * 而是**过早显示错误**：`connect()` 的第一次 `authenticate()` / `start()` 失败就直接置
+   * `DEGRADED`，界面立刻弹出横幅 —— 而通常几百毫秒后重连就成功了。
+   *
+   * ⇒ 首次连接（还没 `LIVE` 过）失败时**先留在 `CONNECTING`**，给自动重连一个宽限窗口；
+   * 窗口内连上就什么都不显示；窗口过了还没连上才置 `DEGRADED` 并显示原因。
+   * 已经 `LIVE` 过再断的情况**不走宽限**（那时用户确实需要知道"掉了"）。
+   */
+  private graceTimer: number = -1;
+  /** 本次运行是否已经 `LIVE` 过（决定宽限是否适用）。 */
+  private everLive: boolean = false;
+  /**
+   * 是否有一次 `connect()` 正在飞（并发闸）。
+   *
+   * 【为什么不复用 `phase === CONNECTING`】phase 是**给界面看的呈现状态**：
+   * 启动宽限期会故意让它停在 CONNECTING 等重连。若并发闸也用它，
+   * 就变成"宽限期内新的 token 到来也进不来 connect()"（docs/330 的真实缺陷）。
+   * 两件事分开表达 —— 这与 `running` / `unaryReady` 各自独立的做法一致。
+   */
+  private connecting: boolean = false;
+  /** 启动宽限期（毫秒）。取值理由见 `enterDegradedOrGrace`。 */
+  private static readonly STARTUP_GRACE_MS: number = 12000;
   private hostName: string = '';
   private authority: string = '';
   private sessions: SessionListItem[] = [];
@@ -670,6 +697,17 @@ export class SessionHub {
    */
   private followCancel: (() => void) | undefined;
   private controlCancel: (() => void) | undefined;
+  /**
+   * 控制流的有界重连（2026-11-10）。
+   *
+   * 【要解决什么】`openControlStream` 的 onError/onEnd 只清 cancel、记一行日志、通知一次，
+   * 之后**不再重开**。这条流是 jobs / queues 的唯一实时来源 ⇒ 流一断，界面上的
+   * running 与排队就停在最后一帧：计时继续走，但状态永远不再更新。
+   * 【为什么必须有上限】这不是"断了就立刻无限重连"的场合：宿主被挂起 / 网关拒绝时
+   * 无限重连只会刷日志。1s → 3s → 8s 三次，拿到 BASELINE 即清零。
+   */
+  private controlRetryTimer: number = -1;
+  private controlRetries: number = 0;
   private lastRefreshAt: number = 0;
   private refreshTimer: number = -1;
   /** 设置刷新自己的节流状态（与列表刷新分开，理由见 `scheduleSettingsRefresh`） */
@@ -712,10 +750,78 @@ export class SessionHub {
    * 任一步失败都进入 DEGRADED 而不是抛错：移动端网络随时可能不可用，
    * 降级可读比崩溃重要（D3 §4「每处失败都有建议」）。
    */
-  async connect(): Promise<boolean> {
-    if (this.phase === HubPhase.LIVE || this.phase === HubPhase.CONNECTING) {
-      return this.phase === HubPhase.LIVE;
+  /**
+   * 连接失败时的**分流**：首次连接先进宽限期，其余情况立即降级（docs/330）。
+   *
+   * 【为什么宽限是 12 秒】三条实测依据：
+   *   · Host 冷启动到 `BOOT_65_AUTH_URL` 实测 **+6846ms**（PC 日志），首解包时更久；
+   *   · Web 侧的首个请求与 Host 就绪之间有近 1 秒的天然错位；
+   *   · `Connection` 的重连退避从秒级起、持续递增，12 秒内必然已试过数次。
+   * 取 12 秒 ≈ "足够的自愈窗口" 又不会让用户对着空白等太久。
+   *
+   * 【为什么 `everLive` 为真时**不走**宽限】那时数据已经在屏上，用户需要知道"掉线了"；
+   * 宽限只用于"从没连上过的首次启动"这一种场景 —— 也就是用户看到的那条
+   * 「刚进去就提示连接失败」。
+   */
+  private enterDegradedOrGrace(message: string): void {
+    if (this.everLive) {
+      this.phase = HubPhase.DEGRADED;
+      this.lastError = message;
+      this.notify();
+      return;
     }
+    if (this.graceTimer !== -1) {
+      /* 已在宽限窗口内：继续等自动重连，不刷屏也不提前报错 */
+      this.record(`grace 内再次失败（继续等待）：${message}`);
+      return;
+    }
+    this.record(`首次连接失败，进入 ${SessionHub.STARTUP_GRACE_MS}ms 宽限：${message}`);
+    /*
+     * 先记下原因但不改 phase（仍是 CONNECTING）：界面上"连接中"是诚实的，
+     * 而"连接失败 + 需要点重连"在这种可自愈的时刻是**误导**。
+     */
+    this.lastError = message;
+    this.graceTimer = setTimeout(() => {
+      this.graceTimer = -1;
+      if (this.phase === HubPhase.LIVE) {
+        return;
+      }
+      /* 宽限用完仍未连上：这时才把它当成真失败展示给用户 */
+      this.phase = HubPhase.DEGRADED;
+      this.notify();
+    }, SessionHub.STARTUP_GRACE_MS);
+    this.notify();
+  }
+
+  /** 连上后清掉宽限计时器（否则它会在 12 秒后把 LIVE 又翻回 DEGRADED）。 */
+  private clearGrace(): void {
+    if (this.graceTimer !== -1) {
+      clearTimeout(this.graceTimer);
+      this.graceTimer = -1;
+    }
+  }
+
+  async connect(): Promise<boolean> {
+    /*
+     * ⚠️ 2026-10-31 第三次修（docs/331）：这里**不能再**因 `phase === CONNECTING` 早退。
+     *
+     * 上一版（docs/330）加了启动宽限：首次连接失败时**故意把 phase 留在 CONNECTING**
+     * 等自动重连。但 `connect()` 第一行的旧早退判据是「CONNECTING ⇒ 直接返回 false」，
+     * 于是宽限期虽然"在等"，**新的 token 到达后根本进不来** ——
+     * 最终必然在 12 秒后降级，用户看到的就是「进去提示连接异常，点一下才好」。
+     * 而"点一下"之所以有效，是因为手动重连会先 `disconnect()` 把 phase 清成 IDLE。
+     *
+     * 正确判据只有一条：**已经 LIVE 就不再重连**；CONNECTING 只用于防止"同一时刻两次并发连接"，
+     * 由 `connecting` 这个独立标志表达（而不是借用 phase —— phase 是给界面看的呈现状态，
+     * 它不该同时承担并发控制）。
+     */
+    if (this.phase === HubPhase.LIVE) {
+      return true;
+    }
+    if (this.connecting) {
+      return false;
+    }
+    this.connecting = true;
     // 【连接状态订阅已在构造函数里做过一次】这里**不再重复订阅**：
     // 重复订阅会让同一次降级被处理多次，且随重连次数累积。
     this.phase = HubPhase.CONNECTING;
@@ -724,9 +830,9 @@ export class SessionHub {
 
     const auth = await this.conn.authenticate();
     if (!auth.ok) {
-      this.phase = HubPhase.DEGRADED;
-      this.lastError = authAdvice(auth.status, auth.reason === undefined ? '未提供原因' : auth.reason);
-      this.notify();
+      this.connecting = false;
+      this.enterDegradedOrGrace(
+        authAdvice(auth.status, auth.reason === undefined ? '未提供原因' : auth.reason));
       return false;
     }
 
@@ -752,15 +858,18 @@ export class SessionHub {
 
     const started = await this.conn.start(sink);
     if (!started) {
-      this.phase = HubPhase.DEGRADED;
-      this.lastError = this.conn.getLastError() ?? '连接未建立：请检查 Host 是否在运行、令牌是否有效';
-      this.notify();
+      this.connecting = false;
+      this.enterDegradedOrGrace(
+        this.conn.getLastError() ?? '连接未建立：请检查 Host 是否在运行、令牌是否有效');
       return false;
     }
 
     this.openControlStream();
     // E132：工作区注册表变更流——删除与归档都以它的 id 为键
     this.openWorkspaceStream();
+    this.clearGrace();
+    this.connecting = false;
+    this.everLive = true;
     this.phase = HubPhase.LIVE;
     // 认证与载体已就绪：一元能力从此可用，且**不随事件流的生死变化**
     this.unaryReady = true;
@@ -784,6 +893,12 @@ export class SessionHub {
    */
   private handleConnectionState(state: ConnectionState, detail: string): void {
     if (state === ConnectionState.CONNECTED) {
+      /*
+       * 载体恢复 ⇒ 此后任何断线都该让用户知道（不再走启动宽限）。
+       * 这里同时清掉宽限计时器：否则它会在窗口到点时把已经 LIVE 的界面翻成 DEGRADED。
+       */
+      this.everLive = true;
+      this.clearGrace();
       this.record('connection connected');
       /**
        * 【必须在载体恢复后重新开流】这里曾经直接 `return`，于是**一次断线之后
@@ -801,12 +916,14 @@ export class SessionHub {
       return;
     }
     if (state === ConnectionState.DISCONNECTED) {
-      this.phase = HubPhase.DEGRADED;
-      if (this.lastError.length === 0) {
-        this.lastError = detail;
-      }
+      /*
+       * 【首次启动的主路径在这里，不在 connect() 的返回值里】
+       * 载体在握手阶段就断开时，`Connection` 是通过这个状态回调通知的 ——
+       * 原实现无条件置 DEGRADED，于是"刚进去就弹连接失败"。
+       * 现在同样过 `enterDegradedOrGrace`：没 LIVE 过就先等自动重连。
+       */
       this.record(`connection disconnected: ${detail}`);
-      this.notify();
+      this.enterDegradedOrGrace(this.lastError.length === 0 ? detail : this.lastError);
       return;
     }
     if (state === ConnectionState.CONNECTING && this.phase === HubPhase.LIVE) {
@@ -840,7 +957,9 @@ export class SessionHub {
   /** 断开并释放所有流（仅一个窗口会调用；其他窗口只订阅快照） */
   async disconnect(): Promise<void> {    this.cancelFollow();
     this.cancelControl();
+    this.controlRetries = 0;
     await this.conn.stop();
+    this.connecting = false;
     this.phase = HubPhase.IDLE;
     this.eventsReady = false;
     this.controlReady = false;
@@ -865,6 +984,31 @@ export class SessionHub {
     if (cancel !== undefined) {
       cancel();
     }
+    if (this.controlRetryTimer >= 0) {
+      clearTimeout(this.controlRetryTimer);
+      this.controlRetryTimer = -1;
+    }
+  }
+
+  /** 控制流断开后的有界重连（见 controlRetryTimer 的说明）。 */
+  private scheduleControlRetry(reason: string): void {
+    if (this.controlRetryTimer >= 0 || this.phase === HubPhase.IDLE) {
+      return;
+    }
+    if (this.controlRetries >= 3) {
+      this.record(`control 重连已放弃（${reason}）`);
+      return;
+    }
+    const delay: number = this.controlRetries === 0 ? 1000 : (this.controlRetries === 1 ? 3000 : 8000);
+    this.controlRetries += 1;
+    this.controlRetryTimer = setTimeout((): void => {
+      this.controlRetryTimer = -1;
+      if (this.phase === HubPhase.IDLE) {
+        return;
+      }
+      this.record(`control 重连 #${this.controlRetries}（${reason}）`);
+      this.openControlStream();
+    }, delay);
   }
 
   // ───────────────────────── 订阅 ─────────────────────────
@@ -3596,6 +3740,8 @@ export class SessionHub {
         const frame: ControlFrame = readControlFrame(value);
         if (frame.type === ControlFrameType.BASELINE) {
           this.controlReady = true;
+          /* 拿到基线 = 这条流真的活着 ⇒ 重连预算清零。 */
+          this.controlRetries = 0;
           // 基线里就带着**当前会话**的排队项（`queues` 是 sessionId → 条目数组）。
           // 不在这里取一次的话，用户在"轮次进行中排队了两条"之后切走再切回来，
           // 队列会显示为空——直到下一次 queue 帧到达才恢复。
@@ -3636,16 +3782,20 @@ export class SessionHub {
       },
       onError: (code: string, message: string) => {
         this.controlCancel = undefined;
+        this.controlReady = false;
         this.record(`control error ${code}`);
         if (code !== GATEWAY_SIGNATURE_INVALID) {
           this.lastError = `控制流失败：${code} ${message}`;
         }
         this.notify();
+        this.scheduleControlRetry(`error ${code}`);
       },
       onEnd: () => {
         this.controlCancel = undefined;
+        this.controlReady = false;
         this.record('control end');
         this.notify();
+        this.scheduleControlRetry('end');
       }
     };
     // 空参数也要有声明类型：ArkTS 禁止无类型对象字面量（arkts-no-untyped-obj-literals）

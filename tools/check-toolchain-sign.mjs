@@ -20,10 +20,11 @@
  * 退出码：0 通过 / 1 有问题 / 3 环境不足（没跑成，不算通过）。
  */
 import { existsSync, readFileSync, statSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = process.cwd();
-const DEST = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'toolchain');
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const DEST = join(ROOT, 'hostruntime', 'src', 'main', 'resources', 'resfile', 'toolchain');
 const MARKER = 'dshm-signed.txt';
 
 const problems = [];

@@ -22,6 +22,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NODE_VER="${NODE_VER:-v22.23.2}"
+# 并行度：默认 nproc，但本机可用内存有限（V8 单个 TU 峰值可达数百 MB），
+# 用 JOBS 显式限制可避免 OOM。例：JOBS=6 bash build-node-ohos.sh
+JOBS="${JOBS:-$(nproc)}"
 ROOT="${HOME}/ohos"
 SDK="${ROOT}/sdk"
 CLANG_DIR="${SDK}/native/llvm/bin"
@@ -105,8 +108,8 @@ echo "[node] configure（dest-os=openharmony dest-cpu=${DEST_CPU} --shared）"
   --prefix="${ROOT}/node-install" \
   2>&1 | tee -a "${BUILD_LOG}"
 
-echo "[node] make -j$(nproc)（V8 很重，预计 30~90 分钟）"
-make -j"$(nproc)" 2>&1 | tee -a "${BUILD_LOG}"
+echo "[node] make -j${JOBS}（V8 很重，预计 30~90 分钟）"
+make -j"${JOBS}" 2>&1 | tee -a "${BUILD_LOG}"
 
 echo "[node] ── 产物 ──"
 ls -la out/Release/ 2>/dev/null | grep -E 'libnode|^.*node$|\.so' || ls -la out/Release/ | head -30

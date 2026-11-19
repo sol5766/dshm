@@ -33,10 +33,18 @@
 #include <hilog/log.h>
 
 #include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -107,6 +115,15 @@ void SetBool(napi_env env, napi_value obj, const char* key, bool value) {
  */
 napi_value RuntimeVersion(napi_env env, napi_callback_info info) {
   napi_value out = nullptr;
+  /*
+   * 构造函数加载 libnode 失败时，编译期 NODE_VERSION_STRING 仍然存在；
+   * 此时返回 "26.7.0" 会把"模块文件存在"误报成"运行时可用"。
+   */
+  if (g_nodeStart == nullptr) {
+    napi_value empty = nullptr;
+    napi_create_string_utf8(env, "", 0, &empty);
+    return empty;
+  }
   napi_create_string_utf8(env, NODE_VERSION_STRING, NAPI_AUTO_LENGTH, &out);
   return out;
 }
@@ -124,42 +141,149 @@ napi_value RuntimeVersion(napi_env env, napi_callback_info info) {
  * 取"KEY=VALUE"字符串数组而不是两个平行数组：无需在两端各自维护下标对应关系，
  * 少一类"键值错位"的错法（键值错位会静默把 Host 指向错误的目录）。
  */
-std::thread g_tailThread;
-std::atomic<bool> g_tailStop{false};
-
-/**
- * 把 Node 抓取文件里**新增**的内容实时转发到 hilog。
+/* ── 进程级崩溃留痕 + 输出轮转（2026-10-18 内测闪退报告的 P0 落点）────────────
  *
- * 【为什么必须有它】原先只在 `node::Start` **返回**时才把捕获内容转 hilog，于是当 Node
- * 一直跑着（这正是现在的状态：started=true 且 node::Start 不返回）时我们**完全瞎**——
- * 不知道 Web 服务起没起来、卡在哪一步。有了 tail 线程，Node 活着也能看见它的输出。
+ * 【为什么加】2in1 内测出现"Host 进程无任何日志地消失"：node-output.log 每次启动被
+ * `"w"` 截断，崩溃现场必丢；native 段错误/abort 也没有任何记录，事后只能靠心跳断档猜。
+ * 启动轮转与崩溃留痕分开处理：
+ *   ① 进程首次启动前把上一次的 node-output.log 轮转成 `.1/.2/.3`（保留最近 3 份）；
+ *   ② 安装 SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE 处理器：先用 ::write 落一行
+ *      `host-crash.log`（**不用 printf/iostream**，避免在崩溃上下文里再死锁），
+ *      再恢复默认动作并重新 raise（保留系统 faultlog / abort 语义）。
+ * 正常退出（node::Start 返回）另写 `host-exit.log`；两份日志拼起来即可区分
+ * "被信号带走" 与 "自己退出"，这是此前完全缺失的证据。
  */
-void TailNodeOutput(std::string path) {
-  long offset = 0;
-  while (!g_tailStop.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    FILE* f = ::fopen(path.c_str(), "r");
-    if (f == nullptr) continue;
-    if (::fseek(f, offset, SEEK_SET) != 0) { ::fclose(f); continue; }
-    char buf[3000];
-    size_t n = ::fread(buf, 1, sizeof(buf) - 1, f);
-    ::fclose(f);
-    if (n == 0) continue;
-    offset += static_cast<long>(n);
-    buf[n] = '\0';
-    // 逐行打：单条 hilog 过长会被截断，行首的定位信息（例如 "dsh web:"）就没了
-    std::string all(buf);
-    size_t pos = 0;
-    while (pos < all.size()) {
-      size_t nl = all.find('\n', pos);
-      std::string line = all.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
-      if (!line.empty()) {
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "DSHM-NODELIVE", "%{public}s", line.c_str());
-      }
-      if (nl == std::string::npos) break;
-      pos = nl + 1;
+static int g_crashFd = -1;
+
+static const char* DshmSignalName(int signo) {
+  switch (signo) {
+    case SIGSEGV: return "SIGSEGV";
+    case SIGABRT: return "SIGABRT";
+    case SIGBUS: return "SIGBUS";
+    case SIGILL: return "SIGILL";
+    case SIGFPE: return "SIGFPE";
+    default: return "SIG?";
+  }
+}
+
+extern "C" void DshmCrashHandler(int signo) {
+  if (g_crashFd >= 0) {
+    char buf[256];
+    int n = ::snprintf(buf, sizeof(buf), "fatal signal %d (%s) pid=%d at=%lld\n",
+                       signo, DshmSignalName(signo), static_cast<int>(::getpid()),
+                       static_cast<long long>(::time(nullptr)));
+    if (n > 0) {
+      ssize_t ignored = ::write(g_crashFd, buf, static_cast<size_t>(n));
+      (void)ignored;
     }
   }
+  ::signal(signo, SIG_DFL);
+  ::raise(signo);
+}
+
+static void InstallCrashHandlers(const std::string& homeDir) {
+  if (homeDir.empty()) return;
+  const std::string marker = homeDir + "/host-crash.log";
+  g_crashFd = ::open(marker.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0664);
+  if (g_crashFd < 0) {
+    OH_LOG_Print(LOG_APP, LOG_WARN, 0x0000, "DSHM-SHIM",
+                 "host-crash.log 打不开：%{public}s", marker.c_str());
+  }
+  const int sigs[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
+  for (int sig : sigs) {
+    ::signal(sig, DshmCrashHandler);
+  }
+}
+
+/** 启动留档：node-output.log → .1，.1 → .2，.2 → .3（.3 丢弃）；运行期容量另行治理。 */
+static void RotateNodeOutput(const std::string& logPath) {
+  if (logPath.empty()) return;
+  const std::string p1 = logPath + ".1";
+  const std::string p2 = logPath + ".2";
+  const std::string p3 = logPath + ".3";
+  ::unlink(p3.c_str());
+  ::rename(p2.c_str(), p3.c_str());
+  ::rename(p1.c_str(), p2.c_str());
+  ::rename(logPath.c_str(), p1.c_str());
+}
+
+// 原生组件也直接 write(1/2)，不能靠 stdio 锁拦住它们；O_APPEND 是截断后不留大洞的前提。
+// 这是运行期治理阈值而非逐次 write 的硬限：最多额外积累一次检查间隔内的突发输出。
+constexpr off_t kNodeOutputLimit = 4 * 1024 * 1024;
+constexpr int kNodeOutputCheckMs = 250;
+std::mutex g_outputMutex;
+int g_outputFd = -1;
+std::string g_outputPath;
+
+static bool LimitNodeOutput(int fd) {
+  struct stat st {};
+  if (::fstat(fd, &st) != 0) return false;
+  if (st.st_size <= kNodeOutputLimit) return true;
+  // 不做保尾复制：并发 native write 不参与锁，复制再截断会吞掉复制期间的新错误。
+  // 旧历史在容量阈值处淘汰；signal / Node 退出证据仍分别写 host-crash / host-exit。
+  if (::ftruncate(fd, 0) != 0) return false;
+  static const char marker[] = "[DSHM] node-output capacity reset; older output expired (4 MiB threshold)\n";
+  size_t offset = 0;
+  while (offset < sizeof(marker) - 1) {
+    const ssize_t n = ::write(fd, marker + offset, sizeof(marker) - 1 - offset);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    offset += static_cast<size_t>(n);
+  }
+  // 清理已成功；标记写失败不把容量治理误报为失败。
+  return true;
+}
+
+static bool CaptureNodeOutput(const std::string& logPath) {
+  std::lock_guard<std::mutex> lock(g_outputMutex);
+  if (g_outputFd >= 0) return true;
+  if (logPath.empty()) return false;
+  // 进程内只轮转一次。重启 Node 时 ArkWeb 仍可能写旧 fd，不能 rename 后把监控移到新 inode。
+  RotateNodeOutput(logPath);
+  int fd = ::open(logPath.c_str(), O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0664);
+  if (fd < 0) return false;
+  const int savedOut = ::dup(STDOUT_FILENO);
+  if (savedOut < 0) { ::close(fd); return false; }
+  ::flockfile(stdout);
+  ::flockfile(stderr);
+  ::fflush(stdout);
+  ::fflush(stderr);
+  bool ok = ::dup2(fd, STDOUT_FILENO) >= 0;
+  if (ok && ::dup2(fd, STDERR_FILENO) < 0) {
+    ::dup2(savedOut, STDOUT_FILENO);
+    ok = false;
+  }
+  if (ok) ::setvbuf(stdout, nullptr, _IOLBF, 0);
+  ::funlockfile(stderr);
+  ::funlockfile(stdout);
+  ::close(savedOut);
+  if (!ok) { ::close(fd); return false; }
+  g_outputFd = fd;
+  g_outputPath = logPath;
+  std::thread([fd]() {
+    bool failed = false;
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kNodeOutputCheckMs));
+      const bool ok = LimitNodeOutput(fd);
+      // 只报状态转变，磁盘错误不能再变成每拍刷屏。
+      if (!ok && !failed) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-SHIM", "node-output 容量治理失败，需检查存储状态");
+      }
+      failed = !ok;
+    }
+  }).detach();
+  return true;
+}
+
+/** 正常退出留痕（node::Start 返回后调用；崩溃路径由信号处理器负责）。 */
+static void AppendLifecycle(const std::string& homeDir, const std::string& line) {
+  if (homeDir.empty()) return;
+  const std::string file = homeDir + "/host-exit.log";
+  int fd = ::open(file.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0664);
+  if (fd < 0) return;
+  ssize_t ignored = ::write(fd, line.c_str(), line.size());
+  (void)ignored;
+  ::close(fd);
 }
 
 napi_value StartHost(napi_env env, napi_callback_info info) {
@@ -173,6 +297,18 @@ napi_value StartHost(napi_env env, napi_callback_info info) {
   if (g_started.load()) {
     SetBool(env, out, "started", false);
     SetString(env, out, "note", "运行时已经启动过；同一进程只允许一个 Node 实例");
+    return out;
+  }
+  /*
+   * 不能先把 started=true 再让工作线程发现 node::Start 缺失。模拟器无 libnode 时，
+   * 那会把确定失败伪装成成功，调用方只能等端口超时。
+   */
+  if (g_nodeStart == nullptr) {
+    SetBool(env, out, "started", false);
+    napi_value applied = nullptr;
+    napi_create_uint32(env, 0, &applied);
+    napi_set_named_property(env, out, "envApplied", applied);
+    SetString(env, out, "note", "libnode 未加载或 node::Start 不可用");
     return out;
   }
 
@@ -228,34 +364,20 @@ napi_value StartHost(napi_env env, napi_callback_info info) {
 
   g_started.store(true);
   g_running.store(true);
-  // 抓取路径在**线程外**算好：Node 线程与 tail 线程都要用它
-  std::string logPath;
+  // 先启用进程级输出捕获与容量治理，再启动 Node，避免遗漏启动错误。
+  std::string homeDir;
   const char* homeEnv = ::getenv("DSHM_SANDBOX_HOME");
   if (homeEnv != nullptr && homeEnv[0] != '\0') {
-    logPath = std::string(homeEnv) + "/node-output.log";
+    homeDir = std::string(homeEnv);
   }
-  g_nodeThread = std::thread([logPath]() {
-    /*
-     * 把 Node 的 stdout/stderr 抓进一个文件。
-     *
-     * 【为什么必须这么做】应用进程的 stdout 在设备上**看不见**（D6 E23：hilog 里没有，
-     * 也没人去读它），而 `node::Start` 返回时把失败原因（例如入口脚本抛错、配置缺失）
-     * 全打在 stdout/stderr 上。实测症状就是"Node 线程起来又退出、端口从未应答"，
-     * 而**原因完全不可见**——这正是当前卡住的地方。
-     * 目录用调用方传进来的 DSHM_SANDBOX_HOME（buildHostEnv 会设），那是应用自己的可写目录。
-     */
-    std::string logPath;
-    const char* home = ::getenv("DSHM_SANDBOX_HOME");
-    if (home != nullptr && home[0] != '\0') {
-      logPath = std::string(home) + "/node-output.log";
-    }
-    if (!logPath.empty()) {
-      if (FILE* f = ::freopen(logPath.c_str(), "w", stdout)) {
-        ::setvbuf(f, nullptr, _IOLBF, 0);
-        ::dup2(::fileno(f), 2);  // stderr 也指向同一个文件
-      }
-    }
-
+  std::string logPath = homeDir.empty() ? std::string() : homeDir + "/node-output.log";
+  InstallCrashHandlers(homeDir);
+  const bool outputCaptured = CaptureNodeOutput(logPath);
+  const std::string outputPath = outputCaptured ? g_outputPath : std::string();
+  if (!outputCaptured) {
+    OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-SHIM", "原生输出捕获未启用：%{public}s", logPath.c_str());
+  }
+  g_nodeThread = std::thread([outputPath, homeDir]() {
     if (g_nodeStart == nullptr) {
       OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-SHIM",
                    "node::Start 未解析到（libnode 未首载成功），无法启动 Node");
@@ -265,6 +387,14 @@ napi_value StartHost(napi_env env, napi_callback_info info) {
       return;
     }
     int rc = g_nodeStart(static_cast<int>(g_argv.size()), g_argv.data());
+    {
+      char line[192];
+      int n = ::snprintf(line, sizeof(line), "node::Start returned rc=%d pid=%d at=%lld\n",
+                         rc, static_cast<int>(::getpid()), static_cast<long long>(::time(nullptr)));
+      if (n > 0) {
+        AppendLifecycle(homeDir, std::string(line, static_cast<size_t>(n)));
+      }
+    }
     g_running.store(false);
     /*
      * 【E119：切换/重启失败的根因就在这里】`g_started` 是 `startHost` 的守卫
@@ -278,56 +408,18 @@ napi_value StartHost(napi_env env, napi_callback_info info) {
      */
     g_started.store(false);
 
-    // Node 退出后，把抓到的输出**转成 hilog**——这是设备上唯一能读到的通道。
+    // 原始内容只留文件，避免 ArkWeb 输出经 hilog 二次放大；退出状态仍立即可见。
     ::fflush(stdout);
-    if (!logPath.empty()) {
-      FILE* f = ::fopen(logPath.c_str(), "r");
-      if (f != nullptr) {
-        // 【必须读全量】先前只读了前 2999 字节，而 Host 打印的 `dsh web: <带 token 的 URL>`
-        // 与"最后一条错误"都在**输出末尾**——被截掉后我们无法判断服务到底有没有绑定端口。
-        // static：64 KB 放在栈上不合适。
-        static char buf[262144];
-        size_t n = ::fread(buf, 1, sizeof(buf) - 1, f);
-        buf[n] = '\0';
-        ::fclose(f);
-        OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-SHIM",
-                     "node::Start returned rc=%{public}d, captured output (%{public}zu bytes):",
-                     rc, n);
-        // 逐行打，避免 hilog 单条过长被截断丢掉关键信息
-        std::string all(buf);
-        size_t pos = 0;
-        while (pos < all.size()) {
-          size_t nl = all.find('\n', pos);
-          std::string line = all.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
-          if (!line.empty()) {
-            OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-NODEOUT", "%{public}s", line.c_str());
-          }
-          if (nl == std::string::npos) {
-            break;
-          }
-          pos = nl + 1;
-        }
-      } else {
-        OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-SHIM",
-                     "node::Start returned rc=%{public}d, but could not reopen %{public}s",
-                     rc, logPath.c_str());
-      }
-    } else {
-      OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-SHIM",
-                   "node::Start returned rc=%{public}d (no DSHM_SANDBOX_HOME, output not captured)", rc);
-    }
+    ::fflush(stderr);
+    OH_LOG_Print(LOG_APP, LOG_ERROR, 0x0000, "DSHM-SHIM",
+                 "node::Start returned rc=%{public}d, output=%{public}s", rc,
+                 outputPath.empty() ? "(not captured)" : outputPath.c_str());
   });
   // **必须 detach**：全局 std::thread 若在进程退出时仍是 joinable，它的析构函数会调用
   // std::terminate —— 表现为"退出时崩溃"。而 node::Start 是永不返回的阻塞调用
   // （Host 正常运行时它就是一直跑），所以这个线程在退出时**一定**是 joinable 的。
   // 不 join 的理由：join 会阻塞调用方直到 Host 结束，而 Host 按设计是要一直跑的。
   g_nodeThread.detach();
-  // 同时开一个 tail 线程：Node 活着的时候也能看见它的输出（见 TailNodeOutput 的说明）
-  if (!logPath.empty()) {
-    g_tailStop.store(false);
-    g_tailThread = std::thread(TailNodeOutput, logPath);
-    g_tailThread.detach();
-  }
 
   SetBool(env, out, "started", true);
   napi_value applied = nullptr;

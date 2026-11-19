@@ -42,7 +42,10 @@ const ABI = arg('--abi', 'arm64-v8a');
 const TARGET = arg('--target', 'default');
 const CANDIDATES = [
   arg('--dir', ''),
+  join(ROOT, 'entry', 'build', 'release', 'intermediates', 'libs', TARGET, ABI),
   join(ROOT, 'entry', 'build', 'default', 'intermediates', 'libs', TARGET, ABI),
+  join(ROOT, 'hostruntime', 'build', 'release', 'intermediates', 'libs', TARGET, ABI),
+  join(ROOT, 'hostruntime', 'build', 'default', 'intermediates', 'libs', TARGET, ABI),
   join(ROOT, 'entry', 'libs', ABI),
 ].filter((p) => p.length > 0);
 
@@ -58,16 +61,10 @@ const SYSTEM_LIBS = new Set([
   'libnative_image.so', 'libpixelmap.so', 'libimage_source.so', 'libimage_packer.so',
   'libohimage.so', 'libipc_capi.so', 'libhitrace_ndk.z.so', 'libzstd.so.1',
   /*
-   * 【2026-09-27 补入】sherpa-onnx（SenseVoice 语音）依赖 OHOS 的 rawfile 接口，
-   * `libsherpa_onnx.so` 与 `libsherpa-onnx-c-api.so` 的 DT_NEEDED 里都有它。
-   *
-   * 证据：docs/70-鸿蒙移植踩坑与修复总览.md 的依赖表已列明
-   *   "`libace_napi.z`/`libhilog_ndk.z`/`librawfile.z` 都是 OHOS 标准系统库"
-   * 但本白名单当时只登记了前两个 ⇒ 漏登记使得门禁在 SenseVoice 引入后
-   * **一直失败**（报 librawfile.z.so 无法解析），而它其实是系统提供的。
-   *
-   * 补入依据（不只凭文档）：库文件在项目与 HAP 内**都不存在**，
-   * 而设备上能加载（识别功能真机实测通过）⇒ 确为系统库。
+   * 【2026-11-06 复核】`librawfile.z.so` 是 OHOS 标准系统库，保留在白名单里。
+   * 原补入依据是 2026-09 的 sherpa-onnx / SenseVoice 语音移植（见 docs/70 第 10 章，
+   * 该章已标注为历史、依赖已移除）；当前语音走系统 CoreSpeechKit。
+   * 结论不变：库文件在项目与 HAP 内都不存在，由系统提供 ⇒ 不得按"缺库"判红。
    */
   'librawfile.z.so',
 ]);

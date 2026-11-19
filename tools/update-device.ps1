@@ -15,25 +15,52 @@
     .\tools\update-device.ps1                      # 用默认构建产物
     .\tools\update-device.ps1 -Hap <路径>          # 指定 HAP
     .\tools\update-device.ps1 -SkipRebuild         # 不重编，只装现有产物
+    .\tools\update-device.ps1 -Target <connectKey> # 两台设备同时在线时，指定装到哪一台
 #>
 
 param(
     [string]$Hap = '',
     [switch]$SkipRebuild,
-    [int]$BootWaitSec = 90
+    [int]$BootWaitSec = 90,
+    [string]$Target = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
+# 【为什么必须有 -Target（2026-10-13 加）】原先 hdc 调用一律不带 `-t`，而 `hdc list targets`
+# 在多台设备同时在线时返回多行 —— 此时 hdc 自己会**拒绝执行**（实测原文：
+# `[Fail]ExecuteCommand need connect-key? please confirm a device by help info`），
+# 或者落到其中一台（取决于 hdc 版本）。PC + 手机同时连着时就无法"逐台指定"。
+# 环境变量 HDC_TARGET 实测**不被 hdc 识别**，只有命令行 `-t <key>` 有效。
+# 默认空 = 完全保持原行为（单设备时不受影响）。
+$targs = if ($Target -ne '') { @('-t', $Target) } else { @() }
+
 # ── 路径 ─────────────────────────────────────────────────────────────────
 $root = Split-Path -Parent $PSScriptRoot
-$clt = 'C:\Program Files\Huawei\DevEco Studio\tools'
+# 【为什么不写死】原先写死 `C:\Program Files\Huawei\DevEco Studio\tools`；2026-10-10 用户把 DevEco
+# 从 C 盘卸载、改装到 `D:\Program Files\Huawei\DevEco Studio`，本脚本（**唯一允许的装机入口**）
+# 当场失效：找不到 hvigorw 就没法构建，装机链条整条断。解析口收在 tools/lib/deveco-home.ps1
+# （候选列表 + **必须真的含 tools\hvigor\bin\hvigorw.js** 才算命中）。可用 DEVECO_HOME 覆盖。
+. (Join-Path $PSScriptRoot 'lib\deveco-home.ps1')
+$clt = Get-DevEcoPath 'tools'
+if (-not $clt) {
+    throw "找不到 DevEco 的 tools 目录（装机要它的 node + hvigor）。`n  候选：$(Get-DevEcoRootHint)`n  可用环境变量 DEVECO_HOME 指定 DevEco 安装根"
+}
 # 从已安装的 SDK 版本目录里找 hdc：版本号会随 SDK 升级而变，写死就得改脚本
 $sdkRoot = Join-Path $env:USERPROFILE 'AppData\Local\OpenHarmony\Sdk'
 $hdc = (Get-ChildItem -Path (Join-Path $sdkRoot '*\toolchains\hdc.exe') -ErrorAction SilentlyContinue |
         Sort-Object FullName -Descending | Select-Object -First 1).FullName
+if (-not $hdc) { $hdc = Get-DevEcoPath 'sdk\default\openharmony\toolchains\hdc.exe' }
 if (-not $hdc) { $hdc = '' }
-$bundle = 'com.dshm.dshclient'
+$bundle = ''
+$profileText = Get-Content -LiteralPath (Join-Path $root 'build-profile.json5') -Raw -ErrorAction SilentlyContinue
+if ($profileText -match '"bundleName"\s*:\s*"([^"]+)"') {
+    $bundle = $Matches[1]
+} else {
+    $appText = Get-Content -LiteralPath (Join-Path $root 'AppScope\app.json5') -Raw
+    if ($appText -match '"bundleName"\s*:\s*"([^"]+)"') { $bundle = $Matches[1] }
+}
+if ($bundle -eq '') { throw '无法从 build-profile.json5 / AppScope/app.json5 解析 bundleName' }
 $filesDir = "/data/app/el2/100/base/$bundle/haps/entry/files"
 
 if (-not (Test-Path $hdc)) { throw "找不到 hdc：$hdc" }
@@ -44,7 +71,7 @@ function Bad($msg)  { Write-Host "  FAIL $msg" -ForegroundColor Red }
 function Info($msg) { Write-Host "       $msg" -ForegroundColor DarkGray }
 
 function Shell($cmd) {
-    return (& $hdc shell $cmd 2>&1 | Out-String).Trim()
+    return (& $hdc @targs shell $cmd 2>&1 | Out-String).Trim()
 }
 
 # ── 0) 硬约束自检：本脚本自身不得含破坏性命令 ────────────────────────────
@@ -80,8 +107,24 @@ if ($targets -match 'Empty' -or $targets -eq '') {
     Bad '没有连接的设备'
     throw '请先连接设备'
 }
-$dev = ($targets -split "`r?`n")[0].Trim()
-Ok "设备 $dev"
+if ($Target -ne '') {
+    # 【为什么在这里校验】`-t` 指到一台不在线的 key 时，后续每一条 hdc 调用都会各自报错，
+    # 排障会被淹没在噪声里；不如在入口一次讲清楚"这台不在线、现在在线的是哪几台"。
+    $online = @(($targets -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    if ($online -notcontains $Target) {
+        Bad "指定设备 $Target 不在线。当前在线：$($online -join ', ')"
+        throw "设备 $Target 未连接"
+    }
+    $dev = $Target
+    Ok "设备 $dev（本次指定，共在线 $($online.Count) 台）"
+} else {
+    $dev = ($targets -split "`r?`n")[0].Trim()
+    Ok "设备 $dev"
+    $onlineCount = @(($targets -split "`r?`n") | Where-Object { $_.Trim() -ne '' }).Count
+    if ($onlineCount -gt 1) {
+        Write-Host "  NOTE 当前有 $onlineCount 台设备在线，本次按「首台」处理（$dev）。要装另一台请加 -Target <key>。" -ForegroundColor Yellow
+    }
+}
 
 # ── 2) 记录安装前的数据基线（用于装后比对）───────────────────────────────
 Step 2 '记录安装前的用户数据基线'
@@ -119,13 +162,22 @@ function LogCount($pattern) {
 $beforeBootCount = LogCount '--- boot pid='
 $beforeExecCount = LogCount 'exec 探测：'
 $beforeMuxCount  = LogCount 'IN-UPGRADE GET /api/remote.mux'
-Info "日志台账基线：boot=$beforeBootCount exec=$beforeExecCount mux=$beforeMuxCount"
+# 【插件市场重启也要计数（2026-10-09 加）】见第 6 步之后的说明：装完 1~2 分钟内插件市场页面**自己**
+# 会 POST /dsh-market/restart 让宿主冷启动（`host-exit-mode=app-restart` ⇒ ArkTS 侧重新拉起）。
+# 那一天现场就是被这个现象绕进去的（"App 怎么退出了？"），所以这里记个基线，末尾如实报出来。
+$beforeMarketCount = LogCount 'POST /dsh-market/restart'
+Info "日志台账基线：boot=$beforeBootCount exec=$beforeExecCount mux=$beforeMuxCount market=$beforeMarketCount"
 
 # ── 3) 构建 ──────────────────────────────────────────────────────────────
 if (-not $SkipRebuild) {
-    Step 3 '构建 debug 版（侧载与验收统一用 debug，签名=debugKey）'
-    $env:JAVA_HOME = 'C:\Program Files\Huawei\DevEco Studio\jbr'
-    $env:DEVECO_SDK_HOME = 'C:\Program Files\Huawei\DevEco Studio\sdk'
+    # 【口径订正（2026-10-15）】本步骤默认仍是 debug 构建（端侧调试用）。
+    # 交付给用户的**侧载件**自 docs/148 起已统一为 release 构建（`dist/sideload/` 里那件，
+    # release 构建 + 调试签名，可直接 install -r）⇒ 装侧载件请走 `-Hap <dist/sideload/…> -SkipRebuild`，
+    # 不要用本步骤的产物去比对侧载件的读数。
+    Step 3 '构建 debug 版（端侧调试用；侧载交付件是 release 构建，走 -Hap + -SkipRebuild）'
+    $devEcoRoot = Split-Path -Parent $clt
+    $env:JAVA_HOME = Join-Path $devEcoRoot 'jbr'
+    $env:DEVECO_SDK_HOME = Join-Path $devEcoRoot 'sdk'
     $env:DEVECO_CLI_CLT_PATH = $clt
     $env:PATH = "$env:JAVA_HOME\bin;$clt\node;$env:PATH"
     Push-Location $root
@@ -150,6 +202,22 @@ if (-not $SkipRebuild) {
     }
     if ($buildExit -ne 0) {
         Get-Content "$root\dist\_update_build.log" -Tail 25
+        # 【识别 hvigor 的"假 ENOENT"（2026-10-09 实测踩到）】hvigorw 在**装自己的构建工具**失败时，
+        # 会用一个**硬编码**报文把任何异常都写成
+        #   00308003 … ENOENT: no such file …\.hvigor\project_caches\<hash>\workspace\node_modules\@ohos\hvigor\bin\hvigor.js
+        # 再附一句 `delete <workspace> and retry`。实测这**不是**文件真缺：`fs.realpathSync` 手测通过、
+        # 目标目录 2577 个文件齐全 ⇒ 照那句话去删缓存白跑一趟。真因是**当前进程写不了
+        # `%USERPROFILE%\.hvigor`**（本机在沙箱里跑 hvigor 就是这个症状：hvigor 要在 project_caches
+        # 里建/更新自己的工具链）。故这里把人话讲清楚，别让人去删缓存。
+        $buildLog = Get-Content "$root\dist\_update_build.log" -Raw
+        if ($buildLog -match '00308003' -or $buildLog -match 'project_caches') {
+            Write-Host ''
+            Write-Host '  上面这条 ENOENT 是 hvigor 的**硬编码假报文**（"装自己的构建工具失败"被一律写成缺 hvigor.js）。' -ForegroundColor Yellow
+            Write-Host '  实测真因通常是**当前进程写不了 %USERPROFILE%\.hvigor**：hvigor 要在 project_caches 里' -ForegroundColor Yellow
+            Write-Host '  建/更新自己的工具链，写不进去就在这一步失败（它自己那句 "delete <workspace> and retry"' -ForegroundColor Yellow
+            Write-Host '  **不解决**这类问题 —— 缓存删了照样失败）。' -ForegroundColor Yellow
+            Write-Host '  ⇒ 在**沙箱外**（`.hvigor` 可写）重跑本脚本；若仍报同一条，再查构建依赖能不能装。' -ForegroundColor Yellow
+        }
         throw '构建失败'
     }
     Ok '构建成功'
@@ -166,11 +234,69 @@ if (-not (Test-Path $Hap)) { throw "找不到 HAP：$Hap" }
 $hapSize = [math]::Round((Get-Item $Hap).Length / 1MB, 1)
 Ok "$hapSize MiB  $Hap"
 
+# 【为什么要读包的 debug 标志（2026-10-15 加）】第 8 步的 exec 探针判据必须按**包的构建模式**分档：
+#   · debug 件（module.json "debug":true）⇒ 平台给调试域，应用数据区里的可执行文件能 execve ⇒
+#     "逐项全 ok"是强判据；
+#   · release 件（"debug":false）⇒ 平台降级应用域（本机 PC 实测 `u:r:normal_hap:s0`），
+#     应用数据区里的可执行文件一律 EPERM（python3.12 / rg / ash / bash），system-sh 连 stat 都被拒（=缺）。
+#     这是 docs/140 / docs/154 已定案的平台行为，且三端终端与 bash 自 docs/155 起统一走 guest VM
+#     ⇒ 宿主 execve 不再是产品依赖路径。release 件下再按"逐项全 ok"判 = **假红**（真实撞到：
+#     2026-10-15 凌晨 .50 release 侧载件装机后本脚本 rc=1，而端侧 vm-bash 接管与功能都正常）。
+# 读不到 debug 标志时保持从严（$hapDebug = $null ⇒ 仍按"逐项全 ok"），绝不因为解析失败而放宽。
+$hapDebug = $null
+try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    $hapFull = (Resolve-Path -LiteralPath $Hap).Path
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($hapFull)
+    try {
+        $mjEntry = @($zip.Entries | Where-Object { $_.FullName -eq 'module.json' }) | Select-Object -First 1
+        if ($mjEntry) {
+            $reader = New-Object System.IO.StreamReader($mjEntry.Open())
+            try { $mjText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if ($mjText -match '"debug"\s*:\s*(true|false)') { $hapDebug = ($Matches[1] -eq 'true') }
+        }
+    } finally { $zip.Dispose() }
+} catch {
+    Info "读包内 module.json 失败（$($_.Exception.Message)）—— 第 8 步判据按从严处理"
+}
+if ($hapDebug -eq $null) {
+    Info '包形态：未知（第 8 步 exec 判据按「逐项全 ok」从严）'
+} else {
+    Info "包形态：$(if ($hapDebug) { 'debug（调试域，应用数据区可执行文件应可 execve）' } else { 'release（应用域降级：应用数据区可执行文件 EPERM 属预期，见 docs/140·155）' })"
+}
+
 # ── 5) 覆盖安装（唯一的装机动作）─────────────────────────────────────────
 Step 5 '覆盖安装（hdc install -r —— 保留用户数据）'
-$out = (& $hdc install -r $Hap 2>&1 | Out-String)
-if ($out -notmatch 'successfully') {
-    Bad '安装失败，原始输出：'
+# 【为什么不能只看 `successfully`（2026-10-10 真机踩到）】`hdc install -r` 会**偶发回空输出**：
+# 现场 `(& $hdc install -r $Hap 2>&1 | Out-String)` 得到空串 ⇒ 旧判据 `-notmatch 'successfully'`
+# 当场判"安装失败"，可手动重跑同一条命令却 `rc=0` + `install bundle successfully`（`docs/143` §7）。
+# ⇒ 判据改三态：含 successfully ⇒ ok；含 fail ⇒ fail；**回空**（既非成功也非失败）⇒ 重跑一次，
+#    仍空就改用 `bm dump` 的 `updateTime` 正面判定（那是安装/更新时刻的毫秒数，变了=这次真装上去了）。
+function BundleUpdateTime {
+    $dump = Shell "bm dump -n $bundle"
+    if ($dump -match '"updateTime"\s*:\s*(\d+)') { return $Matches[1] }
+    return ''
+}
+$before = BundleUpdateTime
+$out = (& $hdc @targs install -r $Hap 2>&1 | Out-String).Trim()
+$verdict = 'unknown'
+if ($out -match 'successfully') { $verdict = 'ok' }
+elseif ($out -match 'fail') { $verdict = 'fail' }
+else {
+    Info "hdc install -r 回空/无法判读（原文：'$out'）⇒ 重跑一次"
+    $out = (& $hdc @targs install -r $Hap 2>&1 | Out-String).Trim()
+    if ($out -match 'successfully') { $verdict = 'ok' }
+    elseif ($out -match 'fail') { $verdict = 'fail' }
+    else {
+        $after = BundleUpdateTime
+        if ($before -ne '' -and $after -ne '' -and $after -ne $before) {
+            $verdict = 'ok'
+            Info "两次输出都判不出来，但 bm dump 的 updateTime 已变（$before → $after）⇒ 认定安装成功"
+        }
+    }
+}
+if ($verdict -ne 'ok') {
+    Bad "安装失败（判读=$verdict），原始输出："
     Write-Host $out
     Write-Host ''
     Write-Host '  若报签名冲突（signature verification failed）：' -ForegroundColor Yellow
@@ -182,13 +308,42 @@ Ok '覆盖安装成功'
 
 # ── 6) 冷启动 ────────────────────────────────────────────────────────────
 Step 6 '冷启动应用'
-Shell "aa force-stop $bundle" | Out-Null
-Start-Sleep -Seconds 2
+# 【本步的判据是 `pidof`，不是 aa 返回的那句话（2026-10-09 加）】
+# `pidof <bundle>` 实测给出 main.js 那条主进程 pid（与日志里 `--- boot pid=` 一致）；ps 里另有
+# `:entry:BackGroundAbility` / `:gpu` 等子进程，它们不影响"是否走了 onNewWant"，故不参与判定。
+function AppAlive { return (Shell "pidof $bundle").Trim() }
+function StopApp {
+    # 返回 $true = 已确认不在跑（pidof 为空）。**重试是必需的**：实测那次 `aa force-stop` 明明回
+    # `force stop process successfully.` 而进程**还在**（旧进程的事件循环正卡在 statSync 风暴里，
+    # 日志有 `LOOP-GAP 17964ms`），隔几秒再停一次就停掉了。
+    for ($try = 1; $try -le 3; $try++) {
+        $out = Shell "aa force-stop $bundle"
+        Start-Sleep -Seconds (2 * $try)
+        $alive = AppAlive
+        if ($alive -eq '') { return $true }
+        Info "aa force-stop 第 $try 次没停下来（pid $alive 还在）：$out"
+    }
+    return $false
+}
+# 【为什么必须判 force-stop（2026-10-09 真机踩到）】原先 `Shell "aa force-stop …" | Out-Null`
+# 输出与返回值都不看，随后只轮询"本轮 exec 探测增加"。那次 force-stop 没生效 ⇒ 紧接着的
+# `aa start` 走的是 **onNewWant**（复用已有 ability）⇒ **不产生新 boot**、日志里没有新的 exec 探测，
+# 于是第 6 步报**假 FAIL**（现场表现："装完就说端侧没起来"，而应用一直在跑、跑的也还是旧代码）。
+# 判据用 `pidof` 而**不是** aa 那句 `force stop process successfully.` —— 后者实测会撒谎。
+$stopped = StopApp
+if ($stopped) {
+    Ok '旧进程已停（pidof 为空）'
+} else {
+    Write-Host '  WARN 三次 aa force-stop 后进程仍在（每拍的 pid 见上）—— 它一直活着的话，下面的 aa start 会走 onNewWant、不会产生新 boot' -ForegroundColor Yellow
+}
+Start-Sleep -Seconds 1
 Shell "aa start -a EntryAbility -b $bundle" | Out-Null
 # 【为什么从"盲等 90 秒"改成"轮询到出现本轮 exec 探测"（2026-10-06 真机踩到）】
 # 盲等只能保证"过了 90 秒"，不能保证"应用起来了"：实测 `hdc install -r` 之后那一次
 # `aa start` 没把应用拉起来（日志停在上一轮的 LOOP-ALIVE），而第 8 步读到上一轮日志，
 # 于是脚本报"端侧就绪"。轮询判据用 2b 记下的 exec 计数增量——它只在**真 boot** 时长。
+# 【为什么要打进度（2026-10-09 加）】原先这 90 秒是**全静默**的（真机上让人以为脚本卡死），
+# 而"卡在哪一拍"恰恰是排障最想要的读数 ⇒ 每 15 秒打一条 boot/exec/pid。
 Info "等待启动（最多 $BootWaitSec 秒；首次可能需解包核心树）"
 $booted = $false
 $waited = 0
@@ -196,17 +351,34 @@ while ($waited -lt $BootWaitSec) {
     Start-Sleep -Seconds 5
     $waited += 5
     if ((LogCount 'exec 探测：') -gt $beforeExecCount) { $booted = $true; break }
+    if (($waited % 15) -eq 0) {
+        Info "t=$waited s：boot $beforeBootCount → $(LogCount '--- boot pid=')，exec $beforeExecCount → $(LogCount 'exec 探测：')，pid=[$(AppAlive)]"
+    }
 }
 if ($booted) {
     Ok "端侧已起来（第 $waited 秒出现本轮 exec 探测）"
 } else {
-    Info "第 $waited 秒仍未见本轮 boot —— 再拉一次前台（实测 install 后首次 aa start 有概率不生效）"
+    Info "第 $waited 秒仍未见本轮 boot —— 再停一次再拉（实测 install 后首次 aa start 有概率不生效；旧进程没停掉的活 aa start 只会走 onNewWant）"
+    [void](StopApp)
     Shell "aa start -a EntryAbility -b $bundle" | Out-Null
     Start-Sleep -Seconds 25
     if ((LogCount 'exec 探测：') -gt $beforeExecCount) {
         Ok '重拉之后端侧已起来'
     } else {
         Bad '端侧没有起来：本轮没有任何新的 exec 探测行'
+        # 【超时诊断（2026-10-09 加）】把现场就地打出来。原先只有一句 Bad，排障还得再连一次
+        # hdc 挨个查（pid 在不在 / 有没有新 boot / 日志停在哪）—— 而这几条正是决定下一步的关键读数。
+        $aliveEnd = AppAlive
+        if ($aliveEnd -ne '') {
+            Info "进程仍在（pid=[$aliveEnd]）⇒ 旧进程没停掉、aa start 只能走 onNewWant：**不会有新 boot**。这不是装机失败，是「停不掉进程」"
+        } else {
+            Info '进程已不在（pidof 为空）⇒ aa start 没能把它拉起来'
+        }
+        Info ('末次 boot 行：' + (Shell "grep -a -e '--- boot pid=' $filesDir/dshm-host.log 2>/dev/null | tail -1"))
+        Info 'ps（主进程 + 子进程）：'
+        foreach ($ln in @((Shell "ps -ef | grep $bundle | grep -v grep | head -4") -split "`n")) { Info ('  ' + $ln.Trim()) }
+        Info '日志末尾：'
+        foreach ($ln in @((Shell "tail -n 6 $filesDir/dshm-host.log") -split "`n")) { Info ('  ' + $ln.Trim()) }
     }
 }
 
@@ -305,10 +477,25 @@ if ($afterExecCount -le $beforeExecCount) {
             Bad "手持档下 toybox 未 ok（$($items -join '，')）—— 宿主连系统真命令都起不来，需查"
         }
     } else {
+        # ── PC / 2in1 档判据（2026-10-15 修订：按包的 debug 标志分档）────────────────
+        # 【为什么改】见第 4 步「为什么要读包的 debug 标志」：release 件下应用域被平台降级
+        # ⇒ 应用数据区里的可执行文件全部 EPERM、system-sh=缺；而"逐项全 ok"是 **debug 件**的强判据
+        # ⇒ 在 release 件上恒判红（假红，会把读者推向"回滚 / 重装"的错误方向）。
+        # 修法：保留 debug 件的强判据，另给 release 件一条分支 —— 宿主必须还起得来**系统**真命令
+        # （toybox=ok），它证明宿主进程的 execve 通道本身没被掐死；"本档能不能跑 bash"由 guest VM
+        # 承担（docs/155），不由这条探针背书。标志未知（$hapDebug = $null）仍走强判据。
         $bad = @($items | Where-Object { $_ -notmatch '=ok$' })
+        $toyboxOk = @($items | Where-Object { $_ -match '^toybox=ok$' }).Count -gt 0
         if ($items.Count -gt 0 -and $bad.Count -eq 0) {
             Ok "exec 探测 $($items.Count)/$($items.Count) 全通"
             $execOk = $true
+        } elseif ($hapDebug -eq $false -and $toyboxOk) {
+            $okItems = @($items | Where-Object { $_ -match '=ok$' })
+            Ok "exec 探测：release 件判据通过（toybox=ok ⇒ 宿主仍能起系统真命令；共 $($items.Count) 项，=ok $($okItems.Count) / 其余 $($bad.Count) 项属 release 域降级，见 docs/140·155）"
+            Info "release 件未通项（预期）：$($bad -join '，')"
+            $execOk = $true
+        } elseif ($hapDebug -eq $false) {
+            Bad "exec 探测：release 件下 toybox 也未 ok（$($items -join '，')）—— 宿主连系统真命令都起不来，需查"
         } else {
             Bad "exec 探测未全通（共 $($items.Count) 项）：$($bad -join '，')"
         }
@@ -322,6 +509,17 @@ if ($afterMuxCount -gt $beforeMuxCount) {
     # 非判据：界面没连上来时本来就没有 websocket —— 旧写法 `grep -c … -gt 0` 对**跨 boot
     # 追加**的日志是**恒真**的，等于每次都替这一步背书。
     Info "本轮未见新的 websocket 接入（$beforeMuxCount → $afterMuxCount；非判据）"
+}
+
+# 【插件市场重启 ≠ 装机失败（2026-10-09 加）】装完 1~2 分钟内，插件市场页面（`ua=… ArkWeb …`）会
+# `POST /dsh-market/restart` 让宿主冷启动：Host 先写 `host-exit-mode=app-restart` 再退出，ArkTS 侧的
+# 冷启动通道随后把它拉起来。现场看到的就是"App 自己退出了"—— 它**不是**本轮装机出问题，但极容易被
+# 读成"新包把 App 搞崩了"，所以在结论前如实体检一次（这也是那次现场真正绕人的地方）。
+$afterMarketCount = LogCount 'POST /dsh-market/restart'
+if ($afterMarketCount -gt $beforeMarketCount) {
+    Info "本轮有 $($afterMarketCount - $beforeMarketCount) 次插件市场重启请求（POST /dsh-market/restart，来自 ArkWeb 页面）—— 那是插件市场的「重启后生效」，不是装机失败"
+} else {
+    Info "本轮未见插件市场重启请求（$beforeMarketCount → $afterMarketCount；非判据）"
 }
 
 # ── 9) 结论 ──────────────────────────────────────────────────────────────

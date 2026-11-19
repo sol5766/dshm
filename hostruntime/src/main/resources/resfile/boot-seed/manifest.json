@@ -1,0 +1,14 @@
+{
+  "kind": "dshm-boot-seed",
+  "createdAt": "2026-11-16T02:20:00.000Z",
+  "scope": "resolve-only",
+  "resolveCache": {
+    "file": "resolve-cache-0.2.2-rc.3+dshm.1_2026-11-13T12_29_32.313Z_24.9.0_137_1.json",
+    "entries": 14586,
+    "ns": "0.2.2-rc.3+dshm.1|2026-11-13T12:29:32.313Z|24.9.0|137|1",
+    "source": "device com.dshm.dshmbeta self-export (Download/boot-seed-export), 2026-11-16"
+  },
+  "compileCacheOmitted": true,
+  "compileCacheOmittedReason": "Device relaunch measurements did not establish a repeatable benefit from shipping compile-cache blobs. Only the portable resolve cache is shipped; compile-cache flushing remains enabled for caches generated on each device.",
+  "notes": "装载器 hostcore/app/boot-seed.cjs；键为核心树相对路径，跨设备可移植；核心树/Node 换版（ns 变化）自动整体失效。重新采集：真机放 Download/<bundle>/.dshm-seed-export-request 后启动一次，从 boot-seed-export 收取。"
+}

@@ -16,8 +16,9 @@
  * Host 侧对应实现见 `hostcore/speech-provider/index.js`。
  *
  * ── 为什么 `$DSH_HOME` 能推出来 ──────────────────────────────────────────
- * provider 的 `dataRoot` 配置是 `dshHomePath('speech-to-text', 'sensevoice')`
- * ⇒ `dataRoot = $DSH_HOME/speech-to-text/sensevoice`
+ * 【2026-10-18 起】识别后端已换成 HarmonyOS Core Speech Kit（ArkTS 侧
+ * `SystemSpeechRecognizer`），provider 不再下载/准备任何模型；
+ * `dataRoot` 只剩“队列目录的父目录”这一个用途（协议未变）。
  * ⇒ `$DSH_HOME = dirname(dirname(dataRoot))`。
  * 本模块侧则直接由 `filesDir` 拼：真机读数为
  * `$DSH_HOME = <filesDir>/dsh/home`（见 EntryAbility 的 host-exit-mode 路径）。
@@ -30,8 +31,8 @@
  * 2. **`onResult` 给的是累计文本**，不是增量片段 ⇒ 必须 merge 而非 `+=`，
  *    否则得到 "一一二一二三…" 这种重复串（真机踩过）。
  * 3. **`writeAudio` 只收 640 或 1280 字节**，而 WAV 数据长度不保证整除
- *    ⇒ `slicePcmChunks` 会切块并**丢弃不足一块的尾巴**（最多 639 字节 ≈ 20ms；
- *    整数秒录音的余数为 0，见 SpeechPcm 的门禁断言）。不足一块喂进去会被拒。
+ *    ⇒ 现实现（`recognizeWithSystem`）把尾巴**补零到 640** 再送，不再丢弃
+ *    （最多多 20ms 静音，比丢半个字好）；旧实现用 `slicePcmChunks` 直接丢尾巴。
  * 4. **只支持 zh-CN**（`listLanguages()` 实测只返回 `["zh-CN"]`）。
  */
 
@@ -43,13 +44,13 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
-import { SenseVoiceRecognizer } from './SenseVoiceRecognizer';
+import { SystemSpeechRecognizer } from './SystemSpeechRecognizer';
+import type { SystemSpeechEvents } from './SystemSpeechRecognizer';
 import {
   HMS_SAMPLE_RATE,
   HMS_CHUNK_BYTES,
   WAV_HEADER_BYTES,
-  slicePcmChunks,
-  mergeTranscript
+  HMS_CHUNK_BYTES as CHUNK_BYTES
 } from 'appstate';
 
 const DOMAIN: number = 0x0d5d;
@@ -83,7 +84,7 @@ const WAV_HEADER: number = WAV_HEADER_BYTES;
  * 启动桥的轮询（幂等：重复调用只挂一个）。
  *
  * @param filesDir 应用的 `context.filesDir`（真机上即 `.../haps/entry/files`）
- * @param abilityCtx UIAbilityContext —— SenseVoice 要用它的 resourceManager 读 rawfile 模型。
+ * @param abilityCtx UIAbilityContext —— 探针要读 rawfile 语音样本；识别引擎本身不需要它。
  *        必须**由调用方显式传入**：本函数在 `EntryAbility.onCreate` 里被调，
  *        那个阶段 `getContext()` 拿不到可靠的 UIAbilityContext
  *        （它是给页面/组件用的 API，不是 Ability 生命周期里的通用取法）。
@@ -91,13 +92,8 @@ const WAV_HEADER: number = WAV_HEADER_BYTES;
  */
 export function startHmsSpeechBridge(filesDir: string,
   abilityCtx?: common.UIAbilityContext): () => void {
-  /* 创建 SenseVoice 识别器（用 UIAbilityContext 以便 resourceManager 读 rawfile 模型）。 */
-  if (svRecognizer === undefined && abilityCtx !== undefined) {
-    try {
-      svRecognizer = new SenseVoiceRecognizer(abilityCtx);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'SenseVoice 实例创建失败: %{public}s', (e as Error).message);
-    }
+  if (abilityCtx !== undefined) {
+    bridgeAbilityCtx = abilityCtx;
   }
   if (bridgeStarted) {
     return () => void 0;
@@ -121,74 +117,6 @@ export function startHmsSpeechBridge(filesDir: string,
   writeHeartbeat(heartbeat, `started dir=${queueDir}`);
 
   /*
-   * 【预热 SenseVoice】把 230MB 模型的加载从"用户点麦克风那一刻"挪到空闲时。
-   *
-   * 【为什么必须做】provider 侧单次识别有预算（TIMEOUT_MS=25s，
-   * 见 hostcore/speech-provider/index.js 的 awaitResult）。若不预热，
-   * **第一次**点麦克风要在这 25 秒内完成"读 230MB rawfile + 建 session
-   * + 初始化 VAD"，超时对用户表现为"识别超时"—— 是必然发生，不是概率问题。
-   *
-   * 【为什么不 await】不能让模型加载挡住桥的启动（桥要立刻开始轮询，
-   * 否则请求会堆在队列里）；warmUp 内部先让出一次控制权，
-   * 再在后台完成加载。失败只记日志，真正的错误留到 recognize() 如实抛出。
-   */
-  if (svRecognizer !== undefined) {
-    /*
-     * 【模型改为在线下载后，预热必须**等模型到位再重试**】
-     *
-     * 旧形态下模型随包内置（rawfile），桥一启动就能预热成功。
-     * 现在模型由 host 侧在启动后**异步下载**（首启约 228MB），
-     * 而桥启动通常早于下载完成 ⇒ 只预热一次必然是"失败"，
-     * 之后**再没有任何时机**触发预热 ⇒ 用户第一次点麦克风时
-     * 要在 25 秒预算里同时完成"读 228MB + 建 session + 初始化 VAD"
-     * —— 那正是这段注释开头说的"必然超时"。
-     *
-     * 修法：按间隔重试预热，直到成功或超过窗口。间隔 3 秒、
-     * 窗口 5 分钟（覆盖首启下载的常见时长）；成功后停止。
-     * 每次尝试都写心跳，便于真机核对。
-     */
-    const WARM_RETRY_MS: number = 3000;
-    const WARM_WINDOW_MS: number = 5 * 60 * 1000;
-    const warmT0: number = Date.now();
-    let warmAttempts: number = 0;
-    const tryWarmUp = (): void => {
-      if (svRecognizer === undefined) {
-        return;
-      }
-      /*
-       * 【先用轻量的 modelsReady() 探路】模型文件不在时直接重试，
-       * 不去构建 OfflineRecognizer —— 后者在文件缺失时会走一遍
-       * 失败路径（读路径、建 session 的失败开销），没必要反复付。
-       * `modelsReady()` 只做 stat（判存在与非空），代价可忽略。
-       */
-      if (!svRecognizer.modelsReady()) {
-        warmAttempts++;
-        writeHeartbeat(heartbeat, `预热等待：模型尚未下载完（第${warmAttempts}次探测）`);
-        if (Date.now() - warmT0 < WARM_WINDOW_MS) {
-          setTimeout(tryWarmUp, WARM_RETRY_MS);
-        } else {
-          writeHeartbeat(heartbeat, '预热放弃：模型在 5 分钟内未就绪');
-        }
-        return;
-      }
-      warmAttempts++;
-      svRecognizer.warmUp().then((ok: boolean): void => {
-        writeHeartbeat(heartbeat,
-          `预热${ok ? '成功' : '失败'} 模型已就绪=${ok} 第${warmAttempts}次`);
-        if (!ok && Date.now() - warmT0 < WARM_WINDOW_MS) {
-          setTimeout(tryWarmUp, WARM_RETRY_MS);
-        }
-      }).catch((e: Error): void => {
-        hilog.warn(DOMAIN, TAG, '预热异常: %{public}s', e.message);
-        if (Date.now() - warmT0 < WARM_WINDOW_MS) {
-          setTimeout(tryWarmUp, WARM_RETRY_MS);
-        }
-      });
-    };
-    tryWarmUp();
-  }
-
-  /*
    * 串行处理：一次只跑一个识别。
    * 【为什么不用并发】HMS 的 `createEngine` 在同一设备上实例数有限，且
    * 用户一次只会说一句话；串行还能让"上一单没清干净"不至于互相干扰。
@@ -201,6 +129,22 @@ export function startHmsSpeechBridge(filesDir: string,
       writeHeartbeat(heartbeat, `alive ticks=${pollTicks} busy=${busy} lastSeen=${lastSeenAt}`);
     }
     if (busy) {
+      return;
+    }
+    /* 探针优先于真实请求：探针是人工触发的诊断，队列里若有真实请求也先跑完探针
+       （两者都要独占引擎，交叉跑只会互相干扰）。 */
+    const probe: SpeechProbeRequest | undefined = probePending;
+    if (probe !== undefined) {
+      probePending = undefined;
+      busy = true;
+      writeHeartbeat(heartbeat, `probe start mode=${probe.mode} seconds=${probe.seconds}`);
+      runSpeechProbe(filesDir, probe).then((): void => {
+        busy = false;
+        writeHeartbeat(heartbeat, 'probe done');
+      }, (e: Object): void => {
+        busy = false;
+        writeHeartbeat(heartbeat, `probe error: ${String(e).slice(0, 160)}`);
+      });
       return;
     }
     const req: BridgeRequest | undefined = takeNextRequest(queueDir);
@@ -245,6 +189,54 @@ let pollTicks: number = 0;
 let lastSeenAt: number = 0;
 /** 最近一次识别的结果文本，供心跳留痕（区分"成功"与"没处理"）。 */
 let lastResult: string = '';
+
+/* ── Task 1：长语音 Go/No-Go 探针（2026-10-18）────────────────────────────────
+ *
+ * 目的：在真机上回答"`recognizerMode: 'long'` 到底能不能持续出结果"。
+ * 【为什么不用人对着麦克风说话】需要 10s / 30s / 5min 三段可复现样本，人声无法保证
+ * 每次一致；改用**系统 TTS 离线合成中文 PCM**（16k/16bit/单声道），再按实时节奏喂给
+ * 引擎 —— 音频内容、语速、停顿都可控，且完全自动，不需要任何交互页面。
+ *
+ * 触发：`aa start ... --ps dshProbe long --ps dshProbeSec 30`（EntryAbility 转成
+ * 本模块的 `requestSpeechProbe`），由既有 200ms 轮询消费一次。
+ * 产物：`files/diag-meeting-probe/probe-<mode>-<secs>s-<stamp>.log` 与 `.json`，
+ *       含 onStart/onEvent/onResult/onComplete/onError 的毫秒时间线与最终文本。
+ */
+interface SpeechProbeRequest {
+  mode: string;
+  seconds: number;
+}
+
+let probePending: SpeechProbeRequest | undefined = undefined;
+
+/**
+ * 探针用的 UIAbilityContext（读 rawfile 里的离线语音样本）。
+ *
+ * 【为什么不在探针里临时取 context】ArkTS 的 `getContext()` 在 Ability 生命周期外
+ * 拿不到可靠实例；`startHmsSpeechBridge` 本来就由 EntryAbility 显式传入，直接留一份。
+ */
+let bridgeAbilityCtx: common.UIAbilityContext | undefined = undefined;
+
+/** 由 EntryAbility 在收到 `dshProbe` 启动参数时调用；同一时刻只保留最新一条。 */
+export function requestSpeechProbe(mode: string, seconds: number): void {
+  /*
+   * 只认 long / short / dictation。
+   *
+   * 【为什么把 speak 下线（2026-10-19 用户反馈）】它是"设备外放 TTS 读 PROBE_TEXT"的自测模式，
+   * 会把"今天我们讨论三个问题…"整段朗读出来；一旦某个启动参数里带着 dshProbe=speak，
+   * 应用每次起来都会突然出声（用户原话"每次启动就开始播报…先去掉这个怪吓人的"）。
+   * 自测已改用 rawfile 里的离线样本（`loadProbePcmFromRawfile`），完全静音 ⇒ 删掉出声那条路。
+   * 未知模式一律忽略：绝不因为一个诊断参数让应用开口。
+   */
+  const normalized: string = mode === 'long' ? 'long' : (mode === 'dictation' ? 'dictation' : (mode === 'short' ? 'short' : ''));
+  if (normalized.length === 0) {
+    return;
+  }
+  probePending = {
+    mode: normalized,
+    seconds: Math.max(10, Math.min(300, Math.floor(seconds)))
+  };
+}
 
 /**
  * 追加一行到桥的诊断日志。
@@ -457,15 +449,7 @@ function reapStale(queueDir: string, names: string[]): void {
   }
 }
 
-/** 处理一个请求：解 base64 → 剥 WAV 头 → 统计质量 → 喂 HMS → 回写结果。 */
-/**
- * SenseVoice 识别器单例（有状态：持有 230MB 模型，必须复用）。
- *
- * 【为什么放模块级】`recognize(pcm)` 是无状态函数，而模型实例必须单例；
- * 由 `startHmsSpeechBridge` 创建、经参数传给 handleRequest。
- */
-let svRecognizer: SenseVoiceRecognizer | undefined = undefined;
-
+/** 处理一个请求：解 base64 → 剥 WAV 头 → 统计质量 → 系统识别 → 回写结果。 */
 async function handleRequest(queueDir: string, req: BridgeRequest, heartbeatPath: string): Promise<void> {
   const t0: number = Date.now();
   try {
@@ -532,20 +516,20 @@ async function handleRequest(queueDir: string, req: BridgeRequest, heartbeatPath
     }
 
     const asrLogPath: string = heartbeatPath + '-asr';
-    asrLog(asrLogPath, `开始识别 pcm=${usePcm.length}B src=${source}`);
+    asrLog(asrLogPath, `开始识别 pcm=${usePcm.length}B src=${source} audioMs=${metrics.durationMs}`);
     /*
-     * 【识别后端：SenseVoice 优先】
-     * SenseVoice 是离线批处理模型，没有 HMS 那种"单会话只吃 4~5s"的
-     * VAD 截断问题（真机七轮实测：HMS ≥6s 近乎全灭）。
+     * 【识别后端：HarmonyOS Core Speech Kit（2026-10-18 起唯一后端）】
+     * SenseVoice 的模型下载/预热/228MB 已随 hostcore/speech-provider 一并删除，
+     * 端侧这里也不再创建它（否则"下载路径没了、代码还留着"只会制造静默坏分支）。
+     *
+     * 【为什么一律 long + 自动轮换，而不是方案里写的"≤55s 用 short"】
+     * 真机实测（docs/194）：
+     *   · short 在**第一次判停**时就收尾 —— 10s 音频只出 11 字，后面的句子全丢；
+     *   · long 持续累计并按停顿切句，到 18.75s 由 appendPcm() 自动轮换、
+     *     跨会话累积文本，整段录音（最长 120s）都能覆盖。
+     * 听写用户一句话里带停顿是常态 ⇒ short 会静默丢字，不能用。
      */
-    let text: string = '';
-    if (svRecognizer !== undefined) {
-      asrLog(asrLogPath, `改用 SenseVoice pcm=${usePcm.length}B`);
-      text = await svRecognizer.recognize(usePcm);
-    } else {
-      asrLog(asrLogPath, `SenseVoice 不可用，回退 HMS pcm=${usePcm.length}B`);
-      text = await recognize(usePcm, asrLogPath);
-    }
+    const text: string = await recognizeWithSystem(usePcm, asrLogPath);
     lastResult = text;
     writeResult(queueDir, req.id, false, text);
     hilog.info(DOMAIN, TAG, '识别完成 id=%{public}s 用时=%{public}dms 文本=%{public}s',
@@ -567,14 +551,6 @@ async function handleRequest(queueDir: string, req: BridgeRequest, heartbeatPath
 }
 
 /**
- * 把 16k 单声道 PCM 喂给 HMS 并从累计回调里合并出最终文本。
- *
- * 真机踩过的三个坑都在这里体现（见文件头注释）：
- *   · 等 `onStart` 再 `writeAudio`；
- *   · `onResult` 是累计文本 ⇒ 用 `mergeTranscript`；
- *   · 只按 640 字节切片送（余数由 slicePcmChunks 丢弃，代价见其注释）。
- */
-/**
  * 把 ASR 每一步写进可读文件。
  *
  * 【为什么必须落文件】此前 done text= 为空却查不出原因：onResult 没日志、
@@ -595,124 +571,54 @@ function asrLog(path: string, line: string): void {
   }
 }
 
-async function recognize(pcm: Uint8Array, logPath: string): Promise<string> {
-  let engine: speechRecognizer.SpeechRecognitionEngine | undefined = undefined;
-  let transcript: string = '';
-  let started: boolean = false;
-  let finished: boolean = false;
-  const sessionId: string = `dshm-bridge-${Date.now()}`;
-
+/** 用系统语音识别把一段 PCM 转成文本（long + 自动轮换，见上方注释）。 */
+async function recognizeWithSystem(pcm: Uint8Array, logPath: string): Promise<string> {
+  const recognizer: SystemSpeechRecognizer =
+    new SystemSpeechRecognizer('long', new BridgeSpeechEvents(logPath));
+  /*
+   * start() 抢不到 lease（会议模式正在录音）会抛"语音识别正被占用"。
+   * 这条错误原样抛给 handleRequest ⇒ 走 .fail ⇒ provider 把它当人话显示，
+   * 既不崩进程，也不会把用户听写静默丢掉。
+   */
+  await recognizer.start();
   try {
-    engine = await speechRecognizer.createEngine({
-      language: 'zh-CN',
-      online: 1
-      /*
-       * 【不要设 recognizerMode 为 long —— 它会让引擎的 VAD 失效】
-       *
-       * 已由真机数据证实（同一份音频、同一套代码，唯一变化就是这个参数）：
-       *
-       *   | 时间   | recognizerMode | onEvent（VAD 事件）       | 结果            |
-       *   |--------|----------------|--------------------------|-----------------|
-       *   | 11:09  | 未设（默认）   | —                        | "234。" ✓       |
-       *   | 11:15  | 未设（默认）   | —                        | "子234。" ✓     |
-       *   | 11:20  | ★ 改成 long    | ★ 一条都没有             | —               |
-       *   | 11:21+ | long           | ★ 一条都没有             | 连续 5 次空 ✗   |
-       *   | 12:33  | ★ 移除回默认   | ★ speech started/stopped | "12342234。" ✓  |
-       *
-       * 【机制】onEvent 是 HMS 报告 VAD（语音活动检测）事件的回调。
-       * 设 long 期间 onEvent **一条都不出现** ⇒ 引擎的 VAD 没有工作
-       * ⇒ 引擎无法判断"哪里有语音" ⇒ 整段被判无语音（输出空，或只出一个句号）。
-       * 移除该参数后 onEvent code=1 speech started / code=3 speech stopped
-       * 立刻出现，识别随即完全正确。
-       *
-       * 【排错代价记录】这个参数让我误判方向很久，因为它"看起来无害"：
-       * 文档（@hms.ai.speechRecognizer.d.ts:288-291）只列了 short/long 可选、
-       * **未说明 long 的语义**。期间我怀疑过音频、采样率、传输链、调用路径、
-       * 采集时序，全部被实测排除（音频频谱正常、sha256 传输一致、
-       * A/B 两条识别路径结果完全相同）。真正的分界点只有这一个参数。
-       * ⇒ 教训：改动能回退时，**先回退再继续排查**。
-       */
-    } as speechRecognizer.CreateEngineParams);
-
-    engine.setListener({
-      onStart: (sid: string, msg: string): void => {
-        started = true;
-      },
-      /*
-       * onEvent：HMS 通过它报告 VAD 事件（speech started / stopped）。
-       *
-       * 【这是 SDK 定义的 5 个回调之一】见 @hms.ai.speechRecognizer.d.ts:217
-       * （RecognitionListener: onStart / onEvent / onResult / onComplete / onError）。
-       * **不是可选的诊断代码** —— 清理时我曾误删它，导致识别全部为空。
-       *
-       * 【为什么关键】若不注册此回调，引擎可能不启用 VAD ⇒ 无法判定"哪里有语音"
-       * ⇒ 整段被判无语音，表现为连续的空白 isFinal。
-       */
-      onEvent: (sid: string, code: number, msg: string): void => {
-        asrLog(logPath, `onEvent code=${code} msg=${msg}`);
-      },
-      onResult: (sid: string, result: speechRecognizer.SpeechRecognitionResult): void => {
-        // 累计文本：必须 merge，不能 +=
-        transcript = mergeTranscript(transcript, result.result, result.isFinal, result.isLast);
-        asrLog(logPath, `onResult raw="${result.result}" isFinal=${result.isFinal} isLast=${result.isLast} mergedLen=${transcript.length}`);
-      },
-      onComplete: (sid: string, msg: string): void => {
-        finished = true;
-      },
-      onError: (sid: string, code: number, msg: string): void => {
-        finished = true;
-        asrLog(logPath, `★ onError code=${code} msg=${msg}`);
-        hilog.warn(DOMAIN, TAG, 'HMS onError code=%{public}d msg=%{public}s', code, msg);
-      }
-    } as speechRecognizer.RecognitionListener);
-
-    engine.startListening({
-      sessionId: sessionId,
-      audioInfo: {
-        audioType: 'pcm',
-        sampleRate: HMS_SAMPLE_RATE,
-        soundChannel: 1,
-        sampleBit: 16
-      } as speechRecognizer.AudioInfo
-    } as speechRecognizer.StartParams);
-
-    // ① 等 onStart（实测 ~200ms 内到）。不等就 writeAudio 会报 1002200010。
-    const startDeadline: number = Date.now() + 2000;
-    while (!started && Date.now() < startDeadline) {
+    /*
+     * 按 640B 一块、20ms 节奏送（引擎只吃 640/1280 整块；实时节奏能避免灌爆内部缓冲）。
+     * 尾块补零到 640 —— 旧实现用 slicePcmChunks 直接丢尾巴，最多丢 20ms 语音。
+     */
+    const usable: number = pcm.length - (pcm.length % CHUNK_BYTES);
+    for (let off: number = 0; off < usable; off += CHUNK_BYTES) {
+      await recognizer.appendPcm(pcm.subarray(off, off + CHUNK_BYTES));
       await sleep(20);
     }
-    if (!started) {
-      throw new Error('HMS 引擎未在 2 秒内进入 onStart（无法送音频）');
+    if (usable < pcm.length) {
+      const tail: Uint8Array = new Uint8Array(CHUNK_BYTES);
+      tail.set(pcm.subarray(usable), 0);
+      await recognizer.appendPcm(tail);
     }
-
-    // ② 按 640 字节切片送，且不丢余数
-    const chunks: Uint8Array[] = slicePcmChunks(pcm, HMS_CHUNK_BYTES);
-    for (const chunk of chunks) {
-      // 识别已结束就不再送（否则报 1002200010，且真实集成时会白耗 CPU）
-      if (finished) {
-        break;
-      }
-      engine.writeAudio(sessionId, chunk);
-      // 640B = 20ms 音频；按实时节奏送，过快可能被丢弃
-      await sleep(20);
-    }
-    engine.finish(sessionId);
-
-    // ③ 等最终结果（onComplete / onError 会置 finished）
-    const deadline: number = Date.now() + RECOGNIZE_TIMEOUT_MS;
-    while (!finished && Date.now() < deadline) {
-      await sleep(50);
-    }
-    asrLog(logPath, `结束 finished=${finished} len=${transcript.length}${finished ? '' : '（超时）'}`);
-    return transcript;
+    // 120s 音频要几十次轮换，收尾预算给足；超时也会返回已定稿文本（不丢数据）
+    const text: string = await recognizer.finish(30000);
+    asrLog(logPath, `系统识别完成 written=${recognizer.writtenBytes()}B len=${text.length}`);
+    return text;
   } finally {
-    if (engine !== undefined) {
-      try {
-        engine.shutdown();
-      } catch (e) {
-        // 忽略
-      }
-    }
+    recognizer.release();
+  }
+}
+
+/** 系统识别事件 → ASR 诊断文件（设备上没有 hilog 也不丢证据）。 */
+class BridgeSpeechEvents implements SystemSpeechEvents {
+  private readonly logPath: string;
+
+  constructor(logPath: string) {
+    this.logPath = logPath;
+  }
+
+  onTranscript(live: string, text: string): void {
+    asrLog(this.logPath, `onTranscript liveLen=${live.length} textLen=${text.length}`);
+  }
+
+  onState(state: string, detail: string): void {
+    asrLog(this.logPath, `onState ${state} ${detail}`);
   }
 }
 
@@ -769,3 +675,304 @@ function sleep(ms: number): Promise<void> {
 
 /** 环形缓冲：最多保留 30 秒（30 × 32000 字节）。 */
 const RING_MAX_BYTES: number = 30 * 32000;
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Task 1 探针实现（长语音 Go/No-Go）
+ *
+ * 判据（见施工方案 Task 1）：
+ *   · 10s / 30s / 5min 三段都有非空文本；
+ *   · 5 分钟文本不是"只识别开头数秒"；
+ *   · 自然停顿（1.2s 静音）后会话没有永久结束；
+ *   · onComplete 在 12s 内到达，或超时后仍有可保存的定稿文本；
+ *   · 同一进程没有多个活动引擎（SystemSpeechRecognizer 的 lease 保证）。
+ *
+ * 音频来源：系统 TTS 离线合成 → 16k/16bit/单声道 PCM。每合成一整段文本后插 1.2s
+ * 静音，模拟自然停顿；按"20ms 送 640 字节"的实时节奏喂引擎，避免一次性灌入被丢弃。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** 探针事件适配器（ArkTS 不允许把带方法字面量直接赋给接口 ⇒ 用类实现）。 */
+class ProbeSpeechEvents implements SystemSpeechEvents {
+  private readonly logLine: (text: string) => void;
+
+  constructor(logLine: (text: string) => void) {
+    this.logLine = logLine;
+  }
+
+  onTranscript(live: string, text: string): void {
+    this.logLine(`onTranscript liveLen=${live.length} textLen=${text.length} live="${live.slice(0, 24)}"`);
+  }
+
+  onState(state: string, detail: string): void {
+    this.logLine(`onState ${state} ${detail}`);
+  }
+}
+
+/** 探针结果 JSON 的形状（ArkTS 禁止无类型对象字面量，必须显式声明）。 */
+interface SpeechProbeJson {
+  ok: boolean;
+  stage: string;
+  mode: string;
+  seconds: number;
+  error?: string;
+  log: string;
+  ttsBytes?: number;
+  writtenBytes?: number;
+  textLen?: number;
+  text?: string;
+  source?: string;
+  id?: string;
+}
+
+/**
+ * 读随包离线语音样本（`rawfile/probe-speech-16k.wav`）。
+ *
+ * 【为什么需要它 —— 2026-10-18 PC 真机首跑踩到】系统 TTS 的 `onData` 回调在这台
+ * 2in1 上**一次都没有触发**（`onStart` 报 audioType=pcm/16000/16bit/ch=3、
+ * `onComplete type=0 synthesis complete`，但 0 字节音频 —— 说明该实现只负责"合成并
+ * 直接播放"，不提供 PCM 流）。继续用 TTS 会让探针喂进去的全是静音，"文本为空"就
+ * 会被误读成"long 模式不行"。
+ * ⇒ 改为：**随包放一段用桌面 SAPI（Microsoft Huihui）合成的 16k/mono/s16 中文语音**，
+ *    探针直接读 rawfile 当声源；TTS 只作兜底。样本 58s，可循环 + 插静音凑任意时长。
+ */
+async function loadProbePcmFromRawfile(): Promise<Uint8Array> {
+  const ctx: common.UIAbilityContext | undefined = bridgeAbilityCtx;
+  if (ctx === undefined) {
+    throw new Error('bridgeAbilityCtx 未就绪');
+  }
+  const raw: Uint8Array = await ctx.resourceManager.getRawFileContent('probe-speech-16k.wav');
+  if (raw.length <= WAV_HEADER) {
+    throw new Error(`样本过短 ${raw.length}B`);
+  }
+  if (!(raw[0] === 0x52 && raw[1] === 0x49 && raw[2] === 0x46 && raw[3] === 0x46)) {
+    throw new Error('样本不是 RIFF/WAVE');
+  }
+  return raw.subarray(WAV_HEADER);
+}
+
+/** 探针日志（追加写，带毫秒相对时间）。 */
+function probeLog(path: string, line: string): void {
+  try {
+    const f: fs.File = fs.openSync(path,
+      fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.APPEND);
+    fs.writeSync(f.fd, line + '\n');
+    fs.closeSync(f);
+  } catch (e) {
+    // 日志写失败不影响探针
+  }
+}
+
+/** 探针结果 JSON（一次覆盖写，PC 侧直接 recv 后读字段即可）。 */
+function writeProbeJson(path: string, payload: string): void {
+  try {
+    const f: fs.File = fs.openSync(path,
+      fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    fs.writeSync(f.fd, payload);
+    fs.closeSync(f);
+  } catch (e) {
+    // 同日志
+  }
+}
+
+/** Host 侧写给桥的请求 JSON（这里由探针模拟，字段与 provider 逐字一致）。 */
+interface DictationPayload {
+  audio: string;
+  language: string;
+}
+
+/**
+ * 听写链路端到端自检（Task 3 验收）：模拟 provider 写一个 6 秒 `.req`，
+ * 然后等桥跑完 `handleRequest` 产出 `.done/.fail`。
+ *
+ * 【为什么要它】Web 麦克风按钮需要真人点击；而这条链路的关键是
+ * 「base64 解码 → 剥 WAV 头 → 质量指标 → 系统识别 → 写结果」。
+ * 探针自己造请求即可覆盖到，不必依赖 UI 自动化点击。
+ */
+async function runDictationProbe(filesDir: string, jsonPath: string,
+  line: (s: string) => void): Promise<void> {
+  const ctx: common.UIAbilityContext | undefined = bridgeAbilityCtx;
+  if (ctx === undefined) {
+    line('dictation: bridgeAbilityCtx 未就绪');
+    return;
+  }
+  const wav: Uint8Array = await ctx.resourceManager.getRawFileContent('probe-speech-16k.wav');
+  const dataBytes: number = 6 * 32000;
+  if (wav.length < 44 + dataBytes) {
+    line(`dictation: 样本过短 ${wav.length}B`);
+    return;
+  }
+  const cut: Uint8Array = new Uint8Array(44 + dataBytes);
+  cut.set(wav.subarray(0, 44), 0);
+  cut.set(wav.subarray(44, 44 + dataBytes), 44);
+  const view: DataView = new DataView(cut.buffer);
+  view.setUint32(4, 36 + dataBytes, true);
+  view.setUint32(40, dataBytes, true);
+  const helper: util.Base64Helper = new util.Base64Helper();
+  const payload: DictationPayload = { audio: helper.encodeToStringSync(cut), language: 'zh-CN' };
+  const id: string = `probe-dict-${Date.now()}`;
+  const queueDir: string = `${filesDir}/dsh/home/speech-to-text/hms-bridge`;
+  const reqPath: string = `${queueDir}/${id}.req`;
+  const tmpPath: string = `${queueDir}/${id}.tmp`;
+  try {
+    if (!fs.accessSync(queueDir)) {
+      fs.mkdirSync(queueDir, true);
+    }
+    const f: fs.File = fs.openSync(tmpPath,
+      fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    fs.writeSync(f.fd, JSON.stringify(payload));
+    fs.closeSync(f);
+    fs.renameSync(tmpPath, reqPath);
+  } catch (e) {
+    line(`dictation: 写请求失败 ${(e as Error).message}`);
+    return;
+  }
+  line(`dictation: 已写请求 id=${id} bytes=${cut.length}`);
+  /*
+   * 【必须立刻返回，不能在这里等 .done】本函数就跑在桥的轮询循环里（busy=true）。
+   * 若在这里等 handleRequest 处理这个 .req，而 handleRequest 又要等轮询空闲
+   * ⇒ 自己等自己，必然死锁（2026-10-18 真机首跑踩到：req 一直躺在队列里）。
+   * 正确做法：只投递，立刻放开 busy；下一拍轮询自然处理，结果看 .done 与 ASR 日志。
+   */
+  const queued: SpeechProbeJson = {
+    ok: true, stage: 'dictation-queued', mode: 'dictation', seconds: 6,
+    id: id, error: '', log: ''
+  };
+  writeProbeJson(jsonPath, JSON.stringify(queued));
+}
+
+
+/** 跑一次探针：合成 → 实时喂 → finish → 落 log/json。 */
+async function runSpeechProbe(filesDir: string, req: SpeechProbeRequest): Promise<void> {
+  const dir: string = `${filesDir}/diag-meeting-probe`;
+  try {
+    if (!fs.accessSync(dir)) {
+      fs.mkdirSync(dir, true);
+    }
+  } catch (e) {
+    // 目录已存在
+  }
+  const stamp: string = new Date().toISOString().replace(/[:.]/g, '-');
+  const logPath: string = `${dir}/probe-${req.mode}-${req.seconds}s-${stamp}.log`;
+  const jsonPath: string = `${dir}/probe-${req.mode}-${req.seconds}s-${stamp}.json`;
+  const t0: number = Date.now();
+  const line = (s: string): void => {
+    probeLog(logPath, `${Date.now() - t0}ms ${s}`);
+  };
+  line(`probe start mode=${req.mode} seconds=${req.seconds}`);
+  if (req.mode === 'dictation') {
+    // 走真实听写链路：自己写 <id>.req（模拟 provider），由轮询 → handleRequest 处理
+    await runDictationProbe(filesDir, jsonPath, line);
+    return;
+  }
+
+  let pcm: Uint8Array = new Uint8Array(0);
+  let source: string = '';
+  try {
+    pcm = await loadProbePcmFromRawfile();
+    if (pcm.length > 0) {
+      source = 'rawfile';
+    }
+  } catch (e) {
+    line(`rawfile 不可用：${(e as Error).message}`);
+  }
+  if (pcm.length === 0) {
+    // 【PC 真机 2026-10-18】rawfile 与 TTS 都没有声源 ⇒ 探针无效，必须单独判死，
+    // 否则"文本为空"会被误读成"long 模式不行"。
+    line('no audio：rawfile 没有产出 PCM（TTS 路径已下线）');
+    const noAudio: SpeechProbeJson = {
+      ok: false, stage: 'no-audio', mode: req.mode, seconds: req.seconds,
+      error: '无可用声源（rawfile 缺失；TTS 合成路径已下线）', log: logPath
+    };
+    writeProbeJson(jsonPath, JSON.stringify(noAudio));
+    return;
+  }
+  line(`audio source=${source} bytes=${pcm.length} audioMs=${Math.round(pcm.length / 32)}`);
+
+  const recognizer: SystemSpeechRecognizer = new SystemSpeechRecognizer(
+    req.mode === 'long' ? 'long' : 'short', new ProbeSpeechEvents(line));
+  try {
+    await recognizer.start();
+  } catch (e) {
+    line(`start failed: ${(e as Error).message}`);
+    const startFail: SpeechProbeJson = {
+      ok: false, stage: 'start', mode: req.mode, seconds: req.seconds,
+      error: (e as Error).message, log: logPath
+    };
+    writeProbeJson(jsonPath, JSON.stringify(startFail));
+    return;
+  }
+  line('engine started');
+
+  /* 实时喂音频：640B/20ms ≈ 实时；每合成一轮（PROBE_TEXT 覆盖约 40s 语音）后插 1.2s 静音。 */
+  const totalBytes: number = req.seconds * 32000;
+  const silentChunk: Uint8Array = new Uint8Array(640);
+  const pending: Uint8Array = new Uint8Array(640);
+  let pendingLen: number = 0;
+  let sent: number = 0;
+  let pos: number = 0;
+  let silenceLeft: number = 0;
+  let progressAt: number = 0;
+  const pushChunk = (src: Uint8Array): void => {
+    let i: number = 0;
+    while (i < src.length) {
+      const take: number = Math.min(pending.length - pendingLen, src.length - i);
+      pending.set(src.subarray(i, i + take), pendingLen);
+      pendingLen += take;
+      i += take;
+      if (pendingLen === pending.length) {
+        recognizer.writePcm(pending);
+        sent += pending.length;
+        pendingLen = 0;
+      }
+    }
+  };
+  while (sent < totalBytes) {
+    if (recognizer.needsRotate()) {
+      // 单会话 18.75s 上限：主动收尾换会话（见 SystemSpeechRecognizer.ROTATE_AT_BYTES）
+      await recognizer.rotate();
+    }
+    if (silenceLeft > 0) {
+      const take: number = Math.min(silentChunk.length, silenceLeft);
+      pushChunk(silentChunk.subarray(0, take));
+      silenceLeft -= take;
+    } else {
+      if (pos >= pcm.length) {
+        pos = 0;
+        silenceLeft = 38400; // 1.2s @16k/mono/s16
+        line(`silence 1200ms at sent=${sent}B`);
+        continue;
+      }
+      const take: number = Math.min(pcm.length - pos, 640);
+      pushChunk(pcm.subarray(pos, pos + take));
+      pos += take;
+    }
+    if (sent - progressAt >= 32000) {
+      progressAt = sent;
+      line(`progress sent=${sent}B written=${recognizer.writtenBytes()}B`);
+    }
+    await sleep(20);
+  }
+  if (pendingLen > 0) {
+    // 尾块补零到 640 再送（引擎只吃 640/1280 的整块）
+    for (let i: number = pendingLen; i < pending.length; i++) {
+      pending[i] = 0;
+    }
+    recognizer.writePcm(pending);
+    line(`tail padded ${pendingLen}->640`);
+  }
+  const text: string = await recognizer.finish(12000);
+  line(`finish textLen=${text.length} written=${recognizer.writtenBytes()}B`);
+  const done: SpeechProbeJson = {
+    ok: text.length > 0,
+    stage: 'done',
+    mode: req.mode,
+    seconds: req.seconds,
+    ttsBytes: pcm.length,
+    writtenBytes: recognizer.writtenBytes(),
+    textLen: text.length,
+    text: text,
+    source: source,
+    log: logPath
+  };
+  writeProbeJson(jsonPath, JSON.stringify(done));
+  line('probe done');
+}

@@ -13,12 +13,16 @@
       "value": "DSHM"
     },
     {
-      "name": "perm_internet_reason",
-      "value": "Connect to the DeepSeek Harness host you specify (on this device, or a LAN/tunnel address) to exchange sessions and events"
+      "name": "shortcut_new_session",
+      "value": "New session"
     },
     {
-      "name": "perm_network_info_reason",
-      "value": "Detect network changes so a dropped connection can be restored and a LAN host can be found"
+      "name": "agent_ext_desc",
+      "value": "DSHM on-device A2A agent service"
+    },
+    {
+      "name": "perm_internet_reason",
+      "value": "Connect to the DSHM host you specify (on this device, or a LAN/tunnel address) to exchange sessions and events"
     },
     {
       "name": "perm_keep_background_reason",
@@ -207,6 +211,66 @@
     {
       "name": "tray_hover_tips",
       "value": "DSHM is running (left-click to open the window)"
+    },
+    {
+      "name": "UsageFormAbility_label",
+      "value": "DSHM session card"
+    },
+    {
+      "name": "UsageFormAbility_desc",
+      "value": "Current session progress, account balance, or token usage"
+    },
+    {
+      "name": "form_display_name",
+      "value": "DSHM session"
+    },
+    {
+      "name": "form_description",
+      "value": "Session progress and balance; token usage when balance is unavailable"
+    },
+    {
+      "name": "perm_custom_sandbox_reason",
+      "value": "Run bundled signed git, rg, shell, and Python tools in the dynamic sandbox execution domain"
+    },
+    {
+      "name": "perm_ignore_library_validation_reason",
+      "value": "Load native libraries supplied by local development tools and plugins without system library signature validation"
+    },
+    {
+      "name": "perm_executable_memory_reason",
+      "value": "Provide anonymous executable memory for runtime JIT and the local virtual machine translation cache"
+    },
+    {
+      "name": "perm_vibrate_reason",
+      "value": "Provide light tactile feedback when copying, pasting, or starting and stopping meeting recording; degrade automatically when unavailable"
+    },
+    {
+      "name": "perm_read_pasteboard_reason",
+      "value": "Read plain text from the clipboard only after the user chooses Paste; never read in the background, read images, or upload clipboard content"
+    },
+    {
+      "name": "perm_documents_directory_reason",
+      "value": "After user approval, use projects in the public Documents directory as a workspace for browsing, searching, and editing files"
+    },
+    {
+      "name": "perm_download_directory_reason",
+      "value": "After user approval, import project archives, source trees, and build outputs from the public Download directory as a workspace"
+    },
+    {
+      "name": "perm_desktop_directory_reason",
+      "value": "After user approval, use temporary projects and scripts in the public Desktop directory as a browsable and editable workspace"
+    },
+    {
+      "name": "perm_full_disk_reason",
+      "value": "PC / 2in1 only: reads and writes the local folder the user selects as the project workspace (including symlinks) and runs the bundled toolchain; no other directories are accessed."
+    },
+    {
+      "name": "perm_get_network_info_reason",
+      "value": "Read the current network type and connectivity state so the on-device host can fall back to offline mode instead of waiting for request timeouts"
+    },
+    {
+      "name": "perm_running_lock_reason",
+      "value": "Keep the CPU awake while a long task (core unpack, host startup, package install) runs, so it is not throttled or suspended halfway"
     }
   ]
 }

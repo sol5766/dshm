@@ -82,7 +82,9 @@ export const REQUIRED_LOCAL_SURFACE = [
   'dshm-shortcuts', 'dshm-a11y',
   // 2026-10-03 起的端侧文件能力与运行时（此前从未被要求登记）
   'dshm-tool-fs-remove', 'dshm-fs-write-nonchmod', 'dshm-workspace-claim',
-  'dshm-office-system-preview', 'dshm-ptc-runtime-inproc'
+  'dshm-office-system-preview', 'dshm-ptc-runtime-inproc',
+  // 原生朗读/分享动作条（2026-11-15）：TextReader/TTS + ShareBoard，见 parity-matrix §4.6
+  'dshm-read-aloud'
 ];
 
 /** 期望的矩阵列数：Feature + 4（Web/状态/界面/协议）+ 4 形态 + Status */

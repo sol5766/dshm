@@ -11,9 +11,11 @@
  *   node tools/protocol-contract.mjs --json .research/protocol/contracts.json
  *   node tools/gen-compat-endpoints.mjs
  */
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import assert from 'node:assert/strict';
+import { validateContracts, recipeNodeModules } from './protocol-contract.mjs';
 
 const ROOT = process.cwd();
 /**
@@ -26,8 +28,7 @@ const CONTRACTS = process.env.DSH_CONTRACTS
   ?? join(ROOT, '.research', 'protocol', 'contracts.json');
 const OUT = join(ROOT, 'dshcompat', 'src', 'main', 'ets', 'Endpoints.ets');
 const DSH_NM = process.env.DSH_NODE_MODULES
-  ?? join(homedir(), 'AppData', 'Roaming', 'io.github.hairyf.deepseek-harness-desktop',
-    'dependencies', 'dsh', 'node_modules');
+  ?? recipeNodeModules(ROOT);
 
 /**
  * 生成物所标注的核心包版本与采集时间。
@@ -164,11 +165,10 @@ const CAPABILITIES = [
     missingHint: '该 Host 未提供目标端点'
   },
   {
-    // 【2026-09-25 rc.2 同步】`subagents/list` **已从上游移除**（rc.1 时就不在了）。
-    // 剩下的 `prompt` / `interruptByParent` 才是现行面。
+    // 0.2.2-rc.2 将 interruptByParent 替换为 interruptByUser(childSessionId)。
     id: 'subagents', label: '子代理',
     requires: [],
-    optional: ['subagents/prompt', 'subagents/interruptByParent'],
+    optional: ['subagents/prompt', 'subagents/interruptByUser'],
     missingHint: '该 Host 未提供子代理端点'
   },
   {
@@ -191,7 +191,19 @@ const CAPABILITIES = [
   }
 ];
 
-const contracts = JSON.parse(readFileSync(CONTRACTS, 'utf8'));
+if (process.argv.includes('--self-test')) {
+  const d = { id: '@deepseek-ai/test#session/follow', namespace: 'session', method: 'follow' };
+  assert.throws(() => validateContracts([]), /0 个 endpoint/);
+  assert.throws(() => validateContracts([d, { ...d }]), /重复契约 id/);
+  assert.throws(() => validateContracts([d, { ...d, id: '@deepseek-ai/other#session/follow' }]), /重复线上 endpoint/);
+  assert.equal(validateContracts([d]).length, 1);
+  assert.equal(shapeOf([{ name: 'agent', wire: 'request' }]), 'ArgsShape.REQUEST');
+  assert.equal(shapeOf([{ name: 'request', wire: '_request' }]), 'ArgsShape.UNDERSCORE_REQUEST');
+  console.log('端点生成自检通过：6 项（空契约、重复 id/endpoint 拒绝及 wire 参数形态）');
+  process.exit(0);
+}
+
+const contracts = validateContracts(JSON.parse(readFileSync(CONTRACTS, 'utf8')));
 
 /**
  * 推断参数形态。

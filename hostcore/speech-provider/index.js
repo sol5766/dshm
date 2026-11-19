@@ -1,5 +1,5 @@
 /*
- * DSHM：SenseVoice 端侧离线识别的 provider 实现（走 sherpa-onnx 官方鸿蒙 HAR）。
+ * DSHM：HarmonyOS **系统语音识别**（Core Speech Kit）的 provider 实现。
  *
  * 本文件由 `tools/pack-core.mjs` 的 patchSensevoiceForHms() 追加到
  * `@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/index.js` 里
@@ -15,14 +15,19 @@
  * 的闭包内、profile 也已有它的行 ⇒ **改它零新增接线**。
  * 详证见 docs/device-validation.md 批次二十三/二十四。
  *
- * ══ 为什么"不提供 preparation"就能让官方按钮变可点 ══════════════════════
- * 官方 UI 的门是
- *   `usable = readiness.connected && provider.preparation.phase ∈ {ready, standby, waking}`
- * 而服务端 snapshot() 写的是
- *   `preparation: provider.preparation?.snapshot() ?? { phase: "ready" }`
- * ⇒ **不带 preparation 的 provider 被报成 ready**，按钮即可用。
- * SenseVoice 恰恰因为鸿蒙不在其平台白名单（lib/index.js:201-207）而永远进不了
- * ready —— 这就是"点语音按钮只会跳设置"的根因。
+ * ══ 2026-10-18：普通听写改用系统识别，**不再下载/准备模型** ═════════════
+ * 识别本体搬到 ArkTS 侧：`entry/src/main/ets/speech/SystemSpeechRecognizer.ets`
+ * 用 Core Speech Kit（`speechRecognizer`）做识别，由 `HmsSpeechBridge.ets` 从
+ * 文件队列取出请求、调它、再写回结果。本 provider 因此**只负责协议**：
+ *   · 不再 import `../speech-models/index.js`（那个 228MB SenseVoice 模型的
+ *     在线下载器），也没有任何"模型目录检查 / 下载进度 / 启动期自动准备"；
+ *   · 因此**刻意不提供 `preparation`** —— 系统识别没有"准备中/需下载"这类
+ *     阶段可报。上游服务端 snapshot() 写的是
+ *       `preparation: provider.preparation?.snapshot() ?? { phase: "ready" }`
+ *       （`dsh-experimental-speech-to-text/lib/index.js:108`）
+ *     ⇒ 不带 preparation 的 provider 被报成 ready，麦克风按钮即可用；
+ *   · 设备上**已经存在**的旧模型目录（`$DSH_HOME/speech-to-text/sensevoice`）
+ *     **不自动删除**：它属于用户数据，清理必须另行授权（方案 Task 4 第 8 条）。
  *
  * ══ 数据流（本文件负责最后一段）════════════════════════════════════════
  *   官方麦克风按钮（WebView）
@@ -32,7 +37,7 @@
  *       → api-speech-to-text：`Buffer.from(base64)` + `validateWave()`
  *         → **本文件的 transcribe()**（跑在 Host/Node 进程）
  *           → 写文件队列 → ArkTS 侧 HmsSpeechBridge.ets
- *                          → `SenseVoiceRecognizer`（sherpa-onnx SenseVoice 离线模型）
+ *                          → `SystemSpeechRecognizer`（Core Speech Kit 短/长会话）
  *           ← 读回识别文本
  *         ← 返回 { text }
  *       → 官方 UI 把 text 插进输入框草稿
@@ -43,19 +48,23 @@
  * 项目既有同手法先例且已验证可用：`host-stop-request`、`host-exit-mode`
  * （见 EntryAbility.startRestartWatcher）、`install-queue`。
  * 两侧同 UID、同文件系统视图，所以文件队列是可靠且可诊断的。
+ *
+ * ══ 协议不变（下游只认这三件）══════════════════════════════════════════
+ *   `<id>.req`（本文件写）→ ArkTS 识别 → `<id>.done` / `<id>.fail`（ArkTS 写）
+ * 诊断面同样不变：队列目录下的 `requests.log`，以及 ArkTS 侧落盘的
+ * `last-audio.wav`（后者在本文件之外，见 `HmsSpeechBridge.ets` 里 `last-audio.wav` 的写入处）。
  */
 
 import { Buffer } from "node:buffer";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { ensureAssets, missingAssets, ASSETS } from "../speech-models/index.js";
 
 /*
  * 依赖注入声明（由 pack-core 以 `hmsProviderInject as inject` 导出）。
  *
- * 【为什么只注入 speechToText】SenseVoice 原本还注入 `subprocess`（它要起
- * sherpa-onnx 子进程）。端侧识别改由 ArkTS 侧 sherpa-onnx 直接完成（不起子进程），
- * 多余的 inject 会让插件等一个用不到的服务，徒增"未就绪"风险。
+ * 【为什么只注入 speechToText】识别改由 ArkTS 侧 Core Speech Kit 直接完成
+ * （不起子进程、不加载模型），多余的 inject 会让插件等一个用不到的服务，
+ * 徒增"未就绪"风险。
  */
 const hmsProviderInject = ["speechToText"];
 
@@ -66,7 +75,8 @@ const TIMEOUT_MS = 25000;
 /**
  * canonical 16k 单声道 PCM16 WAV 的固定头长度。
  * 与 ArkTS 侧（appstate 的 `WAV_HEADER_BYTES`）是**同一个值**，
- * 定义处各写一份是因为两侧语言不同、无法共享模块；两边都有门禁断言钉住。
+ * 定义处各写一份是因为两侧语言不同、无法共享模块；两边都有门禁断言钉住
+ * （hostcore 这份见 `tools/check-layout-fixtures.mjs`）。
  */
 const WAV_HEADER_BYTES = 44;
 /** canonical WAV 每秒字节数（16000 采样 × 2 字节）。 */
@@ -103,7 +113,7 @@ function logRequest(queueDir, line) {
 }
 
 /**
- * 注册 SenseVoice 端侧识别 provider（替换官方 SenseVoice 的 apply）。
+ * 注册 HarmonyOS 系统语音识别 provider（替换官方 SenseVoice 的 apply）。
  *
  * 【必须带 export】本文件被 `lib/index.js` 以
  * `import { hmsApply, hmsProviderInject } from "./hms-provider.js"` 引入，
@@ -123,6 +133,10 @@ export function hmsApply(ctx, config) {
    * ⇒ 队列 = `$DSH_HOME/speech-to-text/hms-bridge`
    * ArkTS 侧用 `filesDir + '/dsh/home/speech-to-text/hms-bridge'`，两者一致
    * （真机读数：`$DSH_HOME = <filesDir>/dsh/home`）。
+   *
+   * 【为什么不改用别的目录名】`dataRoot` 是 bundle 给的值，路径口径一变
+   * ArkTS 侧（HmsSpeechBridge）就得跟着变；队列目录名是**跨侧协议**，
+   * 与"是否下载模型"无关 ⇒ 保留原样。
    */
   const queueDir = config.dataRoot === undefined
     ? undefined
@@ -133,82 +147,50 @@ export function hmsApply(ctx, config) {
     } catch {
       // 建不出也继续：transcribe 时会再试并如实报错
     }
-    ctx.logger.info("sensevoice bridge queue: %s", queueDir);
+    ctx.logger.info("speech bridge queue: %s", queueDir);
   } else {
-    ctx.logger.warn("sensevoice bridge: config.dataRoot 未设置，无法定位队列目录");
+    ctx.logger.warn("speech bridge: config.dataRoot 未设置，无法定位队列目录");
   }
 
-  /*
-   * 模型目录：沿用 `dataRoot`（= `$DSH_HOME/speech-to-text/sensevoice`）。
-   * 模型**不再随包内置**，改为首次使用时由本 provider 在线下载到这里；
-   * ArkTS 侧按同一路径用绝对路径加载（sherpa-onnx 不传 resourceManager 时
-   * 即从文件系统读，Linux/Windows/macOS 走的都是这条路径）。
-   */
-  const modelDir = config.dataRoot;
-
   ctx.effect(() => {
-    const prep = createPreparation(modelDir, ctx);
     const unregister = ctx.speechToText.register({
       info: {
         id: config.providerId,
-        name: 'SenseVoice 离线识别',
         /*
-         * `location: 'host-local'`：识别在端侧本地完成，模型也存放在本地
-         * （首次使用需下载一次）。语义上不是云端能力。
+         * 【显示名】用户在「设置 → 语音」里看到的就是它。识别由 HarmonyOS
+         * Core Speech Kit 在端侧完成 ⇒ 照实写"系统语音识别"，不再自称 SenseVoice。
+         */
+        name: 'HarmonyOS 系统语音识别',
+        /*
+         * `location: 'host-local'`：识别在端侧本地完成（Core Speech Kit 的
+         * 离线会话，`online: 1`，见 `entry/src/main/ets/speech/SystemSpeechRecognizer.ets`），
+         * 音频不出设备。语义上不是云端能力。
          */
         location: 'host-local',
         /*
-         * 【声明 SenseVoice 的**真实**语言能力】
-         * SenseVoice 模型（zh-en-ja-ko-yue-2024-07-17）支持的集合就是
-         * `auto / zh / en / ja / ko / yue` —— 照实写。
-         *
-         * 【为什么同时钉死 profile 的 language】服务端 `selectedProvider()`
-         * 会校验 `provider.info.languages.includes(language)`，
-         * 而服务 config 的 `language` 默认是 `"auto"`。这里已包含 auto，
-         * 但仍把 profile 钉成 zh-CN（见 cordis.patch.yml）：
-         * 端侧主用中文，钉死可避免走 auto 判别带来的一次额外开销。
-         *
-         * 【为什么 ArkTS 侧 modelConfig.language 留空】留空 = auto，
-         * 让模型自行判别（SenseVoice 的语言判别是模型内建的，不是额外开销）。
+         * 【只声明 zh-CN】Core Speech Kit 当前只支持中文（真机
+         * `listLanguages()` 只返回 `["zh-CN"]`）；而上游服务端
+         * `selectedProvider()`（`dsh-experimental-speech-to-text/lib/index.js:135`）
+         * 会校验 `provider.info.languages.includes(language)`，profile 的
+         * `language` 已钉成 zh-CN（见 hostcore/profile/ondevice/cordis.patch.yml）。
+         * 这里多写 en/ja/ko/yue/auto 只会让设置页给出**用不了**的选项。
          */
-        languages: ['zh-CN', 'en', 'ja', 'ko', 'yue', 'auto'],
+        languages: ['zh-CN'],
       },
       /*
-       * preparation：把"模型是否就绪 / 下载进度 / 失败原因"如实报给 UI。
-       *
-       * 【为什么现在必须提供】模型不再随包内置 ⇒ 首次使用前需要下载 228MB。
-       * 若不报状态，UI 会认为 provider 一直可用，用户点麦克风后长时间无响应
-       * 且无从得知原因。上游 UI 会读 preparation.snapshot().phase：
-       *   downloading ⇒ 渲染进度条（用 completedBytes / totalBytes）
-       *   failed      ⇒ 渲染失败提示（用 message 与 download.reason）
-       *   unfinished  ⇒ 触发"需准备"引导
-       */
-      preparation: prep,
-      /*
        * 【关键】**刻意不提供 preparation** ⇒ 服务报 phase=ready ⇒ 按钮可用。
-       * 这不是漏写：SenseVoice 模型已随包内置在 rawfile 里，**无需任何下载**，
-       * 所以没有"准备中/需下载"这类阶段可报。
+       * 系统识别没有任何"准备中/需下载"阶段，所以没有状态可报（上游
+       * snapshot() 对缺省 preparation 直接写 `{ phase: "ready" }`）。
        */
       transcribe: async (input, signal) => {
         hmsCallCount += 1;
         const n = hmsCallCount;
         const audio = input === undefined || input === null ? undefined : input.audio;
         if (audio === undefined || audio === null) {
-          throw new Error('sensevoice: 请求里没有 audio');
+          throw new Error('speech: 请求里没有 audio');
         }
         if (queueDir === undefined) {
-          throw new Error('sensevoice: 队列目录不可用（dataRoot 未配置）');
-        }
-        /*
-         * 模型可能尚未下载（首次使用）。这里**等下载完成再投递**，
-         * 而不是直接失败 —— 对用户来说"第一次慢一点"远好于"第一次报错"。
-         * preparation 同时会把进度报给 UI。
-         */
-        const missing = missingAssets(modelDir);
-        if (missing.length > 0) {
-          ctx.logger.info('sensevoice: 模型缺失 %d 个，先下载再识别', missing.length);
-          await ensureAssets(modelDir, (s) => prep.report(s), signal);
-          ctx.logger.info('sensevoice: 模型就绪，继续识别');
+          throw new Error('speech: 队列目录不可用（dataRoot 未配置）');
         }
         const started = Date.now();
         const audioBuf = Buffer.from(audio);
@@ -216,11 +198,12 @@ export function hmsApply(ctx, config) {
         const audioMs = Math.max(0, Math.round(((audioBytes - WAV_HEADER_BYTES) / WAV_BYTES_PER_SECOND) * 1000));
 
         /*
-         * ===== 整段单次识别（回到成功过的方案）=====
+         * ===== 整段单次识别（长音频由 ArkTS 侧按 55 秒切 short/long 会话）=====
          *
-         * 【为什么不做分段】见本文件顶部的撤回说明：分段在五轮实测中
+         * 【为什么不在 Host 分段】见本文件顶部的撤回说明：分段在五轮实测中
          * 从未救回一次长音频，还引入了 a2 投纯静音、碎片独立成段等缺陷。
          * 成功记录全部来自**整段单次**（11:09 / 11:15 / 12:33 / 12:49×3）。
+         * 长音频的"怎么切"由 ArkTS 侧的识别器决定，桥两侧协议保持不变。
          */
         const id = `req-${Date.now()}-${n}`;
         const reqPath = join(queueDir, `${id}.req`);
@@ -236,7 +219,7 @@ export function hmsApply(ctx, config) {
         const tmpPath = join(queueDir, `${id}.tmp`);
         writeFileSync(tmpPath, payload, 'utf8');
         renameSync(tmpPath, reqPath);
-        ctx.logger.info('sensevoice transcribe #%d whole audioBytes=%d audioMs=%d -> %s',
+        ctx.logger.info('speech transcribe #%d whole audioBytes=%d audioMs=%d -> %s',
           n, audioBytes, audioMs, id);
         logRequest(queueDir, `transcribe #${n} whole audioMs=${audioMs} bytes=${audioBytes}`);
         const result = await awaitResult(queueDir, id, signal, audioMs);
@@ -247,61 +230,13 @@ export function hmsApply(ctx, config) {
          * 标点会被插进草稿 —— 用户看到一个孤零零的句号，比明确报失败更糟。
          */
         if (isPunctuationOnly(result)) {
-          throw new Error('sensevoice: 引擎未识别到内容（仅标点或空）');
+          throw new Error('speech: 引擎未识别到内容（仅标点或空）');
         }
 
-        ctx.logger.info('sensevoice transcribe #%d done in %dms: %s', n, Date.now() - started, result.slice(0, 80));
+        ctx.logger.info('speech transcribe #%d done in %dms: %s', n, Date.now() - started, result.slice(0, 80));
         logRequest(queueDir, `transcribe #${n} done ${Date.now() - started}ms -> ${JSON.stringify(result)}`);
         return { text: result, language: 'zh-CN' };
       },
-    });
-    /*
-     * 启动后自动开始准备：模型缺失时立刻在后台下载。
-     *
-     * 【为什么不等用户点麦克风】那会让首次使用变成"点了之后长时间无响应"。
-     * 启动就下，用户第一次点麦克风时通常已就绪；进度通过 preparation
-     * 报给 UI，用户看到的是"正在下载"而不是干等。
-     *
-     * 【失败不中断启动】下载失败只把状态置为 failed（UI 显示原因），
-     * 用户可稍后重试。
-     */
-    queueMicrotask(() => {
-      /*
-       * 【诊断】把模型目录相关的真实状态写到 queueDir 下的固定文件。
-       * 目的：ctx.logger 的输出在端侧不进任何可读日志（项目已知问题），
-       * 而 queueDir 已被 ArkTS 侧实证可写 ⇒ 用它当观测通道。
-       */
-      try {
-        const lines = [
-          'dataRoot=' + String(config.dataRoot),
-          'dataRootType=' + (typeof config.dataRoot),
-          'modelDir=' + String(modelDir),
-          'queueDir=' + String(queueDir),
-        ];
-        try {
-          if (modelDir !== undefined) {
-            mkdirSync(modelDir, { recursive: true });
-            lines.push('mkdir(modelDir)=ok');
-            const missing = missingAssets(modelDir);
-            lines.push('missing=' + missing.map((a) => a.name).join(','));
-          } else {
-            lines.push('mkdir skipped: modelDir undefined');
-          }
-        } catch (e) {
-          lines.push('mkdir(modelDir) FAILED: ' + String(e && e.message ? e.message : e));
-          lines.push('errCode=' + String(e && e.code ? e.code : '-'));
-        }
-        if (queueDir !== undefined) {
-          writeFileSync(join(queueDir, 'model-dir-diag.txt'), lines.join('\n') + '\n', 'utf8');
-        }
-      } catch {
-        /* 诊断本身失败不应影响启动 */
-      }
-      try {
-        prep.prepare();
-      } catch (e) {
-        ctx.logger.warn('sensevoice 自动准备启动失败: %s', String(e && e.message ? e.message : e));
-      }
     });
     return () => {
       unregister();
@@ -310,125 +245,6 @@ export function hmsApply(ctx, config) {
 }
 
 
-/**
- * 创建 preparation 对象（模型是否就绪 / 下载进度 / 失败）。
- *
- * 【契约】上游服务端读 `preparation.snapshot()`，取其中的 `phase`：
- *   ready       —— 模型齐备，可用
- *   unprepared  —— 尚未准备（UI 会提示"需准备"）
- *   checking    —— 正在核对/准备
- *   downloading —— 正在下载（UI 渲染进度条，用 completedBytes / totalBytes）
- *   failed      —— 失败（UI 显示 message；download.reason 用于分类）
- * 另外支持 subscribe(cb) 让 UI 订阅变化、prepare() 触发准备、cancel() 取消。
- *
- * @param modelDir 模型目录（应用沙箱内的绝对路径）
- * @param ctx cordis 上下文
- * @returns preparation 对象
- */
-function createPreparation(modelDir, ctx) {
-  /** 当前状态。初始按"磁盘上是否已齐备"判定，避免无谓的重复下载。 */
-  let state = { phase: 'unprepared' };
-  let task;
-  const listeners = new Set();
-
-  const publish = (next) => {
-    state = next;
-    for (const cb of listeners) {
-      try {
-        cb();
-      } catch {
-        // 单个订阅者出错不应影响 provider
-      }
-    }
-  };
-
-  /** 先核对磁盘：三个资产齐备就是 ready。 */
-  const inspect = () => {
-    if (modelDir === undefined) {
-      return { phase: 'failed', message: '未配置模型目录（dataRoot 缺失）' };
-    }
-    try {
-      const need = missingAssets(modelDir);
-      if (need.length === 0) {
-        return { phase: 'ready' };
-      }
-      return { phase: 'unprepared' };
-    } catch (e) {
-      return { phase: 'failed', message: String(e && e.message ? e.message : e) };
-    }
-  };
-
-  /** 启动（或复用）下载任务。 */
-  const start = () => {
-    if (task !== undefined) {
-      return;
-    }
-    if (modelDir === undefined) {
-      publish({ phase: 'failed', message: '未配置模型目录（dataRoot 缺失）' });
-      return;
-    }
-    const need = missingAssets(modelDir);
-    if (need.length === 0) {
-      publish({ phase: 'ready' });
-      return;
-    }
-    ctx.logger.info('sensevoice 模型缺失 %d 个，开始下载到 %s', need.length, modelDir);
-    publish({ phase: 'checking', step: 'model' });
-    task = ensureAssets(modelDir, (s) => publish(s), undefined)
-      .then(() => {
-        ctx.logger.info('sensevoice 模型下载完成');
-        publish({ phase: 'ready' });
-      })
-      .catch((e) => {
-        const message = String(e && e.message ? e.message : e);
-        ctx.logger.error('sensevoice 模型下载失败: %s', message);
-        publish({
-          phase: 'failed',
-          message,
-          /*
-           * reason 取值见上游 schema：network / storage / dns / timeout /
-           * certificate / http / integrity / unknown。
-           * 这里按错误信息粗分类 —— 比一律报 unknown 对用户更有用。
-           */
-          download: {
-            resource: 'model.int8.onnx',
-            source: 'gitcode.com',
-            reason: /integrity|校验失败/.test(message) ? 'integrity'
-              : /HTTP \d/.test(message) ? 'http'
-                : /timeout|timed out/i.test(message) ? 'timeout'
-                  : /ENOSPC|storage|空间/i.test(message) ? 'storage'
-                    : 'network',
-          },
-        });
-      })
-      .finally(() => {
-        task = undefined;
-      });
-  };
-
-  /* 启动时先核对一次磁盘，让 UI 立刻拿到正确状态 */
-  publish(inspect());
-
-  return {
-    snapshot: () => state,
-    subscribe: (cb) => {
-      listeners.add(cb);
-      return () => {
-        listeners.delete(cb);
-      };
-    },
-    /* 供 transcribe 路径直接汇报下载进度（与 start() 共用同一 publish） */
-    report: (s) => publish(s),
-    prepare: () => {
-      start();
-    },
-    cancel: () => {
-      /* 下载任务未持有可中断句柄（fetch 无 signal 传入），此处仅复位状态 */
-      task = undefined;
-      publish(inspect());
-    },
-  };
-}
 
 
 /**
@@ -459,9 +275,9 @@ function isPunctuationOnly(text) {
  * 【为什么轮询而不是监听】Node 侧没有"文件出现"的事件（`fs.watch` 在
  * openharmony 上行为未验证），而识别是用户显式动作、延迟不敏感 ⇒ 轮询更稳。
  *
- * 【为什么必须看 .fail】识别失败（引擎未起、音频过短等）必须**如实抛出**，
- * 让官方 UI 显示"识别失败"而不是把空文本插进输入框 —— 后者会让人以为
- * 识别真的返回了空结果。
+ * 【为什么必须看 .fail】识别失败（引擎未起、音频过短、麦克风被占用等）必须
+ * **如实抛出**，让官方 UI 显示"识别失败"而不是把空文本插进输入框 ——
+ * 后者会让人以为识别真的返回了空结果。
  *
  * 【超时为什么要随音频长度伸缩 —— 审核时发现的一个真缺陷】
  * 原实现用固定 25 秒。但 ArkTS 侧是**按实时节奏送音频**的
@@ -482,7 +298,7 @@ async function awaitResult(queueDir, id, signal, audioMs) {
   for (;;) {
     if (signal !== undefined && signal !== null && signal.aborted) {
       cleanup(queueDir, id);
-      throw new Error('sensevoice: aborted');
+      throw new Error('speech: aborted');
     }
     if (existsSync(donePath)) {
       const text = readJsonField(donePath, 'text');
@@ -492,12 +308,12 @@ async function awaitResult(queueDir, id, signal, audioMs) {
     if (existsSync(failPath)) {
       const reason = readJsonField(failPath, 'error');
       cleanup(queueDir, id);
-      throw new Error(`sensevoice: ${reason.length > 0 ? reason : '识别失败'}`);
+      throw new Error(`speech: ${reason.length > 0 ? reason : '识别失败'}`);
     }
     if (Date.now() > deadline) {
       // 超时：把请求清掉，避免 ArkTS 侧稍后处理一个已放弃的请求
       cleanup(queueDir, id);
-      throw new Error(`sensevoice: 识别超时（${Math.round(budget / 1000)}s，音频约 ${Math.round(audioMs / 1000)}s）`);
+      throw new Error(`speech: 识别超时（${Math.round(budget / 1000)}s，音频约 ${Math.round(audioMs / 1000)}s）`);
     }
     await sleep(POLL_MS);
   }

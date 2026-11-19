@@ -27,6 +27,8 @@
  *   G 取消：`signal.abort()` 后要尽快落定（不是干等 20 分钟超时）。
  *   H 仓库接线：pack-core 的注入函数、调用点、标记、锚点、插件清单必须在（否则产物里没有分叉，
  *     而门禁却全绿 —— 即 `check-core-openharmony-patches.mjs` 那一类"打包期才是唯一兜底"的洞）。
+ *     外加**收尾口径**：桥接分支的 `incompatible` 必须非空才带（+dshm.49）—— 无条件带上
+ *     空数组时，上游只看"字段在不在" ⇒ 404/网络/权限失败全被改判成"版本不兼容"。
  *
  * 用法：`node tools/check-profile-pnpm-bridge.mjs`               # 门禁
  *       `node tools/check-profile-pnpm-bridge.mjs --self-test`   # 负控制臂（下面那节）
@@ -81,7 +83,35 @@ function queueFiles(queueDir, suffix) {
   return readdirSafe(queueDir).filter((n) => n.endsWith(suffix));
 }
 
-const sandbox = mkdtempSync(join(tmpdir(), 'dshm-profile-pnpm-'));
+/*
+ * 【2026-10-29 修：临时沙箱必须**避开** /data/storage/】
+ *
+ * 本机（鸿蒙 PC）的 `TMPDIR=/data/storage/el2/base/cache` ⇒ `os.tmpdir()` 直接落在
+ * 应用数据根下。而 `bridgeEnabled()` 的判据之一是 `isDshmAppRuntime()`：
+ * `DSHM_HOME` 与 `DSHM_SANDBOX_HOME` 都以 `/data/storage/` 开头即判"在端侧 Host 里"。
+ * 于是临时沙箱**假扮**成了端侧运行时 ⇒ A3（假壳真能跑 ⇒ 不接管）反而进入接管分支，
+ * 卡在 `waitOutcome()` 的 20 分钟上限上，整道门禁 timeout（真机报告 rc=124 即此）。
+ *
+ * 处置：`tmpdir()` 落在应用根下时改用 `/tmp`（存在且可写就用它），让离线门禁
+ * 与端侧运行时彻底隔离；找不到可用根就如实失败，绝不退回"碰巧像端侧"的路径。
+ * 另在 A0 段加一条对照臂：把两个变量指到 `/data/storage/…` ⇒ 必须接管（证明判据没坏）。
+ */
+function pickSandboxRoot() {
+  const candidates = [tmpdir(), '/tmp'];
+  for (const base of candidates) {
+    if (typeof base !== 'string' || base.length === 0) continue;
+    if (base.startsWith('/data/storage/')) continue; // 应用数据根：会伪装成端侧运行时
+    try {
+      mkdirSync(base, { recursive: true });
+      return mkdtempSync(join(base, 'dshm-profile-pnpm-'));
+    } catch {
+      // 下一个候选
+    }
+  }
+  console.error('❌ 找不到落在 /data/storage/ 之外的临时目录（离线门禁必须与端侧运行时隔离）');
+  process.exit(2);
+}
+const sandbox = pickSandboxRoot();
 const home = join(sandbox, 'home');
 const binDir = join(sandbox, 'bin');
 mkdirSync(home, { recursive: true });
@@ -288,6 +318,53 @@ const mod = await import(pathToFileURL(join(ROOT, ...PLUGIN_REL.split('/'))).hre
   }
 }
 
+/**
+ * 注入串的收尾口径（+dshm.49 真机 P0）：`incompatible` 必须**非空才带**。
+ *
+ * 上游 execa 路径的收尾是 `...incompatible.length > 0 ? { incompatible } : {}`，
+ * 而消费侧只看"字段在不在"（在就抛 incompatible-version）—— 无条件带上空数组
+ * ⇒ 404/网络/权限失败全被改判成"版本不兼容"。单拎成函数是为了让 `--self-test`
+ * 能拿"改坏后的同一份源码"复算它（否则这条判据是不是恒真就没人证）。
+ */
+const bridgeReturnShapeOk = (text) => text.includes('...incompatible.length > 0 ? { incompatible } : {} };')
+  && !text.includes('truncated, logPath, incompatible };');
+
+/**
+ * H5 的判据（2026-10-16 换口径）：从 pack-core 源码里取出那两条锚点**形状正则**，
+ * 直接拿 `alpha.2` 老形态与 `alpha.3+` 新形态各跑一遍 —— **两条都要认**。
+ *
+ * 【为什么不再断言"pack-core 里含某段原文"】锚点已从精确字符串改成形状正则
+ * （上游 alpha.4 给那两句加了 `await`、缩进 4→8 空格），旧的"含原文"断言升级后必然假红，
+ * 而且它证的不是补丁真正依赖的性质。真正该证的是"**两代形态都认**"，所以这里把正则跑起来判。
+ * 单拎成函数同样是为了 `--self-test` 能拿"改坏后的同一份源码"复算它。
+ */
+const PREFLIGHT_ANCHOR_SAMPLES = {
+  // 顺序与 tools/pack-core.mjs 的 sites 一致：0 = lib/types/operations.js（单引号）、1 = lib/index.js（双引号）
+  singleQuote: [
+    "    if (preflight.length > 0)\n        return rejected(preflight, 'nothing was installed');\n",
+    "        if (preflight.length > 0)\n            return await rejected(preflight, 'nothing was installed');\n",
+  ],
+  doubleQuote: [
+    '    if (preflight.length > 0) return rejected(preflight, "nothing was installed");\n',
+    '\t\tif (preflight.length > 0) return await rejected(preflight, "nothing was installed");\n',
+  ],
+};
+const pnpmAnchorShapeAcceptsBoth = (text) => {
+  const patterns = [...text.matchAll(/re: \/(.+?)\/,\n/g)]
+    .map((m) => m[1])
+    .filter((p) => p.includes('preflight'));
+  if (patterns.length !== 2) return false;
+  const acceptsBoth = (source, [oldSample, newSample]) => new RegExp(source).test(oldSample)
+    && new RegExp(source).test(newSample);
+  return acceptsBoth(patterns[0], PREFLIGHT_ANCHOR_SAMPLES.singleQuote)
+    && acceptsBoth(patterns[1], PREFLIGHT_ANCHOR_SAMPLES.doubleQuote);
+};
+
+const pnpmAnchorIsShapeRegex = (text) => {
+  const lines = text.split('\n').filter((l) => l.trim().startsWith('re: /') && l.includes('preflight'));
+  return lines.length === 2 && lines.every((l) => l.includes('([ \\t]*)') && l.includes('(?:await )?'));
+};
+
 /* ── H 仓库接线（打包侧必须同时在） ──────────────────────────────────────── */
 {
   const packCore = readFileSync(join(ROOT, 'tools', 'pack-core.mjs'), 'utf8');
@@ -297,8 +374,10 @@ const mod = await import(pathToFileURL(join(ROOT, ...PLUGIN_REL.split('/'))).hre
   check('H4 注入串里确实 import 了插件本体',
     packCore.includes('import("@deepseek-ai/dshm-profile-pnpm")')
     && packCore.includes('dshmPnpm.bridgeRunProfilePnpm(args, {'));
-  check('H5 锚点是被替换的上游原文（preflight 拒绝分支）',
-    packCore.includes("+ \"        return rejected(preflight, 'nothing was installed');"));
+  check('H5 锚点形状正则同时接受 alpha.2 老形态与 alpha.3+ 新形态（缩进 + await 可选）',
+    pnpmAnchorShapeAcceptsBoth(packCore));
+  check('H5b 两条锚点都是形状正则：缩进进捕获组 + await 可选（精确字符串形态不得回来）',
+    pnpmAnchorIsShapeRegex(packCore));
   check('H6 插件在 pack-core 的自带插件清单里',
     packCore.includes("{ name: '@deepseek-ai/dshm-profile-pnpm', dir: 'dshm-profile-pnpm' }"));
   const pkg = JSON.parse(readFileSync(join(ROOT, 'hostcore', 'plugins', 'dshm-profile-pnpm', 'package.json'), 'utf8'));
@@ -309,6 +388,8 @@ const mod = await import(pathToFileURL(join(ROOT, ...PLUGIN_REL.split('/'))).hre
   check('H8 核心树补丁门禁里也有这条判据（打包期不是唯一兜底）',
     checker.includes("const PROFILE_PNPM_MARKER = 'DSHM_PROFILE_PNPM_BRIDGE';")
     && checker.includes('profile 包通道补丁 · '));
+  check('H9 注入串的收尾是"incompatible 非空才带"（无条件带 ⇒ 拿不到仓库会被改判成版本不兼容）',
+    bridgeReturnShapeOk(packCore));
 }
 
 /* ── 负控制臂（--self-test）：把插件的关键判据改坏，证明这些断言真的会红 ──────
@@ -393,8 +474,35 @@ if (process.argv.includes('--self-test')) {
       bad(`自检 · 改坏「${v.label}」`, error?.message ?? String(error));
     }
   }
+  /*
+   * H 段（仓库接线）的负控制：pack-core 的注入串**也要**被"改坏一处 ⇒ 判据必红"证过。
+   * 与上面那批不同，H 段读的是仓库源码文本（不是插件模块），所以这里对读进来的同一份
+   * 文本做替换再复算同一个谓词 —— 替换没命中（判据与源码脱钩）照样算红。
+   */
+  {
+    const packCoreNow = readFileSync(join(ROOT, 'tools', 'pack-core.mjs'), 'utf8');
+    const broken = packCoreNow.replace(
+      '...incompatible.length > 0 ? { incompatible } : {} };',
+      'incompatible };',
+    );
+    check('自检 · 注入串收尾退回"无条件带 incompatible"（+dshm.49 前的坏形态）⇒ H9 必红',
+      broken !== packCoreNow && bridgeReturnShapeOk(broken) === false,
+      broken === packCoreNow ? '替换锚点没命中 —— H9 与 pack-core 已脱钩' : '');
+  }
+  /*
+   * H5 的负控制：锚点正则**去掉「await 可选」**（退回只认老形态）⇒ 必须判红。
+   * 这条正是 2026-10-16 那个坑的反面：上游给锚点加了 await，只认老形态的正则会让补丁 die。
+   */
+  {
+    const packCoreNow = readFileSync(join(ROOT, 'tools', 'pack-core.mjs'), 'utf8');
+    const withoutAwaitOptional = packCoreNow.replace('(?:await )?', '');
+    check('自检 · 锚点正则去掉「await 可选」⇒ H5 必红（新形态不再被认）',
+      withoutAwaitOptional !== packCoreNow && pnpmAnchorShapeAcceptsBoth(withoutAwaitOptional) === false,
+      withoutAwaitOptional === packCoreNow ? '替换锚点没命中 —— H5 与 pack-core 已脱钩' : '');
+  }
   rmSync(varTmpRoot, { recursive: true, force: true });
-  console.log('（--self-test 的 4 个变体各自只改一处源码锚点；它们红 ⇒ 上面的对应判据不是摆设）');
+  console.log(`（--self-test 的 ${variants.length} 个插件变体 + 2 个 pack-core 变体各自只改一处锚点；`
+    + '它们红 ⇒ 上面的对应判据不是摆设）');
 }
 
 /* ── 收尾 ───────────────────────────────────────────────────────────────── */

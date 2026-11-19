@@ -18,11 +18,20 @@
 # ── 为什么走应用自身的 Python 桥 ──────────────────────────────────────────────
 #   宿主 home（`$filesDir/dsh/home`）是 0700 ⇒ shell 身份读不到里面的 cores 树；
 #   而 Python 桥（`/dshm-python/*`）跑在**应用进程内**、与宿主同 UID ⇒ 读得到。
-#   token **优先**读 `<HOME_DIR>/host-ready.json` 的 `token` 字段（**当前进程**写出的权威值；
-#   实测 0666 ⇒ shell 也读得到），读不到才退回 `$filesDir/dshm-host.log` 里那行 URL ——
-#   ⚠️ 日志里的 token 是**启动当时**打印的，`tail -1` 可能抓到**上一个进程**留下的那行，
-#   于是桥回 401 `{"error":"token required"}`、脚本把偶发写成「未验证」（2026-10-07 手机档实测：
-#   同一台设备手动喂 live token 立刻 5/5 一致）。命令行 `-Token` 优先级最高。
+#   token **优先**读 `<HOME_DIR>/host-ready.json` 的 `token` 字段（**当前进程**写出的权威值），
+#   读不到才退回 `$filesDir/dshm-host.log`；命令行 `-Token` 优先级最高。
+#   ⚠️ 后两条路都可能给出**过期甚至假的值**，且都有真机现场：
+#     · host-ready.json 在 PC 档也常常读不到 —— `dsh/home` 是 0700、`hdc shell` 是另一个 uid
+#       （`cat` 与 `hdc file recv` 都 Permission denied）⇒ 必然掉到日志兜底；
+#     · 日志是**跨 boot 追加**的，且里面所有 `token=` 行都是**客户端请求**行
+#       （IN-REQ / IN-DONE）—— 既混着上一个进程的 token，也混着**本脚本自己**用过的 token
+#       （`-Token wrongtoken` 这种负控制会永久留在日志里；2026-10-09 实测 `grep … | tail -1`
+#       抓到的正是它，于是"权威值"变成刚喂进去的假值）。
+#   故日志兜底的取法（2026-10-09 修）是：用 `--- boot pid=` 分段、**只认最后一段**（= 当前进程），
+#   段内按三级取：`host-ready token=` 行（宿主自己镜像的**权威**行 —— main.js 的 writeHostReady
+#   落盘 host-ready.json 时顺手 log 一行）> `GET /?token=` 行（宿主页面自己的请求，用的必是当前
+#   进程活的 token）> 段内任意 `token=` 行（兜底，仅在本轮有客户端用过 `?token=` 时才可能命中）。
+#   桥回 401 的含义是「桥活着、只是不认这个 token」，那时用 `-Token <live>` 喂一次即可。
 #
 # ── 端口从哪来（**别再从日志里猜**）──────────────────────────────────────────
 #   那份日志里混着 `ACCEPT #n 127.0.0.1:<临时端口>`（客户端源端口，hdc 转发会保留地址），
@@ -45,10 +54,15 @@ $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+# 【为什么不写死】首候选原先写死 `D:\Huawei\DevEco Studio\...`（更早的安装位置）。2026-10-10 用户把
+# DevEco 装到 `D:\Program Files\Huawei\DevEco Studio`。解析口收在 tools/lib/deveco-home.ps1
+# （候选列表 + **必须真的含 tools\hvigor\bin\hvigorw.js** 才算命中），可用 DEVECO_HOME 覆盖。
+. (Join-Path $PSScriptRoot 'lib\deveco-home.ps1')
+
 function Resolve-Hdc {
   if ($env:DSHM_HDC -and (Test-Path $env:DSHM_HDC)) { return $env:DSHM_HDC }
   $cands = @(
-    'D:\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe',
+    (Get-DevEcoPath 'sdk\default\openharmony\toolchains\hdc.exe'),
     (Join-Path $env:LOCALAPPDATA 'OpenHarmony\Sdk')
   )
   foreach ($c in $cands) {
@@ -58,7 +72,7 @@ function Resolve-Hdc {
         ForEach-Object { Join-Path $_.FullName 'toolchains\hdc.exe' } |
         Where-Object { Test-Path $_ } | Select-Object -First 1
       if ($hit) { return $hit }
-    } elseif (Test-Path $c) { return $c }
+    } elseif ($c -and (Test-Path $c)) { return $c }
   }
   return $null
 }
@@ -81,7 +95,21 @@ $keyFiles = @(
   'node_modules/@deepseek-ai/dshm-fs-write-nonchmod/lib/denial-hints.js',
   'node_modules/@deepseek-ai/dshm-fs-write-nonchmod/lib/fsio-nochmod.js',
   'node_modules/@deepseek-ai/dshm-tool-fs-remove/lib/denial-hints.js',
-  'node_modules/@deepseek-ai/dshm-tool-fs-remove/lib/index.js'
+  'node_modules/@deepseek-ai/dshm-tool-fs-remove/lib/index.js',
+  # 手持档 guest 虚拟机 bash 通道（docs/122）与侧边栏终端（docs/123）：这 5 个文件决定"模型发一条 bash"之后
+  # 宿主到 guest 的每一跳（接管判据 / QGA 客户端 / 生命周期 / 汇编脚本），改到就容易
+  # 出现"设备在跑旧代码而本机以为已修"那种最难查的错位。
+  'node_modules/@deepseek-ai/dshm-vm-bash/lib/index.js',
+  'node_modules/@deepseek-ai/dshm-vm-bash/lib/qga.js',
+  'node_modules/@deepseek-ai/dshm-vm-bash/lib/vm.js',
+  'node_modules/@deepseek-ai/dshm-vm-bash/lib/handle.js',
+  # 侧边栏终端的 guest 通道（docs/123）：串口 / 控制终端认领 / 前台进程组探测 / resize。
+  'node_modules/@deepseek-ai/dshm-vm-bash/lib/terminal.js',
+  # 文件访问范围闸门（docs/137）：两份判据副本 + 被注入判据块的搜索入口 —— 三者任一与
+  # 本机树不同，设备就在按另一套允许面判「能不能读 / 能不能写」。
+  'node_modules/@deepseek-ai/dshm-fs-write-nonchmod/lib/fs-fence.js',
+  'node_modules/@deepseek-ai/dshm-tool-fs-remove/lib/fs-fence.js',
+  'node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js'
 )
 
 # ── 2) 运行中的核心树版本（node-output.log 每轮启动轮转，含 cores/<ver>）────────
@@ -121,12 +149,48 @@ if ($Token.Length -eq 0) {
   if ($rm.Success) { $Token = $rm.Groups[1].Value; $TokenSrc = 'host-ready.json' }
 }
 if ($Token.Length -eq 0) {
-  $tokLine = (& $hdc shell "grep -ao 'token=[A-Za-z0-9_-]*' $filesDir/dshm-host.log 2>/dev/null | tail -1" 2>&1 | Out-String)
-  $Token = ($tokLine -replace '.*token=', '').Trim()
-  if ($Token.Length -gt 0) { $TokenSrc = 'dshm-host.log（⚠️ 可能是旧进程留下的）' }
+  # 【2026-10-09 修：从「摸最后一行」改成「按最后一次 boot 分段 + 段内按三级优先取」】
+  # 旧写法 `grep -ao 'token=…' | tail -1` 实测有两个坑：① 会抓到**上一个进程**的 token（早过期）；
+  # ② 日志里所有 `token=` 行都是**客户端请求**行 ⇒ 也会抓到**本脚本自己**刚喂进去的假 token
+  # （负控制 `-Token wrongtoken` 就永久留在同一份跨 boot 追加的日志里，当天实测 `tail -1` 抓到的
+  # 正是它）。口径与理由见文件头「为什么走应用自身的 Python 桥」那一节。
+  #
+  # 【为什么**不**在设备侧用 awk 解析（2026-10-09 实测踩到，别改回去）】先前用一行 awk 做分段与三级
+  # 优先：**交互式跑同一个字符串完全正常**，但放进本脚本用 `-File` 跑时，PowerShell 对"含内嵌 `"`
+  # 的原生参数"做引号处理，设备侧收到的程序里所有 `"` 都被吃掉（设备侧回显实测：
+  # `BEGIN{rdy="";tok=…}` → `BEGIN{rdy=;tok=…}`），awk 因此报 `syntax near '}'` 并返回空 ——
+  # 表现成"日志里明明有 token 行，脚本却说拿不到"。故改成**只用 grep 取行、解析留在 PowerShell 侧**：
+  # 传参里不再出现内嵌双引号，这层地雷就不存在了（并用 `-F` 固定串，顺带避开各档 grep 的正则差异）。
+  $bootHit = (& $hdc shell "grep -anF -e '--- boot pid=' $filesDir/dshm-host.log 2>/dev/null | tail -1" 2>&1 | Out-String).Trim()
+  $bootNo = -1
+  if ($bootHit -match '^(\d+):') { $bootNo = [int]$Matches[1] }
+  # 取"最后一条匹配 $pat 的日志行"里的 token；落在**上一段**（行号 <= bootNo）的一律丢弃。
+  # 只认 `[A-Za-z0-9_-]` 且 >=20 字符的形状：真 token 实测 43 字符的 base64url
+  # ⇒ `wrongtoken` 这类人工短串被滤掉（负控制常驻日志，正是旧写法被它带偏的原因）。
+  function Get-LogToken([string]$pat) {
+    $hit = (& $hdc shell "grep -anF -e '$pat' $filesDir/dshm-host.log 2>/dev/null | tail -1" 2>&1 | Out-String).Trim()
+    $m = [regex]::Match($hit, '^(\d+):.*?token=([A-Za-z0-9_-]{20,})')
+    if (-not $m.Success) { return '' }
+    if ($bootNo -ge 0 -and [int]$m.Groups[1].Value -le $bootNo) { return '' }
+    return $m.Groups[2].Value
+  }
+  # 三级优先：宿主自己镜像的权威行 > 宿主页面自己的请求行 > 任意 `token=` 行（兜底）。
+  $Token = Get-LogToken 'host-ready token='
+  if ($Token.Length -gt 0) { $TokenSrc = 'dshm-host.log 的 host-ready 行（本轮 boot 段）' }
+  if ($Token.Length -eq 0) {
+    $Token = Get-LogToken 'GET /?token='
+    if ($Token.Length -gt 0) { $TokenSrc = 'dshm-host.log 的宿主页面请求行（本轮 boot 段）' }
+  }
+  if ($Token.Length -eq 0) {
+    $Token = Get-LogToken 'token='
+    if ($Token.Length -gt 0) { $TokenSrc = 'dshm-host.log（本轮 boot 段，兜底）' }
+  }
 }
 if ($Token.Length -eq 0) {
-  Write-Host '拿不到宿主 token（host-ready.json 与 dshm-host.log 都没有）⇒ 未验证' -ForegroundColor Yellow
+  Write-Host '拿不到宿主 token（host-ready.json 读不到，且 dshm-host.log 本轮 boot 段里没有像样的 token= 行）⇒ 未验证' -ForegroundColor Yellow
+  Write-Host ("  想看日志里那条页面请求（最接近权威值的可读来源）：`n" +
+              "    " + $hdc + " shell `"grep -ao 'GET /?token=[A-Za-z0-9_-]*' $filesDir/dshm-host.log | tail -1`"") -ForegroundColor DarkGray
+  Write-Host '  或直接 -Token <live> 喂一次（宿主重启后 token 必换）。' -ForegroundColor DarkGray
   exit 2
 }
 Write-Host ('token 来源：' + $TokenSrc + '（长度 ' + $Token.Length + '）') -ForegroundColor DarkGray
@@ -205,8 +269,11 @@ if (-not $resp) {
   if ($saw401) {
     # 「401 要说清楚」：这是**能自证**的失败 —— 桥活着，只是不认这个 token。
     Write-Host ('桥回了 401（token 不被当前进程接受）—— token 来源：' + $TokenSrc) -ForegroundColor Yellow
-    Write-Host ('  ⇒ 日志里的 token 会随进程重启过期；权威值是 <HOME_DIR>/host-ready.json 的 `token`，' +
-                '也可直接 -Token <live> 喂进来') -ForegroundColor Yellow
+    Write-Host ('  ⇒ token 随进程重启必换；**可读**的权威来源是 dshm-host.log 里的 `host-ready token=` 行' +
+                '（main.js 落盘 host-ready.json 时镜像的那行），也可直接 -Token <live> 喂进来。') -ForegroundColor Yellow
+    if ($TokenSrc -like '命令行*') {
+      Write-Host '     本次是命令行显式喂进来的 ⇒ 去掉 -Token 重跑，脚本会自己从日志里取当前的。' -ForegroundColor Yellow
+    }
   } else {
     Write-Host ('桥请求失败（候选端口 ' + ($portCands -join ' / ') + ' 都不应答）⇒ 未验证') -ForegroundColor Yellow
   }

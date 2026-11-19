@@ -5,7 +5,7 @@
  * 组件级自适应由组件自身按容器尺寸处理（如 onAreaChange），不读窗口宽度。
  */
 
-import { Breakpoint } from './Tokens';
+import { Breakpoint } from 'platform';
 
 /** 形态档位 */
 export enum LayoutMode {

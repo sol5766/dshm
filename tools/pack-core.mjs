@@ -22,16 +22,47 @@
  * 注意：不修改任何上游文件；不联网取任何"额外"东西（npm 除外）。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
+import { patchManagerLifecycle } from './lib/manager-lifecycle.mjs';
+/*
+ * 【语法检查子进程的启动标志（2026-10-31）】检测用的 `node --check` 是**子进程**，
+ * 不继承父进程的 `--jitless`。而本机（HarmonyOS 端侧）内核拒绝 JIT 所需的
+ * `mmap(RWX)`/`mprotect(RX)` ⇒ V8 默认启动直接 `Fatal error ... 12 == (*__errno_location())`
+ * （12 = ENOMEM），于是**语法校验全部假红**，报错内容还是 V8 崩溃文本，极易被误判为
+ * "补丁注入坏了"（2026-10-31 实测就误判过一次）。这里统一带上 --jitless；
+ * `--check` 只做解析、不需要 JIT，结果与带 JIT 时逐字一致。
+ */
+const SYNTAX_CHECK_FLAGS = ['--jitless'];
 import { createHash } from 'node:crypto';
 import {
   closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync,
   unlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { deflateRawSync } from 'node:zlib';
+
+/**
+ * 可复现的构建时刻（docs/334）。
+ *
+ * `SOURCE_DATE_EPOCH` 优先（[reproducible-builds.org](https://reproducible-builds.org/docs/source-date-epoch/) 的标准做法），
+ * 否则取 `hostcore/core-recipe.json` 的 mtime —— 配方随核心版本变化，
+ * 因此"同一配方 ⇒ 同一时刻 ⇒ 同一分发包 sha256"。
+ */
+function reproducibleStamp() {
+  const epoch = process.env.SOURCE_DATE_EPOCH;
+  if (typeof epoch === 'string' && /^\d+$/.test(epoch)) {
+    return new Date(Number(epoch) * 1000).toISOString();
+  }
+  try {
+    return new Date(statSync('hostcore/core-recipe.json').mtimeMs).toISOString();
+  } catch {
+    /* 配方读不到时退回打包时刻并如实标注，不假装可复现 */
+    return new Date().toISOString();
+  }
+}
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inventoryOf } from './lib/core-inventory.mjs';
+import { devecoPath, devecoSdkHomeCandidates } from './lib/deveco-home.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -46,6 +77,31 @@ const RECIPE_PATH = resolve(ROOT, arg('--recipe', 'hostcore/core-recipe.json'));
 const OUT_DIR = resolve(ROOT, arg('--out', 'dist/core'));
 const WORK_ROOT = resolve(ROOT, arg('--work', 'dist/core/work'));
 const SKIP_INSTALL = process.argv.includes('--skip-install');
+/*
+ * `--place-in-app`：把本次产出的核心容器**拷进 entry 的 resfile**。
+ *
+ * 【为什么必须有它】AGENTS.md「出包与核心树的三个坑」第 1 条：只跑裸 pack-core 时
+ * 新包留在 `dist/core/`，HAP 里带的还是**旧容器** ⇒ 所有核心侧改动全部不生效，
+ * 而链上自检只看设备树目录名，一路绿灯。
+ *
+ * 【为什么这次要补回来】docs/334 复核时发现本仓库的 `pack-core.mjs` **根本没有这个开关**
+ * （`--place-in-app` 传了也被静默忽略），于是 resfile 里的容器一直是上一次
+ * `assembleApp` 留下的旧文件 —— `check-resfile-core-zip` 会如实判红
+ * （"安装包里带的不是你刚打的树"），这正是它的价值。
+ *
+ * 【只增不删 → 由本函数自己清理】resfile 只允许 1 份容器（多份会把 HAP 顶到 491 MiB）。
+ */
+const PLACE_IN_APP = process.argv.includes('--place-in-app');
+/*
+ * 【目标目录是 **hostruntime** 的 resfile，不是 entry 的】
+ *
+ * 实测（docs/334）：先按 entry 放置 ⇒ `entry-default.hap` 从 66 MB 涨到 **161 MB**
+ * （整个 .app 507 MB → 607 MB）。因为核心容器由**共享 HSP `hostruntime`** 承载，
+ * entry / phone 两个 HAP 都不该带它。放在 entry 等于凭空多打包 95 MB，
+ * 而 hostruntime 里那份才是运行时真正读的。
+ */
+const RESFILE_DIR = resolve(ROOT, 'hostruntime/src/main/resources/resfile');
+const FORCE_INSTALL = process.argv.includes("--force-install");
 
 const recipe = JSON.parse(readFileSync(RECIPE_PATH, 'utf8'));
 const STAGE_NAME = `dsh-core-${recipe.coreVersion}`;
@@ -69,12 +125,10 @@ function which(cmd) {
 
 /** 找 OHOS NDK 的 llvm-readelf（用于读 ELF 段表判签名）。找不到只影响签名校验。 */
 function findReadelf() {
-  const sdkHomes = [
-    process.env.DEVECO_SDK_HOME,
-    process.env.OHOS_SDK_HOME,
-    'D:\\Huawei\\DevEco Studio\\sdk',
-    'C:\\Program Files\\Huawei\\DevEco Studio\\sdk',
-  ].filter(Boolean);
+  // 【2026-10-10 改】不再写死安装根：DevEco 从 `C:\Program Files\Huawei\DevEco Studio` 搬到
+  // `D:\Program Files\Huawei\DevEco Studio` 之后，写死路径的脚本整片失效。解析口见
+  // tools/lib/deveco-home.mjs（`DEVECO_SDK_HOME` / `OHOS_SDK_HOME` → `<DevEco 安装根>/sdk`）。
+  const sdkHomes = devecoSdkHomeCandidates().filter(Boolean);
   const rels = [
     ['default', 'openharmony', 'native', 'llvm', 'bin', 'llvm-readelf'],
     ['default', 'hms', 'native', 'llvm', 'bin', 'llvm-readelf'],
@@ -103,10 +157,112 @@ function writeBundlePackageJson() {
   writeFileSync(join(STAGE, 'package.json'), JSON.stringify(pkg, null, 2) + '\n', 'utf8');
 }
 
+/**
+ * 复用上一代核心树的 `package-lock.json`（让**依赖闭包可复现**）。
+ *
+ * 【为什么需要（2026-10-16 实测）】新鲜 STAGE 没有锁 ⇒ `npm install` 按 ranges 取"当时最新"：
+ * 同一份 recipe、隔一天重跑，`@earendil-works/pi-ai` / `pi-telemetry` 就从 1.2.0 漂到 1.3.0
+ * （两者差 1 个文件：1.3.0 不再导出 `utils/assistant-message-frame.js`）。闭包变化没人评审、
+ * 也没跑过门禁，却直接进了产物 —— 这就是"两次出包内容不一样"的来源，且与 `docs/131` 那种
+ * "闭包 +15/−6 逐条登记"的纪律相悖。
+ * 做法：本版 STAGE 没有锁时，从**其它 `dsh-core-*` 目录**里取**最新**的一份锁拷进来，
+ * `npm install` 以它为准（只解析真正不满足的边）⇒ 闭包默认稳定；升级某个依赖是一个**显式动作**
+ * （更新那份锁 / 改 recipe），不再是 rebuild 的副作用。
+ * 首次使用（work 目录被清过）没有可复用的锁时只打印一行提示，按老行为由 npm 解析。
+ */
+function reusePreviousLockfile() {
+  const lockPath = join(STAGE, 'package-lock.json');
+  if (existsSync(lockPath)) {
+    log('[pack-core]   闭包：本版已有 package-lock.json，按它解析');
+    return;
+  }
+  if (!existsSync(WORK_ROOT)) return;
+  const candidates = readdirSync(WORK_ROOT, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name.startsWith('dsh-core-') && e.name !== STAGE_NAME)
+    .map((e) => ({ name: e.name, lock: join(WORK_ROOT, e.name, 'package-lock.json') }))
+    .filter((c) => existsSync(c.lock))
+    .sort((a, b) => statSync(b.lock).mtimeMs - statSync(a.lock).mtimeMs);
+  if (candidates.length === 0) {
+    log('[pack-core]   ⚠ 没有可复用的 package-lock.json（首个版本或 work 目录被清过）'
+      + '⇒ 本次依赖闭包由 npm 现场解析');
+    return;
+  }
+  copyFileSync(candidates[0].lock, lockPath);
+  log(`[pack-core]   闭包：复用 ${candidates[0].name} 的 package-lock.json`
+    + '（依赖默认不漂；要升级依赖请显式更新这份锁）');
+}
+
 function materialize() {
   log(`\n[pack-core] ① 物化 ${STAGE_NAME} → ${STAGE}`);
   mkdirSync(STAGE, { recursive: true });
   writeBundlePackageJson();
+  reusePreviousLockfile();
+  /*
+   * 【2026-10-29 修：复用暂存树前必须证明"它就是本配方的那一版"】
+   *
+   * 原写法是"只要 `node_modules/@deepseek-ai/dsh` 与 `package-lock.json` 都在就复用"，
+   * 之后 `writeManifest()` 只把 `recipe.coreVersion` 与**实际安装版本**分别记进清单、
+   * **不断言两者相等**。三条真实的踩坑路径都会经过这里：
+   *   · 同版本目录被手工升过 `@deepseek-ai/dsh`（或系统把暂存树弄脏）；
+   *   · 配方回退（`coreVersion` 降回旧值）而目录名相同；
+   *   · `--work` 指到了别的树的目录。
+   * 结果都是"旧核心被打上当前版本的标签出包"，而链上所有自检只看目录名，一路绿灯。
+   *
+   * 现在：复用之前先读 `@deepseek-ai/dsh/package.json` 的 version，与 `recipe.coreVersion`
+   * 的**上游部分**严格相等才复用；不等就明确报错并给出 --force-install 的处置建议，
+   * 绝不静默复用。这一条与 `assertStagedCoreVersion()`（打包前再断言一次）成对，
+   * 见 `writeManifest` 调用点。
+   */
+  const stagedCorePkg = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh', 'package.json');
+  const canReuse = !FORCE_INSTALL && existsSync(stagedCorePkg) && existsSync(join(STAGE, 'package-lock.json'));
+  if (canReuse) {
+    let installed = '';
+    try {
+      installed = JSON.parse(readFileSync(stagedCorePkg, 'utf8')).version || '';
+    } catch (e) {
+      installed = '';
+    }
+    /*
+     * 【2026-10-30 修：比较的是"上游版本"，不是"整串配方版本"】
+     *
+     * `recipe.coreVersion` 是 `0.2.1-rc.4+dshm.97` —— 其中 `+dshm.<n>` 是 semver 的
+     * **build metadata**（AGENTS.md「coreVersion 命名口径」明写：不参与优先级比较，
+     * 纯粹给人读、用来让端侧目录名一眼看出跑的是哪一版）。而 npm 装出来的
+     * `@deepseek-ai/dsh` 的 version 是**上游版本号** `0.2.1-rc.4`，`+dshm.<n>` 根本
+     * 不在包清单里。旧写法拿整串与它比 ⇒ 两者**永远不等** ⇒ 每个新目录第一次能装、
+     * 第二次起一律 die（实测 2026-10-30：`+dshm.97` 复用直接被拒，本机再也出不了包）。
+     *
+     * 现在的判据：① 上游版本必须相等（防"旧核心被打上新版本标签"）；
+     * ② 暂存树清单里记的 `coreVersion` 若与本配方**不同**，就重新物化（见下方 return 前）
+     * —— 那正是"+dshm.98 的内容还套着 +dshm.97 的标签"这件事的判据。
+     */
+    const upstreamOf = (v) => String(v || '').split('+')[0];
+    if (upstreamOf(installed) !== upstreamOf(recipe.coreVersion)) {
+      die(`暂存核心的上游版本与本配方不一致：${STAGE} 里装的是 ${installed || '(读不到)'}，`
+        + `配方要的是 ${recipe.coreVersion}。`
+        + '拒绝复用（旧核心被打上新版本标签出包的根因，见本函数上方注释）。'
+        + '处置：加 --force-install 重装闭包，或核对 --work 是否指错了目录');
+    }
+    let stagedLabel = '';
+    try {
+      stagedLabel = JSON.parse(readFileSync(join(STAGE, 'dshm-core.json'), 'utf8')).coreVersion || '';
+    } catch (e) {
+      stagedLabel = '';
+    }
+    if (stagedLabel === recipe.coreVersion) {
+      log(`[pack-core]   reuse installed closure（${installed} = 上游版本；标签 ${stagedLabel} 与配方一致）`);
+      return;
+    }
+    /*
+     * 标签不同（例如配方从 +dshm.97 升到 +dshm.98）⇒ **包清单不需要重装**，
+     * 但后面的插件放入 / profile 放入 / 补丁注入 / 清单重写**必须照常跑** ——
+     * 这正是新版本内容进入产物的那几步。所以这里既不 return 也不走 npm install，
+     * 直接落到"跳过安装"的出口。
+     */
+    log(`[pack-core]   暂存树标签是 ${stagedLabel || '(无清单)'}，配方是 ${recipe.coreVersion}`
+      + ' ⇒ 包清单复用（不重装），后续插件/profile/补丁/清单照常重新生成');
+    return;
+  }
   if (SKIP_INSTALL) {
     if (!existsSync(join(STAGE, 'node_modules'))) die('--skip-install 但 node_modules 不存在');
     log('[pack-core]   跳过 npm install（--skip-install）');
@@ -126,11 +282,24 @@ function materialize() {
   ];
   log(`[pack-core]   ${npm} ${args.join(' ')}`);
   // stdio: inherit —— 5 分钟量级的安装，进度要看得到；也避免管道相关限制
-  // shell:true 时路径含空格必须加引号（本机 npm 位于 "D:\Program Files\nodejs\npm.cmd"，
-  // 不带引号会被 shell 拆词成 'D:\Program'）。用双引号包裹并转义内部双引号。
-  const npmForShell = `"${npm.replace(/"/g, '\\"')}"`;
-  const r = spawnSync(npmForShell, args, { cwd: STAGE, stdio: 'inherit', shell: process.platform === 'win32' });
-  if (r.status !== 0) die(`npm install 失败（exit=${r.status}）`);
+  /*
+   * 【引号必须跟着 shell 一起用 —— 2026-10-28 再次修复（docs/258 §4.1 的老缺陷又在了）】
+   *
+   * 旧写法**无条件**给路径加双引号：
+   *   const npmForShell = `"${npm}"`; spawnSync(npmForShell, …, { shell: process.platform === 'win32' })
+   * Windows 上（shell:true）这是对的（`D:\Program Files\nodejs\npm.cmd` 不加引号会被拆词）；
+   * 但 POSIX 上 `shell:false` ⇒ spawn 直接 exec，于是去找一个**名字里带双引号**的可执行文件
+   * ⇒ ENOENT，`status` 为 `null`，报错只剩一行 `exit=null`，完全看不出是引号问题。
+   * 实测后果：清掉 `dist/core/work/<ver>` 后**再也物化不出核心树**（2026-10-28 复现）。
+   * 修法：引号与 `shell` 同进同退；并把 `r.error` 一并打进报错（`exit=null` 多半是没起来）。
+   */
+  const useShell = process.platform === 'win32';
+  const npmForShell = useShell ? `"${npm.replace(/"/g, '\\"')}"` : npm;
+  const r = spawnSync(npmForShell, args, { cwd: STAGE, stdio: 'inherit', shell: useShell });
+  if (r.status !== 0) {
+    const why = r.error ? ` error=${r.error.code || r.error.message}` : '';
+    die(`npm install 失败（exit=${r.status}${why}）`);
+  }
 }
 
 // ── ② 裁剪 ──────────────────────────────────────────────────────────────
@@ -188,8 +357,15 @@ const PRUNE_KEEP_BASENAME_PREFIXES = [
   'license', 'licence', 'notice', 'copying', 'authors', 'contributors', 'thirdpartynotices',
 ];
 
+/* rc.4 bowser exports ./README.md as a runtime entry; keep this single declared file. */
+const PRUNE_KEEP_EXPORTS_README = new Set(['bowser/README.md']);
+
 function prune() {
   const nm = join(STAGE, 'node_modules');
+  const parentBundledCore = join(nm, '@deepseek-ai', 'dsh-base', 'node_modules', 'bowser');
+  if (dirSize(parentBundledCore) > 100) {
+    die(`裁剪前命中已打包的有重叠核心（${parentBundledCore}）；STAGE 不可复用，清掉后 --force-install 重建`);
+  }
   log('\n[pack-core] ② 裁剪非鸿蒙二进制');
   let before = dirSize(nm);
   let removedBytes = 0;
@@ -242,6 +418,12 @@ function prune() {
         // 许可证 / 归属声明一律保全（体积可忽略；删了是合规风险）——见 PRUNE_KEEP_BASENAME_PREFIXES。
         const base = f.slice(f.lastIndexOf(sep) + 1).toLowerCase();
         if (PRUNE_KEEP_BASENAME_PREFIXES.some((p) => base.startsWith(p))) {
+          keptLicense++;
+          continue;
+        }
+        const nmRel = rel.slice(rel.indexOf('node_modules/') + 'node_modules/'.length);
+        if (PRUNE_KEEP_EXPORTS_README.has(nmRel)
+          || PRUNE_KEEP_EXPORTS_README.has(nmRel.slice(nmRel.lastIndexOf('node_modules/') + 'node_modules/'.length))) {
           keptLicense++;
           continue;
         }
@@ -326,16 +508,22 @@ function selfSignNatives() {
     attempted += 1;
     const tmp = `${f}.dshm-selfsign`;
     try {
-      execFileSync(tool.java, [
-        '-jar', tool.jar, 'sign',
-        '-mode', 'localSign',
-        '-selfSign', '1',
-        '-inFile', f,
-        '-outFile', tmp,
-        '-signAlg', 'SHA256withECDSA',
-      ], { stdio: ['ignore', 'ignore', 'pipe'], maxBuffer: 32 * 1024 * 1024 });
+      /*
+       * 【原生工具优先（2026-11-05 补缺）】CLT 里自带的是**原生 ELF** `binary-sign-tool`
+       * （2.9 MB，`-selfSign 1` 即可，无需 JDK）。旧代码只认 jar+java，本机没有 java ⇒
+       * 每次都走"跳过签名"分支（日志：找不到 binary-sign-tool（或 JDK））。
+       * 实测原生工具：`sign -inFile X -outFile Y -selfSign 1 -signAlg SHA256withECDSA`
+       * 成功产出 `.codesign`，且签后的 nodecli 仍能按 argv[0] 分派（dsh/pnpm 实测可用）。
+       */
+      const args = tool.native !== undefined
+        ? ['sign', '-inFile', f, '-outFile', tmp, '-selfSign', '1', '-signAlg', 'SHA256withECDSA']
+        : ['-jar', tool.jar, 'sign', '-mode', 'localSign', '-selfSign', '1',
+          '-inFile', f, '-outFile', tmp, '-signAlg', 'SHA256withECDSA'];
+      execFileSync(tool.native !== undefined ? tool.native : tool.java, args,
+        { stdio: ['ignore', 'ignore', 'pipe'], maxBuffer: 32 * 1024 * 1024 });
       if (statSync(tmp).size <= 0) throw new Error('输出为空');
       copyFileSync(tmp, f);
+      try { chmodSync(f, 0o755); } catch { /* 权限失败不影响签名 */ }
       signed += 1;
       log(`[pack-core]   自签名：${f.slice(nm.length + 1)} 已加 .codesign（selfSign）`);
     } catch (e) {
@@ -349,17 +537,27 @@ function selfSignNatives() {
   return { attempted, signed, skipped: false };
 }
 
-/** 找 binary-sign-tool.jar 与可用的 java：找不到返回 null（签名是可选增量步骤）。 */
+/**
+ * 找自签名工具：**原生 ELF 优先**，其次 jar+java；都没有返回 null（签名是可选增量步骤）。
+ *
+ * 【为什么原生优先】本机（HarmonyOS PC / CLT）只有 `toolchains/lib/binary-sign-tool`
+ * 这个原生 ELF，没有 jar、也没有 JDK（`command -v java` 为空）。旧实现只认 jar+java，
+ * 于是每次构建都静默跳过签名，核心树里的 rg 等 ELF 在设备上永远 execve 被拒。
+ */
 function findBinarySignTool() {
+  const nativeCandidates = devecoSdkHomeCandidates()
+    .map((h) => join(h, 'default', 'openharmony', 'toolchains', 'lib', 'binary-sign-tool'))
+    .filter((p) => existsSync(p));
+  if (nativeCandidates.length > 0) {
+    return { native: nativeCandidates[0] };
+  }
   const javaCandidates = [
     process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin', process.platform === 'win32' ? 'java.exe' : 'java') : '',
-    'C:\\Program Files\\Huawei\\DevEco Studio\\jbr\\bin\\java.exe',
-  ].filter((p) => p.length > 0 && existsSync(p));
-  const jarCandidates = [
-    process.env.OHOS_SDK_HOME
-      ? join(process.env.OHOS_SDK_HOME, 'default', 'openharmony', 'toolchains', 'lib', 'binary-sign-tool.jar') : '',
-    'C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\lib\\binary-sign-tool.jar',
-  ].filter((p) => p.length > 0 && existsSync(p));
+    devecoPath(join('jbr', 'bin', process.platform === 'win32' ? 'java.exe' : 'java')),
+  ].filter((p) => p !== null && p.length > 0 && existsSync(p));
+  const jarCandidates = devecoSdkHomeCandidates()
+    .map((h) => join(h, 'default', 'openharmony', 'toolchains', 'lib', 'binary-sign-tool.jar'))
+    .filter((p) => existsSync(p));
   if (javaCandidates.length === 0 || jarCandidates.length === 0) {
     return null;
   }
@@ -481,7 +679,7 @@ function patchVoiceInputNativeCapture() {
    * 现在：版本一致才跳过；版本不同则**先删掉旧注入段**再注入新版
    * （不删会出现两份 start/stop 覆盖，后者包住前者，行为难预测）。
    */
-  const MARK_VERSION = 'v3-permission-window';
+  const MARK_VERSION = 'v4-capture-lifecycle';
   const VERSION_TAG = MARK + '@' + MARK_VERSION;
   if (text.includes(VERSION_TAG)) {
     log('[pack-core]   原生采集补丁已是 ' + MARK_VERSION + '，跳过');
@@ -498,7 +696,7 @@ function patchVoiceInputNativeCapture() {
     log('[pack-core]   已移除旧版原生采集注入，准备注入 ' + MARK_VERSION);
   }
   /* 必须确认 Recording 是模块级变量（否则追加的代码引用不到） */
-  if (!/\bvar Recording = class/.test(text) && !/\bclass Recording\b/.test(text)) {
+  if (!/\bvar Recording\s*=\s*class/.test(text) && !/\bclass Recording\b/.test(text)) {
     die('原生采集补丁：client.js 里找不到模块级 Recording（树形态变了）');
   }
   /*
@@ -547,30 +745,55 @@ function patchVoiceInputNativeCapture() {
     '    return origAmplitude.call(this);',
     '  };',
     '  const origStart = Recording.prototype.start;',
+    '  const captureSessions = new WeakMap();',
+    '  let activeCapture;',
     '  Recording.prototype.start = async function (onError) {',
+    '    let cancel = function () {};',
+    '    let signal;',
+    '    let session;',
+    '    let started = false;',
     '    try {',
     '      const b = br();',
     '      if (!b || typeof b.startNativeCapture !== \'function\') {',
     '        return await origStart.call(this, onError);',
     '      }',
     '      this.lifetime.signal.throwIfAborted();',
-    '      b.startNativeCapture();',
+    '      if (activeCapture) { activeCapture.cancel(); }',
+    '      const generation = b.startNativeCapture();',
+    '      if (!generation) { throw new RecordingError("unavailable"); }',
+    '      signal = this.lifetime.signal;',
+    '      const owner = this;',
+    '      cancel = function () {',
+    '        signal.removeEventListener("abort", cancel);',
+    '        if (captureSessions.get(owner) === session) { captureSessions.delete(owner); }',
+    '        if (activeCapture === session) { activeCapture = undefined; }',
+    '        try { b.cancelNativeCapture(generation); } catch (e) {}',
+    '      };',
+    '      session = { cancel };',
+    '      captureSessions.set(this, session);',
+    '      activeCapture = session;',
+    '      signal.addEventListener("abort", cancel, { once: true });',
     '      const t0 = Date.now();',
     '      /* 等待窗口 15 秒：首次使用会弹系统麦克风授权框，',
     '       * 用户读完再点是**人的时间尺度**。原来的 3 秒会在用户还在看弹框时',
     '       * 就超时报 unavailable（现象：点一下没反应，再点才可能成功）。',
     '       * 授权只在首次发生，之后启动仍在百毫秒级返回。 */',
     '      while (Date.now() - t0 < 15000) {',
+    '        signal.throwIfAborted();',
+    '        if (activeCapture !== session) { throw new RecordingError("interrupted"); }',
     '        let st = \'\';',
     '        try { st = b.nativeCaptureState(); } catch (e) {}',
-    '        if (st.indexOf(\'"phase":"recording"\') >= 0) { return; }',
+    '        if (st.indexOf(\'"phase":"recording"\') >= 0) { started = true; return; }',
     '        if (st.indexOf(\'"phase":"error\') >= 0) { throw new RecordingError("interrupted"); }',
     '        await new Promise(function (r) { setTimeout(r, 50); });',
     '      }',
     '      throw new RecordingError("unavailable");',
     '    } catch (err) {',
+    '      cancel();',
     '      if (err instanceof RecordingError) { throw err; }',
     '      throw new RecordingError("unavailable");',
+    '    } finally {',
+    '      if (!started && signal) { signal.removeEventListener("abort", cancel); }',
     '    }',
     '  };',
     '  const origStop = Recording.prototype.stop;',
@@ -579,7 +802,10 @@ function patchVoiceInputNativeCapture() {
     '    if (!b || typeof b.takeNativeCapture !== \'function\') {',
     '      return await origStop.call(this, maxDurationSeconds);',
     '    }',
-    '    const b64 = b.takeNativeCapture();',
+    '    const session = captureSessions.get(this);',
+    '    if (!session || activeCapture !== session) { throw new RecordingError("empty"); }',
+    '    let b64;',
+    '    try { b64 = b.takeNativeCapture(); } finally { session.cancel(); }',
     '    if (!b64 || b64.length === 0) {',
     '      await this.dispose();',
     '      throw new RecordingError("empty");',
@@ -600,7 +826,7 @@ function patchVoiceInputNativeCapture() {
    * 不在作用域 ⇒ 抛 ReferenceError ⇒ 覆盖不生效（真机表现：diag-native 永远为空）。
    * 所以插到 `return module.exports;` **之前**。
    */
-  const exitAnchor = 'return module.exports;';
+  const exitAnchor = text.includes('return module.exports;') ? 'return module.exports;' : 'return module.exports}';
   const at = text.lastIndexOf(exitAnchor);
   if (at < 0) {
     die('原生采集补丁：未找到 "return module.exports;" —— 无法把覆盖代码放进 factory 内（树形态变了）');
@@ -621,6 +847,7 @@ function patchVoiceInputNoiseSuppression() {
 
   const MARK_AEC = 'DSHM_ECHO_CANCELLATION_OFF';
   const MARK_NS = 'DSHM_NOISE_SUPPRESSION_OFF';
+  text = text.replace('echoCancellation:true', 'echoCancellation: true').replace('noiseSuppression:true', 'noiseSuppression: true');
 
   /*
    * ① 关 AEC —— 根因修复。
@@ -718,7 +945,7 @@ function validateSpeechProviderSyntax(providerPath) {
   /* ① 按 ESM 解析（写成 .mjs 再 --check，这样 node 用 ESM 语义） */
   const tmp = join(tmpdir(), 'dshm-provider-syntax-check.mjs');
   writeFileSync(tmp, src, 'utf8');
-  const syntax = spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf8' });
+  const syntax = spawnSync(process.execPath, SYNTAX_CHECK_FLAGS.concat(['--check', tmp]), { encoding: 'utf8' });
   try {
     unlinkSync(tmp);
   } catch (e) {
@@ -785,23 +1012,24 @@ function patchSensevoiceForHms() {
   cpSync(src, destImpl, { force: true });
 
   /*
-   * ①b 在线模型下载器（provider 以 `../speech-models/index.js` 引用）。
+   * ①b 【2026-10-18 已删除：不再拷 `hostcore/speech-models/index.js`】
    *
-   * 【为什么单独拷】hms-provider.js 落在 `<pkg>/lib/` 下，而源文件里的相对
-   * 引用是 `../speech-models/index.js` ⇒ 解析到 `<pkg>/speech-models/index.js`。
-   * 只拷 provider 而不拷它，运行时会 `Cannot find module`。
+   * 过去这里会把仓库里的模型下载器拷成 `<pkg>/speech-models/index.js`，因为
+   * 当时的 provider 无条件 `import { ensureAssets, missingAssets, ASSETS } from
+   * "../speech-models/index.js"`（hms-provider.js 落在 `<pkg>/lib/`，相对说明符
+   * 解析到 `<pkg>/speech-models/`）；只拷 provider 而不拷它，运行时就是
+   * `Cannot find module`（当时的 E-SV12）。
    *
-   * 【缺了就报错而不是静默跳过】provider 无条件 import 它；缺失只会在端侧
-   * 表现为"插件加载失败"，那时排查成本远高于打包期直接失败。
+   * 现在没有这个依赖了：普通听写的识别本体改用 HarmonyOS **Core Speech Kit**
+   * （ArkTS 侧 `SystemSpeechRecognizer`，见施工方案 Task 3/Task 4），provider 只
+   * 负责 `<id>.req` / `<id>.done` / `<id>.fail` 队列协议 ⇒ **不再 import 下载器**
+   * ⇒ 树里也不需要那个 228MB 模型的下载器副本。
+   *   · 因此**刻意不拷**，也**刻意不 die**：缺了它不再是错误（旧树里有残留也无害，
+   *     只是没人引用的死文件；下次重打核心树即自然消失）。
+   *   · 反向守卫在 `tools/check-core-openharmony-patches.mjs` 的 ③ 组：树内
+   *     `hms-provider.js` **不得**再出现 `ensureAssets(` / `missingAssets(` /
+   *     `preparation: prep`（防的是有人把下载路径加回来却只改一半）。
    */
-  const srcModels = join(ROOT, 'hostcore', 'speech-models', 'index.js');
-  if (!existsSync(srcModels)) {
-    die('语音 provider 依赖在线下载器，但 hostcore/speech-models/index.js 不存在');
-  }
-  const destModels = join(pkgDir, 'speech-models', 'index.js');
-  mkdirSync(dirname(destModels), { recursive: true });
-  cpSync(srcModels, destModels, { force: true });
-  log('[pack-core]   在线模型下载器已放入：@deepseek-ai/…-sensevoice/speech-models/index.js');
 
   // ② ③ 改写 index.js（幂等：以标记判断是否已改）
   const MARK = 'DSHM_HMS_PROVIDER';
@@ -887,6 +1115,15 @@ const DSHM_PLUGIN_PACKAGES = [
   // 提供。publish 的目标根取自 `DSHM_PUBLIC_DOWNLOAD`（ArkTS 认领到的用户可见目录），
   // 落盘复用去 chmod 的 `open('w')→write→close` 原语（见 cordis.patch.yml ⑦）。
   { name: '@deepseek-ai/dshm-tool-fs-remove', dir: 'dshm-tool-fs-remove' },
+  // 模型可见的 Python 工具（2026-10-16，r47 自检报告的缺口）：宿主进程里那份内嵌 CPython
+  // 一直是就绪的，但 Agent 三条路全断（bash 走 guest VM 且受内存门槛 + guest 无 python3；
+  // `/dshm-python/*` 是回环端点而 web_fetch 按 SSRF 策略拒回环；run_code 上游停用）
+  // ⇒ 新增本插件把 `python` 工具接到主进程内的桥（见插件头注与 docs/165）。
+  { name: '@deepseek-ai/dshm-tool-python', dir: 'dshm-tool-python' },
+  // 模型可见的浏览器自动化工具（2026-10-16，docs/173/174）：browser_* 工具 → 宿主进程内
+  // 浏览器桥（/dshm-browser/*）；设备本机浏览器里的 DSHM Browser Bridge 扩展经
+  // ws://127.0.0.1:19390 连入。扩展源码在 hostcore/browser-extension/。
+  { name: '@deepseek-ai/dshm-tool-browser', dir: 'dshm-tool-browser' },
   // 默认工作区登记（见 cordis.patch.yml ⑧ 与插件头注）：把 ArkTS
   // 认领到的 `Download/<包名>/` 在启动期登记进工作区注册表，使官方 Web UI 的
   // `recentWorkspace()` 选中它 ⇒ "新建会话"默认落在用户可见目录，而不是历史 picker
@@ -911,6 +1148,23 @@ const DSHM_PLUGIN_PACKAGES = [
   // `loading:"bytes-complete"` + 正文面板/工具栏按钮调 ArkTS 桥 `openFilePreview` 弹系统预览窗。
   // **只认领 `doc/docx/ppt/pptx`**：`xls/xlsx/csv/tsv` 归内置 Excel（纯客户端实现，端侧正常）。
   { name: '@deepseek-ai/dshm-office-system-preview', dir: 'dshm-office-system-preview' },
+  /*
+   * 云同步设置分区（2026-10-30，docs/319）。
+   *
+   * 【为什么做成插件】前四版入口在手持档全部失败（顶栏菜单无顶栏、账号菜单不可达、
+   * 手持浮钮真机未见、DOM 注入被 React 重渲染冲掉）。插件走官方 `settings.section`
+   * 注册 ⇒ 分区由 React 渲染，与「通用 / 账号 / 插件」**结构同构**，
+   * 不存在"被冲掉"或"样式对不齐"这两类问题。
+   *
+   * 【本插件是纯客户端**加一层薄宿主**】`lib/index.js` 的 `apply()` 有意留空
+   * （能力在 client 与 ArkTS 桥），但 `main` 必须指向真模块 ——
+   * `dsh.profile.bundles` 的每个条目都会被 `resolveBundleDir` 解析，任一失败启动即抛。
+   */
+  { name: '@deepseek-ai/dshm-cloud-sync', dir: 'dshm-cloud-sync' },
+  // 原生朗读/分享动作条（2026-11-15）：纯客户端插件，注册官方
+  // `conversation.chat.assistant-actions`；能力在 ArkTS 桥（ReadAloud/ShareBoard）。
+  // 见 hostcore/profile/ondevice/cordis.patch.yml ⑬d 与插件头注。
+  { name: '@deepseek-ai/dshm-read-aloud', dir: 'dshm-read-aloud' },
   // PTC 运行时（同进程纯 JS 实现，2026-10-05）：
   //
   // 【为什么必须换掉官方实现】`@deepseek-ai/dsh-ptc-runtime-node` 有两条**结构性死路**：
@@ -961,6 +1215,41 @@ const DSHM_PLUGIN_PACKAGES = [
   // 【与其它 dshm-* 的差别】它也没有 cordis 行：接线由本文件的
   // `patchProfilePnpmBridge()` 注入进 plugin-manager 的 `operations.js`。
   { name: '@deepseek-ai/dshm-profile-pnpm', dir: 'dshm-profile-pnpm' },
+  // guest 虚拟机 bash 通道（2026-10-08，见 hostcore/plugins/dshm-vm-bash/lib/index.js 头注）：
+  // 手持档（手机/平板）的应用沙箱里**没有任何可 execve 的 shell**，链 1
+  // （`tool-bash` → `ctx.shell`(`dsh-bash-local`) → `ctx.subprocess` → 本机 `execve`）
+  // 因此结构性不可用。本插件把 `ctx.subprocess.spawn` 在该档改接到**随包 QEMU guest**
+  // 里的真 bash（`docs/119` 已把可行性验到端到端：QGA 可用 11.8 s、命令 81~219 ms），
+  // 于是模型的 bash 工具真的能执行命令。
+  // 【与其它 dshm-* 的差别】它与 profile-pnpm 桥同族：**接线不在本文件**，而是 profile 的
+  // 一个 cordis 行（`hostcore/profile/ondevice/cordis.patch.yml` 第 ⑬ 节的 insert）——
+  // 本插件对时机没有要求（改的是 `ctx.subprocess` 实例上的一个方法，第一次 spawn 远晚于
+  // 所有插件装载），所以用普通行即可，让"哪一档装载了什么"在 profile 里一眼可读。
+  // 本清单里的作用只是"落树 + 声明依赖"（与市场桥同）。
+  // 【惰性】三条判据与市场桥 / profile-pnpm 桥**同源**：`DSHM_PLATFORM === 'ohos'` 且
+  // "随包假壳 spawn 不起来" 且 VM 资产齐备才接管 ⇒ PC/2in1 档整条插件惰性。
+  { name: '@deepseek-ai/dshm-vm-bash', dir: 'dshm-vm-bash' },
+  // ⚠️ 历史沿革（2026-11-06）：以下描述的是**已剥离**的 dshm-meeting-ai 插件
+  // （2026-10-31 会议模式剥离，源码仅存于 dist/frozen/meeting-mode-20261031T125746/）。
+  // 当前 DSHM_PLUGIN_PACKAGES 无此项，profile 也无对应 insert；保留文字供追溯。
+  // 原生会议面板的「AI 总结 / 实时英译」没有系统侧通道 —— 小艺慧记的摘要**没有公开 API**
+  // （`@hms.ai.A2A` 是"我们被小艺调用"，方向相反；`textProcessing` 只有实体/分词），系统也
+  // 没有翻译 API（`docs/197` §2.1/§2.3 逐条核过）。所以这两项走 **Host 侧本机模型**：
+  // 面板把 `$DSH_HOME/meeting-ai/<id>.req` 写进磁盘，本插件用 `ctx.llm`（形态照官方
+  // `dsh-session-title-llm` 的 prepareCall + call.stream）生成后写 `<id>.done` / `<id>.fail`。
+  // 【与其它 dshm-* 的差别】它不需要改任何上游实现：只是一个普通 cordis 行
+  // （`hostcore/profile/ondevice/cordis.patch.yml` ⑭ 的 insert），不包装 `ctx.subprocess`、
+  // 不注入 boot 回调。本清单里的作用是"落树 + 声明依赖"（同其它项）。
+  // 【失败面】模型没登录 / 断网 / 超时（60s）一律写 `.fail`，绝不写空 `.done`、绝不抛给宿主。
+  // 启动救援（2026-11-08，见 hostcore/plugins/dshm-boot-rescue/README.md）：
+  // 某个插件在加载阶段把 Web UI 打成 `Failed to load plugins` 失败页时，「设置 → 插件」
+  // 也在同一张页面里 ⇒ 用户没有任何入口停用肇事插件，只能卸载重装。本插件是**纯宿主插件**
+  // （无 cordis client 半身、零依赖、不声明 static inject），由宿主把 `rescue-client.js`
+  // 通过 `webServer.tapIndex` 注入 index.html；即使其它插件全部 pending，这段脚本仍会执行，
+  // 在失败页上挂出「启动恢复中心」，把肇事行 id 写进 `.dshm-plugin-rows.yml`，
+  // 用户划掉后台重开即可恢复。所有读写限定在 $DSH_HOME / $DSHM_HOME 内，失败只写日志、不阻断启动。
+  // 默认启用见 profile ⑮；恢复条件：删本项 + profile ⑮ 那一行。
+  { name: '@deepseek-ai/dshm-boot-rescue', dir: 'dshm-boot-rescue' },
 ];
 /**
  * 承载自带插件依赖声明的上游包。
@@ -1041,6 +1330,59 @@ function assertDshmBelongingsConsistent() {
     + `${DSHM_PLUGIN_DECLARER} 的 ${wantNames.length} 条 dshm-* 声明均等于清单`);
 }
 
+/**
+ * 回归锁：自带插件的 **dsh peer 版本**必须与树里真正的运行版本一致。
+ *
+ * 【为什么必须有它（2026-10-16 真机事故）】`@deepseek-ai/dsh-app-boot` 的插件兼容闸门
+ * （`evaluatePluginCompatibility`）在装载 profile 行之前逐条读插件 manifest：`engines.dsh`
+ * 优先，否则看 `peerDependencies` 里每个 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*`，
+ * 用 `semver.satisfies(运行时版本, range, { includePrerelease: true })` 判。
+ * **精确钉法**（`"0.2.1-alpha.2"` 这种）只要内核升一档就整条不满足 ⇒ 那一行被**停用**。
+ * 2026-10-16 升 alpha.4 时正是漏了这一跳：四个自带插件的 peer 还写着 alpha.2 ⇒
+ * `fs-write-nonchmod`（端侧 profile 里 `fs` 服务的**唯一**提供者，它 replace 掉上游
+ * `fs-sandbox`）被停用 ⇒ `session-controller` 永远停在 `pending (waiting for service: fs)`，
+ * 界面文案「session controller 不可用」。也就是说这类漏改**不是少个功能，而是整个会话面起不来**。
+ *
+ * 【判据取谁】运行版本从**树里**的 `node_modules/@deepseek-ai/dsh-app-boot/package.json` 现读
+ * （与闸门 `getDshRuntimeVersion()` 同源），不取 recipe —— recipe 的 coreVersion 带
+ * `+dshm.NN` 构建元数据，包版本不带，两者不相等。
+ * 精确钉法必须逐字相等；`workspace:*|^|~` 与非精确范围交给上游闸门按 semver 判
+ * （它们跨一个 prerelease 仍然满足），本锁只拦"精确钉法忘了跟着升"这一类。
+ */
+function assertDshmPeerPinsMatchRuntime() {
+  const bootManifestPath = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'package.json');
+  if (!existsSync(bootManifestPath)) {
+    die(`自带插件 peer 版本回归锁读不到运行时 manifest：${bootManifestPath}`);
+  }
+  const runtimeVersion = JSON.parse(readFileSync(bootManifestPath, 'utf8')).version;
+  if (typeof runtimeVersion !== 'string' || runtimeVersion.trim() === '') {
+    die(`自带插件 peer 版本回归锁读不到运行时版本：${bootManifestPath}`);
+  }
+  /** 精确钉法（可带 prerelease / build 元数据）；非精确写法不在此锁的判据面内。 */
+  const exactPin = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+  const mismatches = [];
+  for (const pkg of DSHM_PLUGIN_PACKAGES) {
+    const manifestPath = join(STAGE, DSHM_PLUGIN_SCOPE_DIR, pkg.dir, 'package.json');
+    if (!existsSync(manifestPath)) die(`自带插件 manifest 不存在：${manifestPath}`);
+    const peers = JSON.parse(readFileSync(manifestPath, 'utf8')).peerDependencies ?? {};
+    for (const [name, range] of Object.entries(peers)) {
+      if (name !== '@deepseek-ai/dsh' && !name.startsWith('@deepseek-ai/dsh-')) continue;
+      if (typeof range !== 'string') die(`${pkg.name} 的 peerDependencies["${name}"] 必须是字符串`);
+      if (exactPin.test(range) && range !== runtimeVersion) {
+        mismatches.push(`${pkg.name}: ${name} 钉在 ${range}，树里的运行版本是 ${runtimeVersion}`);
+      }
+    }
+  }
+  if (mismatches.length) {
+    die('自带插件的 dsh peer **精确钉法**与树里的运行版本不一致 —— 上游兼容闸门会把对应 profile 行'
+      + '整条停用（2026-10-16 事故：fs-write-nonchmod 被停用 ⇒ fs 服务缺失 ⇒ session-controller'
+      + '永远 pending）：\n'
+      + mismatches.map((m) => `  · ${m}`).join('\n')
+      + `\n  修法：把 hostcore/plugins/<dir>/package.json 里这些 peer 值改成 ${runtimeVersion}。`);
+  }
+  log(`[pack-core]   回归锁 ✓ 自带插件的 dsh peer 精确钉法均等于运行版本 ${runtimeVersion}`);
+}
+
 /** 把自带插件放进核心树，并让 loader 能按名字解析到它（见上方长注释）。 */
 function embedDshmToolPackages() {
   log('\n[pack-core] ④b DSHM 自带插件包');
@@ -1081,6 +1423,10 @@ function embedDshmToolPackages() {
     cpSync(src, dest, { recursive: true, force: true });
     log(`[pack-core]   ${pkg.name} → node_modules/@deepseek-ai/${pkg.dir}/（入口 lib/index.js）`);
   }
+
+  // ③b 回归锁：精确 peer 钉法必须跟着内核版本走（见函数头注的 2026-10-16 事故）。
+  // 放在"落树之后"而不是"读源码之前"：判据是**将要进产物的那份字节**。
+  assertDshmPeerPinsMatchRuntime();
 
   // ④ 依赖声明"先清后写"：先移除声明者里**全部** `@deepseek-ai/dshm-*` 键，再按清单
   // 依次写入当前项。清单里已移除的项由此从 manifest 中消失；声明者的其它依赖既不改值、
@@ -1275,6 +1621,7 @@ function patchFsSearchFallback() {
   if (t.includes('function buildFallbackArgv')) {
     die('fs-search 降级 patch：pristine 原文里竟然已有注入块 —— pristine 记录不自洽，人工核对');
   }
+  t = 'import { existsSync } from "node:fs";\nimport { parse } from "node:path";\n' + t;
 
   const helpers = `// ── 鸿蒙适配（pack-core 注入）：rg 不可 exec 时的 find/grep 降级 ──
 // debug 签名域 execve 拒绝第三方 ELF（真机实证 rg=denied），系统 find/grep
@@ -1481,14 +1828,55 @@ function accessibilityDenial(toolName, stderrText) {
 	return new SearchError(toolName + " 读不到搜索目录：目录被系统拒绝访问（Permission denied）—— 这是『读不到』，不是『没有内容』。原始 stderr: " + first.trim(), "SEARCH_FAILED");
 }`;
 
+  /* ── 访问范围闸门（docs/137）：glob / grep 的**搜索根** ────────────────────
+   * 【为什么这里有第二个入口】本工具**不过 `ctx.fs`**（其头注逐字："Spawn-backed, not
+   * a `ctx.fs` provider method"）：它 spawn 随包 ripgrep（exec 被拒时降级系统
+   * find/grep），搜索根作为 argv 元素直接进 `ctx.subprocess` ⇒ `ctx.fs` 那道闸门
+   * 管不到它，必须在**把根交给 spawn 之前**再判一次。
+   * 【判据从哪来】`hostcore/plugins/dshm-fs-write-nonchmod/lib/fs-fence.js` 里
+   * BEGIN/END 之间那一段**原样**搬过来（纯字符串、无 import、只用 JS 内建）——
+   * 这样"两个入口一份判据"是结构上的事实，而不是靠人工同步；
+   * tools/check-fs-fence.mjs 再钉住块内容逐字节一致 + 行为矩阵。
+   * 【依赖边界】注入的这段只能用目标文件已 import 的标识符：这里只用 `process`（全局）
+   * 与 `SearchError` / `ctx`（都在作用域内）。 */
+  const scopeBegin = '/* ==== DSHM-FS-SCOPE-BEGIN ====';
+  const scopeEnd = '/* ==== DSHM-FS-SCOPE-END ==== */';
+  const scopeSource = readFileSync(join(ROOT, 'hostcore', 'plugins', 'dshm-fs-write-nonchmod', 'lib', 'fs-fence.js'), 'utf8');
+  const scopeFrom = scopeSource.indexOf(scopeBegin);
+  const scopeTo = scopeSource.indexOf(scopeEnd);
+  if (scopeFrom < 0 || scopeTo < 0) die('fs-search 访问范围闸门：fs-fence.js 里找不到 DSHM-FS-SCOPE 标记（判据源形态变了）');
+  const scopeBlock = scopeSource.slice(scopeFrom, scopeTo + scopeEnd.length);
+  const scopeHelpers = "\n/* ── 访问范围闸门（docs/137，pack-core 从 fs-fence.js 原样注入）────────── */\n"
+    + scopeBlock + "\n" + [
+      "/** 把模型给的 path 参数折成绝对路径，再判一次范围；越界抛 SearchError（同一工具错误面）。 */",
+      "async function refuseOutOfScopeSearch(ctx, exec, toolName, requestedPath) {",
+      "\tif (requestedPath === void 0 || String(requestedPath).trim() === \"\") return;",
+      "\tconst raw = String(requestedPath).trim();",
+      "\tlet absolute = raw;",
+      "\tif (raw.charAt(0) !== \"/\") {",
+      "\t\tconst workdir = exec.agent === void 0 ? process.cwd() : await ctx.workingDirectory.ensure(exec.agent, exec.signal);",
+      "\t\tlet base = String(workdir);",
+      "\t\twhile (base.length > 1 && base.charAt(base.length - 1) === \"/\") base = base.slice(0, -1);",
+      "\t\tabsolute = base + \"/\" + raw;",
+      "\t}",
+      "\tconst roots = scopeRoots(process.env);",
+      "\tconst normalized = scopeNormalize(absolute);",
+      "\tif (normalized !== \"\" && scopeAllows(normalized, roots)) return;",
+      "\tthrow new SearchError(scopeDenialMessage(normalized === \"\" ? absolute : normalized, roots), \"SEARCH_FAILED\");",
+      "}"
+    ].join("\n") + "\n";
+
   // 1) helpers 注入：resolveRgPath 尾锚点（文件内唯一，rg -c 验证）
-  const tailAnchor = '\treturn rgPathPromise;\n}';
+  const tailAnchor = t.includes('import { resolveRgPath, spawnRipgrep } from "@deepseek-ai/dsh-util-ripgrep";')
+    ? 'import { resolveRgPath, spawnRipgrep } from "@deepseek-ai/dsh-util-ripgrep";'
+    : '\treturn rgPathPromise;\n}';
   if (!t.includes(tailAnchor)) die('fs-search 降级 patch：tail anchor 未命中（resolveRgPath 形态变了）');
-  t = t.replace(tailAnchor, tailAnchor + '\n' + helpers);
+  t = t.replace(tailAnchor, tailAnchor + '\n' + helpers + scopeHelpers + '\n/** DSHM_SEARCH_HELPERS_END */\n');
 
   // 2) spawn 段：rg 解析失败或 exec 探测失败 → find/grep argv
-  const oldSpawn = `\tconst workdir = exec.agent?.session.header.cwd ?? process.cwd();
-\tlet handle;
+  const oldSpawn = t.includes('handle = await spawnRipgrep(ctx.subprocess, {\n\t\t\targv,')
+    ? '\tlet handle;\n\ttry {\n\t\thandle = await spawnRipgrep(ctx.subprocess, {\n\t\t\targv,'
+    : `\tlet handle;
 \ttry {
 \t\thandle = ctx.subprocess.spawn({
 \t\t\targv: [
@@ -1496,8 +1884,7 @@ function accessibilityDenial(toolName, stderrText) {
 \t\t\t\t"--no-config",
 \t\t\t\t...argv
 \t\t\t],`;
-  const newSpawn = `\tconst workdir = exec.agent?.session.header.cwd ?? process.cwd();
-\t// 鸿蒙适配：rg 解析失败（平台包缺失）或 exec 探测失败（execve 被拒）→ 系统 find/grep
+  const newSpawn = `\t// 鸿蒙适配：rg 解析失败（平台包缺失）或 exec 探测失败（execve 被拒）→ 系统 find/grep
 \tlet rgPath;
 \ttry {
 \t\trgPath = await resolveRgPath();
@@ -1552,6 +1939,28 @@ function accessibilityDenial(toolName, stderrText) {
   if (!t.includes(oldEmpty)) die('fs-search 空结果守卫：锚点未命中（runRipgrep 尾段形态变了）');
   t = t.replace(oldEmpty, newEmpty);
 
+  // 5) 访问范围闸门（docs/137）：glob / grep 的搜索根，在 spawn **之前**判一次
+  const oldGlobExec = `\t\tasync execute(args, exec) {
+\t\t\tconst input = parseGlobArgs(args);
+\t\t\tconst run = await runRipgrep(ctx, exec, "glob", buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes);`;
+  const newGlobExec = `\t\tasync execute(args, exec) {
+\t\t\tconst input = parseGlobArgs(args);
+\t\t\t// 访问范围闸门（docs/137）：搜索根直接进 argv ⇒ 必须在 spawn 之前判
+\t\t\tawait refuseOutOfScopeSearch(ctx, exec, "glob", input.path);
+\t\t\tconst run = await runRipgrep(ctx, exec, "glob", buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes);`;
+  if (!t.includes(oldGlobExec)) die('fs-search 访问范围闸门：glob execute 锚点未命中（形态变了）');
+  t = t.replace(oldGlobExec, newGlobExec);
+
+  const oldGrepExec = `\t\tasync execute(args, exec) {
+\t\t\tconst run = await runRipgrep(ctx, exec, "grep", buildGrepCommand(parseGrepArgs(args)), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes);`;
+  const newGrepExec = `\t\tasync execute(args, exec) {
+\t\t\tconst input = parseGrepArgs(args);
+\t\t\t// 访问范围闸门（docs/137）：搜索根直接进 argv ⇒ 必须在 spawn 之前判
+\t\t\tawait refuseOutOfScopeSearch(ctx, exec, "grep", input.path);
+\t\t\tconst run = await runRipgrep(ctx, exec, "grep", buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes);`;
+  if (!t.includes(oldGrepExec)) die('fs-search 访问范围闸门：grep execute 锚点未命中（形态变了）');
+  t = t.replace(oldGrepExec, newGrepExec);
+
   // 【为什么在这里自检（2026-10-05 一天内连踩两次）】上面三段注入都是**模板串**，而模板串有三条暗礁：
   //   ① 反斜杠要写两个（正则里的 `\/` 会被吃成一个裸 `/`，注入后是语法错的 `//+$/`）；
   //   ② 反引号与 `${` 要转义（否则被当模板定界/插值）；
@@ -1562,7 +1971,7 @@ function accessibilityDenial(toolName, stderrText) {
   // 拆开单独解析必然假阳性（实测两种）。故写临时 .mjs 文件、用 `node --check` 做完整 ESM 解析。
   const syntaxProbe = join(tmpdir(), `dshm-fs-search-probe-${process.pid}.mjs`);
   writeFileSync(syntaxProbe, t);
-  const probeRun = spawnSync(process.execPath, ['--check', syntaxProbe], { encoding: 'utf8' });
+  const probeRun = spawnSync(process.execPath, SYNTAX_CHECK_FLAGS.concat(['--check', syntaxProbe]), { encoding: 'utf8' });
   try { unlinkSync(syntaxProbe); } catch { /* 临时文件删不掉不影响结论 */ }
   if (probeRun.status !== 0) {
     const detail = String(probeRun.stderr || '').split('\n').filter((line) => line.trim() !== '').slice(0, 6).join(' | ');
@@ -1647,10 +2056,10 @@ function allowOriginList() {
   }
   let text = readFileSync(target, 'utf8');
   /*
-   * 【幂等判定必须接受**旧标记**】原为 `includes('HDSH_ORIGIN_LIST')`；
+   * 【幂等判定必须接受**旧标记**】原为 `includes(HDSH_ORIGIN_LIST)`；
    * HDSH→DSHM 改名后，核心树里由**上一版 pack-core** 打过的补丁仍带旧标记
    * ⇒ 只认新标记会判成"未打过"，于是重跑替换，而待替换片段已被换掉
-   * ⇒ `die('上游实现已变化')`，整个打包中断。
+   * ⇒ `die(上游实现已变化)`，整个打包中断。
    *
    * 教训与 E-SV14 同类：**改标记名时必须同时认旧名**，否则老树无法增量重打包。
    * 两处字面量都保留，直到核心树重建过一次（pack-core 会从上游重新解包）。
@@ -1659,6 +2068,48 @@ function allowOriginList() {
     log('[pack-core]   Origin 栅栏补丁已存在（跳过）');
     return;
   }
+  /*
+   * 【0.2.1-alpha.2：上游把同源判定抽成了独立函数】
+   * alpha.1 的形态是内联在 isTrustedApiRequest 里的 try/catch 块（下面是旧锚点，
+   * 保留它以便老树仍能增量重打包）；alpha.2 起改成 `return isSameAuthorityOrigin(origin, host);`，
+   * 比较逻辑搬进新函数。补丁点随之搬迁：改函数本身即可，语义完全不变
+   * （多值 Origin 任一候选同源即通过）。两种形态都认，两个都不中才 die。
+   */
+  const beforeNew = `function isSameAuthorityOrigin(origin, host) {
+\tlet originUrl;
+\ttry {
+\t\toriginUrl = new URL(origin);
+\t} catch {
+\t\treturn false;
+\t}
+\tconst scheme = originUrl.protocol === "https:" ? "https:" : originUrl.protocol === "http:" ? "http:" : void 0;
+\tif (scheme === void 0) return false;
+\tconst hostUrl = parseAuthority(host, scheme);
+\treturn hostUrl !== void 0 && originUrl.host === hostUrl.host;
+}`;
+  const afterNew = `function isSameAuthorityOrigin(origin, host) {
+\t/* DSHM_ORIGIN_LIST: 多值 Origin（鸿蒙客户端 libwebsockets 附加的无端口 Origin +
+\t * 调用方注入值）只要**任一项**同源即通过。原实现按整串解析，导致每一次端侧 WS 升级
+\t * 都被判 403。详见 tools/pack-core.mjs 的 allowOriginList()。 */
+\tfor (const rawOrigin of String(origin).split(",")) {
+\t\tconst candidate = rawOrigin.trim();
+\t\tif (candidate.length === 0) continue;
+\t\tlet originUrl;
+\t\ttry {
+\t\t\toriginUrl = new URL(candidate);
+\t\t} catch {
+\t\t\t/* 单个非法候选不足以否决整条请求，继续看下一项 */
+\t\t\tcontinue;
+\t\t}
+\t\t/* 不能像上游那样只认 http(s)：鸿蒙客户端附上来的那条是 ws:// —— 它正是本次要放行的值。
+\t\t * 比较的是 .host，非层级 scheme（file:/data:）的 host 为空串 ⇒ 天然不匹配，安全边界不变。 */
+\t\tif (originUrl.host === "") continue;
+\t\tconst scheme = originUrl.protocol === "https:" || originUrl.protocol === "wss:" ? "https:" : "http:";
+\t\tconst hostUrl = parseAuthority(host, scheme);
+\t\tif (hostUrl !== void 0 && originUrl.host === hostUrl.host) return true;
+\t}
+\treturn false;
+}`;
   const before = `\tconst origin = header$1(request.headers, "origin");
 \tif (origin === void 0) return true;
 \ttry {
@@ -1681,12 +2132,19 @@ function allowOriginList() {
 \t\t}
 \t}
 \treturn false;`;
-  if (!text.includes(before)) {
-    die('Origin 栅栏补丁：上游实现已变化（未找到待替换片段），拒绝静默跳过');
+  if (text.includes(beforeNew)) {
+    text = text.replace(beforeNew, afterNew);
+    writeFileSync(target, text, 'utf8');
+    log('[pack-core]   Origin 栅栏补丁（0.2.1-alpha.2 新形态）：已允许逗号分隔的 Origin 列表');
+    return;
   }
-  text = text.replace(before, after);
-  writeFileSync(target, text, 'utf8');
-  log('[pack-core]   Origin 栅栏补丁：已允许逗号分隔的 Origin 列表');
+  if (text.includes(before)) {
+    text = text.replace(before, after);
+    writeFileSync(target, text, 'utf8');
+    log('[pack-core]   Origin 栅栏补丁（旧形态）：已允许逗号分隔的 Origin 列表');
+    return;
+  }
+  die('Origin 栅栏补丁：上游实现已变化（未找到待替换片段），拒绝静默跳过');
 }
 
 /**
@@ -2174,6 +2632,15 @@ function patchAgentPresetWorkflow() {
     const file = join(dir, name);
     let text = readFileSync(file, 'utf8');
     /*
+     * 【2026-10-16：ptc.patch.yml 归 `patchPtcPresetWorkflowEnabled()` 管】
+     * 用户拍板「PTC 模式必须有 run_code」⇒ 那份文件里这两行要**恢复启用**。本函数若继续
+     * 遍历它，第二遍 pack 会在 enable 补丁摘掉 `disabled: true` 之后重新插回来，
+     * 幂等性当场破坏。两个方向各有一组门禁判据，谁都不许越界。
+     */
+    if (name === 'ptc.patch.yml') {
+      continue;
+    }
+    /*
      * 【兼容改名前的旧标记】核心树里由上一版 pack-core 打过的是 `HDSH_WORKFLOW_DISABLED`。
      * 若只认新名，会判成"没打过" ⇒ 走下面的插入逻辑，而 `already` 判重发现
      * `disabled: true` 已在 ⇒ 既不计数 touched 也不计数 alreadyDone ⇒ 最终 die
@@ -2235,6 +2702,195 @@ function patchAgentPresetWorkflow() {
   if (alreadyDone > 0) {
     log(`[pack-core]   agent preset 补丁：${alreadyDone} 个文件已带标记（幂等跳过）`);
   }
+}
+
+/**
+ * 【PTC 模式恢复 `run_code`：只动 ptc 预设那两行（2026-10-16，用户拍板「1 2 3 都做」第 2 件）】
+ *
+ * 【为什么上游那里是关的】alpha.4 把 `workflow-ptc` / `tool-workflow` 写成了 `disabled: true`
+ * 两处：bundle 级 `dsh-web-app/cordis.patch.yml`（**根 plane**，预设之下不生效）与
+ * 预设自己的 `presets/ptc.patch.yml`（**这一条才有效** —— 真机 `agentPresets/read('ptc')`
+ * 的合成结果里这两行就是 disabled）。而"PTC 模式"的定义就是让模型用 `run_code` 编排工具调用
+ * ⇒ 预设里停用这两行 = PTC 模式没有 `run_code`（客户端文案也明说"当前 PTC 预设未启用 workflow 工具"）。
+ *
+ * 【为什么端侧可以开】官方 `ptc-runtime` 已被 profile ① 换成同进程纯 JS 的
+ * `@deepseek-ai/dshm-ptc-runtime-inproc`，它的 `language === 'typescript'` 正是
+ * `dsh-workflow-ptc` 的硬要求（`dsh-workflow-ptc/lib/index.js:607`），并已有 166 条断言的门禁。
+ *
+ * 【只动 ptc】standard / cordis 由 `patchAgentPresetWorkflow()` 显式停用（带 DSHM 标记），
+ * 本函数一个字都不碰它们 —— 否则模型在标准模式下会拿到一条没在端侧验证过的 `run_code`。
+ *
+ * 【幂等 / 失败即停】标记 `DSHM_PTC_WORKFLOW_ENABLED`；两行没同时命中（上游改名/改结构）
+ * 就 `die`，绝不静默跳过：静默跳过会让"PTC 模式有 run_code"变成一句没人验证过的话。
+ */
+function patchPtcPresetWorkflowEnabled() {
+  const file = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-web-app', 'presets', 'ptc.patch.yml');
+  if (!existsSync(file)) {
+    die(`PTC 预设补丁：找不到 ${file}`);
+  }
+  const MARK = 'DSHM_PTC_WORKFLOW_ENABLED';
+  const text = readFileSync(file, 'utf8');
+  if (text.includes(MARK)) {
+    log('[pack-core]   PTC 预设补丁已存在（幂等跳过）');
+    return;
+  }
+  /*
+   * 形态：`- id: <两者之一>` → 紧随其后的 `name:` 行 → 同级的 `disabled: true`。
+   * 只摘 `disabled: true` 那一行，并原缩进插入标记注释（YAML 里注释不参与结构）。
+   */
+  const pattern = /^([ \t]*)- id: (workflow-ptc|tool-workflow)\n([ \t]*name: [^\n]*\n)([ \t]*)disabled: true\n/gm;
+  let hits = 0;
+  const next = text.replace(pattern, (whole, dashIndent, id, nameLine, disabledIndent) => {
+    hits += 1;
+    return `${dashIndent}- id: ${id}\n${nameLine}`
+      + `${disabledIndent}# ${MARK}: 端侧有同进程 PTC 运行时（dshm-ptc-runtime-inproc）⇒ 这条恢复启用\n`;
+  });
+  if (hits !== 2) {
+    die(`PTC 预设补丁：只命中 ${hits}/2 行（workflow-ptc / tool-workflow 的 disabled: true）`
+      + '—— 上游结构变化，拒绝静默跳过（否则"PTC 模式有 run_code"就是句空话）');
+  }
+  writeFileSync(file, next, 'utf8');
+  log('[pack-core]   PTC 预设补丁：ptc.patch.yml 的 workflow-ptc / tool-workflow 已恢复启用（只动这一份预设）');
+}
+
+/**
+ * 【端侧插件开关：摘掉 `optional-terminal-pwsh`（2026-10-13，docs/150）】
+ *
+ * 【现象】「设置 → 插件 → 持久终端」里那条显示为 `@deepseek-ai/dsh-terminal-bash` 的开关
+ * **点不动**（不报错，只是不响应）。
+ *
+ * 【根因】UI 的行列表**不来自合成后的挂载树**，而来自 bundle **自带**的补丁文件：
+ * `@deepseek-ai/dsh-plugin-manager` 的 `declaredRows()` 用
+ * `bundlePatchPaths(dir, bundle) → loadOverlayPatches()` 枚举 bundle 自带
+ * `cordis.patch.yml` 的 insert 行，再用 `this.ctx.loader.entries()` 里**同 id 的活条目**
+ * 反查 `entryId`；客户端 `RowSwitch()` 把 `row.entryId === void 0` 判成禁用
+ * （`lib/client.js`：`const locked = row.readOnlyReason !== void 0 || row.entryId === void 0;`）。
+ * 而端侧 profile（`hostcore/profile/ondevice/cordis.patch.yml` 的 D52 整组覆盖）把
+ * `optional-persistent-terminals` 这个 group 的 config 换成了「除 pwsh 外的三条」
+ * ⇒ 合成树里**没有** `optional-terminal-pwsh` 这个 id ⇒ 反查不到活条目 ⇒
+ * `entryId === undefined` ⇒ 客户端判为锁定、`setPluginEnabled(id)` 也无从下手。
+ * 更迷惑的是该行的 `name` 与真正的 bash 行相同（都是 `@deepseek-ai/dsh-terminal-bash`）
+ * ⇒ 用户看到的是**同一个标题下的两个开关，其中一个点不动**。
+ *
+ * 【修法】就地删掉 bundle 自带补丁里 `optional-terminal-pwsh` 那一条（含它的
+ * `name` / `disabled` / `config` 子行）⇒ `declaredRows()` 只枚举出 3 行 ⇒
+ * 死开关**根本不出现**。端侧没有 PowerShell，该行本来就是必然 ENOENT 的占位，
+ * 摘掉不损失任何能力。profile 的整组覆盖**保留**（两条口径一致、幂等、无害）。
+ *
+ * 【幂等】留一行 `# DSHM_TERMINAL_BUNDLE_PWSH_DROPPED` 注释做标记。
+ * 该注释**不得**含 `- id: optional-terminal-pwsh` 这个字面量 ——
+ * `tools/check-core-openharmony-patches.mjs` 对它断言 ×0，裸字面量会把那条判据顶红。
+ *
+ * 上游若给该 group 改名/加行，这里**报错退出**而不是静默跳过。
+ */
+function patchTerminalBundleRows() {
+  const file = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-experimental-terminal-bundle', 'cordis.patch.yml');
+  if (!existsSync(file)) {
+    die(`终端 bundle 行补丁：找不到 ${file}`);
+  }
+  const MARK = 'DSHM_TERMINAL_BUNDLE_PWSH_DROPPED';
+  const raw = readFileSync(file, 'utf8');
+  // 已打标也必须核对结构：标记不能掩盖重打前的上游变动或手改。
+  if (raw.split(MARK).length - 1 > 1) die('终端 bundle 行补丁：迁移标记重复，拒绝掩盖重复注入');
+  const clean = raw.split('\n').filter((line) => !line.trimStart().startsWith(`# ${MARK}:`)).join('\n').trimEnd();
+  const hasPanel = clean.includes("name: '@deepseek-ai/dsh-terminal-panel'");
+  const wantsPanel = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0]);
+  if (hasPanel !== wantsPanel) die('终端 bundle 行补丁：配方版本与新旧终端布局不符');
+  // rc.2 把两个 shell 后端合并为 terminal-panel；只接受已确认的新布局，未知变更仍判死。
+  if (hasPanel) {
+    const expected = `- insert:
+    - id: optional-persistent-terminals
+      name: cordis:group
+      group: true
+      isolate:
+        terminals: true
+      config:
+        - id: optional-terminal-registry
+          name: '@deepseek-ai/dsh-terminal'
+        - id: optional-terminal-panel
+          name: '@deepseek-ai/dsh-terminal-panel'
+          config:
+            preferredShells: !!js "process.platform === 'win32' ? ['pwsh', 'powershell'] : []"
+        - id: optional-tool-terminal
+          name: '@deepseek-ai/dsh-tool-terminal'`;
+    if (clean !== expected) {
+      die('终端 bundle 行补丁：terminal-panel 新布局与已核实的 rc.2 三条配置不符，拒绝静默跳过');
+    }
+    const profile = readFileSync(join(ROOT, 'hostcore/profile', recipe.profile, 'cordis.patch.yml'), 'utf8');
+    const panelGroup = `- id: optional-persistent-terminals
+  config:
+    - id: optional-terminal-registry
+      name: '@deepseek-ai/dsh-terminal'
+    - id: optional-terminal-panel
+      name: '@deepseek-ai/dsh-terminal-panel'
+      config:
+        preferredShells: []
+    - id: optional-tool-terminal
+      name: '@deepseek-ai/dsh-tool-terminal'`;
+    if (!profile.includes(panelGroup) || /\n    - id: optional-terminal-(?:bash|pwsh)\b/.test(profile)) {
+      die('终端 bundle 行补丁：rc.2 profile 未严格同步 panel 三行，禁止旧 shell backend 覆盖新布局');
+    }
+    if (!profile.includes("- id: terminal-controller\n  config:\n    shellCandidates: ['sh', 'zsh', 'bash']")) {
+      die('终端 bundle 行补丁：profile 必须保留 sh/zsh/bash 候选且由设备执行环境决定默认 shell');
+    }
+    writeFileSync(file, clean + `\n# ${MARK}: 上游已合并为 terminal-panel，PowerShell 偏好仅限 win32，无独立占位开关。\n`, 'utf8');
+    log('[pack-core]   终端 bundle 行补丁：已核实 rc.2 terminal-panel 布局（无独立 pwsh 占位行）');
+    return;
+  }
+  const legacyExpected = `- insert:
+    - id: optional-persistent-terminals
+      name: cordis:group
+      group: true
+      isolate:
+        terminals: true
+      config:
+        - id: optional-terminal-registry
+          name: '@deepseek-ai/dsh-terminal'
+        - id: optional-terminal-bash
+          name: '@deepseek-ai/dsh-terminal-bash'
+          disabled: !!js process.platform === 'win32'
+        - id: optional-tool-terminal
+          name: '@deepseek-ai/dsh-tool-terminal'`;
+  const legacyPwsh = `        - id: optional-terminal-pwsh
+          name: '@deepseek-ai/dsh-terminal-bash'
+          disabled: !!js process.platform !== 'win32'
+          config:
+            shellDialect: pwsh
+`;
+  if (clean !== legacyExpected && clean.replace(legacyPwsh, '') !== legacyExpected) {
+    die('终端 bundle 行补丁：旧布局并非已核实的 registry/bash/pwsh/tool-terminal，拒绝静默跳过');
+  }
+  if (raw.includes(MARK)) {
+    if (clean !== legacyExpected) die('终端 bundle 行补丁：旧布局带标记但仍残留 pwsh 行');
+    log('[pack-core]   终端 bundle 行补丁：旧布局结构已核实（幂等）');
+    return;
+  }
+  const lines = raw.split('\n');
+  const out = [];
+  let dropped = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = /^(\s*)- id: optional-terminal-pwsh\s*$/.exec(lines[i]);
+    if (m === null) {
+      out.push(lines[i]);
+      continue;
+    }
+    // 该条目 = `- id:` 行本身 + 其后所有缩进更深的行（到同级/更浅为止）。
+    const indent = m[1].length;
+    let j = i + 1;
+    while (j < lines.length) {
+      const l = lines[j];
+      if (l.trim() !== '' && l.match(/^\s*/)[0].length <= indent) break;
+      j += 1;
+    }
+    out.push(`${m[1]}# ${MARK}: 端侧没有 PowerShell，该占位行不再是可点的开关（tools/pack-core.mjs / docs/150）`);
+    i = j - 1;
+    dropped += 1;
+  }
+  if (dropped !== 1) {
+    die(`终端 bundle 行补丁：期望摘掉 1 条 pwsh 占位行，实际 ${dropped} 条（上游结构变化？），拒绝静默跳过`);
+  }
+  writeFileSync(file, out.join('\n'), 'utf8');
+  log(`[pack-core]   终端 bundle 行补丁：已摘掉 ${dropped} 条 pwsh 占位行`);
 }
 
 /**
@@ -2421,7 +3077,9 @@ function patchMarketDesktopRuntime() {
  * 都已保留**（回滚语义不变），而 `execa` 还没被调用。此处 `log` / `append` /
  * `output` / `truncated` / `logPath` / `incompatible` 都已在作用域内，所以接管分支能
  * 合成**与 execa 路径完全相同的返回形状**（`{exitCode, output, truncated, logPath,
- * incompatible}`），写进同一份 `.plugin-manager/logs/operation-<id>/pnpm.log`，
+ * ...incompatible.length > 0 ? {incompatible} : {}}` —— `incompatible` 必须**非空才带**，
+ * 理由见 `profilePnpmBridgeInjection()` 的同名注释），写进同一份
+ * `.plugin-manager/logs/operation-<id>/pnpm.log`，
  * 上游的"失败 ⇒ `throw new Error(output)`"链路一个字都不用改。
  *
  * 【惰性保证】桥自己先同步探一次 `bin/pnpm --version`（与市场桥同一判据）；能跑就返回
@@ -2430,52 +3088,450 @@ function patchMarketDesktopRuntime() {
  *
  * 【幂等/防呆】按标记跳过；找不到锚点即 die —— 上游改了这段就当场暴露在打包期，
  * 而不是静默失效成"平板档又卸不掉插件了"。
+ *
+ * 【为什么是**两个**注入点（2026-10-14 追加）】上游一次构建出两份同源实现：
+ *   · `lib/types/operations.js` —— 独立入口（`…/dsh-plugin-manager/operations`，CLI 那侧）；
+ *   · `lib/index.js` —— 包 main，**服务/Web 侧真正走的那份**：
+ *     `PluginManager.runPnpm()`（index.js:2073）调的就是它自己的 `runProfilePnpm()`。
+ * 只打前者时，手机档「设置 → 插件 → 项目地址安装」仍然 `execa("pnpm", …)` ⇒
+ * `spawn pnpm EACCES`（真机实证：fport 直打 `pluginManager/installBundle` 回
+ * `{"exitCode":1,"output":"Command failed with EACCES: pnpm add …","kind":"permission"}`）。
+ * 两份产物的风格不同（缩进 4 空格 / tab、字面量单引号 / 双引号）⇒ 锚点与注入串逐站点给。
  */
-function patchProfilePnpmBridge() {
-  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-plugin-manager',
-    'lib', 'types', 'operations.js');
+/**
+ * 插件**检查**通道的进程内分叉（2026-11-03，docs/358）。
+ *
+ * 与 `patchProfilePnpmBridge()` 分开：那一处接的是**安装**（`runProfilePnpm`），
+ * 这一处接的是**检查**（`view` / `registry` / git 预检）。手持档上前者也坏、后者也坏，
+ * 但它们在上游是两个不同的文件位置与函数，锚点正则不能混用。
+ *
+ * 三处注入同一契约：**桥返回 undefined = 不接管，照旧走 execa**
+ * （PC / 2in1 档就是这条 ⇒ 已验收链路零变化）。
+ */
+function patchPluginManagerInspectBridge() {
+  const MARK = 'DSHM_PLUGIN_MANAGER_BRIDGE';
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-plugin-manager', 'lib', 'index.js');
   if (!existsSync(target)) {
-    die(`profile 包通道补丁：找不到 ${target}`);
+    die(`插件检查通道补丁：找不到 ${target}`);
   }
+  let text = readFileSync(target, 'utf8');
+  text = patchManagerLifecycle(text);
+  writeFileSync(target, text);
+  const opsTarget = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-plugin-manager', 'lib', 'types', 'operations.js');
+  let opsText = existsSync(opsTarget) ? readFileSync(opsTarget, 'utf8') : '';
+  /*
+   * 【不再按"任一文件已有标记"整段跳过（2026-11-07）】站点会继续增加（view / view-profile /
+   * registry / git…），旧判据只要 index.js 有标记就 return ⇒ 新加的站点永远注入不进去
+   * （上一轮 operations 的 view 桥、这一轮 viewProfilePackage 都被它挡过）。
+   * 现在逐个站点按自己的 tag 判重（见下面的循环），这里只保留"文件是否可读"的检查。
+   */
+  const sites = [
+    {
+      what: 'view（pnpm view → /dshm-registry/view）',
+      file: 'index',
+      tag: 'view',
+      re: /([ \t]*)if \(parsed\.kind !== "registry"\) return void 0;\n([ \t]*)const viewed = await execa\(options\.command \?\? "pnpm", \[/,
+      make: (u1, u2) => [
+        `${u1}/* ${MARK}:view —— 手持档 execa(pnpm) 必 EACCES；改走 Host 进程内 registry 通道。 */`,
+        `${u1}{`,
+        `${u2}  const dshmBridge = await import("@deepseek-ai/dshm-profile-pnpm");`,
+        `${u2}  const dshmViewed = await dshmBridge.bridgeViewProfilePackage(dir, parsed.spec, options, environment);`,
+        `${u2}  if (dshmViewed !== undefined) {`,
+        `${u2}    if (dshmViewed.exitCode === 0) return JSON.parse(dshmViewed.stdout);`,
+        `${u2}    throw new Error(dshmViewed.stderr || "无法获取插件信息（进程内 registry 通道）");`,
+        `${u2}  }`,
+        `${u1}}`,
+        `${u1}const viewed = await execa(options.command ?? "pnpm", [`,
+      ].join('\n'),
+    },
+    {
+      what: 'view（operations 入口：pnpm view → /dshm-registry/view）',
+      file: 'operations',
+      tag: 'view-operations',
+      re: /([ \t]*)if \(parsed\.kind !== 'registry'\)\n[ \t]*return undefined;\n([ \t]*)const viewed = await execa\(options\.command \?\? 'pnpm', \[/,
+      make: (u1, u2) => [
+        `${u1}/* ${MARK}:view-operations —— 与 lib/index.js 同源的第二份实现（CLI/operations 入口），
+	          手持档 execa(pnpm) 必 EACCES；同样改走 Host 进程内 registry 通道。 */`,
+        `${u1}{`,
+        `${u2}  const dshmBridge = await import("@deepseek-ai/dshm-profile-pnpm");`,
+        `${u2}  const dshmViewed = await dshmBridge.bridgeViewProfilePackage(dir, parsed.spec, options, environment);`,
+        `${u2}  if (dshmViewed !== undefined) {`,
+        `${u2}    if (dshmViewed.exitCode === 0) return JSON.parse(dshmViewed.stdout);`,
+        `${u2}    throw new Error(dshmViewed.stderr || "无法获取插件信息（进程内 registry 通道）");`,
+        `${u2}  }`,
+        `${u1}}`,
+        `${u1}const viewed = await execa(options.command ?? 'pnpm', [`,
+      ].join('\n'),
+    },
+    {
+      what: 'viewProfilePackage（插件页「无法获取插件信息」的真正 spawn 点）',
+      file: 'index',
+      tag: 'view-profile',
+      /* 【必须在注入里**逐字回写函数头**】锚点包含 `async function viewProfilePackage(…) {`，
+         只回写它之后的内容 = 把函数头删掉 ⇒ 函数体掉到模块作用域、`return` 出现在函数外
+         ⇒ 整个模块 SyntaxError ⇒ 三端 `tool-plugin-manager` 一直 `waiting for pluginManager`
+         （2026-11-07 20:07 真机 P0，见 docs/395）。 */
+      re: /([ \t]*)((?:export )?async function viewProfilePackage\(dir, spec, options\) \{)\n([ \t]*)const result = await execa\(options\.command \?\? (["'])pnpm\4, \[/,
+      make: (u1, header, u2, q) => [
+        `${u1}${header}`,
+        `${u2}/* ${MARK}:view-profile —— 插件页 inspect() 走这里；手持档 execa(pnpm) 必 EACCES，改走进程内 registry 通道。 */`,
+        `${u2}{`,
+        `${u2}  const dshmBridge = await import("@deepseek-ai/dshm-profile-pnpm");`,
+        `${u2}  const dshmViewed = await dshmBridge.bridgeViewProfilePackage(dir, spec, options, process.env);`,
+        `${u2}  if (dshmViewed !== undefined) return dshmViewed;`,
+        `${u2}}`,
+        `${u2}const result = await execa(options.command ?? ${q}pnpm${q}, [`,
+      ].join('\n'),
+    },
+    {
+      what: 'viewProfilePackage（operations 入口的同源实现）',
+      file: 'operations',
+      tag: 'view-profile-operations',
+      re: /([ \t]*)((?:export )?async function viewProfilePackage\(dir, spec, options\) \{)\n([ \t]*)const result = await execa\(options\.command \?\? (["'])pnpm\4, \[/,
+      make: (u1, header, u2, q) => [
+        `${u1}${header}`,
+        `${u2}/* ${MARK}:view-profile-operations —— 同源第二份；插件页 inspect() 若走 operations 入口也走进程内通道。 */`,
+        `${u2}{`,
+        `${u2}  const dshmBridge = await import("@deepseek-ai/dshm-profile-pnpm");`,
+        `${u2}  const dshmViewed = await dshmBridge.bridgeViewProfilePackage(dir, spec, options, process.env);`,
+        `${u2}  if (dshmViewed !== undefined) return dshmViewed;`,
+        `${u2}}`,
+        `${u2}const result = await execa(options.command ?? ${q}pnpm${q}, [`,
+      ].join('\n'),
+    },
+    {
+      what: 'registry（pnpm config get registry → installer.json / 默认源）',
+      file: 'index',
+      tag: 'registry',
+      re: /([ \t]*)async function readProfileRegistry\(dir, options\) \{\n([ \t]*)const result = await execa\(options\.command \?\? "pnpm", \[/,
+      make: (u1, u2) => [
+        `${u1}async function readProfileRegistry(dir, options) {`,
+        `${u2}/* ${MARK}:registry */`,
+        `${u2}{`,
+        `${u2}  const dshmBridge = await import("@deepseek-ai/dshm-profile-pnpm");`,
+        `${u2}  const dshmRegistry = dshmBridge.bridgeReadProfileRegistry(dir, process.env);`,
+        `${u2}  if (dshmRegistry !== undefined) return dshmRegistry;`,
+        `${u2}}`,
+        `${u2}const result = await execa(options.command ?? "pnpm", [`,
+      ].join('\n'),
+    },
+    {
+      what: 'git 预检（git ls-remote → 跳过，交给进程内安装器）',
+      file: 'index',
+      tag: 'git-preflight',
+      re: /([ \t]*)async function checkGithubConnection\(spec, dir, options\) \{\n/,
+      make: (u1) => [
+        `${u1}async function checkGithubConnection(spec, dir, options) {`,
+        `${u1}  /* ${MARK}:git-preflight */`,
+        `${u1}  {`,
+        `${u1}    const dshmBridge = await import("@deepseek-ai/dshm-profile-pnpm");`,
+        `${u1}    if (dshmBridge.shouldSkipGithubConnection(spec, process.env) === true) return void 0;`,
+        `${u1}  }`,
+      ].join('\n') + '\n',
+    },
+  ];
+  for (const site of sites) {
+    const onOps = site.file === 'operations';
+    const buf = onOps ? opsText : text;
+    if (buf.length === 0) {
+      die(`插件检查通道补丁：缺文件（${site.what}）`);
+    }
+    if (buf.includes(`${MARK}:${site.tag}`)) {
+      log(`[pack-core]   ${site.what} 已注入（跳过）`);
+      continue;
+    }
+    const matched = site.re.exec(buf);
+    if (matched === null) {
+      die(`插件检查通道补丁：找不到锚点（${site.what}）—— 上游结构变化？拒绝静默跳过`);
+    }
+    const injection = site.make(...matched.slice(1).map((v) => (v === undefined ? '' : v)));
+    const next = buf.replace(site.re, () => injection);
+    if (onOps) { opsText = next; } else { text = next; }
+    log(`[pack-core]   插件检查通道：${site.what} 已注入`);
+  }
+  writeFileSync(target, text, 'utf8');
+  if (opsText.length > 0) {
+    writeFileSync(opsTarget, opsText, 'utf8');
+  }
+  /*
+   * 【语法守卫（2026-11-07 P0 之后加）】注入型补丁改的是**正在被加载的模块**：一旦
+   * 括号/函数头被破坏，端侧表现为 `tool-plugin-manager … waiting for pluginManager`，
+   * 三端全崩，而纯文本门禁看不出来。这里直接用 node 自己的解析器验一遍，失败就 die。
+   */
+  for (const f of [target, opsTarget]) {
+    if (!existsSync(f)) {
+      continue;
+    }
+    const r = spawnSync(process.execPath, ['--check', f], { encoding: 'utf8' });
+    if (r.status !== 0) {
+      die(`插件检查通道补丁：${f} 注入后语法不通过 —— ${String(r.stderr || '').split('\n').slice(0, 4).join(' ')}`);
+    }
+    log(`[pack-core]   插件检查通道：${basename(f)} 语法自检通过`);
+  }
+}
+
+function patchProfilePnpmBridge() {
   const MARK = 'DSHM_PROFILE_PNPM_BRIDGE';
-  const anchor = '    if (preflight.length > 0)\n'
-    + "        return rejected(preflight, 'nothing was installed');\n";
-  const injection = [
-    `    /* ${MARK}: 端侧（手机/平板档）没有任何可 execve 的 shell，execa(pnpm) 必 EACCES。`,
-    '       上游的 packageManager 钩子只能换"spawn 哪个可执行文件"，本档任何 command 都点不着火',
-    '       ⇒ 必须在这里分叉：探针判"随包假壳跑不起来"时改走 Host 进程内的安装队列',
-    '       （与市场桥同一协议、同一判据、同一个 dshm-installer）。',
-    '       返回 undefined = 不接管、照旧 spawn（PC/2in1 档就是这条）⇒ 已验收链路零变化。',
-    '       实现见 hostcore/plugins/dshm-profile-pnpm/。 */',
-    '    {',
-    '        const dshmPnpm = await import("@deepseek-ai/dshm-profile-pnpm");',
-    '        const bridged = await dshmPnpm.bridgeRunProfilePnpm(args, {',
-    '            dir, signal: options.signal,',
-    '        });',
-    '        if (bridged !== undefined) {',
-    '            if (bridged.text.length > 0) {',
-    '                const bridgedBytes = Buffer.from(bridged.text, "utf8");',
-    '                await log.write(bridgedBytes);',
-    '                options.onOutput?.(bridged.text, bridged.exitCode === 0 ? "stdout" : "stderr");',
-    '                append(bridgedBytes);',
-    '            }',
-    '            await log.close();',
-    '            return { exitCode: bridged.exitCode, output: output.toString("utf8"), truncated, logPath, incompatible };',
-    '        }',
-    '    }',
+  const libDir = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-plugin-manager', 'lib');
+  const sites = [
+    {
+      rel: join('types', 'operations.js'),
+      /*
+       * 【2026-10-16 升级 alpha.4 的教训】锚点原来写成**精确字符串**（4 空格缩进 + 无 await），
+       * 而上游只是加了 `await`、缩进从 4 空格变 8 空格 ⇒ 补丁直接 die（"拒绝静默跳过"是对的，
+       * 但代价是每换一版都要手改）。改成**形状正则**：缩进取捕获组、`await` 可选，
+       * 既兼容 0.2.1-alpha.2 的老形态，也兼容 alpha.3+ 的新形态。
+       */
+      re: /([ \t]*)if \(preflight\.length > 0\)\n[ \t]*return (?:await )?rejected\(preflight, 'nothing was installed'\);\n/,
+    },
+    {
+      rel: 'index.js',
+      re: /([ \t]*)if \(preflight\.length > 0\)[ \t]*return (?:await )?rejected\(preflight, "nothing was installed"\);\n/,
+    },
+  ];
+  for (const site of sites) {
+    const target = join(libDir, site.rel);
+    if (!existsSync(target)) {
+      die(`profile 包通道补丁：找不到 ${target}`);
+    }
+    const text = readFileSync(target, 'utf8');
+    if (text.includes(MARK)) {
+      log(`[pack-core]   profile 包通道补丁已存在（跳过）：${site.rel}`);
+      continue;
+    }
+    const matched = site.re.exec(text);
+    if (matched === null) {
+      die(`profile 包通道补丁：${site.rel} 里找不到 preflight/`
+        + '`nothing was installed` 锚点（上游结构变化？），拒绝静默跳过');
+    }
+    const injection = profilePnpmBridgeInjection(matched[1]);
+    writeFileSync(target, text.replace(site.re, (whole) => whole + injection), 'utf8');
+    log(`[pack-core]   profile 包通道：${site.rel} 已注入 runProfilePnpm 的进程内分叉`);
+  }
+}
+
+/**
+ * 生成 `runProfilePnpm()` 里的进程内分叉段（见 `patchProfilePnpmBridge()` 的注释）。
+ *
+ * 注入点必须同时满足三件事：兼容性预检与 profile 清单快照**都已做完**（回滚语义不变）、
+ * `execa` **还没被调用**、以及 `log`/`append`/`output`/`truncated`/`logPath`/`incompatible`
+ * 都已在作用域内 —— 接管分支据此合成**与 execa 路径完全相同的返回形状**，写进同一份
+ * `.plugin-manager/logs/operation-<id>/pnpm.log`，上游"失败 ⇒ `throw new Error(output)`"
+ * 的链路一个字都不用改。
+ *
+ * 桥自己先同步探一次 `bin/pnpm --version`（与市场桥同判据）：能跑就返回 `undefined`
+ * ⇒ 这里原样继续走 `execa`，PC/2in1 档因此**行为一个字节不变**。
+ * @param unit 该文件的一级缩进（上游两份产物分别是 4 空格与 tab）
+ * @returns 直接拼在锚点之后的源码片段（以换行结尾）
+ */
+function profilePnpmBridgeInjection(unit) {
+  const i1 = unit;
+  const i2 = unit + unit;
+  const i3 = i2 + unit;
+  const i4 = i3 + unit;
+  return [
+    `${i1}/* DSHM_PROFILE_PNPM_BRIDGE: 端侧（手机/平板档）没有任何可 execve 的 shell，execa(pnpm) 必 EACCES。`,
+    `${i2}上游的 packageManager 钩子只能换"spawn 哪个可执行文件"，本档任何 command 都点不着火`,
+    `${i2}⇒ 必须在这里分叉：探针判"随包假壳跑不起来"时改走 Host 进程内的安装队列`,
+    `${i2}（与市场桥同一协议、同一判据、同一个 dshm-installer）。`,
+    `${i2}返回 undefined = 不接管、照旧 spawn（PC/2in1 档就是这条）⇒ 已验收链路零变化。`,
+    `${i2}实现见 hostcore/plugins/dshm-profile-pnpm/。 */`,
+    `${i1}{`,
+    `${i2}const dshmPnpm = await import("@deepseek-ai/dshm-profile-pnpm");`,
+    `${i2}const bridged = await dshmPnpm.bridgeRunProfilePnpm(args, {`,
+    `${i3}dir, signal: options.signal,`,
+    `${i2}});`,
+    `${i2}if (bridged !== undefined) {`,
+    `${i3}if (bridged.text.length > 0) {`,
+    `${i4}const bridgedBytes = Buffer.from(bridged.text, "utf8");`,
+    `${i4}await log.write(bridgedBytes);`,
+    `${i4}options.onOutput?.(bridged.text, bridged.exitCode === 0 ? "stdout" : "stderr");`,
+    `${i4}append(bridgedBytes);`,
+    `${i3}}`,
+    `${i3}await log.close();`,
+    `${i3}/* incompatible 必须**非空才带**：上游 execa 路径的收尾也是"非空才带上它"，`,
+    `${i4}而 installBundle 那侧只看"这个字段在不在"（在就抛 incompatible-version）。`,
+    `${i4}无条件带上空数组 ⇒ 任意失败（404/网络/权限）都被改判成"版本不兼容"（+dshm.49 真机 P0）。 */`,
+    `${i3}return { exitCode: bridged.exitCode, output: output.toString("utf8"), truncated, logPath, ...incompatible.length > 0 ? { incompatible } : {} };`,
+    `${i2}}`,
+    `${i1}}`,
     '',
   ].join('\n');
-  const text = readFileSync(target, 'utf8');
-  if (text.includes(MARK)) {
-    log('[pack-core]   profile 包通道补丁已存在（跳过）');
-    return;
+}
+
+/**
+ * GitHub 安装地址归一化（2026-10-14，+dshm.48）。
+ *
+ * 【用户报】手机/PC 的「设置 → 插件 → 项目地址安装」粘贴 **GitHub 地址**时报
+ * 「无法识别这个包名或地址」（`pluginManager/inspect` → `refused/invalid-spec`）；
+ * 而手打 `owner/repo`、`github:owner/repo` 反而能装。
+ *
+ * 【根因】闸门只有一个 `HOSTED_REPOSITORY_URL`
+ * （`/^https?:\/\/[^/]+\/[^/]+\/[^/#]+(?:\.git)?(?:#.*)?$/i`）—— **恰好两段路径**。
+ * 而从浏览器地址栏复制的地址几乎总是页面路径：
+ *   · `…/o/r/tree/main[/sub]`（看分支/子目录）—— 三段以上 ⇒ 直接拒；
+ *   · `…/o/r/`（尾斜杠）—— 该正则不容尾斜杠 ⇒ 拒；
+ *   · `…/o/r?tab=readme-ov-file`（点过 README 页签）—— `?` 落在 `[^/#]` 里 ⇒ 被并进
+ *     **仓库名** ⇒ 即使侥幸过关，pnpm 也会去拉 `r?tab=…` 而 404（拒得更晚、报错更难懂）；
+ *   · `o/r`（简写）—— 落进 `PACKAGE_NAME` 判据 ⇒「不是注册表接受的包名」。
+ * 真机实证（fport 直打 `pluginManager/inspect`，+dshm.47）：`/tree/main`、尾斜杠、`o/r`
+ * 三种形态全 `refused/invalid-spec`；两段式 `https://github.com/o/r`、`github:o/r`、
+ * `.git`、`#ref` 本来就过。
+ *
+ * 【修法】在**解析入口**把 GitHub 系的页面地址折回 pnpm 的规范形态
+ * `github:o/r[#ref][&path:/sub]`：
+ *   · 上游判的是"包名/地址形态"，页面段在它眼里全是噪声 ⇒ 归一化后原样通过；
+ *   · `&path:` 是 pnpm **自己**的规范拼法（`parseGitParams` 按 `&` 拆 committish 里的
+ *     `path:` 前缀）⇒ PC 档直跑 pnpm 吃得下；
+ *   · 端侧（手机/平板）走的是进程内安装通道 `hostcore/app/dshm-installer.js`，它的
+ *     `parseGitHub()` 认的正是这一形态 ⇒ 两端同一份 spec，不多造第二种格式。
+ *
+ * 【边界】只做"放行 + 规范化"，且只碰 GitHub 系（`github.com` 页面地址 / `github:` 简写 /
+ * `owner/repo` 简写）。npm 名、绝对路径、`file:`/`link:`、tarball、gitlab/bitbucket/gist
+ * 简写、`git+ssh`/`git@…` scp 形态 **一个字节都不改**（原样返回，语义零变化）。
+ *
+ * 【两个站点】上游一次构建出两份实现（与 ⑬ 同族）：
+ *   · `lib/index.js` —— 包 main，**服务/Web 侧真正走的那份**：它内联了一份
+ *     `parseInstallSpec`，且 `inspect()` / `installBundle()` 各自把**原始 spec** 再交给
+ *     `checkGithubConnection(parsedForRegistry(spec), …)` 与 `runPnpm(["add", spec, …])`
+ *     ⇒ 三个锚点都要归一（只改 parse 内部不够：pnpm argv 与连接检查用的都是入口那个变量）；
+ *   · `lib/types/install-spec.js` —— `operations` / `types` 两个入口共用的解析器
+ *     （`import { parseInstallSpec } from "./install-spec.js"`）⇒ 改这一处，CLI 那侧一致。
+ */
+function patchInstallSpecNormalize() {
+  const MARK = 'DSHM_INSTALL_SPEC_NORMALIZE';
+  const libDir = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-plugin-manager', 'lib');
+  const sites = [
+    {
+      rel: 'index.js',
+      indent: '\t',
+      parseHead: 'function parseInstallSpec(raw) {\n\tconst spec = raw.trim();\n',
+      parseHeadPatched: 'function parseInstallSpec(raw) {\n\tconst spec = dshmNormalizeInstallSpec(raw);\n',
+      entryHeads: [
+        '\t\tasync inspect(spec, options, signal) {\n\t\t\tlet parsed;\n',
+        '\t\tinstallBundle(spec, options) {\n\t\t\tconst requestId = options?.requestId;\n',
+      ],
+    },
+    {
+      rel: join('types', 'install-spec.js'),
+      indent: '    ',
+      parseHead: 'export function parseInstallSpec(raw) {\n    const spec = raw.trim();\n',
+      parseHeadPatched: 'export function parseInstallSpec(raw) {\n    const spec = dshmNormalizeInstallSpec(raw);\n',
+      entryHeads: [],
+    },
+  ];
+  for (const site of sites) {
+    const target = join(libDir, site.rel);
+    if (!existsSync(target)) die(`安装地址归一化补丁：找不到 ${target}`);
+    let text = readFileSync(target, 'utf8');
+    if (text.includes(MARK)) {
+      log(`[pack-core]   安装地址归一化已存在（跳过）：${site.rel}`);
+      continue;
+    }
+    if (!text.includes(site.parseHead)) {
+      die(`安装地址归一化补丁：${site.rel} 里找不到 parseInstallSpec 的头部锚点`
+        + '（上游结构变化？），拒绝静默跳过');
+    }
+    for (const head of site.entryHeads) {
+      if (!text.includes(head)) {
+        die(`安装地址归一化补丁：${site.rel} 里找不到入口锚点 `
+          + `${JSON.stringify(head.slice(0, 48))}…（上游结构变化？），拒绝静默跳过`);
+      }
+    }
+    const helper = installSpecNormalizeHelper()
+      .split('\n').map((line) => (line === '' ? line : site.indent + line)).join('\n');
+    text = text.replace(site.parseHead, helper + '\n' + site.parseHeadPatched);
+    const call = site.indent + site.indent + site.indent + 'spec = dshmNormalizeInstallSpec(spec);\n';
+    for (const head of site.entryHeads) text = text.replace(head, head + call);
+    writeFileSync(target, text, 'utf8');
+    log(`[pack-core]   安装地址归一化：${site.rel} 已注入`
+      + `（parseInstallSpec + ${site.entryHeads.length} 个入口）`);
   }
-  if (!text.includes(anchor)) {
-    die('profile 包通道补丁：operations.js 里找不到 preflight/`nothing was installed` 锚点'
-      + '（上游结构变化？），拒绝静默跳过');
-  }
-  writeFileSync(target, text.replace(anchor, anchor + injection), 'utf8');
-  log('[pack-core]   profile 包通道：operations.js 已注入 runProfilePnpm 的进程内分叉');
+}
+
+/**
+ * 生成插进 `parseInstallSpec()` 之前的那份归一化源码（见 `patchInstallSpecNormalize()`）。
+ *
+ * 用 `String.raw` 是为了让正则里的 `\s` / `\/` **逐字**落进目标文件（普通字符串要写成
+ * `\\s`，抄改一次就错一次）；片段本身零依赖：只用字符串与正则内建，不 import 任何东西
+ * —— 目标文件在**模块求值期**就要解析它，不能引入解析顺序上的新耦合。
+ * @returns 未缩进的源码片段（不含尾部换行）。
+ */
+function installSpecNormalizeHelper() {
+  return String.raw`/* DSHM_INSTALL_SPEC_NORMALIZE: GitHub 安装地址归一化（tools/pack-core.mjs 的
+ * patchInstallSpecNormalize() 注入；设计说明见那份注释）。
+ *   https://github.com/o/r/tree/main/sub        → github:o/r#main&path:/sub
+ *   https://github.com/o/r/blob/main/a/b/x.md   → github:o/r#main&path:/a/b
+ *   https://github.com/o/r/releases/tag/v1.2.3  → github:o/r#v1.2.3
+ *   https://github.com/o/r?tab=readme-ov-file   → github:o/r
+ *   https://github.com/o/r/  ·  github.com/o/r  ·  o/r  ·  github:o/r#main&path:/sub
+ * 非 GitHub 形态（npm 名 / 绝对路径 / file: / link: / tarball / gitlab·bitbucket·gist /
+ * git+ssh / git@…) 原样返回；产出形态是 pnpm 自己的 github:o/r[#ref][&path:/sub]。
+ * 【注意】这份片段是用反引号模板承载的 ⇒ 正文里**不许出现反引号**（会被提前闭合），
+ * 也不许出现"美元 + 花括号"的插值起手；两者都有 tools/check-install-spec-normalize.mjs 盯着。 */
+function dshmNormalizeInstallSpec(raw) {
+	if (typeof raw !== "string") return raw;
+	const typed = raw.trim();
+	if (typed === "" || typed.startsWith("-")) return typed;
+	/* ① 先摘子目录（'&path:' / '?path=' / '#path:' 三种拼法都认；值到下一个分隔符为止，
+	 * 所以两种先后顺序都能切对 —— 与 hostcore/app/dshm-installer.js 的 parseGitHub() 同序）。 */
+	let base = typed;
+	let sub = "";
+	const pathAt = /[&?#]path[:=]([^#&?\s]*)/.exec(base);
+	if (pathAt !== null) {
+		sub = pathAt[1].trim();
+		base = base.slice(0, pathAt.index) + base.slice(pathAt.index + pathAt[0].length);
+	}
+	/* ② 再摘 ref（'#' 之后到下一个分隔符为止）。 */
+	let ref = "";
+	const hashAt = base.indexOf("#");
+	if (hashAt >= 0) {
+		const rest = base.slice(hashAt + 1);
+		const stop = rest.search(/[&?\s]/);
+		ref = (stop >= 0 ? rest.slice(0, stop) : rest).trim();
+		base = base.slice(0, hashAt) + (stop >= 0 ? rest.slice(stop) : "");
+	}
+	base = base.trim();
+	/* ③ 仓库主体只可能是三种 GitHub 形态（带 host 的页面地址 / 'github:' 简写 /
+	 * 'owner/repo' 简写）；一种都不是 ⇒ 原样返回，一个字节都不改。
+	 * '?' 走到这里只可能是页面参数（?tab=… / ?plain=… / ?q=…）：仓库名不该带上它。 */
+	const candidates = [base];
+	const queryAt = base.indexOf("?");
+	if (queryAt >= 0) candidates.push(base.slice(0, queryAt));
+	let match = null;
+	for (const candidate of candidates) {
+		match = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/\s?#]+)\/([^\/\s?#]+?)(?:\.git)?(?:\/(.*))?$/i.exec(candidate);
+		if (match === null) match = /^github:([^\/\s?#:]+)\/([^\/\s?#:]+?)(?:\.git)?(?:\/(.*))?$/i.exec(candidate);
+		if (match === null) match = /^([A-Za-z0-9][A-Za-z0-9-]*)\/([^@\s\/]+?)(?:\.git)?$/.exec(candidate);
+		if (match !== null) break;
+	}
+	if (match === null) return typed;
+	/* ④ 页面段 → ref / 子目录。'/blob/<ref>/<file>' 指的是**文件** ⇒ 取它所在目录
+	 * （装包要的是目录）；issues / pulls / actions / wiki / settings… 与仓库名无关，丢弃。 */
+	let pageRef = "";
+	let pagePath = "";
+	const page = match[3] === undefined ? "" : match[3].replace(/^\/+/, "");
+	if (page !== "") {
+		const segments = page.split("/").filter((segment) => segment.length > 0);
+		const head = (segments[0] === undefined ? "" : segments[0]).toLowerCase();
+		if (head === "tree" || head === "blob") {
+			pageRef = segments[1] === undefined ? "" : segments[1];
+			const inner = segments.slice(2).join("/");
+			pagePath = head === "tree" ? inner : inner.replace(/\/?[^\/]*$/, "");
+		}
+		else if (head === "releases" && (segments[1] === undefined ? "" : segments[1]).toLowerCase() === "tag") {
+			pageRef = segments[2] === undefined ? "" : segments[2];
+		}
+	}
+	if (pageRef !== "") ref = pageRef;
+	/* 页面段里跟在 ref 后面的查询串（'/tree/main?tab=x'）不是 ref 的一部分。 */
+	if (ref !== "") ref = ref.split(/[&?]/)[0].trim();
+	if (sub === "" && pagePath !== "") sub = pagePath;
+	sub = sub.split(/[&?]/)[0].trim().replace(/^\.?\//, "").replace(/\/+$/, "");
+	return "github:" + match[1] + "/" + match[2]
+		+ (ref === "" ? "" : "#" + ref)
+		+ (sub === "" ? "" : "&path:/" + sub);
+}`;
 }
 
 /**
@@ -2504,12 +3560,36 @@ function patchFsLocalLink() {
     log('[pack-core]   fs-local 补丁已存在（跳过）');
     return;
   }
-  const before = `\t\tif (createIfAbsent !== void 0) try {
+  /*
+   * 【2026-11-05 上游 0.2.2-rc.1 迁移】上游把 `createIfAbsent` 收进了 `options`，
+   * 且错误文案里的 `createIfAbsent.displayPath` 换成外层变量 `displayPath`：
+   *   `if (createIfAbsent !== void 0) try { … }` → `if (options.createIfAbsent) try { … }`
+   * 两种形态都保留：新的用于 0.2.2+，旧的用于回退重打 rc.5 的树。
+   * 逐个按**逐字原文**试，都不命中才 die —— 绝不静默跳过（真机上会退化成"write 工具 EPERM link"）。
+   */
+  const VARIANTS = [
+    {
+      name: '0.2.2-rc.1+（options.createIfAbsent）',
+      head: 'options.createIfAbsent',
+      display: 'displayPath',
+      before: `\t\tif (options.createIfAbsent) try {
+\t\t\tawait linkFile(tempPath, absolutePath);
+\t\t} catch (error) {
+\t\t\tawait throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget);
+\t\t}`,
+    },
+    {
+      name: '0.2.1-rc.5 及更早（裸 createIfAbsent）',
+      head: 'createIfAbsent !== void 0',
+      display: 'createIfAbsent.displayPath',
+      before: `\t\tif (createIfAbsent !== void 0) try {
 \t\t\tawait linkFile(tempPath, absolutePath);
 \t\t} catch (error) {
 \t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);
-\t\t}`;
-  const after = `\t\tif (createIfAbsent !== void 0) {
+\t\t}`,
+    },
+  ];
+  const buildAfter = (v) => `\t\tif (${v.head}) {
 \t\t\t/*
 \t\t\t * 【DSHM 端侧补丁 2026-09-26（DSHM_FS_LOCAL_SANDBOX）】原为 link(tempPath, absolutePath)
 \t\t\t * 做 no-clobber 发布（目标已存在则 EEXIST）。鸿蒙沙箱**禁硬链接**（EPERM/EACCES），
@@ -2525,7 +3605,7 @@ function patchFsLocalLink() {
 \t\t\t\tconst linkUnsupported = code === "EPERM" || code === "EACCES"
 \t\t\t\t\t|| code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EXDEV";
 \t\t\t\tif (!linkUnsupported) {
-\t\t\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);
+\t\t\t\t\tawait throwGuardedCreateFailure(error, absolutePath, ${v.display}, inspectPublicationTarget);
 \t\t\t\t} else {
 \t\t\t\t\tlet exists = true;
 \t\t\t\t\ttry {
@@ -2534,18 +3614,19 @@ function patchFsLocalLink() {
 \t\t\t\t\t\texists = false;
 \t\t\t\t\t}
 \t\t\t\t\tif (exists) {
-\t\t\t\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);
+\t\t\t\t\t\tawait throwGuardedCreateFailure(error, absolutePath, ${v.display}, inspectPublicationTarget);
 \t\t\t\t\t} else {
 \t\t\t\t\t\tawait rename(tempPath, absolutePath);
 \t\t\t\t\t}
 \t\t\t\t}
 \t\t\t}
 \t\t}`;
-  if (!text.includes(before)) {
-    die('fs-local 补丁：上游 writeFileAtomic 的 createIfAbsent 发布段已变化（未找到待替换片段），拒绝静默跳过');
+  const variant = VARIANTS.find((v) => text.includes(v.before));
+  if (!variant) {
+    die('fs-local 补丁：上游 writeFileAtomic 的 createIfAbsent 发布段已变化（新旧两种形态都未命中），拒绝静默跳过');
   }
-  writeFileSync(target, text.replace(before, after), 'utf8');
-  log('[pack-core]   fs-local 补丁：createIfAbsent 发布 link→rename 回退（鸿蒙禁硬链接）');
+  writeFileSync(target, text.replace(variant.before, buildAfter(variant)), 'utf8');
+  log(`[pack-core]   fs-local 补丁：createIfAbsent 发布 link→rename 回退（${variant.name}；鸿蒙禁硬链接）`);
 }
 
 
@@ -2569,6 +3650,120 @@ function patchFsLocalLink() {
  * 两者都不在 = `die()`。末尾再核对标记总数 —— 上游改结构必须当场暴露在打包期，
  * 而不是静默失效成「真机又是裸 EPERM」（那种回归只能靠用户复现）。
  */
+/**
+ * `dsh-agent-instructions` 的**向上找项目根**必须容忍「允许面之外」的探测（P0，2026-10-10）。
+ *
+ * 【根因】上游按 `projectRootMarkers`（默认 `['.git']`）从会话 cwd **逐级向上**探
+ * `<dir>/.git`（`findProjectRoot()` → `existsAsMarker()`），而 `existsAsMarker()` 只把
+ * **`FS_NOT_FOUND`** 当成"这里没有标记"，其余一律 `throw`（它要的是"探针坏了就得响"）。
+ * 我们这一层加的访问范围闸门（docs/137）对允许面之外的路径抛 **`FS_PERMISSION_DENIED`**
+ * ⇒ 这条向上走的路在**边界那一跳**上炸掉，而它是在 `compose()` 里被 await 的
+ * （`agent/pre-step` 钩子，无人捕捉）⇒ **整轮直接失败**，面板上就是那句闸门文案：
+ *   `路径在 DSHM 的允许范围之外，已拒绝访问：/storage/Users/.git`
+ *
+ * 【为什么恰好是这条路径】真机（PC 档）实测：默认工作区
+ * `/storage/Users/currentUser/Download/com.dshm.dshclient` 一路向上都没有 `.git`，
+ * 于是探测依次 `/storage/Users/currentUser/Download/.git`（面内，FS_NOT_FOUND ⇒ 继续）
+ * → `/storage/Users/currentUser/.git`（同上）→ **`/storage/Users/.git`**（面外 ⇒ 闸门拒绝 ⇒ 炸）。
+ * `/storage/Users` 本身存在（`lstat` 通）但 `listdir` 是 `EPERM`（app 身份实测）
+ * ⇒ 它不是 `currentUser` 的别名，而是**同级的别人的目录** ⇒ **闸门判得对**，
+ * 错的是"把探针问到面外还当成致命错"。
+ *
+ * 【改法】`existsAsMarker()` 的 catch 里把**允许面之外的探测**当成"这里没有标记"
+ * （返回 false，继续向上；走到 `/` 后由上游自己 `return resolve(cwd)` 收尾），
+ * 判据只加一条 `error.code === "FS_PERMISSION_DENIED"`（闸门唯一的拒绝码，不 import 闸门）。
+ * **不改闸门本身**：模型/工具主动要面外内容的读与写照样 `FS_PERMISSION_DENIED`（docs/137 不变）。
+ */
+function patchAgentInstructionsScopeWalk() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-agent-instructions', 'lib', 'index.js');
+  if (!existsSync(target)) {
+    die(`项目根探测容忍补丁：找不到 ${target}`);
+  }
+  const MARK = 'DSHM_SCOPE_WALK_TOLERANT';
+  const sites = [
+    {
+      why: 'existsAsMarker 旁的判据助手（只认闸门的拒绝码，不 import 闸门）',
+      before: [
+        'function isMissingProviderPathError(error) {',
+        '\treturn error instanceof Error && "code" in error && error.code === "FS_NOT_FOUND";',
+        '}',
+      ].join('\n'),
+      after: [
+        'function isMissingProviderPathError(error) {',
+        '\treturn error instanceof Error && "code" in error && error.code === "FS_NOT_FOUND";',
+        '}',
+        '/*',
+        ' * 【DSHM 端侧补丁 2026-10-10（DSHM_SCOPE_WALK_TOLERANT）】同族判据：**允许面之外**的探测。',
+        ' * 拒绝码就是 docs/137 的 fs-fence.js 用的那个 `FS_PERMISSION_DENIED`（它只有一个码）。',
+        ' * 这里**不 import** 闸门（上游文件不依赖端侧插件），只认码。',
+        ' */',
+        'function isScopeDeniedProviderPathError(error) {',
+        '\treturn error instanceof Error && "code" in error && error.code === "FS_PERMISSION_DENIED";',
+        '}',
+      ].join('\n'),
+    },
+    {
+      why: 'existsAsMarker：面外探测 ⇒ 当作"这里没有标记"（原来是把整轮打成失败）',
+      before: [
+        'async function existsAsMarker(path, fileSystem, signal) {',
+        '\tif (fileSystem !== void 0) try {',
+        '\t\tconst target = await fileSystem.resolve(path, signalOptions(signal));',
+        '\t\treturn await fileSystem.stat(target, signal) !== void 0;',
+        '\t} catch (error) {',
+        '\t\tsignal?.throwIfAborted();',
+        '\t\tif (isMissingProviderPathError(error)) return false;',
+        '\t\tthrow error;',
+        '\t}',
+      ].join('\n'),
+      after: [
+        'async function existsAsMarker(path, fileSystem, signal) {',
+        '\tif (fileSystem !== void 0) try {',
+        '\t\tconst target = await fileSystem.resolve(path, signalOptions(signal));',
+        '\t\treturn await fileSystem.stat(target, signal) !== void 0;',
+        '\t} catch (error) {',
+        '\t\tsignal?.throwIfAborted();',
+        '\t\t/*',
+        '\t\t * 【DSHM 端侧补丁 2026-10-10（DSHM_SCOPE_WALK_TOLERANT）】上游只认 `FS_NOT_FOUND`，',
+        '\t\t * 而允许面之外的探测带的是 `FS_PERMISSION_DENIED`（真机：`/storage/Users/.git`）',
+        '\t\t * ⇒ 原来一律 `throw`，等于把"向上找项目根"变成整轮失败。',
+        '\t\t * 语义：这一问是"此处有没有标记"⇒ 无权看就是**没有**，继续向上；到 `/` 之后',
+        '\t\t * 由 findProjectRoot() 自己 `return resolve(cwd)` 收尾（上游既有兜底）。',
+        '\t\t * 只多认这一个码：其余错误（含取消）照旧上抛。',
+        '\t\t */',
+        '\t\tif (isMissingProviderPathError(error) || isScopeDeniedProviderPathError(error)) return false;',
+        '\t\tthrow error;',
+        '\t}',
+      ].join('\n'),
+    },
+  ];
+  let text = readFileSync(target, 'utf8');
+  let patched = 0;
+  for (const site of sites) {
+    // 幂等判据必须先看 after：本函数 site① 的 after 是"before + 追加块"（before 是 after 的
+    // 前缀），若先按 before 计数会得到 1 并**重复注入**（实测 2→3 处标记后判红）。
+    if (text.includes(site.after)) continue; // 已打过（幂等）
+    const times = text.split(site.before).length - 1;
+    if (times === 0) {
+      die(`项目根探测容忍补丁：未找到待替换片段（${site.why}）—— 上游结构变化？拒绝静默跳过`);
+    }
+    if (times !== 1) {
+      die(`项目根探测容忍补丁：待替换片段出现 ${times} 次（${site.why}）—— 判据不再唯一，拒绝静默乱改`);
+    }
+    text = text.split(site.before).join(site.after);
+    patched += 1;
+  }
+  if (patched === 0) {
+    log('[pack-core]   项目根探测容忍补丁已存在（跳过）');
+    return;
+  }
+  const marks = text.split(MARK).length - 1;
+  if (marks !== sites.length) {
+    die(`项目根探测容忍补丁：标记 ${MARK} 应出现 ${sites.length} 次，实际 ${marks} 次 —— 补丁不完整，拒绝出包`);
+  }
+  writeFileSync(target, text, 'utf8');
+  log(`[pack-core]   项目根探测容忍补丁：面外探测不再炸 agent/pre-step（${marks} 处）`);
+}
+
 function patchFsLocalPermissionHint() {
   const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-fs-local', 'lib', 'index.js');
   if (!existsSync(target)) {
@@ -2579,6 +3774,27 @@ function patchFsLocalPermissionHint() {
    * 模板串会在这里被就地求值（实测炸过），单引号串才是"逐字写进树里"。
    */
   const MARK = 'DSHM_FS_LOCAL_PERMISSION_HINT';
+  if (['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])) {
+    const text = readFileSync(target, 'utf8');
+    const nativeSites = [
+      'import { FileSystem, FsError, FsTargetKey, FsVersion, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";',
+      '\t\tinfo = await stat(target.targetKey);\n\t} catch (error) {\n\t\tthrow fsErrorFromErrno(verb, target.displayPath, error);',
+      'async function readFileAbortable(absolutePath, displayPath, verb, signal) {',
+      '\t\tif (isAbortError(error)) throw new FsError(`${verb} aborted`, "FS_ABORTED");\n\t\tthrow fsErrorFromErrno(verb, displayPath, error);',
+      '\tconst raw = await readFileAbortable(target.targetKey, target.displayPath, "read", signal);',
+      '\tconst buffer = await readFileAbortable(absolutePath, displayPath, "edit", signal);',
+    ];
+    const shared = readFileSync(join(STAGE, 'node_modules/@deepseek-ai/dsh-fs/lib/index.js'), 'utf8');
+    const errnoSites = [
+      'case "EACCES":\n\t\tcase "EPERM": return new FsError(`${failure}: permission denied`, "FS_PERMISSION_DENIED", { cause: error });',
+      'default: return new FsError(`${failure}: ${error.message}`, "FS_IO_ERROR", { cause: error });',
+    ];
+    if (text.includes(MARK) || nativeSites.some((lit) => !text.includes(lit)) || errnoSites.some((lit) => !shared.includes(lit))) {
+      die('fs-local 权限文案：rc.2 原生 errno 归一化契约不完整或混入旧注入，拒绝覆盖上游');
+    }
+    log('[pack-core]   fs-local 权限文案：rc.2 原生 stat/read/edit errno 归一化已核实，无需注入');
+    return;
+  }
   const sites = [
     {
       why: 'statRegularFile：stat 被拒 ⇒ FS_PERMISSION_DENIED',
@@ -2649,9 +3865,11 @@ function patchFsLocalPermissionHint() {
   let text = readFileSync(target, 'utf8');
   let patched = 0;
   for (const site of sites) {
+    // 同 patchAgentInstructionsScopeWalk()：先认 after 再按 before 计数，避免
+    // "before 是 after 前缀"时把已打的补丁再打一遍。
+    if (text.includes(site.after)) continue; // 已打过（幂等）
     const times = text.split(site.before).length - 1;
     if (times === 0) {
-      if (text.includes(site.after)) continue; // 已打过（幂等）
       die(`fs-local 权限文案补丁：未找到待替换片段（${site.why}）—— 上游结构变化？拒绝静默跳过`);
     }
     if (times !== 1) {
@@ -2901,7 +4119,9 @@ function patchResourceAddressArmor() {
     if (text.includes('DSHM_RESOURCE_ARMOR_PROTOCOL')) {
       log('[pack-core]   资源地址补丁（client-resources.protocolOf）已存在（跳过）');
     } else {
-      const before = '\t\t\tif (parsed.protocol !== `dsh-resource:`) return void 0;\n'
+      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+        ? 'if(parsed.protocol!==`${`dsh-resource`}:`)return void 0;return parsed.hostname===``?void 0:parsed.hostname.toLowerCase()'
+        : '\t\t\tif (parsed.protocol !== `dsh-resource:`) return void 0;\n'
         + '\t\t\treturn parsed.hostname === "" ? void 0 : parsed.hostname.toLowerCase();\n';
       if (!text.includes(before)) {
         die('资源地址补丁：client-resources 的 protocolOf() 实现已变化（未找到待替换片段），拒绝静默跳过');
@@ -2929,7 +4149,9 @@ function patchResourceAddressArmor() {
     if (text.includes('DSHM_RESOURCE_ARMOR_PATH')) {
       log('[pack-core]   资源地址补丁（sidebar-right.pathOf）已存在（跳过）');
     } else {
-      const before = '\t\tfunction pathOf(address) {\n'
+      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+        ? 'function pathOf(address){try{return new URL(address).pathname}catch{return}}'
+        : '\t\tfunction pathOf(address) {\n'
         + '\t\t\ttry {\n'
         + '\t\t\t\treturn new URL(address).pathname;\n'
         + '\t\t\t} catch {\n'
@@ -2970,7 +4192,9 @@ function patchResourceAddressArmor() {
     if (text.includes('DSHM_RESOURCE_ARMOR_SUBAGENT')) {
       log('[pack-core]   资源地址补丁（subagent.parseSubagentChatAddress）已存在（跳过）');
     } else {
-      const before = '\t\t\tif (url.protocol !== "dsh-resource:" || url.hostname.toLowerCase() !== "subagentchat") return void 0;\n'
+      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+        ? 'if(url.protocol!==`dsh-resource:`||url.hostname.toLowerCase()!==`subagentchat`)return void 0;const parts=url.pathname.split(`/`).filter(Boolean);if(parts.length!==2||parts[0]!==`session`)return void 0;const parentSessionId=url.searchParams.get(`parent`);const mode=url.searchParams.get(`mode`);'
+        : '\t\t\tif (url.protocol !== "dsh-resource:" || url.hostname.toLowerCase() !== "subagentchat") return void 0;\n'
         + '\t\t\tconst parts = url.pathname.split("/").filter(Boolean);\n'
         + '\t\t\tif (parts.length !== 2 || parts[0] !== "session") return void 0;\n'
         + '\t\t\tconst parentSessionId = url.searchParams.get("parent");\n'
@@ -3036,7 +4260,9 @@ function patchSidebarTabIdLeak() {
     log('[pack-core]   侧栏页签守卫补丁（sidebarRight.tabs.register 取号回滚）已存在（跳过）');
     return;
   }
-  const before = '\t\t\t\tconst dispose = this.ctx.effect(() => {\n'
+  const before = text.includes('const dispose=this.ctx.effect(()=>{this.ids.add(id);const slot=this.enter(kind,entry);this.refresh();return()=>{')
+    ? 'const dispose=this.ctx.effect(()=>{this.ids.add(id);const slot=this.enter(kind,entry);this.refresh();return()=>{'
+    : '\t\t\t\tconst dispose = this.ctx.effect(() => {\n'
     + '\t\t\t\t\tthis.ids.add(id);\n'
     + '\t\t\t\t\tconst slot = this.enter(kind, entry);\n'
     + '\t\t\t\t\tthis.refresh();\n'
@@ -3062,6 +4288,73 @@ function patchSidebarTabIdLeak() {
   log('[pack-core]   侧栏页签守卫补丁：sidebarRight.tabs.register() 取号失败回滚');
 }
 
+/**
+ * 首次启动「无法创建默认工作区」提示的收口（用户三条原话合起来）：
+ *   「两边首次安装都提示，**无法创建默认工作区**，这个不需要提示，默认就是让用户自己去创建，
+ *    弹窗别人还以为出什么毛病了」/「PC 也一样，三端都一样，不要这个提示，当然前提是没有什么影响」。
+ *
+ * 【为什么会弹】`dsh-client-ui-workspace/lib/client.js` 的启动流（逐行核对）：
+ *   `:1599` 三条同时成立（无目标工作区 · `workspaces.items.length === 0` · 无会话）才尝试首建；
+ *   `:1607-1614` `initializeDefaultWorkspace()` 里 `this.workspaces.initializeDefault(signal)` 抛错即
+ *   `this.notify({ kind: "defaultWorkspaceFailed" })` ⇒ `:4519` 渲染成 `t("defaultWorkspace.failed")`
+ *   = "无法创建默认工作区，请通过'选择工作区'选择文件夹"。
+ *
+ * 【为什么端侧必然抛】目录来自 `dsh-api-workspace-controller/lib/index.js:609-641` 的
+ * `defaultWorkspaceDirectory()`：`documentsDirectory` 端侧没有覆盖值 ⇒ 走 `runNativeCommand`
+ * 平台分支（`win32→powershell` / `darwin→osascript` / `linux→xdg-user-dir`），**openharmony 落到
+ * `default: throw new Error("system Documents directory is unavailable on <platform>")`**。
+ * 即"首次启动建默认工作区"在三端**结构性地不可能成功**（与 `docs/150` 把插件改成"只撤不建"
+ * 后的"空注册表 = 正常态"是同一条结论）。
+ *
+ * 【修法为什么安全】失败路径上**只**发这条 warning：不建会话、不改注册表、不阻断启动
+ * （`initializeDefaultWorkspace` 返回 undefined ⇒ `target` 仍 undefined ⇒ 跳过 `connectWorkspace`，
+ * 主区维持空态）。所以这里把这个 notify **删掉**只是"不再弹这条提示"，其余行为逐字不变；
+ * 用户仍可从侧栏「添加工作区」（`workspace.add` / `menu.addWorkspace`）自己选定目录。
+ *
+ * 【保持失败语义】`try/catch` 整段保留（吞掉 rejection、让启动流继续），只把 catch 体里那一行
+ * `notify` 换成静默 `return` —— 与"失败要知道"相反的场景（真要提示的 `createFailed` 等）不受影响。
+ *
+ * 【防呆】找不到待替换片段即 die（上游改了这段就当场在打包期暴露，而不是悄悄失效）。
+ */
+function patchDefaultWorkspaceToast() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js');
+  if (!existsSync(target)) die(`默认工作区提示补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_NO_DEFAULT_WORKSPACE_TOAST')) {
+    log('[pack-core]   默认工作区提示补丁已存在（跳过）');
+    return;
+  }
+  const before = text.includes('async initializeDefaultWorkspace(signal){try{return await this.workspaces.initializeDefault(signal)}catch(_error){if(!signal.aborted)this.notify({kind:`defaultWorkspaceFailed`});return}}')
+    ? 'async initializeDefaultWorkspace(signal){try{return await this.workspaces.initializeDefault(signal)}catch(_error){if(!signal.aborted)this.notify({kind:`defaultWorkspaceFailed`});return}}'
+    : '\t\t\tasync initializeDefaultWorkspace(signal) {\n'
+    + '\t\t\t\ttry {\n'
+    + '\t\t\t\t\treturn await this.workspaces.initializeDefault(signal);\n'
+    + '\t\t\t\t} catch (_error) {\n'
+    + '\t\t\t\t\tif (!signal.aborted) this.notify({ kind: "defaultWorkspaceFailed" });\n'
+    + '\t\t\t\t\treturn;\n'
+    + '\t\t\t\t}\n'
+    + '\t\t\t}\n';
+  if (!text.includes(before)) {
+    die('默认工作区提示补丁：dsh-client-ui-workspace 的 initializeDefaultWorkspace() 实现已变化'
+      + '（未找到待替换片段），拒绝静默跳过');
+  }
+  const after = '\t\t\tasync initializeDefaultWorkspace(signal) {\n'
+    + '\t\t\t\t/* DSHM_NO_DEFAULT_WORKSPACE_TOAST：端侧 defaultWorkspaceDirectory() 必抛\n'
+    + '\t\t\t\t * （openharmony 落 `default:` 分支）⇒ 原实现在这里弹\n'
+    + '\t\t\t\t * 「无法创建默认工作区，请通过"选择工作区"选择文件夹」，用户会误以为出故障。\n'
+    + '\t\t\t\t * 空注册表是有意为之的正常态（用户从侧栏「添加工作区」自建）⇒ 首次初始化失败改为\n'
+    + '\t\t\t\t * **静默**：不弹提示、不建会话、不阻断启动（try/catch 语义原样保留）。 */\n'
+    + '\t\t\t\ttry {\n'
+    + '\t\t\t\t\treturn await this.workspaces.initializeDefault(signal);\n'
+    + '\t\t\t\t} catch (_error) {\n'
+    + '\t\t\t\t\treturn;\n'
+    + '\t\t\t\t}\n'
+    + '\t\t\t}\n';
+  text = text.replace(before, after);
+  writeFileSync(target, text, 'utf8');
+  log('[pack-core]   默认工作区提示补丁：首建失败不再弹「无法创建默认工作区」');
+}
+
 function patchPdfMapCompat() {
   const target = join(
     STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-documentpreview', 'lib', 'client.pdf.js',
@@ -3074,8 +4367,10 @@ function patchPdfMapCompat() {
   }
 
   // ① 主线程：chunk 工厂开头装一次（该 chunk 是懒加载，装在这里就不受注入时机影响）。
-  const factoryAnchor = 'factory: (require) => {';
-  if ((text.split(factoryAnchor).length - 1) !== 1) {
+  // rc.2 发布物改为压缩箭头；两种已知格式仍须唯一，不匹配不能省略 realm 补齐。
+  const factories = ['factory: (require) => {', 'factory:require=>{'].filter((a) => text.includes(a));
+  const factoryAnchor = factories[0];
+  if (factories.length !== 1 || (text.split(factoryAnchor).length - 1) !== 1) {
     die('pdf 兼容补丁：chunk 工厂入口不唯一（未找到 factory 行），拒绝静默跳过');
   }
   const indented = MAP_COMPAT_SOURCE.replace(/\n+$/, '')
@@ -3084,7 +4379,7 @@ function patchPdfMapCompat() {
 
   // ② pdf worker：worker 由 Blob URL 起，独立 realm，不继承页面/主线程的原型补丁 ⇒
   //    在 Blob 分片数组**最前面**插一段同样源码的字符串字面量（JSON.stringify 保证转义正确）。
-  const blobAnchor = 'new Blob([_dsh_pdf_worker_default, ';
+  const blobAnchor = text.includes('new Blob([_dsh_pdf_worker_default, ') ? 'new Blob([_dsh_pdf_worker_default, ' : 'new Blob([_dsh_pdf_worker_default,';
   if ((text.split(blobAnchor).length - 1) !== 1) {
     die('pdf 兼容补丁：内联 pdf worker 的 Blob 构造不唯一（未找到待替换片段），拒绝静默跳过');
   }
@@ -3147,6 +4442,419 @@ function patchSubprocessOpenharmony() {
   log('[pack-core]   subprocess-local 补丁：index.js 跳过鸿蒙的 shellActivity 注入 + idle 分支接受 openharmony');
 }
 
+function patchNodePtySocketGuard() {
+  const target = join(STAGE, 'node_modules', 'node-pty', 'lib', 'unixTerminal.js');
+  if (!existsSync(target)) die(`node-pty 补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_NODE_PTY_SOCKET_GUARD')) {
+    log('[pack-core]   node-pty 补丁（unixTerminal.js）已存在（跳过）');
+    return;
+  }
+  /*
+   * 【缺口（根因，2026-10-14）】`pty.fork()` **失败**时 `_socket` 还没被赋值，而
+   * node-pty 在 `fork()` 之前就已经订好了 200ms 的 `DESTROY_SOCKET_TIMEOUT_MS` 定时器，
+   * 回调里无条件 `_this._socket.destroy()`。于是"一次失败 spawn"会在 200ms 后升级成
+   * **未捕获的 TypeError**，从定时器里逃出来，谁都接不住。
+   *
+   * 真机链（PC 档 `86E0226429000417`，`dist/acceptance/pc-node-output.log`）：
+   *   `BOOT_40_PROFILE_BOOT +1053ms` → `[DEP0168] N-API 未捕获异常警告`
+   *   → 恰好 +200ms `unixTerminal.js:114:35 TypeError`
+   *   → `BOOT_50_DSH_INIT runProfile 已返回 但没有 webServer` → 宿主线程 `process.exit(1)`。
+   *
+   * 触发它的正是我们自己的探针：`hostcore/app/main.js` 的 `runtimeFacts()` 用
+   * `pty.spawn('/system/bin/sh', ['-c', 'echo DSHM_PTY_OK'])` 试
+   * `ALLOW_EXTERNAL_NATIVE_CODE`。在 `spawn-helper` 被平台拒的那一档，`fork()` 同步抛错、
+   * 被探针自己的 try/catch 吞掉——补丁前那个 try/catch **接不住** 200ms 后的定时器回调，
+   * 于是一次"探测"就把宿主打死（这正是"点了终端就闪退"的上游形状）。
+   *
+   * 修法：让那次 destroy 容忍 `_socket` 未定义。语义只放宽失败路径，成功路径逐字不变。
+   */
+  const before = '                    // Destroying the socket now will cause the close event to fire\n'
+    + '                    _this._socket.destroy();';
+  if ((text.split(before).length - 1) !== 1) {
+    die('node-pty 补丁：unixTerminal.js 的 socket destroy 锚点不唯一（未找到待替换片段），拒绝静默跳过');
+  }
+  const after = '                    // Destroying the socket now will cause the close event to fire\n'
+    + '                    // DSHM_NODE_PTY_SOCKET_GUARD: pty.fork() 抛错时 _socket 还是 undefined，\n'
+    + '                    // 这里必须容忍它；否则 200ms 后的 TypeError 会逃出 try/catch 打死宿主。\n'
+    + '                    if (_this._socket !== undefined && _this._socket !== null) {\n'
+    + '                        _this._socket.destroy();\n'
+    + '                    }';
+  writeFileSync(target, text.replace(before, after), 'utf8');
+  log('[pack-core]   node-pty 补丁：unixTerminal.js 的 socket destroy 容忍未赋值（spawn 失败不再打死宿主）');
+}
+
+/**
+ * ⑳ web_fetch 的深嵌套 HTML 兜底（2026-10-17，抓取成功率）。
+ *
+ * 【为什么加】`dsh-tool-web` 的 `renderBody()` 在两条失败路径（词法深度超过
+ * MAX_CONVERSION_DEPTH=512 / turndown 抛错）上把**整页**替换成一句 "HTML content omitted"
+ * —— 真机会话实录：`https://www.stats.gov.cn/sj/ndsj/2025/indexch.htm`（HTTP 200，目录页
+ * 表格嵌套深）就这样整页丢失，用户的体感是"抓不到数据"。
+ * 深度上限本身**必须保留**（turndown 对深树是超线性：depth 2000≈2s / 20000≈5s，
+ * 会把事件循环占死，注释见上游 MAX_CONVERSION_DEPTH）；但"丢弃"不是唯一选项 ——
+ * 线性扫一遍标签 + 反转义几个常用实体，就能把正文救回来，且不泄露任何原始标签/脚本。
+ *
+ * 【边界】只改这两条失败分支；正常路径（turndown 成功）一个字节不动。
+ * 标记：DSHM_SHALLOW_HTML_FALLBACK（门禁 tools/check-core-openharmony-patches.mjs 断言）。
+ */
+function patchWebToolDeepHtmlFallback() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-tool-web', 'lib', 'index.js');
+  if (!existsSync(target)) die(`dsh-tool-web 兜底补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_SHALLOW_HTML_FALLBACK')) {
+    log('[pack-core]   dsh-tool-web 深嵌套兜底补丁已存在（跳过）');
+    return;
+  }
+  const upstream = '\t\tcase "html":\n'
+    + '\t\t\tif (exceedsConversionDepth(content)) return {\n'
+    + '\t\t\t\ttext: "[HTML content omitted: unable to convert safely.]",\n'
+    + '\t\t\t\tsourceTruncated\n'
+    + '\t\t\t};\n'
+    + '\t\t\ttry {\n'
+    + '\t\t\t\treturn {\n'
+    + '\t\t\t\t\ttext: turndown.turndown(content),\n'
+    + '\t\t\t\t\tsourceTruncated\n'
+    + '\t\t\t\t};\n'
+    + '\t\t\t} catch {\n'
+    + '\t\t\t\treturn {\n'
+    + '\t\t\t\t\ttext: "[HTML content omitted: unable to convert safely.]",\n'
+    + '\t\t\t\t\tsourceTruncated\n'
+    + '\t\t\t\t};\n'
+    + '\t\t\t}';
+  if ((text.split(upstream).length - 1) !== 1) {
+    die('dsh-tool-web 兜底补丁：renderBody 的 html 分支锚点不唯一（未找到待替换片段），拒绝静默跳过');
+  }
+  const helper = '/**\n'
+    + ' * DSHM_SHALLOW_HTML_FALLBACK（2026-10-17）：深嵌套/转换失败时的**兜底纯文本**提取。\n'
+    + ' *\n'
+    + ' * 【为什么加】原实现在词法深度超过 MAX_CONVERSION_DEPTH 或 turndown 抛错时，\n'
+    + ' * 把整页替换成一句 "HTML content omitted"（连正文都不留）—— 真机会话实录：\n'
+    + ' * 国家统计局的目录页（HTTP 200、表格嵌套深）就是这样整页丢失的。\n'
+    + ' * 深度上限本身必须保留（turndown 对深树超线性，会占死事件循环）；\n'
+    + ' * 但线性扫一遍标签 + 反转义几个实体即可救回正文，且不泄露任何原始标签/脚本。\n'
+    + ' * 【边界】只在这两条失败分支上生效；正常路径（turndown 成功）一个字节不动。\n'
+    + ' */\n'
+    + 'function salvageDeepHtmlText(html) {\n'
+    + '\tconst stripped = html\n'
+    + '\t\t.replace(/<(script|style|noscript|template|svg)\\b[\\s\\S]*?<\\/\\1\\s*>/gi, " ")\n'
+    + '\t\t.replace(/<!--[\\s\\S]*?-->/g, " ")\n'
+    + '\t\t.replace(/<[^>]*>/g, " ");\n'
+    + '\tconst decoded = stripped\n'
+    + '\t\t.replace(/&nbsp;/gi, " ")\n'
+    + '\t\t.replace(/&lt;/gi, "<")\n'
+    + '\t\t.replace(/&gt;/gi, ">")\n'
+    + '\t\t.replace(/&quot;/gi, \'"\')\n'
+    + "\t\t.replace(/&#39;/gi, \"'\")\n"
+    + '\t\t.replace(/&amp;/gi, "&");\n'
+    + '\tconst frames = [];\n'
+    + '\tconst frameRe = /<frame\\b[^>]*?\\bsrc\\s*=\\s*["\\\']([^"\\\']+)["\\\']/gi;\n'
+    + '\tlet match;\n'
+    + '\twhile ((match = frameRe.exec(html)) !== null && frames.length < 5) frames.push(match[1]);\n'
+    + '\tconst frameNote = frames.length > 0\n'
+    + '\t\t? ` Frameset srcs (fetch these directly): ${frames.join(", ")}.`\n'
+    + '\t\t: "";\n'
+    + '\treturn "[Shallow text fallback: deeply nested or unconvertible HTML; tags and scripts stripped.]"\n'
+    + '\t\t+ frameNote + "\\n"\n'
+    + '\t\t+ decoded.replace(/\\s+/g, " ").trim();\n'
+    + '}\n\n';
+  const after = '\t\tcase "html":\n'
+    + '\t\t\tif (exceedsConversionDepth(content)) return {\n'
+    + '\t\t\t\ttext: salvageDeepHtmlText(content),\n'
+    + '\t\t\t\tsourceTruncated\n'
+    + '\t\t\t};\n'
+    + '\t\t\ttry {\n'
+    + '\t\t\t\treturn {\n'
+    + '\t\t\t\t\ttext: turndown.turndown(content),\n'
+    + '\t\t\t\t\tsourceTruncated\n'
+    + '\t\t\t\t};\n'
+    + '\t\t\t} catch {\n'
+    + '\t\t\t\treturn {\n'
+    + '\t\t\t\t\ttext: salvageDeepHtmlText(content),\n'
+    + '\t\t\t\t\tsourceTruncated\n'
+    + '\t\t\t\t};\n'
+    + '\t\t\t}';
+  text = text.replace(upstream, after);
+  const renderAnchor = 'function renderBody(body, maxInputChars) {';
+  if ((text.split(renderAnchor).length - 1) !== 1) {
+    die('dsh-tool-web 兜底补丁：renderBody 定义锚点不唯一，拒绝静默跳过');
+  }
+  text = text.replace(renderAnchor, helper + renderAnchor);
+  writeFileSync(target, text, 'utf8');
+  log('[pack-core]   dsh-tool-web 兜底补丁：深嵌套/转换失败的 HTML 改走线性纯文本提取（不再整页丢弃）');
+}
+
+/**
+ * ㉑ web_fetch 的请求头（2026-10-17，抓取成功率第二批）。
+ *
+ * 【为什么】UA 已在 profile 里改成浏览器 UA（docs/177）；但很多反爬中间件还会看
+ * **Accept-Language** 与**同源 Referer** —— 一个"只有 UA、没有语言/来源"的请求仍然会被
+ * 打成低分。这里补上浏览器正常会带的两项（仅此两项，不动 method / redirect / SSRF 策略）。
+ * 标记：DSHM_WEB_FETCH_HEADERS（门禁 tools/check-core-openharmony-patches.mjs 断言）。
+ */
+function patchWebFetchHeaders() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-web-fetch-http', 'lib', 'index.js');
+  if (!existsSync(target)) die(`web-fetch-http 请求头补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_WEB_FETCH_HEADERS')) {
+    log('[pack-core]   web-fetch-http 请求头补丁已存在（跳过）');
+    return;
+  }
+  const before = '\t\tconst headers = {\n'
+    + '\t\t\t"user-agent": this.limits.userAgent,\n'
+    + '\t\t\t"accept": "text/html,application/xhtml+xml,text/*;q=0.9,application/json;q=0.8"\n'
+    + '\t\t};';
+  if ((text.split(before).length - 1) !== 1) {
+    die('web-fetch-http 请求头补丁：headers 锚点不唯一（未找到待替换片段），拒绝静默跳过');
+  }
+  const after = '\t\tconst headers = {\n'
+    + '\t\t\t"user-agent": this.limits.userAgent,\n'
+    + '\t\t\t"accept": "text/html,application/xhtml+xml,text/*;q=0.9,application/json;q=0.8",\n'
+    + '\t\t\t// DSHM_WEB_FETCH_HEADERS: 浏览器默认会带的语言/来源头（反爬中间件对缺席请求打分更低）\n'
+    + '\t\t\t"accept-language": "zh-CN,zh;q=0.9,en;q=0.8",\n'
+    + '\t\t\t"referer": url.origin + "/"\n'
+    + '\t\t};';
+  writeFileSync(target, text.replace(before, after), 'utf8');
+  log('[pack-core]   web-fetch-http 请求头补丁：补 Accept-Language + 同源 Referer');
+}
+
+function patchClientHmrPoll() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-hmr', 'lib', 'index.js');
+  if (!existsSync(target)) die(`client-hmr 补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_CLIENT_HMR_POLL_OFF')) {
+    log('[pack-core]   client-hmr 轮询补丁已存在（跳过）');
+    return;
+  }
+  /*
+   * 【缺口（根因，2026-10-14）】`@deepseek-ai/dsh-client-hmr` 由 `dsh-web-app` 的
+   * bundle patch **总是挂载**（上游注释："always mounted: it is idle until a rebuild
+   * watcher (pnpm run dev:web) actually rewrites client bundles"）。它"idle"的判据是
+   * "没人重写 bundle"，但它自己的实现是 `setInterval(pollWatches, 500)` —— **每 500ms
+   * 把 client graph 里每一条 bundle 都 `statSync` 一遍**。上游语境里这些文件在本地盘、
+   * 进程热着，代价看不出来；端侧两个条件同时变坏：
+   *   · 核心树解在 el2（`/data/storage/el2/.../dsh/cores/<ver>/node_modules/...`），
+   *     单次 stat 在设备上要 ~0.18ms（内存吃紧时单次 200~300ms）；
+   *   · 端侧**没有** `dev:web` 重建器，也不可能有人在运行期改这些 bundle ⇒ 轮询 100% 是白工。
+   *
+   * 真机读数（PC 档，V8 CPU profile 的调用栈，`dist/acceptance/20261014-pcstart/`）：
+   *   `statSync <- bundleStat <- pollWatches <- listOnTimeout` —— 一次 `LOOP-GAP 4262ms` 内
+   *   `statSync×23117=4114ms`（下一次 `LOOP-GAP 11503ms` 内 `statSync×23185=8016ms`），
+   *   同时段 WebView 渲染进程被系统 OOM 杀掉（`RenderExited exitSig:9`）。
+   *   即：**它把事件循环整段占住**，网页那边的观感就是"启动巨慢 / 卡住"。
+   *
+   * 修法：把"挂 bundle 监视 + 起轮询"这一个 `ctx.effect` 变成惰性 —— 默认**不跑**，
+   * 只有显式 `DSHM_CLIENT_HMR_POLL=1` 才启用（保留给将来在端侧做真 HMR 的场景）。
+   * **只关轮询，不动 SSE 通道**：`/plugins/events` 那条 effect 原样保留（连接时的首帧
+   * graph 与 `onGraphChanged`/`onRebuilt` 推送都还在），所以浏览器半边的模块表同步
+   * 一个字都不变 —— 关掉的只有"磁盘上有没有人改了 bundle"这件端侧恒假的事。
+   */
+  const before = '\tctx.effect(() => {\n\t\tsyncWatches();\n';
+  if ((text.split(before).length - 1) !== 1) {
+    die('client-hmr 补丁：bundle watches 的 ctx.effect 锚点不唯一（未找到待替换片段），拒绝静默跳过');
+  }
+  const after = '\tctx.effect(() => {\n'
+    + '\t\t// DSHM_CLIENT_HMR_POLL_OFF: 端侧没有重建器，轮询只会把事件循环整段占住（实测 23k statSync / 4s）。\n'
+    + '\t\tif (process.env.DSHM_CLIENT_HMR_POLL !== "1") return () => {};\n'
+    + '\t\tsyncWatches();\n';
+  writeFileSync(target, text.replace(before, after), 'utf8');
+  log('[pack-core]   client-hmr 补丁：bundle 轮询默认关闭（DSHM_CLIENT_HMR_POLL=1 可开；SSE 通道不动）');
+}
+
+/**
+ * 侧边栏终端：软键盘弹出时禁止 xterm 的 ResizeObserver 触发 fit/resize。
+ *
+ * 真机现象（2026-10-18）：手机终端呼出键盘后，输入与删除时整行预览/滚动位置乱跳。
+ * xterm 的 `ResizeObserver` 会把键盘引起的可视高度变化当成终端尺寸变化，连续
+ * `fitScreen()` → `xterm.resize()` → `model.resize()`，服务端 PTY 也跟着反复收到
+ * SIGWINCH。键盘输入还没提交，视口先重排了几次。
+ *
+ * 原生壳在 `avoidAreaChange(TYPE_KEYBOARD)` 时给 `<html>` 挂 `dshm-keyboard-open`；
+ * 本补丁让测量函数在键盘存在期间直接返回，键盘收起后 ResizeObserver 会自然再跑一次。
+ */
+function patchTerminalKeyboardResizeGuard() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-ui-sidebar-terminal',
+    'lib', 'client.terminal.js');
+  if (!existsSync(target)) die(`终端键盘 resize 守卫：找不到 ${target}`);
+  const src = readFileSync(target, 'utf8');
+  if (src.includes('DSHM_KEYBOARD_RESIZE_GUARD')) {
+    log('[pack-core]   终端键盘 resize 守卫已存在（跳过）');
+    return;
+  }
+  const anchor = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+    ? 'const measure=()=>{if(!current.current.visible'
+    : 'const measure = () => {\n\t\t\t\t\tif (!current.current.visible';
+  const count = src.split(anchor).length - 1;
+  if (count !== 1) {
+    die(`终端键盘 resize 守卫：measure 锚点不唯一（找到 ${count} 处），拒绝静默跳过`);
+  }
+  const inserted = 'const measure = () => {\n'
+    + '\t\t\t\t\t/* DSHM_KEYBOARD_RESIZE_GUARD: 软键盘不是终端尺寸变化；键盘期暂停 fit/resize。 */\n'
+    + '\t\t\t\t\tconst __dshmRoot = document.documentElement;\n'
+    + "\t\t\t\t\tif (__dshmRoot && __dshmRoot.classList.contains('dshm-keyboard-open')) return;\n"
+    + '\t\t\t\t\tif (!current.current.visible';
+  writeFileSync(target, src.replace(anchor, inserted), 'utf8');
+  log('[pack-core]   终端补丁：软键盘期暂停 xterm fit/resize（输入预览不再乱跳）');
+}
+
+/**
+ * 左下角「连接异常，刷新重试」根治：WebSocket 失败后必须**自己**持续重试。
+ *
+ * 【真机现象（2026-10-31，三端一致，云调试新设备同样复现）】
+ *   启动后左下角永远是「连接异常，刷新重试」，点一下手动重连又能好。
+ *   日志逐毫秒对照（`com.dshm.dshclient/DSHM-NODELIVE`）：
+ *     09:11:24.550  ACCEPT #10 127.0.0.1:40010
+ *     09:11:24.551  IN-UPGRADE GET /api/remote.mux ... origin=http://127.0.0.1:3120
+ *                   URLRequestCanceled error:ERR_WS_UPGRADE(-173)
+ *   Host 收到升级后 **1ms 内**就被取消，`ws.handleUpgrade` 来不及写出 101
+ *   ⇒ 这是 ArkWeb 网络栈自己 abort 的，不是 Host 拒绝、不是网络、不是 token。
+ *
+ * 【为什么这一处必须修（与 ArkWeb 为什么 cancel 是两件事）】
+ *   对照实验（本机 1.1.6 实测）：用真实 token + cookie、逐字节照 ArkWeb 的头
+ *   （Host / Origin / Sec-WebSocket-*）直接打 `/api/remote.mux`，Host 回的是
+ *   `HTTP/1.1 101 Switching Protocols` ⇒ **Host 侧完全健康**。
+ *   而 1.1.6(+dshm.96) 与 1.1.7(+dshm.103) 的 `dsh-client-connection` /
+ *   `dsh-api-gateway` / `dsh-host-webserver` / 前端 dist 全部**逐字节相同**
+ *   ⇒ "1.1.7 改坏了连接"不成立，两版共有一个上游缺陷：
+ *
+ *     ① `RemoteStreamMuxClient.maintain()` 失败后**只置 failure，不排下一次**；
+ *     ② 它唯一的重启入口是 `onReconnectRequested`，而那个回调只在
+ *        `ConnectionController.loop()` 走到 retry 分支时才触发；
+ *     ③ `loop()` 的 offline 分支是 `await waitForAbort(retryDelay.signal)`，
+ *        只有 `online` 事件能唤醒 —— 而 `setNetworkAvailable()` 首行
+ *        `if (this.networkAvailable === available) return;` 让"再报一次 true"直接返回。
+ *     ⇒ 一次 WS 失败 = 永久不再尝试（日志实证：17:11:24 之后再无任何 ACCEPT/UPGRADE）。
+ *
+ * 【修法】只动 ③ 之上那层（不碰 ArkWeb）：让 `maintain()` 在**失败后自己带退避重连**，
+ *   不再依赖 `loop()` 的状态。退避与官方口径一致（500ms 起、×2、封顶 10s），
+ *   连上（`opened`）即复位；`disposed`/`!running` 时立即停，不留悬挂定时器。
+ *   这样即使 ArkWeb 偶发取消，用户看到的是"短暂连接中 → 自动连上"，
+ *   而不是"永久连接异常"。
+ *
+ * 【判据】`tools/check-ws-self-heal.mjs`（带对照臂：把自愈删掉必须判红）。
+ */
+function patchRemoteStreamSelfHeal() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-api-gateway', 'lib', 'client.browser.js');
+  if (!existsSync(target)) die(`WS 自愈补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_WS_SELF_HEAL')) {
+    log('[pack-core]   WS 自愈补丁已存在（跳过）');
+    return;
+  }
+
+  // ── ① 失败后自己排重试 ───────────────────────────────────────────────
+  // rc.2 压缩发布格式：仅展开经核对的状态机边界，随后仍由旧补丁的唯一锚点判据逐项验收。
+  text = text.replace('running=false;disposed=false;failure;', '\t\t\trunning = false;\n\t\t\tdisposed = false;\n\t\t\tfailure;\n')
+    .replace('this.keepAlive=task;task.then(()=>{this.keepAlive=void 0})}', '\t\t\t\tthis.keepAlive = task;\n\t\t\t\ttask.then(() => {\n\t\t\t\t\tthis.keepAlive = void 0;\n\t\t\t\t});\n\t\t\t}\n')
+    .replace('settled=true;this.cancelCandidate=void 0;this.socket=socket;', '\t\t\t\t\t\tsettled = true;\n\t\t\t\t\t\tthis.cancelCandidate = void 0;\n\t\t\t\t\t\tthis.socket = socket;\n')
+    .replace('const failed=()=>{', '\t\t\t\t\tconst failed = () => {\n')
+    .replace('const closed=()=>{socket.removeEventListener(`open`,opened);', '\t\t\t\t\tconst closed = () => {\n\t\t\t\t\t\tsocket.removeEventListener("open", opened);\n');
+  const anchorFields = '\t\t\trunning = false;\n'
+    + '\t\t\tdisposed = false;\n'
+    + '\t\t\tfailure;\n';
+  if ((text.split(anchorFields).length - 1) !== 1) {
+    die('WS 自愈补丁：类字段锚点不唯一，拒绝静默跳过');
+  }
+  text = text.replace(anchorFields,
+    '\t\t\trunning = false;\n'
+    + '\t\t\tdisposed = false;\n'
+    + '\t\t\t/* DSHM_WS_SELF_HEAL: 自愈退避状态（attempt 计数 / 待定定时器 / 待输出诊断）。 */\n'
+    + '\t\t\tselfHealAttempt = 0;\n'
+    + '\t\t\tselfHealTimer;\n'
+    + '\t\t\tselfHealBuf;\n'
+    + '\t\t\tfailure;\n');
+
+  const anchorMaint = '\t\t\t\tthis.keepAlive = task;\n'
+    + '\t\t\t\ttask.then(() => {\n'
+    + '\t\t\t\t\tthis.keepAlive = void 0;\n'
+    + '\t\t\t\t});\n'
+    + '\t\t\t}\n';
+  if ((text.split(anchorMaint).length - 1) !== 1) {
+    die('WS 自愈补丁：maintain() 尾部锚点不唯一，拒绝静默跳过');
+  }
+  const afterMaint = '\t\t\t\tthis.keepAlive = task;\n'
+    + '\t\t\t\ttask.then(() => {\n'
+    + '\t\t\t\t\tthis.keepAlive = void 0;\n'
+    + '\t\t\t\t\t/* DSHM_WS_SELF_HEAL: 失败后自己排下一次 —— 不再等 loop() 的 onReconnectRequested。\n'
+    + '\t\t\t\t\t * 官方只在 reconnect() 里重排队，而 loop() 可能永远不回来（见 patch 头注③）。 */\n'
+    + '\t\t\t\t\tthis.scheduleSelfHeal();\n'
+    + '\t\t\t\t});\n'
+    + '\t\t\t}\n'
+    + '\t\t\t/** DSHM_WS_SELF_HEAL：按官方退避口径排一次自愈（500ms 起、×2、封顶 10s）。 */\n'
+    + '\t\t\tscheduleSelfHeal() {\n'
+    + '\t\t\t\tif (!this.running || this.disposed) return;\n'
+    + '\t\t\t\tif (this.socket !== void 0 && this.socket.readyState === 1) { this.selfHealAttempt = 0; return; }\n'
+    + '\t\t\t\tif (this.selfHealTimer !== void 0) return;\n'
+    + '\t\t\t\tconst attempt = ++this.selfHealAttempt;\n'
+    + '\t\t\t\tconst cap = Math.min(10000, 500 * (2 ** Math.max(0, attempt - 1)));\n'
+    + '\t\t\t\tconst delay = cap / 2 + Math.random() * (cap / 2);\n'
+    + '\t\t\t\tif (this.selfHealBuf !== void 0) {\n'
+    + '\t\t\t\t\tconst line = "[DSHM-WS] 升级失败(error/close)，" + String(Math.round(delay)) + "ms 后第 " + String(attempt) + " 次自愈重连 " + String(this.selfHealBuf);\n'
+    + '\t\t\t\t\tthis.selfHealBuf = void 0;\n'
+    + '\t\t\t\t\ttry { console.warn(line); } catch (ignored) { /* 日志失败不影响重连 */ }\n'
+    + '\t\t\t\t}\n'
+    + '\t\t\t\tthis.selfHealTimer = setTimeout(() => {\n'
+    + '\t\t\t\t\tthis.selfHealTimer = void 0;\n'
+    + '\t\t\t\t\tif (!this.running || this.disposed) return;\n'
+    + '\t\t\t\t\tthis.maintain();\n'
+    + '\t\t\t\t}, delay);\n'
+    + '\t\t\t\tif (typeof this.selfHealTimer === "object" && this.selfHealTimer !== null && typeof this.selfHealTimer.unref === "function") this.selfHealTimer.unref();\n'
+    + '\t\t\t}\n';
+  text = text.replace(anchorMaint, afterMaint);
+
+  // ── ② 连上即复位退避、清掉待决定时器 ─────────────────────────────────
+  const anchorOpened = '\t\t\t\t\t\tsettled = true;\n'
+    + '\t\t\t\t\t\tthis.cancelCandidate = void 0;\n'
+    + '\t\t\t\t\t\tthis.socket = socket;\n';
+  if ((text.split(anchorOpened).length - 1) !== 1) {
+    die('WS 自愈补丁：opened() 锚点不唯一，拒绝静默跳过');
+  }
+  text = text.replace(anchorOpened,
+    '\t\t\t\t\t\tsettled = true;\n'
+    + '\t\t\t\t\t\tthis.cancelCandidate = void 0;\n'
+    + '\t\t\t\t\t\t/* DSHM_WS_SELF_HEAL: 连上即复位退避，并清掉残留的重连定时器。 */\n'
+    + '\t\t\t\t\t\tthis.selfHealAttempt = 0;\n'
+    + '\t\t\t\t\t\tthis.selfHealBuf = void 0;\n'
+    + '\t\t\t\t\t\tif (this.selfHealTimer !== void 0) { clearTimeout(this.selfHealTimer); this.selfHealTimer = void 0; }\n'
+    + '\t\t\t\t\t\tthis.socket = socket;\n');
+
+  // ── ③ 诊断埋点：把 ArkWeb 给的 error/close 细节带出来（只记不抛）───────
+  const anchorFailed = '\t\t\t\t\tconst failed = () => {\n';
+  if ((text.split(anchorFailed).length - 1) !== 1) {
+    die('WS 自愈补丁：failed() 锚点不唯一，拒绝静默跳过');
+  }
+  text = text.replace(anchorFailed,
+    '\t\t\t\t\t/* DSHM_WS_SELF_HEAL: 记录 ArkWeb 侧的失败细节（code/reason），供云调试定位取消原因。 */\n'
+    + '\t\t\t\t\tconst noteCarrier = (kind, event) => {\n'
+    + '\t\t\t\t\t\ttry {\n'
+    + '\t\t\t\t\t\t\tconst detail = {\n'
+    + '\t\t\t\t\t\t\t\tkind,\n'
+    + '\t\t\t\t\t\t\t\tcode: event?.code,\n'
+    + '\t\t\t\t\t\t\t\treason: event?.reason,\n'
+    + '\t\t\t\t\t\t\t\twasClean: event?.wasClean,\n'
+    + '\t\t\t\t\t\t\t\tonLine: globalThis.navigator?.onLine,\n'
+    + '\t\t\t\t\t\t\t\turl: typeof remoteStreamUrl === "function" ? remoteStreamUrl() : void 0\n'
+    + '\t\t\t\t\t\t\t};\n'
+    + '\t\t\t\t\t\t\tthis.selfHealBuf = JSON.stringify(detail);\n'
+    + '\t\t\t\t\t\t} catch (ignored) { /* 诊断失败不影响重连 */ }\n'
+    + '\t\t\t\t\t};\n'
+    + '\t\t\t\t\tconst failed = () => {\n'
+    + '\t\t\t\t\t\tnoteCarrier("error");\n');
+
+  const anchorClosed = '\t\t\t\t\tconst closed = () => {\n'
+    + '\t\t\t\t\t\tsocket.removeEventListener("open", opened);\n';
+  if ((text.split(anchorClosed).length - 1) !== 1) {
+    die('WS 自愈补丁：close 锚点不唯一，拒绝静默跳过');
+  }
+  text = text.replace(anchorClosed,
+    '\t\t\t\t\tconst closed = (event) => {\n'
+    + '\t\t\t\t\t\tif (this.selfHealBuf === void 0) noteCarrier("close", event);\n'
+    + '\t\t\t\t\t\tsocket.removeEventListener("open", opened);\n');
+
+  writeFileSync(target, text, 'utf8');
+  log('[pack-core]   WS 自愈补丁：升级失败后自动退避重连 + error/close 诊断（DSHM-WS）');
+}
+
 function embedTreeInfo() {
   // 插件与原生模块清单：**在构建期算一次**，写进树里给端侧读。
   // 【为什么不在端侧现算】端侧要算同一件事，得在 27250 个文件 / 4000 个目录上递归
@@ -3158,7 +4866,22 @@ function embedTreeInfo() {
     coreVersion: recipe.coreVersion,
     platform: `${recipe.platform.os}/${recipe.platform.cpu}`,
     profile: recipe.profile,
-    builtAt: new Date().toISOString(),
+    /*
+     * 【可复现构建（docs/334 复核发现）】此前这里是 `new Date().toISOString()`，
+     * 于是**同一个核心版本、同一棵源树，每次打包得到不同的 sha256**。
+     * 实测三次连打：85a1447b / e0b0391a / 571077f3 —— 三个不同值。
+     *
+     * 后果不是"哈希不好看"，而是**"三方一致"门禁失去意义**：
+     * `check-resfile-core-zip` 断言 resfile ↔ 配方 ↔ 本次产出三者相等，
+     * 而"本次产出"每次都变 ⇒ 只要重打包一次，之前放进去的那份立刻"不一致"。
+     * 而且无法回答"设备上跑的这棵树是不是就是仓库这一份"。
+     *
+     * 修法：优先取 `SOURCE_DATE_EPOCH`（可复现构建的标准环境变量，秒级时间戳），
+     * 否则取**核心配方文件自身的 mtime** —— 后者与版本号同步递增（改核心必升
+     * `+dshm.<n>` 并重写配方），因此"同一配方 ⇒ 同一 builtAt ⇒ 同一 sha256"。
+     * 注意：这**不是**"打包时刻"，而是"这份核心内容成形的时刻"，语义更准。
+     */
+    builtAt: reproducibleStamp(),
     // dsh 的两条硬约束的交集：OHOS 支持 >= 22.17.0，会话持久化 zstd 需要 >= 22.15
     nodeFloor: '22.17.0',
     overrides: recipe.overrides,
@@ -3380,11 +5103,20 @@ function pack() {
     }
   }
 
-  // 随应用分发：放进 entry 的 resfile（**不是 rawfile**，见 hostruntime/core/BundledCore.ets 的说明：
-  // resfile 安装后解压到沙箱、可按真实路径只读访问；rawfile 的 fd 不是文件系统 fd，copyFile 会拷坏）
+  // 随应用分发：放进 HAP/HSP common 的 resfile（见 hostruntime/core/BundledCore.ets：
+  // resfile 安装后解压到沙箱，可按真实路径只读访问）。
+  // 2026-10-28 双端分离后，core 只放在共享 HSP；entry/phone HAP 各自放一份会让
+  // 合并 APP 体积翻倍。以下沿用旧的单份清理判据，补上 HSP 目录。
   if (process.argv.includes('--place-in-app')) {
-    const resDir = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile');
+    const resDir = join(ROOT, 'hostruntime', 'src', 'main', 'resources', 'resfile');
     mkdirSync(resDir, { recursive: true });
+    const entryResDir = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile');
+    for (const stale of existsSync(entryResDir) ? readdirSync(entryResDir) : []) {
+      if (stale.startsWith('dsh-core-') && stale.endsWith('.zip')) {
+        rmSync(join(entryResDir, stale), { force: true });
+        log(`[pack-core]   清掉 entry 重复容器：${stale}`);
+      }
+    }
     /*
      * 【2026-10-05 加：放新的之前，把**其它**核心容器删掉】
      * 真机复测实测：三份 core 共存把 HAP 从 406 MB 顶到 491 MB（每份 ~85 MB）。
@@ -3403,7 +5135,7 @@ function pack() {
     }
     const dest = join(resDir, `${base}.zip`);
     cpSync(zipPath, dest, { force: true });
-    log(`[pack-core]   已放入应用内置资源：entry/src/main/resources/resfile/${base}.zip`);
+    log(`[pack-core]   已放入共享 HSP 资源：hostruntime/src/main/resources/resfile/${base}.zip`);
     log('[pack-core]   注意：该文件已在 .gitignore 中（体积大，不进版本库）');
   }
 
@@ -3415,6 +5147,23 @@ function writeManifest(extra) {
   let fileCount = 0;
   for (const f of listFilesRecursive(nm)) { void f; fileCount++; }
   const corePkg = JSON.parse(readFileSync(join(nm, '@deepseek-ai', 'dsh', 'package.json'), 'utf8'));
+  /*
+   * 【打包前的最后一道断言（2026-10-29）】清单里同时记 `coreVersion`（配方）与
+   * `coreVersionInstalled`（实际装了什么）**只是为了让人能对账**，它们相等必须由
+   * 这里当场判死，而不是靠读者发现不相等。materialize() 的复用分支已有一道同样的
+   * 断言；这里再判一次锁的是"即将被 zip 读走的这棵树"（中间还隔着一串 patch 步骤）。
+   */
+  /*
+   * 【2026-10-30 与 materialize() 同口径】比较**上游版本**：`+dshm.<n>` 是 build metadata，
+   * 不在 npm 包清单里（上一版拿整串比 ⇒ 每次出包都在这里判死，而门禁 check-resfile-core-zip
+   * 又会指出"打包前断言失败"，两头都不通）。上游版本不等才是"旧核心被打上新标签"。
+   */
+  const installedUpstream = String(corePkg.version || '').split('+')[0];
+  const recipeUpstream = String(recipe.coreVersion || '').split('+')[0];
+  if (installedUpstream !== recipeUpstream) {
+    die(`打包前断言失败：实际安装 ${corePkg.version} ≠ 配方 coreVersion ${recipe.coreVersion}（上游部分）。`
+      + '产物会被打上错误版本标签 —— 请清掉该暂存树后 --force-install 重建');
+  }
   const manifest = {
     generatedAt: new Date().toISOString(),
     recipe: RECIPE_PATH.slice(ROOT.length + 1).split(sep).join('/'),
@@ -3473,7 +5222,12 @@ patchCredentialsOwnerCheck();
 patchAppBootReadonlyStack();
 patchMarketDesktopRuntime();
 patchProfilePnpmBridge();
+patchPluginManagerInspectBridge();
+patchInstallSpecNormalize();
 patchAgentPresetWorkflow();
+patchPtcPresetWorkflowEnabled();
+patchTerminalBundleRows();
+patchTerminalKeyboardResizeGuard();
 patchFsLocalLink();
 patchFsLocalPermissionHint();
 patchAttachmentLocalLink();
@@ -3489,9 +5243,110 @@ patchAttachmentLocalCause();
 patchResourceAddressArmor();
 patchPdfMapCompat();
 patchSubprocessOpenharmony();
+patchNodePtySocketGuard();
+patchClientHmrPoll();
+patchWebToolDeepHtmlFallback();
+patchWebFetchHeaders();
 patchSidebarTabIdLeak();
+patchDefaultWorkspaceToast();
 ensureRipgrepPlatformPackage();
 patchFsSearchFallback();
+patchAgentInstructionsScopeWalk();
+/*
+ * 【WS 自愈，2026-10-31】必须排在 `patchClientHmrPoll` 之类**同目录不同文件**的补丁之外、
+ * 且早于 `pack()`。它改的是浏览器侧 `dsh-api-gateway/lib/client.browser.js`
+ * （`RemoteStreamMuxClient`），与其他补丁无顺序耦合；放在树落盘之后、签名之前。
+ */
+/*
+ * ── 回环网络豁免（docs/337）：ArkWeb 把 127.0.0.1 误判为 Offline，连接永久卡死 ──
+ *
+ * 【真机证据（2026-10-31 20:04–20:05，平板，+dshm.104）】
+ *   20:04:38  nqe: event_message: network qualicy changed ... effective_connection_type Offline
+ *   20:04:39.261  ACCEPT #10 127.0.0.1:41980          ← Host 正常接受 TCP
+ *   20:04:39.262  IN-UPGRADE GET /api/remote.mux ... cookie=224B origin=http://127.0.0.1:3120
+ *                 URLRequestCanceled error:ERR_WS_UPGRADE(-173) duration:6ms NQE:...Offline
+ *   之后 27 秒内：零 ACCEPT、零 IN-UPGRADE —— 再没有任何连接尝试。
+ *
+ * 【机制（dsh-client-connection/lib/client.browser.js 实证）】
+ *   watchBrowserNetwork():
+ *     const initiallyAvailable = navigator?.onLine;      // ← ArkWeb 对回环报 false
+ *     controller.setNetworkAvailable(initiallyAvailable); // → networkAvailable=false
+ *     browser.addEventListener("online", online);        // ← 只认系统 online 事件
+ *
+ *   ClientConnectionLoop.loop():
+ *     while (running) {
+ *       if (!this.networkAvailable && !this.immediateRetry) {
+ *         emitState("disconnected");                       // ← 左下角「连接异常，刷新重试」
+ *         await waitForAbort(retryDelay.signal);           // ← **卡死**，只有 online 能唤醒
+ *       }
+ *     }
+ *
+ *   ⇒ 本机 Host 就在 127.0.0.1:3120 上活着、端口可连（ACCEPT 已证明），
+ *     但 ArkWeb 的 navigator.onLine=false 让连接循环认定"设备离线"而永久休眠；
+ *     而系统永远不会补发 online 事件（网络从头到尾都是通的）。
+ *     **这不是"连不上"，是"根本不再尝试"。**
+ *
+ * 【为什么同步补上的 selfHeal 也救不了】docs/335 的 `scheduleSelfHeal` 在
+ *   `dsh-api-gateway` 的 RemoteStreamMuxClient 层，而卡死发生在上游
+ *   `dsh-client-connection` 的 `networkAvailable` 闸门——闸门不放行，
+ *   下层连 `maintain()` 都进不去。层级搞错了，所以日志里一条 `[DSHM-WS]` 都没有。
+ *
+ * 【修法（最小侵入，只动"网络可用性"这一件事）】
+ *   1. `watchBrowserNetwork()`：回环页面的 `navigator.onLine === false` **不予采信**
+ *      （页面本身就是从 127.0.0.1 加载的，能加载出来就说明回环可达）；
+ *   2. `loop()` 的离线闸门：把页面判据从"设备在线"放宽为"**Host 可达即可**"——
+ *      给 `networkAvailable` 之外再认一个 `loopbackBypass`，回环下永不休眠；
+ *   3. 保留原有的 online/offline 监听（真断网时仍会降级并如实显示）。
+ */
+function patchLoopbackNetworkBypass() {
+  const target = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-client-connection', 'lib', 'client.browser.js');
+  if (!existsSync(target)) die(`回环网络豁免补丁：找不到 ${target}`);
+  let text = readFileSync(target, 'utf8');
+  if (text.includes('DSHM_LOOPBACK_NET_BYPASS')) {
+    log('[pack-core]   回环网络豁免补丁已存在（跳过）');
+    return;
+  }
+
+  // ── ① watchBrowserNetwork：回环页面不采信 navigator.onLine=false ──────────
+  text = text.replace('const initiallyAvailable=browser?.navigator?.onLine;', 'const initiallyAvailable = browser?.navigator?.onLine;')
+    .replace('const offline=()=>{controller.setNetworkAvailable(false)};', '\t\t\tconst offline = () => {\n\t\t\t\tcontroller.setNetworkAvailable(false);\n\t\t\t};');
+  const anchorWatch = 'const initiallyAvailable = browser?.navigator?.onLine;';
+  if ((text.split(anchorWatch).length - 1) !== 1) {
+    die('回环网络豁免补丁：watchBrowserNetwork 锚点不唯一，拒绝静默跳过');
+  }
+  text = text.replace(anchorWatch,
+    '/* DSHM_LOOPBACK_NET_BYPASS: 回环页面（从 127.0.0.1/localhost 加载）能渲染出来\n'
+    + '\t\t\t * 就证明回环可达，此时 ArkWeb 报的 navigator.onLine=false 不可采信。 */\n'
+    + '\t\t\tconst dshmLoopbackPage = (() => {\n'
+    + '\t\t\t\ttry {\n'
+    + '\t\t\t\t\tconst h = (globalThis.location?.hostname ?? "").toLowerCase();\n'
+    + '\t\t\t\t\treturn h === "127.0.0.1" || h === "localhost" || h === "[::1]" || h === "::1"\n'
+    + '\t\t\t\t\t\t|| /^127\\./.test(h);\n'
+    + '\t\t\t\t} catch (e) { return false; }\n'
+    + '\t\t\t})();\n'
+    + '\t\t\tconst initiallyAvailable = dshmLoopbackPage ? true : browser?.navigator?.onLine;');
+
+  // ── ② offline 监听：回环页面不因 offline 事件休眠（仍是真断网时记录，但不锁死） ──
+  const anchorOffline = '\t\t\tconst offline = () => {\n'
+    + '\t\t\t\tcontroller.setNetworkAvailable(false);\n'
+    + '\t\t\t};';
+  if ((text.split(anchorOffline).length - 1) === 1) {
+    text = text.replace(anchorOffline,
+      '\t\t\tconst offline = () => {\n'
+      + '\t\t\t\t/* DSHM_LOOPBACK_NET_BYPASS: 回环页面不因 ArkWeb 的 offline 误判而休眠。 */\n'
+      + '\t\t\t\tif (dshmLoopbackPage) { return; }\n'
+      + '\t\t\t\tcontroller.setNetworkAvailable(false);\n'
+      + '\t\t\t};');
+  } else {
+    die('回环网络豁免补丁：offline 监听锚点不唯一，拒绝静默跳过');
+  }
+
+  writeFileSync(target, text, 'utf8');
+  log('[pack-core]   回环网络豁免补丁：ArkWeb 误报 Offline 时连接不再永久休眠（DSHM_LOOPBACK_NET_BYPASS）');
+}
+patchLoopbackNetworkBypass();
+
+patchRemoteStreamSelfHeal();
 addOnDevicePreset();
 /*
  * 【顺序：先落树，再写树内清单】注意**不要把这两步的因果说反**。
@@ -3537,3 +5392,36 @@ log(`  解包体积   ${(manifest.nodeModules.unpackedBytes / 1048576).toFixed(1
 log(`  分发包     ${manifest.package.file}  ${(manifest.package.bytes / 1048576).toFixed(1)} MB / ${manifest.package.entries} 条目`);
 log(`  sha256     ${manifest.package.sha256}`);
 log(`  签名       ${manifest.native.signatureCheckSkipped ? '未校验' : `${manifest.native.signed.length} 通过 / ${manifest.native.unsigned.length} 未检出`}`);
+
+if (PLACE_IN_APP) {
+  placeIntoApp();
+}
+
+/**
+ * 把本次产出的核心容器放进 entry 的 resfile（`--place-in-app`）。
+ *
+ * 三条纪律（都来自实测事故，见 AGENTS.md）：
+ *   1. 目标文件名**必须**与配方 `coreVersion` 一致 —— 端侧按目录名/文件名认版本；
+ *   2. 先清掉 resfile 里**其它**核心容器 —— 只增不删会让 HAP 从 306 MiB 顶到 491 MiB；
+ *   3. 拷完立刻回读 sha256 并与本次产出一致，不一致就判错退出（不写"看起来成功了"）。
+ */
+function placeIntoApp() {
+  const src = resolve(ROOT, manifest.package.file);
+  const base = basename(src);
+  if (!existsSync(RESFILE_DIR)) {
+    mkdirSync(RESFILE_DIR, { recursive: true });
+  }
+  const stale = readdirSync(RESFILE_DIR)
+    .filter((n) => /^dsh-core-.+\.zip$/.test(n) && n !== base);
+  for (const n of stale) {
+    rmSync(join(RESFILE_DIR, n), { force: true });
+    log(`  放置       清掉旧容器 ${n}`);
+  }
+  const dst = join(RESFILE_DIR, base);
+  copyFileSync(src, dst);
+  const back = createHash('sha256').update(readFileSync(dst)).digest('hex');
+  if (back !== manifest.package.sha256) {
+    die(`放置后回读 sha256 不一致：期望 ${manifest.package.sha256}，实际 ${back}`);
+  }
+  log(`  放置       → hostruntime/src/main/resources/resfile/${base}（sha256 复核一致）`);
+}

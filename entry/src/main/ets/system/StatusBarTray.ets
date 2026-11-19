@@ -14,6 +14,16 @@
  *      使窗口不可见时进程不被系统挂起回收。①④ 顺序不能反：该 processMode 的 SDK 前提是
  *      「应用必须已有状态栏图标」，所以先 install、再 hold（调用方延时 300ms 也是为此）。
  *
+ * ## 分档：**手持档（手机 / 平板）整段不挂**（2026-10-14 收口）
+ *
+ * 上述四件事全部只对 PC / 2in1 成立（手持档三键「关闭」= 退出应用，没有"收进后台"这个状态，
+ * 后台保活另有 `KeepAlive` 长时任务）⇒ 调用方 `EntryAbility.setupTray` 先问 `applicable()`，
+ * 手持档直接返回、**不 install 也不 hold**（`hold` 是本仓唯一一处 `processMode` 用法，也就是
+ * 唯一能凭空造出"第二个 DSHM 进程"的地方）。手持档上 `addToStatusBar` 其实是**成功**的
+ * （真机 `diag-tray` 约 50 行 `install ok`），所以这条不能靠"系统会拒绝"来兜。
+ * 手持档仍保留 `applicable()` 里那**一次性摘残留**：老版本挂过、或异常退出留下的注册，得有人摘
+ * （见该方法的注释）。
+ *
  * ## 幂等：**踩过一次真回归，别再改回去**
  *
  * `launchType=specified` 下同一 UIAbility 会被反复复用与重建（多窗），`onWindowStageCreate`
@@ -31,7 +41,8 @@
  * ## 失败降级
  *
  * `install()` 失败**抛出**，由调用方 `EntryAbility.setupTray` 捕获并记日志降级：
- * 官方行为下「关闭窗口 = 退出应用」，图标挂不上只是少一个入口，不影响关闭与退出。
+ * 图标挂不上只是少一个「左键唤回」入口与后台保活，不影响窗口关闭（PC 档收进后台 /
+ * 手持档退出）本身。
  *
  * ## 摘图标（`remove`）要在**还有前台窗口**时做
  *
@@ -57,21 +68,35 @@ import { fileIo } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { commonEventManager, emitter, BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { localizedOr } from 'platform';
+import { isHandheldForm, localizedOr } from 'platform';
 
 const DOMAIN: number = 0x0000;
 const TAG: string = 'entry/tray';
 
-/** 本应用身份：托盘 `hold` 要用它构造 Want，与 AppScope/app.json5 保持一致 */
-const BUNDLE_NAME: string = 'com.dshm.dshclient';
 /** 托盘图标绑定的后台 Ability 所在模块 */
 const MODULE_NAME: string = 'entry';
 /** 托盘图标绑定的后台 Ability 名（见 module.json5 的 abilities 段） */
 const BG_ABILITY_NAME: string = 'BackGroundAbility';
 
 /** 托盘图标（rawfile）：系统按状态栏明暗二选一渲染，故需纯白 / 纯黑两份单色剪影 */
-const ICON_WHITE: string = 'tray_white.png';
-const ICON_BLACK: string = 'tray_black.png';
+/*
+ * 【2026-11-03：托盘图标换成新版彩色品牌标】
+ *
+ * 之前这两处指向 `tray_white.png` / `tray_black.png`（72×72）—— 那是**鲸鸿时期的黑鸟剪影**，
+ * 也就是用户看到的"一个灰色的旧图标"。这条路径此前一直被忽略：改 `app.icon`、
+ * `abilities[].icon`、`startWindowIcon` 都不会影响托盘，因为托盘图标由本文件在运行时
+ * 用 `statusBarManager.addToStatusBar` 的 PixelMap 挂上去。
+ *
+ * 平台约束（SDK `@hms.pcService.statusBarManager.d.ts` 原文）：
+ *   `interface StatusBarIcon { white: image.PixelMap; black: image.PixelMap }`
+ *   white 的注释是 "Icons displayed against dark wallpapers. **Pure white is recommended**"，
+ *   black 同理推荐纯黑 —— 即**推荐**单色，但接口本身只要求传 PixelMap。
+ * 所以这里把同一张**彩色**标既当 white 又当 black 传：系统按原样渲染就是彩色，
+ * 若它坚持做单色化，至少形状也已经是新标（不再是黑鸟）。
+ */
+const ICON_COLOR: string = 'tray_color.png';
+const ICON_WHITE: string = ICON_COLOR;
+const ICON_BLACK: string = ICON_COLOR;
 
 /**
  * 托盘诊断落点（`filesDir/diag-tray`，一行「ISO 时间戳 + 事件」）。
@@ -113,6 +138,44 @@ export class StatusBarTray {
   private static bgHeld: boolean = false;
   private static iconClickCb: ((clickType: string) => void) | null = null;
   private static subscribers: Array<commonEventManager.CommonEventSubscriber> = [];
+
+  /**
+   * 本机是否需要托盘（**调用方在 `install` / `hold` 之前必须先问这一句**）。
+   *
+   * 判据只有一条：**非手持档**（PC / 2in1）。手持档（手机 / 平板）返回 `false`，理由两条：
+   *   · 托盘的第一职责是「窗口收进后台后把用户唤回来」的回程入口 —— 手持档三键「关闭」是
+   *     系统官方行为 = 退出应用（`EntryAbility.handleWindowWillClose` 手持档第一行就返回），
+   *     不存在"收进后台"这个状态，也就没有需要唤回的对象；
+   *   · 托盘的第四件事是 `hold()` 拉一个**独立进程**贴住图标 —— 手持档的后台保活由
+   *     `KeepAlive` 长时任务统一承担，那个进程在手持档上纯属多一份常驻内存，并且是用户在
+   *     进程列表里能看到的"第二个 DSHM 进程"。
+   *
+   * 【真机实证（2026-10-14，手机 62T0225B18039433）】手持档上 `addToStatusBar` **每一次都
+   * 成功**（`files/diag-tray` 里 08:50～13:14 共约 50 行 `install ok`）⇒ 紧跟着的 `hold()`
+   * 链路每次启动都会被走到。托盘在手持档不是"挂了但没用上"，而是**真的会去拉进程**。
+   *
+   * 返回 `false` 时仍会做**一次性摘残留**（与 `install` 首次挂载前那一次同源、同语义）：
+   * 系统侧的状态栏注册是按 bundle 保存的 ⇒ 老版本（手持档还会挂的那一版）或异常退出可能留下
+   * 一个没人管的图标，而手持档既然不再走 `install`，就再没有别的路径去摘它。无残留时该调用会
+   * 抛，忽略即可（真机实测：同一个调用点、同一个形态，`install pre-clean` 一直能成功）。
+   *
+   * 全程**写 `diag-tray`**：跳过（而非失败）必须留下正面记录，否则事后无法区分「这一档压根
+   * 没挂」与「尝试挂了但失败」。
+   */
+  static applicable(context: common.Context): boolean {
+    if (!isHandheldForm()) {
+      return true;
+    }
+    try {
+      statusBarManager.removeFromStatusBar(context);
+      StatusBarTray.diag(context,
+        'install skip：手持档（手机/平板）不挂托盘、不拉后台 Ability 进程（顺带摘掉了上次遗留的注册）');
+    } catch (err) {
+      StatusBarTray.diag(context,
+        `install skip：手持档（手机/平板）不挂托盘、不拉后台 Ability 进程（摘残留：${errOf(err as Object)}，无残留时正常）`);
+    }
+    return false;
+  }
 
   /** 追加一条托盘诊断（与 pages/WebApp.ets 的 writeDiagMarker 同一套写法；写失败静默）。 */
   private static diag(context: common.Context, detail: string): void {
@@ -192,7 +255,7 @@ export class StatusBarTray {
        * notifyOnly 的项），所以本类也不再订阅它。
        */
       quickOperation: quick,
-      hoverTips: localizedOr(context, $r('app.string.tray_hover_tips'), 'DSHM 正在运行')
+      hoverTips: localizedOr(context, $r('app.string.tray_hover_tips'), 'DSHM正在运行')
     };
     /*
      * 一次调用、失败即抛出：没有自定义菜单之后，这里已经没有「退回不带菜单再试」的降级对象了
@@ -220,7 +283,14 @@ export class StatusBarTray {
     if (StatusBarTray.bgHeld) {
       return;
     }
-    const want: Want = { bundleName: BUNDLE_NAME, abilityName: BG_ABILITY_NAME };
+    /*
+     * 必须取当前 Ability 的真实 bundleName。
+     *
+     * 本仓库现在是**正式 PC 工程**（com.dshm.dshclient）；beta 身份只在出 Beta 包时由 tools/build-beta.mjs 临时切换。
+     * 这里写死正式包名会把 beta 的托盘后台 Ability 拉进另一个进程，主进程仍会被冻结；
+     * 2026-10-20 内测日志里的 10 分钟冻结就发生在这条边界之后。
+     */
+    const want: Want = { bundleName: context.abilityInfo.bundleName, abilityName: BG_ABILITY_NAME };
     const options: StartOptions = {
       processMode: contextConstant.ProcessMode.NEW_PROCESS_ATTACH_TO_STATUS_BAR_ITEM,
       startupVisibility: contextConstant.StartupVisibility.STARTUP_HIDE

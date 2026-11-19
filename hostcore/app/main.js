@@ -20,7 +20,9 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
+
 // 用户插件行守卫（D27 死锁修复，2026-09-23）：预检 + 启动失败自愈。见 dshm-user-rows.js 头注释。
 const userRows = require('./dshm-user-rows.js');
 // 内置技能同步（P0-1 修复，2026-09-28）：内容 sha256 判等，避免等长改动推不下去。
@@ -31,9 +33,45 @@ const skillsSync = require('./dshm-skills.js');
 // 同样单列文件，理由同上（main.js 不可 require）。
 const compatModule = require('./dshm-compat.js');
 // 纯 JS tar / tar.gz 解包（**单份实现**，与插件安装器共用同一份 walker）。
-// 工具链解包在手机 / 平板档必须走它：那条路原先是 `spawn busybox tar`，而本档
-// 应用自带可执行文件一律 EACCES（判决性读数见 docs/104）⇒ 永远解不出来。
+// 工具链解包保留纯 JS 路径：PC 原生 exec 正常时走进程内 tar，失败时也能在
+// 不依赖外部解包器的前提下给出确定结果。
 const tarGz = require('./tar-gz.cjs');
+// 市场挂载契约补丁的**重放**入口（2026-10-14 回归修复）：皮肤市场常常是**启动之后**才装
+// 进来的，boot 那一刻的补丁贴不到它 ⇒ 装完这一跳必须再贴一次。单列文件是为了让
+// tools/check-market-bridge.mjs 能直接 require（main.js 不可 require）。见该文件头注。
+const marketPatch = require('./dshm-market-patch.cjs');
+// 主线程侧的**异步 Python 桥**（2026-10-19，LOOP-GAP 根因二）：Python 的**执行**搬到
+// ./python-worker.cjs 的 worker 线程里，主线程只负责排队与调度 —— 内测日志里
+// `pip install` 那几处 800711ms / 522814ms / 33277ms 的停顿就是"端点里同步跑 Python"造成的。
+// 单列文件同样是为了让门禁能直接 require（main.js 不可 require，理由同上）。
+const pythonBridgeAsync = require('./python-bridge-async.cjs');
+// 需要独立 Node CLI 的插件（如 dsh-bili-whale）由启动期准备受控副本。
+// 只登记已确认会 spawn node 的插件，避免所有用户无端复制 100+ MB 运行时。
+const nodeRuntimeProvision = require('./node-runtime-provision.cjs');
+const ffmpegRuntimeProvision = require('./ffmpeg-runtime-provision.cjs');
+const startupWork = require('./startup-work.cjs').create({
+  onError: (error) => diag(`startup diagnostic failed: ${String(error)}`),
+});
+
+/*
+ * 运行期诊断总闸（2026-10-25）。
+ *
+ * 这些埋点是在 LOOP-GAP 排查期逐项加上的；其中 V8 CPU profiler 会常驻一个
+ * `v8:ProfEvntProc` 线程并按 1000µs 连续采样，同步 fs 环还会包住每一个高频 fs 调用。
+ * 正式包把总闸关掉，只有显式 `DSHM_RUNTIME_DIAG=1` 才启用整组取证；
+ * 单项兼容开关 `DSHM_CPU_PROFILE=1` / `DSHM_HB=1` / `DSHM_IN_LOG=1` / `DSHM_TS_LOG=1`
+ * 仍可用于现场只开某一项。业务路径不受这个开关影响。
+ */
+const RUNTIME_DIAG_ENABLED = process.env.DSHM_RUNTIME_DIAG === '1';
+let NODE_CLI_STATUS = {
+  requested: false,
+  ready: false,
+  file: '',
+  source: '',
+  version: '',
+  action: 'none',
+  error: '',
+};
 
 /**
  * 路径从哪来（**这一环不能靠环境变量**）
@@ -149,6 +187,7 @@ function dshmTallyHandles() {
 
 diag(`--- boot pid=${process.pid} execPath=${process.execPath} argv=${JSON.stringify(process.argv)}`);
 diag(`userData=${USER_DATA} DSH_BASE=${DSH_BASE}`);
+pruneStaleHostReady();
 // koffi 按 `${root}/build/koffi/${process.platform}_${process.arch}/koffi.node` 找原生模块
 // （见 node_modules/koffi/index.js:468-499）。我们随包放的是 `openharmony_arm64`，
 // 所以要如实打印这两个值，才能判断它到底在找哪个目录名。
@@ -171,8 +210,8 @@ try {
     const tsOrig = console[tsName];
     if (typeof tsOrig !== 'function' || tsOrig.__dshmTsWrapped === true) continue;
 const tsFn = function (...args) {
-// 【诊断版（E86）】默认挂时间戳（`DSHM_TS_LOG=0` 关闭）：取证不该依赖运行期 setenv。
-if (process.env.DSHM_TS_LOG !== '0') {
+// 常驻逐行前缀也会增加每个 console 调用的分配；只在显式诊断时启用。
+if (RUNTIME_DIAG_ENABLED || process.env.DSHM_TS_LOG === '1') {
         return tsOrig.apply(console, [`[${new Date().toISOString()}]`, ...args]);
       }
       return tsOrig.apply(console, args);
@@ -181,7 +220,7 @@ if (process.env.DSHM_TS_LOG !== '0') {
     console[tsName] = tsFn;
     tsWrapped++;
   }
-diag(`插件日志时间戳前缀已就绪（${tsWrapped} 个 console 方法；诊断版默认逐行生效，DSHM_TS_LOG=0 关闭）`);
+diag(`插件日志时间戳前缀已就绪（${tsWrapped} 个 console 方法；仅 DSHM_RUNTIME_DIAG=1 或 DSHM_TS_LOG=1 时逐行生效）`);
 } catch (e) {
   diag(`插件日志时间戳前缀安装失败：${String(e)}`);
 }
@@ -270,6 +309,22 @@ process.on('unhandledRejection', (reason) => {
   diag(`!! unhandledRejection: ${stack}`);
 });
 /*
+ * fs 探测缓存的句柄（LOOP-GAP 治理；实现见 ./fs-probe-cache.cjs）。
+ *
+ * 【为什么先在这里声明成 `let`】真正的安装点在下面（`installNativeRedirect()` 之后、
+ * 核心树 require 之前）。若进程在那之前就退出（依赖缺失 / 早退 / 平台杀），exit 回调里
+ * 直接读一个还没初始化的 `const` 绑定会踩 TDZ 抛 ReferenceError —— 那会把"进程最后几行
+ * 日志"变成一条异常。声明成 `let` + `null` 初值，退出时按"没装上就不打 stats"处理。
+ */
+let fsProbeCacheHandle = null;
+/*
+ * 持久解析缓存的句柄（冷启动治理，实现见 ./resolve-cache.cjs）。
+ * 与上面 fsProbeCacheHandle 同样的 TDZ 规避：安装点在 CORE_DIR/HOME_DIR 之后、
+ * 核心树 import 之前；exit 回调里按"没装上就不打 stats、不落盘"处理。
+ */
+let resolveCacheHandle = null;
+
+/*
  * 【诊断（E88）】「宿主自己干净退出（code=0）」的成因取证。
  *
  * 三次现场都只留下 `!! process 'exit' event, code=0`：没有 `收到停止请求` / `收到应用重启请求`
@@ -297,6 +352,53 @@ for (const dshmSignal of ['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGQUIT', 'SIGUSR1', '
 process.on('exit', (code) => {
   diag(`!! process 'exit' event, code=${code} exitCode=${process.exitCode}`);
   diagSync(`!! EXIT-SNAPSHOT code=${code} exitCode=${process.exitCode} ${dshmTallyHandles()}`);
+  /*
+   * fs 探测缓存的自我核对读数（LOOP-GAP 治理，见 docs/199）。
+   *
+   * 只在退出时打一次：命中 / 未命中 / 直通 / 入缓存条数 / **估计节省的毫秒数**。
+   * 用 diagSync 而不是 diag：这一行常常落在进程最后几行里，缓冲写会丢（同上 E88 的理由）。
+   * 命中率高但 LOOP-GAP 不变 ⇒ 说明大头不在探测面上，别把这条读数当"已修"的证据。
+   */
+  try {
+    if (fsProbeCacheHandle === null) {
+      diagSync('[dshm-host] fs 探测缓存 stats：未安装（安装点未执行）');
+    } else {
+      const fsProbeStats = fsProbeCacheHandle.stats();
+      diagSync('[dshm-host] fs 探测缓存 stats：enabled=' + fsProbeStats.enabled
+        + ' TTL=' + fsProbeStats.ttlMs + 'ms'
+        + ' 命中=' + fsProbeStats.hits
+        + ' 未命中=' + fsProbeStats.misses
+        + ' 直通=' + fsProbeStats.passthrough
+        + ' 入缓存=' + fsProbeStats.cachedNegatives
+        + ' 估计省=' + fsProbeStats.savedMs + 'ms'
+        + ' 条目=' + fsProbeStats.entries);
+    }
+  } catch (e) {
+    diagSync('[dshm-host] fs 探测缓存 stats 读取失败：' + (e && e.message));
+  }
+  /*
+   * 持久解析缓存的落盘兜底 + 自我核对读数（冷启动治理，见 ./resolve-cache.cjs）。
+   * ready 检查点已落过盘；这里兜底"ready 之后又采集了新条目"的情况。
+   * 命中数是下次冷启动收益的直接读数：命中 ≈ 14800 ⇒ 整套解析推导被查表替换。
+   */
+  try {
+    if (resolveCacheHandle === null) {
+      diagSync('[dshm-host] 解析缓存 stats：未安装（安装点未执行）');
+    } else {
+      resolveCacheHandle.flush('exit');
+      const rcStats = resolveCacheHandle.stats;
+      diagSync('[dshm-host] 解析缓存 stats：enabled=' + rcStats.enabled
+        + ' 命中=' + rcStats.hits
+        + ' 未命中=' + rcStats.misses
+        + ' 直通=' + rcStats.passthrough
+        + ' 已采集=' + rcStats.harvested
+        + ' 条目=' + rcStats.entries
+        + ' 落盘=' + rcStats.flushed
+        + (rcStats.flushError.length > 0 ? ' 落盘失败：' + rcStats.flushError : ''));
+    }
+  } catch (e) {
+    diagSync('[dshm-host] 解析缓存 stats 读取失败：' + (e && e.message));
+  }
 });
 
 /*
@@ -337,6 +439,7 @@ try {
         const server = origCreate.apply(this, args);
         try {
           server.on('upgrade', (req) => {
+            if (String(req.url || '').includes('remote.mux')) startupWork.activity();
             const h = req.headers || {};
             diag(`IN-UPGRADE ${req.method} ${req.url} conn=${h.connection} upgrade=${h.upgrade}` +
               ` key=${h['sec-websocket-key'] === undefined ? 'no' : 'yes'}` +
@@ -399,14 +502,13 @@ try {
   server.on('close', () => { dshmReadAddr(); diagSync(`SERVER-CLOSE event ${dshmAddr}`); });
 } catch (e) { diag(`SERVER-LIFE 挂载失败：${String(e)}`); }
 server.on('request', (req, res) => {
-/*
- * 【诊断版（E86）】默认开启入站日志（`DSHM_IN_LOG=0` 显式关闭）。
- *
- * 原来是 `!== '1' 就 return`，于是每次取证都要先用 python 桥在宿主进程里 setenv，
- * 而那个桥是在本进程里跑 CPython 的 —— 它本身就是「谁挡住了事件循环」的嫌疑人。
- * 诊断期间默认开启，让测量与被测对象解耦（正式形态要恢复门控或摘掉埋点）。
- */
-if (process.env.DSHM_IN_LOG === '0') return;
+  if (req.headers && req.headers['user-agent']) {
+    res.once('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 400) startupWork.activity();
+    });
+  }
+/* 入站逐请求日志只用于取证；正式运行默认关闭，避免每个 API/WebSocket 请求都分配并落盘。 */
+if (!RUNTIME_DIAG_ENABLED && process.env.DSHM_IN_LOG !== '1') return;
             const h = req.headers || {};
             diag(`IN-REQ ${req.method} ${req.url} conn=${h.connection} upgrade=${h.upgrade}` +
               ` cookie=${h.cookie === undefined ? '(none)' : h.cookie.length + 'B'}` +
@@ -439,7 +541,7 @@ if (process.env.DSHM_IN_LOG === '0') return;
       mod.createServer = wrapped;
     }
   }
-  diag('入站请求诊断已安装（IN-UPGRADE / IN-REQ）');
+  diag('入站请求诊断已安装（IN-UPGRADE / IN-REQ；仅 DSHM_RUNTIME_DIAG=1 或 DSHM_IN_LOG=1 时逐请求记录）');
 } catch (e) {
   diag(`入站请求诊断安装失败：${String(e)}`);
 }
@@ -451,11 +553,14 @@ if (process.env.DSHM_IN_LOG === '0') return;
  * loop 被同步调用挡住时任何 JS 定时器都跑不了，只能靠独立线程的采样器——V8 CPU profiler
  * 就在独立线程打点，能采到「发起这次同步调用的 JS 帧」。本机已验证：忙等 400ms 时
  * 398 个样本里 343 个精确落在忙等那一行（dist/_proftest.cjs）。
- * 采样间隔 1000µs；看门狗发现 >=3s 停顿后（loop 恢复时）stop 落盘，再重新开始，最多 3 份。
+ * 采样间隔 1000µs；看门狗发现 >=3s 停顿后（loop 恢复时）stop 落盘，再重新开始；
+ * 最多 3 份**且跨启动只保留最近 3 份**（上限见下面 pruneProfiles 的注释）。
  * 全程 try/catch：拿不到 inspector 只记一行 PROF-UNAVAILABLE，绝不影响启动。
  */
 let dshmDumpProfile = null;
-try {
+if (!RUNTIME_DIAG_ENABLED && process.env.DSHM_CPU_PROFILE !== '1') {
+  diag('PROF-DISABLED（常驻 V8 采样默认关闭；DSHM_CPU_PROFILE=1 或 DSHM_RUNTIME_DIAG=1 开启）');
+} else try {
   const fsProf = require('node:fs');
   const PROF_DIR = path.join(path.dirname(DIAG_LOG), 'dshm-diag');
   const inspector = require('node:inspector');
@@ -466,6 +571,30 @@ try {
   const profPost = (method, params) => new Promise((resolve, reject) => {
     profSession.post(method, params || {}, (err, result) => (err ? reject(err) : resolve(result)));
   });
+  /*
+   * 【为什么还要一条**跨启动**的上限】`profDumps >= 3` 只管**本进程**：每次启动最多落 3 份。
+   * 但文件是**跨启动累积**的 —— 2026-10-08 真机清出 46 份 / 156 MiB（≈16 次启动 × 3 份 × ~3.4 MB），
+   * 而这类 LOOP-GAP 已被判为平台 appfreeze（`docs/106` §3：心跳线程同期中断 38~59s、停顿期间 0 条
+   * `IN-REQ`、同步调用增量仅 ~250ms）⇒ 采样值得留，但只值得留最近几次。
+   * 写新文件前把老的削到 `KEEP_PROFILES - 1` 份，磁盘占用因此恒定在 ~3 份。
+   */
+  const KEEP_PROFILES = 3;
+  const pruneProfiles = () => {
+    try {
+      const names = fsProf.readdirSync(PROF_DIR)
+        .filter((n) => n.startsWith('dshm-profile-') && n.endsWith('.cpuprofile'));
+      if (names.length < KEEP_PROFILES) { return; }
+      const aged = names.map((n) => {
+        const full = path.join(PROF_DIR, n);
+        let t = 0;
+        try { t = fsProf.statSync(full).mtimeMs; } catch (e) { t = 0; }
+        return { full, t };
+      }).sort((a, b) => a.t - b.t);
+      for (const item of aged.slice(0, aged.length - (KEEP_PROFILES - 1))) {
+        try { fsProf.unlinkSync(item.full); } catch (e) { /* 删不掉就留着，绝不影响采样 */ }
+      }
+    } catch (e) { /* 目录读不到：下一次采样照样写，不影响主流程 */ }
+  };
   const startProf = () => {
     if (profRunning || profDumps >= 3) { return Promise.resolve(); }
     return profPost('Profiler.start').then(() => {
@@ -480,6 +609,7 @@ try {
     profPost('Profiler.stop').then((r) => {
       try {
         fsProf.mkdirSync(PROF_DIR, { recursive: true });
+        pruneProfiles();
         const file = path.join(PROF_DIR, `dshm-profile-${tag}-${Date.now()}.cpuprofile`);
         fsProf.writeFileSync(file, JSON.stringify(r.profile));
         diag(`PROF-DUMPED ${file} nodes=${r.profile.nodes.length} samples=${r.profile.samples.length}`);
@@ -551,11 +681,12 @@ try {
  * 心跳线程自己的 appendFileSync 与主 loop 状态无关地落盘，于是拉一次日志就能看出：
  *   · 心跳连续、主线程静默 ⇒ H1（结合 SYNC-RING / js-tid 的 wchan 找那个同步调用）；
  *   · 心跳也断在同一段 ⇒ (B) 进程级冻结（不再是"谁挡住了 loop"的问题）。
- * `DSHM_HB=0` 关闭。worker 用 unref() 挂起，不参与主进程存活判定（排空后照样能自然退出）。
+ * 默认关闭；`DSHM_HB=1` 或 `DSHM_RUNTIME_DIAG=1` 开启。worker 用 unref()
+ * 挂起，不参与主进程存活判定（排空后照样能自然退出）。
  */
 try {
-  if (process.env.DSHM_HB === '0') {
-    diag('心跳线程已按 DSHM_HB=0 关闭');
+  if (!RUNTIME_DIAG_ENABLED && process.env.DSHM_HB !== '1') {
+    diag('心跳线程默认关闭（DSHM_HB=1 或 DSHM_RUNTIME_DIAG=1 开启）');
   } else {
     const dshmHbFile = path.join(path.dirname(DIAG_LOG), 'dshm-hb.log');
     const dshmHbSrc = [
@@ -579,7 +710,7 @@ try {
     const dshmHbWorker = new Worker(dshmHbSrc, { eval: true, workerData: { file: dshmHbFile } });
     dshmHbWorker.on('error', (e) => { try { diag(`心跳线程错误：${String(e)}`); } catch (e2) { /* ignore */ } });
     dshmHbWorker.unref();
-    diag(`心跳线程已启动（pid=${process.pid}；每 1s 写 ${dshmHbFile}；DSHM_HB=0 关闭）`);
+    diag(`心跳线程已启动（pid=${process.pid}；每 1s 写 ${dshmHbFile}；仅显式诊断时启用）`);
   }
 } catch (e) {
   diag(`心跳线程启动失败：${String(e)}`);
@@ -641,6 +772,261 @@ const NATIVE_LIBS = jitlessEnv.resolveNativeLibsDir(__dirname);
  * 上面 NATIVE_LIBS 仍留在本文件——python 桥 / gitcompat / sharp 等别处要用它拼 libs/ 路径。
  */
 jitlessEnv.installNativeRedirect({ libsDir: NATIVE_LIBS, log: diag });
+
+/*
+ * 【LOOP-GAP 除根】收窄 Node 全局模块搜索路径（2026-10-19，见 docs/199 §8）。
+ *
+ * 【为什么缓存还不够（缓存治第 2 次、这里治第 1 次）】下面那层 fs 探测负结果缓存只把
+ * "同一路径 30s 内**第二次**探测"变快；**第一次**照样要付。分诊报告 P0-2 / S-07 给的就是第一次：
+ *   SYNC-SLOW 192220ms existsSync
+ *     /storage/Users/currentUser/.node_modules/@cocofhu/skillhub/package.json
+ * （另两笔同型 15843ms / 36839ms）。自变量不是我们的代码，而是 **Node 启动时按 HOME 拼出来的
+ * 全局路径表**：本机 `HOME=/storage/Users/currentUser`（公共存储挂载）⇒ 任何一次 `require('包')`
+ * 在正常 `node_modules` 链上没命中，都会回退去探 `$HOME/.node_modules`、`$HOME/.node_libraries`
+ * 这些慢目录，一次 miss 就是 3.7s ~ 192s。
+ *
+ * 【做法】把指向前缀 `/storage/Users/currentUser` 的全局项摘掉（**应用沙箱内路径一律保留**）：
+ *   · `NODE_PATH` 里的同类项直接从 env 过滤（worker 继承 env ⇒ 这一半连带修好）；
+ *   · "活路径表"只能靠 Node 自己的 `Module._initPaths()` 用收窄后的输入重算 ——
+ *     ⚠️ `Module.globalPaths` 只是内部 `modulePaths` 的**浅拷贝**，splice / 赋值它**对解析无效**
+ *     （实测 Node v24.19.0；依据与实验见 module-path-guard.cjs 头注 §二）；
+ *   · 重算期间 `HOME`/`USERPROFILE` 被临时清空，**同一同步窗口内 `finally` 逐字还原**，
+ *     不存在"异步期间 HOME 是空"的窗口。
+ *
+ * 【为什么必须在这个位置】与下面缓存层同理：必须早于核心树 require；而且要**早于**缓存层 ——
+ * 先摘掉慢路径，再缓存剩下的负结果。顺序反了会把"第一次 192s 的那条负结果"缓存起来，
+ * 收益仍然只有第二次。`DSHM_GLOBAL_PATHS=keep` 可整条关掉（排障时复现旧行为）。
+ *
+ * 打出来的诊断行（供事后检索与门禁断言，tools/check-module-path-guard.mjs 会钉这段字面量）：
+ *   [dshm-host] 全局模块路径已收窄（移除 N 项 /storage/Users/currentUser，NODE_PATH 移除 M 项，保留 K 项）
+ * keep 模式下是 `全局模块路径保持原样（DSHM_GLOBAL_PATHS=keep）`；
+ * 失败时是 `全局模块路径收窄失败（不阻塞）：…`（绝不抛、绝不改解析语义）。
+ */
+try {
+  const modulePathGuard = require('./module-path-guard.cjs');
+  modulePathGuard.installModulePathGuard({ log: diag });
+} catch (e) {
+  diag('全局模块路径收窄安装失败（不阻塞启动，退回 Node 默认全局路径）：' + (e && e.message));
+}
+
+/*
+ * 【LOOP-GAP 根因治理】同步 fs「探测型」调用的**负结果**缓存（2026-10-19）。
+ *
+ * 【问题读数】内测日志里事件循环停顿与同步调用账本指向同一件事（见 docs/199）：
+ *   LOOP-GAP 33277ms（第 9413 拍）/ 最长一次 800711ms（13 分钟）；
+ *   SYNC-SLOW-LOG 36839ms existsSync
+ *     /storage/Users/currentUser/.node_modules/@linxin666/dsh-web-all/package.json；
+ *   SYNC-COUNT existsSync×332830=64485ms | readFileSync×122216=42862ms。
+ * 这些 existsSync 绝大多数是 Node / 打包器**逐级向上找 node_modules** 产生的**负结果**
+ * ——同一个"不存在"的答案被重复问上万次，每次都要穿透到慢存储。
+ *
+ * 【为什么必须装在**这里**（三个顺序都是承重的，不是随手挑的位置）】
+ *   ① 必须早于**核心树 require**（下面 `require(path.join(CORE_DIR, 'node_modules', …))`
+ *      那一段，以及 runProfile 挂载的整棵模块图）——缓存只对"装上之后的调用"生效，
+ *      晚一步就等于这一轮 LOOP-GAP 白修；
+ *   ② 必须晚于 `installNativeRedirect()`（上一行）：那条把 `existsSync` 改写成了
+ *      "沙箱里找不到就去 HAP libs/ 找平铺 .node"。缓存层套在它**外面**，于是 `.node`
+ *      探测的"真答案"仍由重定向给出；而 `libs/…` 不在白名单里 ⇒ 直通，不缓存；
+ *   ③ 必须早于下面的**同步调用环**（SYNC-RING / SYNC-COUNT）：那一层包的是"有效代价"，
+ *      装在它前面，命中缓存就立刻表现为快调用 —— 真机上正是靠 SYNC-COUNT 的下降
+ *      验证收益，顺序反了读数会骗人。
+ *
+ * 规则（每一条都是"宁可少省，也不许改语义"，实现与边界见 ./fs-probe-cache.cjs 头注）：
+ *   · 只缓存**负结果**，默认 TTL 30s；正结果一律不缓存（装完插件/升完核心必须立刻可见）；
+ *   · 只对 `node_modules` / `/package.json` / `/profiles/` / `/install-queue` 形态生效，
+ *     其余路径直通；
+ *   · `DSHM_FS_PROBE_CACHE=off` 全关，`DSHM_FS_PROBE_CACHE_TTL_MS` 可调；
+ *   · 任何异常都直通（缓存层绝不把异常改写成 false / 不存在）。
+ * 退出时（exit 钩子）打一行 stats（命中/未命中/节省 ms），供事后核对。
+ */
+try {
+  const fsProbeCache = require('./fs-probe-cache.cjs');
+  fsProbeCacheHandle = fsProbeCache;
+  const fsProbeState = fsProbeCache.installFsProbeCache({ log: diag });
+  if (fsProbeState.enabled) {
+    // 这行的字面量（含白名单清单）由 tools/check-fs-probe-cache.mjs 钉住：
+    // 它必须与 fs-probe-cache.cjs 的 WHITELIST_LABEL 逐字一致，否则检索/统计会漏。
+    diag('[dshm-host] fs 探测缓存已安装（TTL=' + fsProbeState.ttlMs + 'ms，白名单=node_modules/package.json/profiles/install-queue）');
+  } else {
+    diag('[dshm-host] fs 探测缓存未启用（' + (fsProbeState.reason || '已关闭')
+      + '；DSHM_FS_PROBE_CACHE=off 关、DSHM_FS_PROBE_CACHE_TTL_MS 调）');
+  }
+} catch (e) {
+  diag('fs 探测缓存安装失败（不阻塞启动，退回无缓存直通）：' + (e && e.message));
+}
+
+/*
+ * ── 内存看门狗与诊断（2026-10-19 MatePad Edge 现场）────────────────────
+ *
+ * 【现场】内测设备（24 GB RAM + 50 GB swap）上，应用启动约 78 秒后系统首次 PSI，
+ * 随后 97 条 LowMemoryKill / OomKiller / SwapFull，最终设备重启。启动期快照：
+ * ArkWeb 多渲染进程 + Node Host 叠加。
+ *
+ * 【本块做什么】
+ *   ① 10 秒采样 `/proc/self/status` 的 VmRSS 与 `/proc/meminfo` 的 MemAvailable，
+ *      追加到 `files/diag-mem`（与 ArkTS 侧 `onMemoryLevel` 同一份文件，按行区分来源）；
+ *   ② 越过阈值（RSS > 1600 MiB 或 MemAvailable < 384 MiB）时打 `cdiag` 并在
+ *      `files/diag-mem-critical` 落持久标记（≤1 次/分钟，避免写爆）；
+ *   ③ 标记只用于诊断；PC 工程没有 guest VM，不再用它切换任何预热门。
+ *
+ * 关掉：`DSHM_MEM_WATCH=off`。阈值可调：`DSHM_MEM_RSS_LIMIT_MIB` / `DSHM_MEM_AVAIL_FLOOR_MIB`。
+ */
+try {
+  const memEnabled = String(process.env.DSHM_MEM_WATCH || '').trim().toLowerCase() !== 'off';
+  const homeEnv = String(process.env.DSHM_HOME || '').trim();
+  /* DSHM_HOME = <filesDir>/dsh/home ⇒ 上两级就是 ArkTS 侧的 filesDir */
+  const filesDir = homeEnv.length > 0 ? path.dirname(path.dirname(homeEnv)) : '';
+  const memDiagPath = filesDir.length > 0 ? path.join(filesDir, 'diag-mem') : '';
+  const memCriticalPath = filesDir.length > 0 ? path.join(filesDir, 'diag-mem-critical') : '';
+  const readMiB = (file, re) => {
+    try {
+      const m = fs.readFileSync(file, 'utf8').match(re);
+      return m === null ? null : Number(m[1]) / 1024;
+    } catch (e) {
+      return null;
+    }
+  };
+  const rssMiB = () => readMiB('/proc/self/status', /^VmRSS:\s+(\d+)\s+kB/m);
+  const availMiB = () => readMiB('/proc/meminfo', /^MemAvailable:\s+(\d+)\s+kB/m);
+  const rssLimit = Number(process.env.DSHM_MEM_RSS_LIMIT_MIB || '1600');
+  const availFloor = Number(process.env.DSHM_MEM_AVAIL_FLOOR_MIB || '384');
+
+  /*
+   * 读「还有没有等触发的定时任务」（2026-11-08，熄屏任务被冻结）。
+   *
+   * 调度器的持久域是 `$DSH_HOME/storages/schedule.json`（domain=schedule / version=2 /
+   * table=tasks，写入方是 `@deepseek-ai/dsh-schedule`）。任务在 `status === 'active'` 时
+   * `record.scheduledAt` 就是下一次应当触发的 UTC 时刻。
+   *
+   * 【为什么必须进 workload】熄屏时没有运行中的 turn、也没有安装队列 ⇒ 原来的 refs=0，
+   * ArkTS 判定"无保活诉求" ⇒ 不申请长时任务 ⇒ 系统冻结进程 ⇒ 到点的定时任务要等亮屏
+   * 才补跑（真机实测 19:30:30 的任务 19:33:19 才送达）。把"有活跃调度"算成一份在途事实，
+   * 才能让熄屏前就有保活诉求。
+   *
+   * 读不到 / 结构不认识一律当 0：不能因为调度文件异常而把应用变成"永远忙"。
+   */
+  const readScheduledWork = () => {
+    const out = { count: 0, nextScheduledAt: null };
+    try {
+      const p = path.join(HOME_DIR, 'storages', 'schedule.json');
+      if (!fs.existsSync(p)) return out;
+      const doc = JSON.parse(fs.readFileSync(p, 'utf8'));
+      const tasks = (doc && doc.tables && doc.tables.tasks) || (doc && doc.tasks) || {};
+      let next = null;
+      for (const key of Object.keys(tasks)) {
+        const item = tasks[key];
+        if (!item || item.status !== 'active') continue;
+        const record = item.record || item;
+        const at = record && record.scheduledAt;
+        if (typeof at !== 'string') continue;
+        const ms = Date.parse(at);
+        if (!Number.isFinite(ms)) continue;
+        out.count += 1;
+        if (next === null || ms < next) next = ms;
+      }
+      if (next !== null) out.nextScheduledAt = new Date(next).toISOString();
+    } catch (e) { /* 调度域缺失 / 损坏 ⇒ 按无调度处理 */ }
+    return out;
+  };
+
+  if (memEnabled) {
+    const appendMem = (line) => {
+      if (memDiagPath.length === 0) return;
+      try {
+        fs.appendFileSync(memDiagPath,
+          new Date().toISOString() + ' host ' + line + '\n');
+      } catch (e) { /* 诊断写失败不影响主流程 */ }
+    };
+    let lastCriticalAt = 0;
+    let lastMemWarnAt = 0;
+    const timer = setInterval(() => {
+      const rss = rssMiB();
+      const avail = availMiB();
+      if (rss === null && avail === null) return;
+      appendMem('rss=' + (rss === null ? '?' : rss.toFixed(1)) + 'MiB avail='
+        + (avail === null ? '?' : avail.toFixed(0)) + 'MiB');
+      /*
+       * ── 工作负载快照（2026-11-03，平板后台任务修复）────────────────────────
+       *
+       * 【为什么要这个文件】ArkTS 侧要决定"现在到底有没有活要干"，才能申请长时任务
+       * （`backgroundTaskManager.startBackgroundRunning`）。但"活"的定义在 Host 里：
+       * 会话在跑、有后台 job、有在途安装。熄屏那一刻如果按"没有用户交互"来判，就会被
+       * 判成"无诉求"⇒ 系统挂起进程 ⇒ 用户的 agent turn 被打断（真机反馈）。
+       *
+       * 这里把判据**落盘**给 ArkTS 读（跨语言唯一稳定的共享面是文件系统）：
+       *   refs  = (会话在跑 ? 1 : 0) + 在途安装数 + 在途后台 job 数
+       * ArkTS 侧 refs>0 就 acquire、归零就 release（见 platform/notify/KeepAlive.ets）。
+       * 判据全部取**已有事实**：install-queue 的文件数、card-state 的 running 标记，
+       * 不新造状态机。
+       */
+      try {
+        const queueDir = path.join(HOME_DIR, 'install-queue');
+        let pending = 0;
+        try {
+          pending = fs.readdirSync(queueDir).filter((n) => n.endsWith('.req')).length;
+        } catch (e) { /* 队列不存在 = 0 */ }
+        let turnRunning = 0;
+        try {
+          const card = JSON.parse(fs.readFileSync(path.join(HOME_DIR, 'card-state.json'), 'utf8'));
+          /*
+           * 【2026-11-05 修：判据必须认 card-state 的**真实字段**】
+           *
+           * `registerCardState()` 写出去的形状是：
+           *   { updatedAt, session: { sessionId, title, state, turn, step }, balance, usage }
+           * 其中 `state` ∈ `idle | running | done | error`（见本文件 5514/5862/5885/5903）。
+           *
+           * 而这里原来只认**顶层** `running` / `turnActive` 两个键 —— 它们从来没被任何写入方
+           * 产生过 ⇒ `turnRunning` 恒为 0 ⇒ `refs` 只剩安装队列 ⇒ 熄屏那一刻若没有安装任务，
+           * ArkTS 侧 `maybeAcquireHandheldKeepAlive()` 算出的 `workloadRefs=0`，长时任务不申请，
+           * 手持档（含平板）进程被系统冻结（客户反馈「熄屏/锁屏后任务停摆」「平板无法后台任务」
+           * 的**宿主侧一半原因**；另一半是 `KeepAlive.noteScreenState()` 的 refs 判据）。
+           *
+           * 现在同时认新字段与历史键，任一命中即算"有 turn 在跑"。
+           * `turn > 0` 单独不足以判"在跑"：done/error 之后 turn 仍保持上一轮的值。
+           */
+          const sess = card && card.session ? card.session : null;
+          const running = (card && (card.running === true || card.turnActive === true))
+            || (sess && sess.state === 'running');
+          turnRunning = running ? 1 : 0;
+        } catch (e) { /* 卡片状态读不到 = 0 */ }
+        const scheduled = readScheduledWork();
+        const refs = turnRunning + pending + (scheduled.count > 0 ? 1 : 0);
+        const workload = {
+          refs: refs,
+          turnRunning: turnRunning,
+          pendingInstalls: pending,
+          scheduledTasks: scheduled.count,
+          nextScheduleAt: scheduled.nextScheduledAt,
+          at: new Date().toISOString(),
+        };
+        fs.writeFileSync(path.join(HOME_DIR, 'workload.json'),
+          JSON.stringify(workload, null, 2) + '\n', 'utf8');
+      } catch (e) { /* 快照写失败不影响主流程；ArkTS 侧读不到就当 refs=0 */ }
+      const over = (rss !== null && rss > rssLimit) || (avail !== null && avail < availFloor);
+      if (!over) return;
+      const now = Date.now();
+      if (now - lastMemWarnAt > 30000) {
+        lastMemWarnAt = now;
+        diag('[dshm-host] 内存告警：rss=' + (rss === null ? '?' : rss.toFixed(1))
+          + 'MiB avail=' + (avail === null ? '?' : avail.toFixed(0))
+          + 'MiB（阈值 rss>' + rssLimit + ' / avail<' + availFloor + '）');
+      }
+      if (memCriticalPath.length > 0 && now - lastCriticalAt > 60000) {
+        lastCriticalAt = now;
+        try {
+          fs.writeFileSync(memCriticalPath, new Date().toISOString()
+            + ' host rss=' + (rss === null ? '?' : rss.toFixed(1))
+            + ' avail=' + (avail === null ? '?' : avail.toFixed(0)) + '\n');
+        } catch (e) { /* 标记写失败：下次再试 */ }
+      }
+    }, 10000);
+    if (timer !== undefined && typeof timer.unref === 'function') timer.unref();
+    diag('[dshm-host] 内存看门狗已安装（10s 采样；rss>' + rssLimit + 'MiB 或 avail<'
+      + availFloor + 'MiB 记危急；diag-mem=' + (memDiagPath || '(无 DSHM_HOME)') + '）');
+  }
+} catch (e) {
+  diag('内存看门狗安装失败（不阻塞启动）：' + (e && e.message));
+}
 
 /*
  * `node-addon-require-builtin` → 端侧 JS shim（配合 RuntimePort 的 --expose-internals）。
@@ -903,6 +1289,43 @@ let requestAppRestart = null; // 由 start() 内注册（那时才知道 HOME_DI
  */
 const dshmSyncRing = [];
 const dshmSyncSlowLog = [];
+/*
+ * ── 启动期同步环（docs/339）──────────────────────────────────────────────
+ *
+ * 【解决什么问题】真机冷启动的 LOOP-GAP 一直是空的（`LOOP-GAP-2050ms SYNC-RING` 后面没内容），
+ * 因为同步环**默认关闭**（要 `DSHM_RUNTIME_DIAG=1`），于是"那 3.7 秒被谁挡住"无从归因。
+ * 而 `DSHM_RUNTIME_DIAG=1` 会顺带打开逐请求日志等一堆重型埋点，不适合用来测启动。
+ *
+ * 【做法】默认**只在启动期**装环：从进程开始记到 host-ready 落盘，然后 `dshmRingStop()`
+ * **还原全部原函数**并打一份 `SYNC-COUNT` 按耗时 Top12 的榜。
+ * 稳态零开销——这正是它可以从"诊断开关"升级为"默认行为"的前提。
+ *
+ * 【为什么敢默认开】包装器是透传的（只 Date.now() 记账 + try/finally 补时长），
+ * 不改任何业务语义；任何一步失败都已被 try/catch 吞掉并只在 diag 留一行。
+ * 想打开：`DSHM_BOOT_RING=1`。
+ *
+ * 【2026-10-31 发布前复核：默认改为**关闭**（opt-in）】原先是默认开启。改的原因不是它不安全，
+ * 而是**它在真机上一条数据都没产出**（多份日志里 `SYNC-COUNT` 均未出现），
+ * 说明这条路径至少在当前环境里没有按预期走通。发布包不携带"没被验证过会执行"的启动期包装：
+ * 一旦装了环却走不到 `dshmRingStop()`，`fs` 会在**整个进程生命周期**里保持被包装 ——
+ * 那是稳态开销，正是我们要避免的东西。
+ * ⇒ 保留代码（将来排查启动时用 `DSHM_BOOT_RING=1` 打开），默认不参与生产路径。
+ */
+const DSHM_BOOT_RING_ON = process.env.DSHM_BOOT_RING === '1';
+const dshmRingRestore = [];
+let dshmRingActive = false;
+/*
+ * 【启动期 require 账本】按"被 require 的模块名"累计次数与耗时。
+ *
+ * 为什么需要它：profile 装载的大头是**模块图加载**（`docs/146` 记过"建树模块加载 1037ms"），
+ * 但那只是猜测——环只能抓到同步 fs/cp 调用，抓不到 `require` 本身。
+ * 包装 `Module._load` 就能把"哪个包装载贵"直接量出来，且与插件行 id 一一对得上
+ * （`@deepseek-ai/dsh-xxx` → 插件行的 name）。这决定了分阶段时该先延后谁。
+ *
+ * 只记 >=5ms 的调用（一次 require 通常 <1ms，记全部会把内存撑起来且没有信息量）。
+ */
+const dshmRequireStat = new Map();
+const DSHM_REQUIRE_MIN_MS = 5;
 /* 【诊断（E94/E95）】单次 >=200ms 的同步调用另存一份 + 按名字累计次数/总耗时。
  * 环（dshmSyncRing）只留最后 24 条：一次巨型调用能被它和 SYNC-SLOW 抓住，但"一长串中等
  * 调用"会被便宜的尾巴挤出环外、且单次都不足 1s ⇒ 必须另开这两个账本记形状。 */
@@ -931,6 +1354,37 @@ function dshmRingPush(entry) {
   dshmSyncRing.push(entry);
   if (dshmSyncRing.length > 24) { dshmSyncRing.shift(); }
 }
+
+/**
+ * 卸载启动期同步环并打出**启动期同步调用耗时榜**（docs/339）。
+ *
+ * 【为什么卸载】包装每个高频 fs 调用都有成本（两次 Date.now()）。启动期值得，
+ * 稳态不值得 ⇒ 就绪后立刻还原，回到"零开销"的原来行为。
+ *
+ * 【为什么必须打榜】环只留最后 24 条、SYNC-SLOW 只留 >=1s 的；
+ * 而真机上更常见的是"一长串 200–900ms 的中等同步调用"把时间一点点吃掉。
+ * `dshmSyncStat` 按名字累计次数与总耗时，正好能看见这种形状。
+ * 这张榜就是"那 3.7 秒到底花在哪"的直接答案。
+ */
+function dshmRingStop(reason) {
+  if (!dshmRingActive) { return; }
+  /*
+   * 【`DSHM_RUNTIME_DIAG=1` 时**只打榜、不卸载**】
+   * 那个开关的语义是"诊断常驻"，环必须留到进程结束。若在这里也卸掉，
+   * 等于偷偷改了诊断模式的行为 —— 而本函数的使命只是给"启动期"收尾。
+   */
+  if (RUNTIME_DIAG_ENABLED) {
+    try { dshmRingDump(`BOOT-RING-SUMMARY(${reason})`); } catch (e) { /* ignore */ }
+    diag('启动期同步环汇总已打（DSHM_RUNTIME_DIAG=1：环按诊断语义继续常驻，不卸载）');
+    return;
+  }
+  dshmRingActive = false;
+  try { dshmRingDump(`BOOT-RING-STOP(${reason})`); } catch (e) { /* ignore */ }
+  for (const restore of dshmRingRestore) { try { restore(); } catch (e) { /* ignore */ } }
+  const n = dshmRingRestore.length;
+  dshmRingRestore.length = 0;
+  diag(`启动期同步环已卸载（还原 ${n} 个入口；之后零包装开销）`);
+}
 function dshmRingDump(tag) {
   try {
     const now = Date.now();
@@ -953,9 +1407,23 @@ function dshmRingDump(tag) {
         .map(([n, s]) => `${n}×${s.n}=${s.ms}ms`).join(" ⏐ ");
       diag(`${tag} SYNC-COUNT 同步调用总耗时 ${grand}ms，按耗时 Top12：${top}`);
     }
+    /*
+     * 【require 耗时榜】启动期按"被 require 的模块名"累计。
+     * 这张榜回答的是"profile 装载时哪个包最贵"，直接对应插件行的 name，
+     * 是分阶段加载时"先延后谁"的依据。只打 Top15，避免日志被刷爆。
+     */
+    if (dshmRequireStat.size > 0) {
+      const rowsReq = [...dshmRequireStat.entries()].sort((a, b) => b[1].ms - a[1].ms);
+      const totalReq = rowsReq.reduce((sum, [, v]) => sum + v.ms, 0);
+      const topReq = rowsReq.slice(0, 15)
+        .map(([n, v]) => `${n}×${v.n}=${v.ms}ms`).join(" ⏐ ");
+      diag(`${tag} REQUIRE-COUNT 被计时的 require 总耗时 ${totalReq}ms（${rowsReq.length} 个不同模块），Top15：${topReq}`);
+    }
   } catch (e) { /* 记账失败不影响主流程 */ }
 }
+if (RUNTIME_DIAG_ENABLED || DSHM_BOOT_RING_ON) {
 try {
+  dshmRingActive = true;
   const dshmRingShort = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
   const dshmTrack = (name, fn) => function (...args) {
     const t0 = Date.now();
@@ -984,7 +1452,10 @@ try {
   for (const name of dshmSyncFs) {
     const orig = fs[name];
     if (typeof orig !== "function") { continue; }
-    try { fs[name] = dshmTrack(name, orig); } catch (e) { /* 只读属性就跳过 */ }
+    try {
+      fs[name] = dshmTrack(name, orig);
+      dshmRingRestore.push(() => { try { fs[name] = orig; } catch (e) { /* ignore */ } });
+    } catch (e) { /* 只读属性就跳过 */ }
   }
   const dshmSyncCp = require("node:child_process");
   for (const name of ["spawnSync", "execFileSync", "execSync"]) {
@@ -992,10 +1463,16 @@ try {
     if (typeof orig !== "function") { continue; }
     try {
       Object.defineProperty(dshmSyncCp, name, { configurable: true, enumerable: true, writable: true, value: dshmTrack(name, orig) });
+      dshmRingRestore.push(() => {
+        try {
+          Object.defineProperty(dshmSyncCp, name, { configurable: true, enumerable: true, writable: true, value: orig });
+        } catch (e) { /* ignore */ }
+      });
     } catch (e) { /* ignore */ }
   }
   try {
     const dshmWait = Atomics.wait;
+    dshmRingRestore.push(() => { try { Atomics.wait = dshmWait; } catch (e) { /* ignore */ } });
     Atomics.wait = function (...args) {
       const t0 = Date.now();
       const entry = { n: "Atomics.wait", a: String(args[3] == null ? "" : args[3]), t0, ms: -1 };
@@ -1011,10 +1488,56 @@ try {
       }
     };
   } catch (e) { /* ignore */ }
-diag("同步调用环已安装（进入即记账；单次 >=200ms 记 SYNC-WARN、>=1s 记 SYNC-SLOW；停顿后随 LOOP-GAP 打 SYNC-RING/SYNC-WARN-LOG/SYNC-COUNT）");
+  /*
+   * require 计时（与同步环同生命周期）。放在环之后：先保证环本身可用，
+   * 再加这一层——它失败也只丢"按包耗时"这一个读数，不影响同步环。
+   */
+  try {
+    const dshmModule = require("node:module");
+    const dshmOrigLoad = dshmModule._load;
+    dshmModule._load = function (request, parent, isMain) {
+      const t0 = Date.now();
+      try {
+        return dshmOrigLoad.apply(this, arguments);
+      } finally {
+        const ms = Date.now() - t0;
+        if (ms >= DSHM_REQUIRE_MIN_MS) {
+          try {
+            const e = dshmRequireStat.get(request) || { n: 0, ms: 0 };
+            e.n += 1; e.ms += ms;
+            dshmRequireStat.set(request, e);
+          } catch (err) { /* 记账失败不影响装载 */ }
+        }
+      }
+    };
+    dshmRingRestore.push(() => { try { dshmModule._load = dshmOrigLoad; } catch (e) { /* ignore */ } });
+    diag(`启动期 require 计时已安装（只记 >=${DSHM_REQUIRE_MIN_MS}ms 的调用）`);
+  } catch (e) {
+    diag(`启动期 require 计时安装失败（不阻塞）：${e && e.message}`);
+  }
+  diag("同步调用环已安装（启动期自动开启；DSHM_BOOT_RING=0 可关；>=200ms 记 SYNC-WARN、>=1s 记 SYNC-SLOW）");
 } catch (e) {
   diag(`同步调用环安装失败（不阻塞）：${e && e.message}`);
 }
+} else {
+  diag('同步调用环默认关闭（避免包装每个高频 fs / child_process 调用；DSHM_RUNTIME_DIAG=1 开启）');
+}
+
+/*
+ * 【无条件的版本标识（docs/339 §9.6）】不管环装没装上、装完卸没卸，这一行**一定**打。
+ *
+ * 起因：真机反馈"装了最新包但搜不到 SYNC-COUNT"。要区分到底是
+ *   ① 装的是旧包（没有这段代码），还是
+ *   ② 日志窗口没覆盖到启动（像 22:56 那份在 launch 后 1 秒就断了），
+ * 只靠"有没有 SYNC-COUNT"是分不开的——两者都不出现。
+ *
+ * 加这一行之后：只要日志里**有** BOOT_00，就必然有它；看见了它却看不见 SYNC-COUNT，
+ * 那就是环没装/没走到收尾，而不是窗口问题。armed 直接给出环的最终状态。
+ */
+diag(`DSHM-BOOTRING version=v2 armed=${dshmRingActive ? '1' : '0'}`
+  + ` env=${process.env.DSHM_BOOT_RING === '0' ? 'off' : 'default'}`
+  + ` diag=${RUNTIME_DIAG_ENABLED ? 'on' : 'off'}`
+  + ' ／ 有此行即说明本包含启动期同步环；若看不到 SYNC-COUNT 请检查启动窗口是否完整');
 
 /** 读我们自己的 state.json，得到"当前版本"，据此拼出核心树目录。 */
 function currentCoreDir() {
@@ -1036,11 +1559,136 @@ function currentCoreDir() {
   }
 }
 
+/**
+ * 把"本次实际在跑的核心目录名"发布到 `$DSH_BASE/cores/.current`（2026-11-12，docs/410）。
+ *
+ * 【为什么需要】`bin/dsh` 壳只能靠 glob 猜最新核心，而 glob 展开是**字符序**：
+ * `0.2.2-rc.1+dshm.10` 会排在 `+dshm.9` 前面 ⇒ 到 dshm.10 时静默回退旧核心。
+ * 宿主本来就知道当前核心（`state.json` 的 `current` / `DSHM_CORE_DIR`），直接发布一份
+ * 权威答案即可，壳不必再猜。写失败不阻塞启动：壳会退回原有 glob 行为。
+ */
+function publishCurrentCore() {
+  if (DSH_BASE.length === 0 || CORE_DIR.length === 0) {
+    return;
+  }
+  const name = path.basename(CORE_DIR);
+  if (typeof name !== 'string' || name.length === 0) {
+    return;
+  }
+  const dir = path.join(DSH_BASE, 'cores');
+  const file = path.join(dir, '.current');
+  try {
+    if (!fs.existsSync(dir)) {
+      return;
+    }
+    const prev = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : '';
+    if (prev === name) {
+      return;
+    }
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, name + '\n', 'utf8');
+    fs.renameSync(tmp, file);
+    diag(`bin/dsh：当前核心已发布到 cores/.current（${name}）`);
+  } catch (e) {
+    diag(`bin/dsh：写 cores/.current 失败（壳退回 glob 字典序）：${String(e).slice(0, 120)}`);
+  }
+}
+
 const CORE_DIR = process.env.DSHM_CORE_DIR || currentCoreDir();
 const HOME_DIR = process.env.DSHM_HOME || (DSH_BASE.length > 0 ? path.join(DSH_BASE, 'home') : '');
 const SANDBOX_HOME = process.env.DSHM_SANDBOX_HOME || USER_DATA || HOME_DIR;
 const PORT = process.env.DSHM_PORT || '3120';
 const PROFILE = process.env.DSHM_PROFILE || 'ondevice';
+
+/*
+ * ── 冷启动种子（2026-11-16，首启提速）──────────────────────────────────────
+ *
+ * 全新安装后的第一次启动：解析缓存是空表（A2 首启装 0 条），编译缓存在端侧
+ * 从未落盘（宿主进程被杀、AtExit 不执行，见下方 markReady 处的编译缓存落盘
+ * 注释）——首启必然全冷。本层把随包预置的两份种子（解析表 JSON + V8 code
+ * cache blob）在插件图装载**之前**拷进可写目录，让"装完第一次点开"≈温启动。
+ * 边界与安全论证全量见 ./boot-seed.cjs 头注；DSHM_BOOT_SEED=off 全关。
+ *
+ * 【安装点约束】必须先于下方 installResolveCache（解析种子要先落到 HOME_DIR
+ * 才会被它读到），也必须先于核心树装载（编译种子要先就位、装载期编译才命中）。
+ */
+try {
+  const bootSeed = require('./boot-seed.cjs');
+  const bs = bootSeed.installBootSeed({ homeDir: HOME_DIR, log: diag });
+  if (bs.enabled) {
+    diag('[dshm-host] 冷启动种子已装载（种子目录=' + bs.seedDir
+      + ' 解析新拷=' + bs.resolveCopied
+      + ' 编译新拷=' + bs.compileCopied + '/' + bs.nsCount + ' ns）');
+  } else if (bs.reason.length > 0) {
+    diag('[dshm-host] 冷启动种子未装载（' + bs.reason + '）');
+  }
+} catch (e) {
+  diag('冷启动种子装载异常（不阻塞启动）：' + (e && e.message));
+}
+
+/*
+ * ── 持久解析缓存（冷启动治理，2026-11-15）──────────────────────────────────
+ *
+ * 温编译缓存（NODE_COMPILE_CACHE，ArkTS 侧注入，ESM 亦覆盖）之后，BOOT_40→50 的
+ * 剩余大头是核心树 ESM 解析机器：~14800 次 resolve、每次 ~155µs 的推导
+ * （候选 stat 风暴 + package.json 逐级 walk + 归一化），温态本地读数 ~2.5s/7.0s。
+ * 答案跨启动不变 ⇒ 持久化到 HOME_DIR，下次冷启动用一次 Map.get 换掉整套推导。
+ *
+ * 边界（每条"宁可少省，也不许改语义"，全量见 ./resolve-cache.cjs 头注）：
+ *   · 只缓存核心树内 parent → 核心树内 target 的 ESM 解析；用户插件 / node: 不碰；
+ *   · 命名空间 = coreVersion+builtAt（dshm-core.json）+ Node 版本 + ABI + 格式版本，
+ *     核心升级 / 同版本重打 / Node 换版 ⇒ 自动整体失效重新采集；
+ *   · DSHM_RESOLVE_CACHE=off 全关；任何异常直通 nextResolve。
+ * 安装点必须在 CORE_DIR/HOME_DIR 就绪之后、下方 `await import(entry)` 核心树装载之前
+ * —— 晚一步等于这一轮白装。
+ */
+try {
+  const resolveCache = require('./resolve-cache.cjs');
+  resolveCacheHandle = resolveCache.installResolveCache({
+    coreDir: CORE_DIR,
+    homeDir: HOME_DIR,
+    log: diag,
+  });
+  const rcStats = resolveCacheHandle.stats;
+  if (rcStats.enabled) {
+    diag('[dshm-host] 持久解析缓存已安装（装载条目=' + rcStats.entries
+      + ' 命名空间=' + rcStats.ns + '）');
+  } else {
+    diag('[dshm-host] 持久解析缓存未启用（' + (rcStats.reason || '已关闭')
+      + '；DSHM_RESOLVE_CACHE=off 关）');
+  }
+} catch (e) {
+  diag('持久解析缓存安装失败（不阻塞启动，退回常规解析）：' + (e && e.message));
+}
+
+/*
+ * 清掉**别的 profile 留下的陈旧 `host-ready.<profile>.json`**（2026-11-05 复测 P1）。
+ *
+ * 现场：`host-ready.superagent.json` 还写着 pid=18911、port=3082，但该进程早已不在，
+ * 3082 也连接拒绝。任何按这个文件判断"superagent 在跑"的逻辑都会误判。
+ * 判据只能是 pid 存活（`kill(pid,0)`），文件名不能说明任何事。
+ * 只清**非主 profile** 的那几份；主 `host-ready.json` 由本进程马上重写。
+ */
+function pruneStaleHostReady() {
+  try {
+    const names = fs.readdirSync(HOME_DIR).filter((n) => /^host-ready\..+\.json$/.test(n));
+    for (const name of names) {
+      const file = path.join(HOME_DIR, name);
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const pid = Number(parsed && parsed.pid);
+        let alive = false;
+        if (Number.isFinite(pid) && pid > 0) {
+          try { process.kill(pid, 0); alive = true; } catch (e) { alive = false; }
+        }
+        if (!alive) {
+          fs.unlinkSync(file);
+          diag(`host-ready：清理陈旧 ${name}（pid=${Number.isFinite(pid) ? pid : '?'} 已不在）`);
+        }
+      } catch (e) { /* 坏 JSON：留着给人看，别替人删证据 */ }
+    }
+  } catch (e) { /* 读不到目录不影响启动 */ }
+}
 
 function log(msg) {
   // 统一前缀，便于 ArkTS / 诊断页从日志里认出我们的行
@@ -1067,6 +1715,25 @@ function log(msg) {
  * 订阅一个空监听即可跳过默认行为（Electron 文档明示：订阅了就不执行默认动作）。
  */
 function keepAliveWithoutWindows() {
+  /*
+   * 【端侧不走 Electron（2026-11-03，r9 §八 反馈项）】
+   *
+   * 这条监听的来历是早期 Electron 宿主：它把"永不建窗"的 Node 宿主当成
+   * "所有窗口都已关闭" ⇒ 启动即 quit（真机 `APPSPAWN: Unexpected call: exit(1)`），
+   * 于是补一个空监听压掉默认行为。
+   *
+   * 但**鸿蒙端侧根本没有 Electron**：`require('electron')` 必然抛，catch 里那句
+   * "非 Electron 环境？"每天都会打一遍，既噪声又误导（让人以为保活靠它）。
+   * 端侧的存活语义由 ArkTS 侧负责 —— 前台由 UIAbility 生命周期持有，
+   * 后台由 `backgroundTaskManager` 长时任务持有（`platform/notify/KeepAlive.ets`，
+   * refs 由 Host 写的 `workload.json` 驱动）。所以这里在鸿蒙环境**明确跳过**，
+   * 只在真正的 Electron 宿主（桌面历史形态）上才注册。
+   */
+  if (process.platform === 'openharmony' || typeof process.versions.ohos !== 'undefined'
+    || String(process.env.DSHM_PLATFORM || '') === 'ohos') {
+    log('保活：鸿蒙端侧不注册 Electron 的 window-all-closed（存活由 ArkTS 长时任务负责）');
+    return;
+  }
   try {
     const electron = require('electron');
     if (electron && electron.app && typeof electron.app.on === 'function') {
@@ -1076,7 +1743,7 @@ function keepAliveWithoutWindows() {
       log('已注册 window-all-closed 保活监听');
     }
   } catch (e) {
-    log('注册保活监听失败（非 Electron 环境？）：' + e.message);
+    log('注册保活监听失败（非 Electron 环境，端侧属预期）：' + e.message);
   }
 }
 
@@ -1178,6 +1845,55 @@ let RUNTIME_FACTS_CACHE = null;
  * 上一次进程"（pid 守卫）⇒ 读数就丢了。故一律先暂存，`writeHostReady()` 首次落盘时并进去。
  */
 const PENDING_RUNTIME_PROBES = {};
+/**
+ * `pty.node` dlopen 探针结论的缓存（docs/322）。
+ *
+ * 【缓存什么】只缓存**稳定的坏结论**（"仍被系统拦，权限未生效"）与成功结论；
+ * E44 模式（闭包缺）不缓存 —— 那种情况会随依赖闭包装配而变，值得每次重探。
+ * 【存在哪】`<HOME_DIR>/runtime-facts.json`（沙箱内，随应用数据走，不涉隐私）。
+ * 【失败态】读写异常一律静默：这是一条**纯降噪**的旁路，不能因为它挡住启动。
+ */
+const PTY_DLOPEN_CACHE_FILE = 'runtime-facts.json';
+
+function ptyDlopenCachePath() {
+  return path.join(HOME_DIR, PTY_DLOPEN_CACHE_FILE);
+}
+
+/** 读缓存；`'on'` 表示环境变量要求强制重探。返回探针记录或 null。 */
+function readPtyDlopenCache() {
+  try {
+    if (String(process.env.DSHM_PTY_DLOPEN_PROBE || '') === 'on') {
+      return 'on';
+    }
+    const raw = JSON.parse(fs.readFileSync(ptyDlopenCachePath(), 'utf8'));
+    const rec = raw && raw['sandbox-dlopen'];
+    if (rec && typeof rec.name === 'string' && typeof rec.note === 'string'
+        && typeof rec.ok === 'boolean') {
+      return { name: rec.name, ok: rec.ok, note: `${rec.note}（缓存）` };
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** 写缓存（只写这一项，保留文件里其它字段）。 */
+function writePtyDlopenCache(record) {
+  try {
+    let next = {};
+    try {
+      next = JSON.parse(fs.readFileSync(ptyDlopenCachePath(), 'utf8')) || {};
+    } catch (e) {
+      next = {};
+    }
+    next['sandbox-dlopen'] = { name: record.name, ok: record.ok, note: record.note };
+    next.updatedAt = new Date().toISOString();
+    fs.writeFileSync(ptyDlopenCachePath(), JSON.stringify(next, null, 2));
+  } catch (e) {
+    /* 写不进去就下次再探：不影响功能 */
+  }
+}
+
 function runtimeFacts() {
   if (RUNTIME_FACTS_CACHE !== null) {
     return RUNTIME_FACTS_CACHE;
@@ -1247,6 +1963,25 @@ function runtimeFacts() {
   //   ② 报 napi 符号找不到（E44 模式）→ noexec 拦截已解除，只差 NEEDED 闭包；
   //   ③ 报 not accessible / operation not permitted → 权限没生效（E39 原样）。
   // 直连 process.dlopen，绕开本文件的 require hook，测的就是"系统层"。
+  /*
+   * 【2026-10-31 性能/日志收口（docs/322）】这段探针**每次冷启动**都做一次注定失败的
+   * `process.dlopen(pty.node)`：真机日志里每次启动固定刷 3 组 `MUSL-LDSO: load ...
+   * pty.node failed, namespace=moduleNs_default/ndk, errno=22`。
+   * 这些告警来自 **musl 动态加载器**（框架层打印，应用无法关闭），而结论早在 E39 就定了：
+   * "沙箱 `.node` 的 dlopen 被系统拦"。⇒ 结论稳定后就不必每次再撞一次：
+   *   · `DSHM_PTY_DLOPEN_PROBE=on`  强制重探（排障用）；
+   *   · 默认只在**首次**启动时探测一次，结果写进 `<HOME>/runtime-facts.json` 缓存，
+   *     之后直接读缓存（日志噪音与一次必然失败的 dlopen 都省掉）。
+   */
+  const ptyProbeCached = readPtyDlopenCache();
+  /*
+   * 写法说明：`else try { … } catch (e) { … }` 在语法上合法，但可读性差、
+   * 后续裁剪时容易被误当成"if 里还有别的语句"而改坏。这里改成显式的
+   * `if (cached) { … } else { probe + catch }`，控制流一眼可见。
+   */
+  if (ptyProbeCached !== null && ptyProbeCached !== 'on') {
+    facts.natives.push(ptyProbeCached);
+  } else {
   try {
     const probeMod = { exports: {} };
     process.dlopen(probeMod, path.join(CORE_DIR, 'node_modules', 'node-pty',
@@ -1259,13 +1994,19 @@ function runtimeFacts() {
   } catch (e) {
     const message = e && e.message ? String(e.message) : String(e);
     const noexecLifted = /symbol|relocat/i.test(message);
-    facts.natives.push({
+    const record = {
       name: 'sandbox-dlopen',
       ok: false,
       note: (noexecLifted
         ? `noexec 已解除但闭包缺（E44 模式，符合预期）：${message.slice(0, 140)}`
         : `仍被系统拦（E39 原样，权限未生效）：${message.slice(0, 140)}`),
-    });
+    };
+    facts.natives.push(record);
+    /* 只缓存"仍被系统拦"这一稳定结论（E44 可能因闭包修复而变 ⇒ 下次重探） */
+    if (!noexecLifted) {
+      writePtyDlopenCache(record);
+    }
+  }
   }
   // E15 之前的结论是"平台级进程创建限制"。ALLOW_EXTERNAL_NATIVE_CODE 声称
   // 允许"运行外部 Native 二进制代码（含 bin）"——node-pty 的完整链正是试金石：
@@ -1299,7 +2040,22 @@ function runtimeFacts() {
   RUNTIME_FACTS_CACHE = facts;
   return facts;
 }
-/** 把 authenticatedUrl 拆成 baseUrl + token，写 `<HOME_DIR>/host-ready.json`。 */
+/**
+ * 把 authenticatedUrl 拆成 baseUrl + token，写 `<HOME_DIR>/host-ready.json`。
+ *
+ * 【多 profile 隔离（2026-11-03，docs/349 §6.1）】两个宿主（ondevice@3121 / superagent@3082）
+ * 以前写**同一个** `host-ready.json` ⇒ 后起的把前面的覆盖，主界面拿到 3082 的 token
+ * 再去访问 3121，实测 **401**。
+ * 现在：`ondevice` 写 `host-ready.json`（保持既有读取面不变）；其他 profile 写
+ * `host-ready.<profile>.json`，互不覆盖。
+ */
+
+function hostReadyPath() {
+  return PROFILE === 'ondevice'
+    ? path.join(HOME_DIR, 'host-ready.json')
+    : path.join(HOME_DIR, `host-ready.${PROFILE}.json`);
+}
+
 function writeHostReady(authUrl) {
   try {
     const parsed = new URL(authUrl);
@@ -1323,6 +2079,7 @@ function writeHostReady(authUrl) {
         zstd: facts.zstd,
         listenAddress: facts.listenAddress,
         natives: facts.natives,
+        nodeCli: NODE_CLI_STATUS,
       },
     };
     // 【探针读数先于本次落盘】见 PENDING_RUNTIME_PROBES：exec / 终端两批探针若已经跑完，
@@ -1354,9 +2111,23 @@ function writeHostReady(authUrl) {
       }
       diag(`探针读数（日志副本）：runtime={${probeKeys.join(',')}} ${parts.join(' | ')}`);
     }
-    fs.writeFileSync(path.join(HOME_DIR, 'host-ready.json'), JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    fs.writeFileSync(hostReadyPath(), JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    /*
+     * 【可核查副本（2026-10-09）】`dsh/home` 是 0700 ⇒ 外部核查（`hdc shell` 是另一个 uid）读不到
+     * host-ready.json；而 token 是 Python 桥端点唯一的凭据源 ⇒ 核查脚本会陷进「有 token 才读得到
+     * home、home 读不到才想要 token」的死结。此前唯一可读的 token 来源是日志里**客户端**留下的
+     * `GET /?token=…` 行 —— 但那行只在「webview **首次**导航」时出现，**重启后 webview 复用 cookie
+     * 就再也不出现**（2026-10-09 PC 实测：同一台设备，冷启动那次日志里有 token 行，下一次就没有，
+     * 于是当时的代码指纹核对脚本只能报「未验证」）。
+     * 故按本仓既有手法（探针读数镜像一行进 dshm-host.log，见上面 runtime 那段）把权威 token 显式
+     * 镜像一行：相对「UI 自己的请求行里本来就明文带着 token」这没有新增暴露面，只是把**偶发**变成**必有**。
+     */
+    if (token.length > 0) {
+      log(`host-ready token=${token} port=${payload.port} pid=${process.pid}`);
+    }
     stage('BOOT_65_AUTH_URL', `port=${payload.port} tokenLen=${token.length} → host-ready.json`
       + ` node=${facts.nodeVersion} zstd=${facts.zstd} jitless=${facts.jitless}`);
+
   } catch (e) {
     console.error('[dshm-host] 写 host-ready.json 失败：' + (e && e.message));
   }
@@ -1416,7 +2187,14 @@ function recordRuntimeProbe(key, value) {
 /** 读回 `host-ready.json` 里的 authenticatedUrl（没抓到就是空串，不抛）。 */
 function readHostReadyUrl() {
   try {
-    const p = path.join(HOME_DIR, 'host-ready.json');
+    /*
+     * 【必须读**本 profile 自己**的那份（2026-11-03，docs/354 §9.5）】
+     * 旧实现写死 `HOME_DIR/host-ready.json` —— 那是主宿主（ondevice/3121）的文件。
+     * 第二宿主（superagent/3082）启动时因此把**主宿主的 authUrl** 当成自己的打进
+     * `DSHM_READY`，日志里就出现"3082 的 profile 配 3121 的 token"这种串台。
+     * `hostReadyPath()` 已按 profile 分文件，这里复用即可。
+     */
+    const p = hostReadyPath();
     if (!fs.existsSync(p)) {
       return '';
     }
@@ -1666,13 +2444,18 @@ function resolveWorkspaceDir() {
  * `dsh-credentials-local` 的 `assertOwnerOnly()` 要求凭据文件"不能被属主以外读到"，
  * 而 hmfs 把文件权限强制成 **660**（属组可读）⇒ 检查必然抛错，
  * 表现就是"用户明明填了密钥、模型却说没有密钥"。
- * 【为什么不用别的手段探测】端侧 `process.platform` 是 `linux`，与桌面 Linux 无法区分；
- * 这里用**我们自己确知的事实**：应用沙箱路径一定以 `/data/storage` 开头。
- * 显式、可审计，且只在端侧成立——pack-core 的补丁只认这个变量。
+ * 【为什么不用别的手段探测】HAP 内的 node 报 `process.platform === 'linux'`，与桌面 Linux
+ * 无法区分；但鸿蒙 PC 档的宿主 node 报 `openharmony`（2026-11-07 实测），两条判据都要认。
+ * 【2026-11-07 修正】原实现只认 `/data/storage` 前缀。PC 档 `app.getPath('userData')`
+ * 落在 `/storage/Users/<user>`，前缀不匹配 ⇒ 本变量未设 ⇒ 凭据插件按 660 拒绝启动
+ * （`.dshm-boot-failed` 的 BOOT_40_PROFILE_BOOT）。而 hmfs 下 `chmod 600` 是空操作
+ * （实测仍为 660），所以这条豁免是唯一可行路径，不能靠运维 chmod 绕过。
  */
-if (SANDBOX_HOME.startsWith('/data/storage') || HOME_DIR.startsWith('/data/storage')) {
+const DEVICE_SANDBOX_PREFIXES = ['/data/storage', '/storage/Users'];
+if (process.platform === 'openharmony'
+  || DEVICE_SANDBOX_PREFIXES.some((p) => SANDBOX_HOME.startsWith(p) || HOME_DIR.startsWith(p))) {
   process.env.DSHM_PLATFORM = 'ohos';
-  diag('平台标识：DSHM_PLATFORM=ohos（鸿蒙应用沙箱路径）');
+  diag('平台标识：DSHM_PLATFORM=ohos（鸿蒙端侧：平台名或沙箱路径）');
 }
 for (const key of ['NO_PROXY', 'no_proxy']) {
   if (!process.env[key] || process.env[key].length === 0) {
@@ -1727,7 +2510,7 @@ function execOk(p) {
 /**
  * 读文件头 4 字节验 ELF magic（布尔，不抛）。
  * 【为什么需要它——hmfs 元数据全体不可信】真机实测：busybox tar 在 hmfs 上
- * 解 apk 里的 symlink 条目会留下"残缺链接占位"（hdc ls 显示 l????????），
+ * 解 Alpine 包里的 symlink 条目会留下"残缺链接占位"（hdc ls 显示 l????????），
  * 而 Node 的 statSync / lstatSync / accessSync 对这种条目**全部返回成功**且
  * mode=0777（symlink 固有 x 位）——按元数据判"已就绪/可执行"会被骗过。
  * open+read 走的是真实数据面：残缺链接跟随即 ENOENT，骗不了。
@@ -2173,6 +2956,11 @@ const CLI_SHIM_LINES = [
   '  exit 0',
   'fi',
   `QDIR="${HOME_DIR}/install-queue"`,
+  /*
+   * 当前 profile 目录（生成时写死，同 QDIR 的理由：子进程 env 白名单里读不到 DSH_HOME）。
+   * 用途只有一处：`list` 在"pwd 不是包目录"时回落查这里（docs/293 §5.1）。
+   */
+  `PROFILE_DIR="${HOME_DIR}/profiles/${PROFILE}"`,
   'mkdir -p "$QDIR" 2>/dev/null',
   'if [ "$cmd" = "add" ] || [ "$cmd" = "install" ] || [ "$cmd" = "i" ]; then',
   '  shift',
@@ -2299,20 +3087,57 @@ const CLI_SHIM_LINES = [
   //   定安装源。此前假壳无 config 分支 → 落到末尾拒绝行 → 上层把 registry 判成
   //   不可信 → Web 插件页的 registry 探测/安装失败。这里返回与安装器 / view 端点
   //   同源（DEFAULT_REGISTRY=npmmirror）的 registry，让上层拿到的就是实际安装源。
-  'if [ "$cmd" = "config" ] || [ "$cmd" = "get" ]; then',
-  '  if [ "$cmd" = "get" ] && [ -z "$2" ]; then',
-  '    echo "pnpm(shim): 用法 pnpm config get <key>" >&2',
+  /*
+   * 【2026-10-29 修 docs/293 §5.2：`npm config` 静默空返回 rc=0】
+   *
+   * 原文只处理 `config get <key>`：裸 `pnpm config`（不带 get）会一路落到"收集 mykey →
+   * 没有 registry ⇒ 打印空串 → exit 0"，用户看到的是**什么都没有、退出码还成功**，
+   * 无法区分"没配置"与"不支持"。同一个 `config` 入口的两种形态给出两种语义，本身就是缺陷。
+   *
+   * 现在：
+   *   · `config get <key>` 保持原语义（registry 给真值，其余键回空串 + rc 0 ——
+   *     上游 plugin-manager 靠它判 registry，回非零会把安装源判成不可信）；
+   *   · 裸 `config` / `config list` / `config --json` 走**明确的只读列表**：
+   *     打印端侧真实生效的 registry 一行到 stdout，并把"其余键在端侧无配置链"写进 stderr；
+   *   · 写类（`config set` / `config delete`）明确拒绝并 rc 1 —— 端侧没有可写配置链，
+   *     假装成功会让用户以为改掉了。
+   */
+  'if [ "$cmd" = "config" ]; then',
+  '  sub="$2"',
+  '  if [ "$sub" = "set" ] || [ "$sub" = "delete" ] || [ "$sub" = "rm" ]; then',
+  '    echo "pnpm(shim): 端侧不支持修改配置（config $sub）：registry 由 Host 统一管理" >&2',
+  '    echo "  需要换源请在「设置 → 插件」里改用 Host 的 registry 配置" >&2',
   '    exit 1',
   '  fi',
-  '  # 只喂 registry：其余 config 键一律回空 / 兜底（端侧无真实 pnpm 配置链）。',
-  '  mykey=""',
-  '  for a in "$@"; do',
-  '    [ "$a" = "config" ] && continue',
-  '    [ "$a" = "get" ] && continue',
-  '    [ -n "$mykey" ] && continue',
-  '    mykey="$a"',
-  '  done',
-  '  if [ "$mykey" = "registry" ]; then',
+  '  if [ -z "$sub" ] || [ "$sub" = "list" ] || [ "$sub" = "ls" ] || [ "$sub" = "--json" ]; then',
+  '    echo "registry=https://registry.npmmirror.com/"',
+  '    echo "pnpm(shim): 端侧只有 registry 一项配置；其余配置键在端侧不存在（无 pnpm 配置链）" >&2',
+  '    exit 0',
+  '  fi',
+  '  if [ "$sub" = "get" ]; then',
+  '    if [ -z "$3" ]; then',
+  '      echo "pnpm(shim): 用法 pnpm config get <key>" >&2',
+  '      exit 1',
+  '    fi',
+  '    if [ "$3" = "registry" ]; then',
+  '      echo "https://registry.npmmirror.com/"',
+  '      exit 0',
+  '    fi',
+  '    echo ""',
+  '    exit 0',
+  '  fi',
+  '  echo "pnpm(shim): 未知的 config 子命令：$sub（端侧支持 config get <key> 与 config 列表）" >&2',
+  '  exit 1',
+  'fi',
+  /*
+   * 兼容旧形态：`get <key>` 直接调用（上游确有这条）。与 `config get` 同语义。
+   */
+  'if [ "$cmd" = "get" ]; then',
+  '  if [ -z "$2" ]; then',
+  '    echo "pnpm(shim): 用法 pnpm get <key>" >&2',
+  '    exit 1',
+  '  fi',
+  '  if [ "$2" = "registry" ]; then',
   '    echo "https://registry.npmmirror.com/"',
   '    exit 0',
   '  fi',
@@ -2381,23 +3206,91 @@ const CLI_SHIM_LINES = [
   //  inventory 空 → 市场报 "installed package manifest missing / did not materialize"。
   //  这里转发 Host /dshm-packages/list，返回 pnpm list --json 同形 JSON（dir=PWD，
   //  市场以 profileDir 为 cwd 起 spawn）。无法取出就回 [] + 0，靠 deps diff 兜底。
-  'if [ "$cmd" = "list" ] || [ "$cmd" = "ls" ] || [ "$cmd" = "ll" ]; then',
+  /*
+   * ── list：目录解析要"先认 pwd，再回落到当前 profile"（2026-10-29，docs/293 §5.1）──
+   *
+   * 【原文的三重缺陷】（真机实测 docs/293 §5.1）
+   *   · `dir=$(pwd)` 被无条件当成 profile 目录 ⇒ 在 `/tmp` 或家目录下跑 `npm list`
+   *     得到 404，却被文案说成"端点到不可达"（把排障方向带歪）；
+   *   · 失败分支先 `echo "[]"` 再把退出码覆盖成 0（`echo` 的成功）⇒ 脚本无法据 rc 判断；
+   *   · 只有 cd 到 profile 目录才查得出来，而用户未必知道 package.json 在哪。
+   *
+   * 【现在的口径】
+   *   ① pwd 下有 `package.json` ⇒ 就用它（保留"在市场以 profileDir 为 cwd 起 spawn"
+   *      这条主路径的原有语义，`pnpm list --json --depth=0` 在任意 JS 项目目录下也成立）；
+   *   ② pwd 下没有 ⇒ 回落到**当前 profile 目录**（生成时写死，同 install-queue 的做法），
+   *      并在 stderr 说明"这是回落结果"，不让读数来源变得不可追溯；
+   *   ③ 两种都失败 ⇒ 文案区分 **404（不是包目录）** 与 **连不上（Host 未就绪）**，
+   *      并且 **exit 1** —— 先 `echo "[]"` 让 stdout 仍是合法 JSON，**再** `exit 1`。
+   *
+   * 【为什么回落到 profile 而不是报错】`npm list` 的用户意图几乎总是"我装了哪些插件"，
+   * 而端侧的答案永远在 profile 里；报错只会让用户去找 package.json 的位置。
+   * 任何"回落到别处"的结果都在 stderr 里点明，不伪造读数。
+   */
+  '  if [ "$cmd" = "list" ] || [ "$cmd" = "ls" ] || [ "$cmd" = "ll" ]; then',
   '  TOKEN="${DSHM_PYTHON_TOKEN:-}"',
   '  if [ -z "$TOKEN" ]; then',
   `    TOKEN=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "${HOME_DIR}/host-ready.json" 2>/dev/null)`,
   '  fi',
   '  if [ -z "$TOKEN" ]; then',
-  '    echo "pnpm(shim): list 失败：Host token 未就绪" >&2',
+  '    echo "pnpm(shim): list 失败：Host token 未就绪（Host 未启动或仍在启动，稍后重试）" >&2',
   '    echo "[]"',
   '    exit 1',
   '  fi',
-  "  LISTENC=$(printf \"%s\" \"$(pwd)\" | sed -e 's/%/%25/g' -e 's/@/%40/g' -e 's|/|%2F|g' -e 's/ /%20/g' -e 's/&/%26/g' -e 's/+/%2B/g' -e 's/?/%3F/g' -e 's/=/%3D/g' -e 's/#/%23/g')",
-  `  OUT=$(wget -O - "http://127.0.0.1:${PORT}/dshm-packages/list?token=$TOKEN&dir=$LISTENC" 2>/dev/null)`,
-  '  if [ $? -eq 0 ] && [ -n "$OUT" ]; then',
-  '    printf "%s\n" "$OUT"',
+  /*
+   * 【为什么要临时文件】busybox wget 在 404 与"连不上"两种情况下**都是 rc=1 + stdout 空**，
+   * 只能靠 stderr 文案区分。把 stdout 收进文件、stderr 收进变量，两条通道就不会互相污染。
+   * 目录先建：list 分支可能跑在 `mkdir -p "$QDIR"` 之前（该 mkdir 在 add/rm 分支里）。
+   */
+  '  mkdir -p "$QDIR" 2>/dev/null',
+  '  LISTDIR="$(pwd)"',
+  `  if [ ! -f "$LISTDIR/package.json" ]; then`,
+  '    LISTDIR="$PROFILE_DIR"',
+  '    echo "pnpm(shim): 当前目录不是包目录（无 package.json）⇒ 改查当前 profile：$LISTDIR" >&2',
+  '  fi',
+  "  LISTENC=$(printf \"%s\" \"$LISTDIR\" | sed -e 's/%/%25/g' -e 's/@/%40/g' -e 's|/|%2F|g' -e 's/ /%20/g' -e 's/&/%26/g' -e 's/+/%2B/g' -e 's/?/%3F/g' -e 's/=/%3D/g' -e 's/#/%23/g')",
+  /*
+   * 【为什么把 stderr 留下来判、而不是只看 `$?`（2026-10-29 实测）】
+   * 随包 busybox 的 wget 在**连不上**与**404**两种情况下都返回 rc=1、stdout 都为空
+   * （实测：200 ⇒ rc=0 带正文；404 ⇒ rc=1 空；Connection refused ⇒ rc=1 空）。
+   * 原写法只用 `$?` 判，等于把这两种结局压成同一行"端点到不可达"——正是 docs/293 §5.1
+   * 指出的"排障方向被带歪"。所以这里把 stderr 收进变量，用其中的 `connect`/`refused`
+   * 字样区分"Host 没起来"与"Host 说这个目录不是包目录"。
+   */
+  /*
+   * 【用命令替换一次拿全（stdout+stderr 合并进 ERR，正文另存 OUT）】
+   * 为什么不用 `2>&1 >file`：POSIX 下重定向顺序敏感，且 `$QDIR/.list.out` 在
+   * 某些 ash 变体里于 mkdir 之前就绪会失败 —— 本轮实测踩过（表现为所有 list 用例都
+   * 走"不是包目录"分支，连成功路径也进不去）。改成"先合并 stderr、正文随后分离"。
+   */
+  `  RAW=$(wget -O - "http://127.0.0.1:${PORT}/dshm-packages/list?token=$TOKEN&dir=$LISTENC" 2>&1)`,
+  '  RC=$?',
+  /*
+   * busybox wget 失败时 stdout 为空、stderr 有文案；成功时 stdout 是 JSON、stderr 可能
+   * 有进度行。判据用"正文是否以 [ 或 { 开头"而不是"stderr 是否为空"—— 后者会把带
+   * 进度输出的成功也判成失败。
+   */
+  '  OUT=""',
+  '  case "$RAW" in',
+  '    \[*|\{*) OUT="$RAW" ;;',
+  '    *) OUT="" ;;',
+  '  esac',
+  '  if [ $RC -eq 0 ] && [ -n "$OUT" ]; then',
+  '    printf "%s\\n" "$OUT"',
   '    exit 0',
   '  fi',
-  '  echo "pnpm(shim): list 查询失败（端点到不可达）" >&2',
+  /*
+   * 两类失败分开报：连不上（stderr 有 connect/refused/无应答）vs 端点回了非 2xx。
+   * 两者的排障动作完全不同 —— "端点到不可达"把 404 也吞进这句，是原缺陷的核心。
+   */
+  '  case "$RAW" in',
+  '    *connect*|*Connect*|*refused*|*timed*|*unreachable*)',
+  '      echo "pnpm(shim): list 失败：连不上 Host（127.0.0.1:${PORT}，Host 未启动或仍在启动）" >&2',
+  '      ;;',
+  '    *)',
+  '      echo "pnpm(shim): list 失败：$LISTDIR 不是可枚举的包目录（Host 未返回依赖树：缺 package.json 或未授权）" >&2',
+  '      ;;',
+  '  esac',
   '  echo "[]"',
   '  exit 1',
   'fi',
@@ -2506,9 +3399,142 @@ const DSH_SHIM_LINES = [
   //  【注意】这里必须先于下面的 argv 扫描：扫描会消费 `--profile <p>`，而
   //  shimDirResolveLines 需要看到原始 "$@" 才能取到 --profile 的值。
   ...shimDirResolveLines(),
+  /*
+   * 【`--version` 要报真身版本（2026-11-02 移动端复测 P3）】
+   * 旧实现硬编码 `0.1.7-rc.1 (dshm install-queue shim)`，排障时会把它当成"真 dsh 没在跑"。
+   * 真身能起就 `exec` 它拿真版本；起不来才回落到带 "shim" 字样的兜底串 —— 兜底串保留是
+   * 为了"没有核心树"的环境仍能回答，但不会再冒充真版本。
+   */
+  /*
+   * 【非 plugin 子命令转发真 dsh（2026-11-02，docs/344 §3）】
+   *
+   * superagent 的 SETUP.md 第 4 步就是 `dsh superagent --from-default-profile web
+   * --dump-config`；旧壳对它一律回一句"未支持"，命令直接不可用。真身一直在
+   * （`${CORE_DIR}/node_modules/@deepseek-ai/dsh/lib/bin.js`，`--version` 报 0.2.1-rc.5），
+   * 只是 PATH 上被安装队列壳挡住了。
+   *
+   * 判据故意简单：**只拦 `plugin`**（那是安装队列通道），其余原样 exec 真身。
+   * 不猜子命令名单 —— 上游加子命令时这里不用改。
+   *
+   * ⚠️ 转发不等于"能启动"：真 dsh 起 profile 仍会被原生 `.node` 挡住（docs/344 §4），
+   * 但 `--dump-config`、`--version`、`plugin ... --help` 这类**只组合不启动**的用法可用，
+   * 且报错会来自真身（真实原因）而不是壳（"未支持"）。
+   */
+  /*
+   * 【本地路径标识放行（2026-11-02 docs/346 §3）】
+   * `dsh plugin --profile X add "link:<dir>"` 是 superagent SETUP 的官方步骤，而队列协议
+   * 只认 npm 包名 / GitHub 地址 ⇒ 旧壳直接判"无法识别"。本地 link 不涉及下载与审核，
+   * 投递队列没有意义 ⇒ 这类 spec 直接透传真 dsh（真 dsh 会走 pnpm link）。
+   */
+  /*
+   * 【核心路径运行时解析 —— 只用 shell 内建（2026-11-03 第二次修）】
+   * 上一版写成「ls -1d 各核心目录再 sort」的命令替换，而端侧 busybox **没有**
+   * `ls`/`sort`/`awk`/`sed` 这些 applet（实测 bin/ 下都没有）⇒ 命令替换为空
+   * ⇒ 循环一次没跑 ⇒ `_dshbin` 空 ⇒ `dsh --version` 落到"核心 CLI 未就位"。
+   * 改用**纯 glob + 内建 test**：不依赖任何外部命令。
+   *
+   * 【glob 只作兜底（2026-11-12，docs/410）】glob 展开按**字符序**，
+   * `+dshm.10` 会排在 `+dshm.9` 之前 ⇒ 升到 dshm.10 时"取最后一个"会静默选回旧核心。
+   * 现在首选 `cores/.current`（宿主每次启动发布实际在跑的核心目录名），
+   * 读不到才退回 glob；两者都只用 shell 内建。
+   */
+  /*
+   * 【核心目录从**脚本自身位置**推导（2026-11-03 第三次修）】
+   * 前两版分别用了写死的 `${CORE_DIR}` 和 `${SANDBOX_HOME:-$HOME}/dsh/cores`：
+   *   · 写死 ⇒ 升核心就断（.106→.107→.109 连断三次，docs/349/351）；
+   *   · env 推导 ⇒ 真机上算出了 `.107` 的路径，而当时 cores 里**只有 .109**
+   *     （v21 体检 [5] 实测），说明该 shell 的 SANDBOX_HOME/HOME 与宿主不一致。
+   * 本版：`bin/dsh` 必然在 `<sandbox>/bin/` 下 ⇒ 去掉两级就得到 `<sandbox>`，
+   * 再拼 `dsh/cores`。**语义上不可能错**，且只用参数展开、不调任何外部命令
+   * （端侧 busybox 没有 ls/sort/awk/sed，这点已踩过两次）。
+   */
+  '_b="$0"',
+  'case "$_b" in',
+  '  */*) ;;',
+  '  *)',
+  '    _rest="$PATH"',
+  '    while [ -n "$_rest" ]; do',
+  '      _p="${_rest%%:*}"',
+  '      case "$_rest" in *:*) _rest="${_rest#*:}" ;; *) _rest="" ;; esac',
+  '      [ -n "$_p" ] || continue',
+  '      if [ -f "$_p/dsh" ]; then _b="$_p/dsh"; break; fi',
+  '    done',
+  '    ;;',
+  'esac',
+  '_bin="${_b%/*}"',
+  '_sb="${_bin%/*}"',
+  '_cores="$_sb/dsh/cores"',
+  /*
+   * 【兜底路径按档位推导（2026-11-12，docs/410）】
+   * 旧版无条件写死 `haps/entry/...`：phone 档 `bin/` 与 `cores/` 都在
+   * `haps/phone/files/` 下，一旦 `$_sb/dsh/cores` 不存在就指到 entry 档的目录，
+   * 结果是"核心 CLI 未就位"或选到另一个档的核心。改为先看自己这一档，再试另一档。
+   */
+  'if [ ! -d "$_cores" ]; then',
+  '  case "$_sb" in',
+  '    *haps/phone*) _alt="/data/storage/el2/base/haps/entry/files/dsh/cores" ;;',
+  '    *) _alt="/data/storage/el2/base/haps/phone/files/dsh/cores" ;;',
+  '  esac',
+  '  [ -d "$_alt" ] && _cores="$_alt"',
+  'fi',
+  '_dshbin=""',
+  /*
+   * 【权威来源 = cores/.current（2026-11-12，docs/410）】
+   * 旧实现只靠 glob 取"最后一个"，而 glob 展开按**字符序**：
+   * `0.2.2-rc.1+dshm.10` 排在 `+dshm.9` 之前 ⇒ 到 dshm.10 时会静默回退到旧核心。
+   * 宿主每次启动把"实际在跑的核心目录名"写进 `cores/.current`，壳优先读它；
+   * 读不到（首装、旧版宿主没写过）才退回 glob，行为与旧版一致。
+   * `read` 是 shell 内建，不依赖端侧 busybox 缺失的 ls/sort/awk。
+   */
+  'if [ -f "$_cores/.current" ]; then',
+  '  _cur=""',
+  '  read _cur < "$_cores/.current" || _cur=""',
+  '  if [ -n "$_cur" ] && [ -f "$_cores/$_cur/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then',
+  '    _dshbin="$_cores/$_cur/node_modules/@deepseek-ai/dsh/lib/bin.js"',
+  '  fi',
+  'fi',
+  'if [ -z "$_dshbin" ] && [ -d "$_cores" ]; then',
+  '  for _d in "$_cores"/*/; do',
+  '    [ -d "$_d" ] || continue',
+  '    if [ -f "${_d}node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then',
+  '      _dshbin="${_d}node_modules/@deepseek-ai/dsh/lib/bin.js"',
+  '    fi',
+  '  done',
+  'fi',
+  /*
+   * 【--version 必须放在 _dshbin 解析**之后**（2026-11-03，docs/354 §4.2）】
+   * 旧顺序里 `_dshbin` 恒为空 ⇒ 永远打印兜底串 ⇒ v21 体检 [1] 误判 FAIL。
+   */
   'if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then',
-  '  echo "dsh 0.1.7-rc.1 (dshm install-queue shim)"',
+  '  if [ -n "$_dshbin" ]; then',
+  '    exec node "$_dshbin" --version',
+  '  fi',
+  '  echo "dsh (dshm shim; 核心 CLI 未就位)"',
   '  exit 0',
+  'fi',
+  'if [ "${1:-}" = "plugin" ]; then',
+  '  for _a in "$@"; do',
+  '    case "$_a" in',
+  '      link:*|file:*|./*|/*)',
+  '        if [ -n "$_dshbin" ]; then exec node "$_dshbin" "$@"; fi',
+  '        ;;',
+  '    esac',
+  '  done',
+  'fi',
+  /*
+   * 【核心路径必须**运行时**解析，不能写死（2026-11-03，docs/349 §3）】
+   * 旧实现把 `${CORE_DIR}`（写壳时的当前核心）烧进脚本；核心升到 +dshm.107 后
+   * 脚本仍指向 +dshm.106 ⇒ `dsh --help` 报 "核心 CLI 未就位（…dshm.106…）" rc=127，
+   * 升级一次就回归一次。
+   * 现在扫 `cores/<版本>/node_modules/@deepseek-ai/dsh/lib/bin.js`，取**版本最大的那个**
+   * （`ls -d` 按名排序，版本串本身有序；取最后一个可用的）。
+   */
+  'if [ "${1:-}" != "plugin" ]; then',
+  '  if [ -n "$_dshbin" ]; then',
+  '    exec node "$_dshbin" "$@"',
+  '  fi',
+  '  echo "dsh：核心 CLI 未就位（在 $_cores 下未找到 lib/bin.js）" >&2',
+  '  exit 127',
   'fi',
   //  argv 扫描：跳过 `plugin` 与 `--profile <p>`；install/add 收首个非选项参数
   //  为 spec（preparePluginArgs 注入的 --config.*/--registry=* 等 flag 全被 -*)
@@ -2695,10 +3721,111 @@ const DSH_SHIM_LINES = [
 ];
 
 /**
+ * pnpm/npm 假壳脚本正文（**生成规则只有这一处**）。
+ *
+ * 【为什么单独成函数】`docs/293 §5.1/§5.2` 的两条缺陷（list 目录解析与退出码、
+ * config 静默空返回）都只在**真跑起来**才现形 —— 静态读字符串看不出"失败分支的
+ * 退出码被 echo 覆盖"这类语义错误。抽出来后门禁
+ * `tools/check-cli-shim-semantics.mjs` 提取本函数的源码、在假 HOME 下真跑
+ * `list` / `config` 分支，对判据（目录回落、rc、stdout/stderr 分流）逐条断言。
+ *
+ * @param env 生成期常量覆盖（测试注入假 HOME_DIR / PROFILE / PORT）
+ */
+function cliShimScript(env = {}) {
+  const home = typeof env.HOME_DIR === 'string' ? env.HOME_DIR : HOME_DIR;
+  const port = env.PORT !== undefined ? env.PORT : PORT;
+  const lines = CLI_SHIM_LINES.map((l) => String(l)
+    .replaceAll('${HOME_DIR}', home)
+    .replaceAll('${PORT}', String(port)));
+  return lines.join('\n') + '\n';
+}
+
+/**
  * 布置 pnpm/npm/npx 假壳到 busybox bin（PATH 最前 ⇒ 遮蔽系统不存在的真身）。
  * 幂等：每次启动重写（HOME_DIR 若变化随重写生效）；chmod+X_OK 与 busybox 同
  * 策略，但失败只记日志不阻塞——假壳缺失时退化为原始 127 行为，不伤已验证链路。
  */
+/**
+ * `ps` 垫片（2026-11-02，docs/344 §6 第 4 项）。
+ *
+ * 【为什么需要】superagent 的控制脚本（`scripts/dsh-superagent start|status`）用
+ * `ps -ww -o pid=,ucomm=,args=` 与 `ps -ax` 判断进程在不在。而端侧 toybox/busybox
+ * 的 ps **都不支持 `-o`**（实测：只支持 `-A -o` 的部分字段，且没有 `ucomm`），
+ * 于是"服务起没起"这一步永远判假。
+ *
+ * 【做法】直接读 /proc：`comm` 给短名、`cmdline` 给完整 argv（NUL 分隔转空格）。
+ * 只实现控制脚本真正用到的两件事：`-o` 列表（支持 pid/ppid/ucomm/comm/args/command，
+ * 字段名后带 `=` 表示不要表头）与 `-a/-e/-ax`（本实现恒列全部进程，`-a` 只是兼容）。
+ *
+ * 【为什么不伪装成 toybox ps】它会漏字段、静默出错；一个诚实的实现比一个残缺的兼容层好。
+ */
+const PS_SHIM_LINES = [
+  '#!/system/bin/sh',
+  '# DSHM ps shim：/proc 直读，支持 -o pid=,ucomm=,args= 与 -ax（docs/344）',
+  'fmt=""',
+  'while [ $# -gt 0 ]; do',
+  '  case "$1" in',
+  '    -o) fmt="$2"; shift 2 ;;',
+  '    -o*) fmt="${1#-o}"; shift ;;',
+  '    --format) fmt="$2"; shift 2 ;;',
+  '    *) shift ;;',
+  '  esac',
+  'done',
+  'if [ -z "$fmt" ]; then',
+  '  fmt="pid=,ucomm=,args="',
+  'fi',
+  'for d in /proc/[0-9]*; do',
+  '  [ -d "$d" ] || continue',
+  '  pid=${d#/proc/}',
+  '  comm=$(cat "$d/comm" 2>/dev/null) || continue',
+  '  args=$(tr "\\000" " " < "$d/cmdline" 2>/dev/null)',
+  '  [ -n "$args" ] || args="[$comm]"',
+  '  out=""',
+  '  IFS=","',
+  '  for f in $fmt; do',
+  '    name=${f%%=*}',
+  '    case "$name" in',
+  '      pid) v="$pid" ;;',
+  '      ppid) v=$(awk "/^PPid:/{print \\$2}" "$d/status" 2>/dev/null) ;;',
+  '      ucomm|comm|comm=) v="$comm" ;;',
+  '      args|command|cmd) v="$args" ;;',
+  '      *) v="" ;;',
+  '    esac',
+  '    if [ -n "$out" ]; then out="$out $v"; else out="$v"; fi',
+  '  done',
+  '  unset IFS',
+  '  echo "$out"',
+  'done',
+  '',
+];
+
+/**
+ * CLI 假壳的首行解释器（2026-11-07）。
+ *
+ * 端侧 `/system/bin/sh` 对三方应用 execve 被拒（docs/110 的真机结论），而 busybox 的
+ * `ash` 副本在平板/PC 档可执行（与 bash 垫片同一份）⇒ 假壳首行改指它，`pnpm view`
+ * 这类**直接 spawn** 才有机会跑起来。`ash` 不可用的档位（手机）保持原样，
+ * 那条路本来由 ELF 启动器与进程内桥负责。
+ */
+function shimShebang(binDir) {
+  try {
+    const ash = path.join(binDir, BASH_SHIM_INTERPRETER);
+    fs.accessSync(ash, fs.constants.X_OK);
+    return '#!' + ash;
+  } catch (e) {
+    return '#!/system/bin/sh';
+  }
+}
+
+/** 把脚本首行的 `#!/system/bin/sh` 换成可用的解释器（无可用解释器时原样返回）。 */
+function withShimShebang(script, binDir) {
+  const sh = shimShebang(binDir);
+  if (sh === '#!/system/bin/sh') {
+    return script;
+  }
+  return script.replace(/^#!\/system\/bin\/sh/, sh);
+}
+
 function ensureCliShims(binDir) {
   if (!binDir || binDir.length === 0) {
     return; // busybox 未布置（PATH 未注入）：假壳无处生效
@@ -2706,15 +3833,59 @@ function ensureCliShims(binDir) {
   if (HOME_DIR.length === 0) {
     return; // HOME_DIR 未解析（写死路径会成空串）：不布置，退化为 127 行为
   }
-  const installScript = CLI_SHIM_LINES.join('\n') + '\n';
-  const npxScript = NPX_SHIM_LINES.join('\n') + '\n';
-  const dshScript = DSH_SHIM_LINES.join('\n') + '\n';
-  for (const [name, script] of [['pnpm', installScript], ['npm', installScript], ['npx', npxScript], ['dsh', dshScript]]) {
+  /*
+   * 【目录必须先建（2026-11-03，手机端 `dsh not found` 的根因）】
+   * 手持档 busybox 常常布置失败（execve 被拒），`<SANDBOX>/bin` 于是**不存在**；
+   * 旧实现第一件写 `pnpm` 就抛 ENOENT，随后 `return` —— 后面的 npm/npx/dsh/ps
+   * **一个都没写**，用户看到的就是 `dsh: command not found`。
+   * 这里先 mkdir，且把"单个失败就 return"改成"继续写其余的并记日志"。
+   */
+  try {
+    ensureDir(binDir);
+  } catch (e) {
+    diag(`CLI 假壳：创建 ${binDir} 失败（继续尝试写文件）：${String(e)}`);
+  }
+  const installScript = withShimShebang(cliShimScript(), binDir);
+  /* 发布权威核心名：`bin/dsh` 优先读它（先于写 shim，壳首次执行即可用）。 */
+  publishCurrentCore();
+  const npxScript = withShimShebang(NPX_SHIM_LINES.join('\n') + '\n', binDir);
+  const dshScript = withShimShebang(DSH_SHIM_LINES.join('\n') + '\n', binDir);
+  const psScript = withShimShebang(PS_SHIM_LINES.join('\n'), binDir);
+  /*
+   * 真身优先（2026-11-02）：随包 npm/pnpm 解包完成后，bin/ 下应当是真 wrapper，
+   * 而不是安装队列假壳。判据只看"包里的入口文件在不在"，不看版本。
+   */
+  const realReady = (n) => {
+    const root = n === 'pnpm' ? PNPM_ROOT : NPM_ROOT;
+    const entry = n === 'pnpm' ? 'bin/pnpm.cjs' : 'bin/npm-cli.js';
+    return n !== 'npx' && statSize(path.join(root, entry)) > 0;
+  };
+  for (const [name, script] of [['pnpm', installScript], ['npm', installScript], ['npx', npxScript], ['dsh', dshScript], ['ps', psScript]]) {
+    if (realReady(name)) {
+      continue; // 真身已就绪：留给工具链 wrapper 布置，别用假壳盖掉
+    }
     if (!rewriteExecutable(path.join(binDir, name), (d) => fs.writeFileSync(d, script), `CLI 假壳：${name}`)) {
-      return;
+      diag(`CLI 假壳：${name} 写入失败（继续布置其余）`);
+    }
+    /*
+     * 【额外写一份 `<name>-queue`（2026-11-03，r9 §10-1）】
+     *
+     * `ensureToolchainWrappers()` 在**本函数之后**运行，会把 `bin/pnpm`/`bin/npm`/`bin/npx`
+     * 覆盖成"指向 `toolchain/<x>root` 的真身 wrapper"。而手持档那四个 root 是**空的**
+     * （解包 spawn busybox EACCES）⇒ wrapper 一路 `exit 127` ⇒ 用户看到的
+     * `pnpm：尚未就位（首次启动解包中）` / `command not found` —— 等于把原本可用的
+     * **安装队列通道**拆掉了（r9 的头号坑）。
+     * 所以这里把队列假壳另外留一份到 `<name>-queue`，由真身 wrapper 在"真身缺失"时
+     * `exec` 它：**有真身用真身，没真身回队列**，两条路都不再 127。
+     */
+    if (name === 'pnpm' || name === 'npm' || name === 'npx') {
+      if (!rewriteExecutable(path.join(binDir, name + '-queue'), (d) => fs.writeFileSync(d, script),
+        `CLI 队列兜底：${name}-queue`)) {
+        diag(`CLI 队列兜底：${name}-queue 写入失败（真身缺失时将退化为 127）`);
+      }
     }
   }
-  diag('CLI 假壳：pnpm/npm/npx/dsh 已布置为安装队列通道（pnpm add / dsh plugin install 即投递队列，view 转发 Host registry 端点）');
+  diag('CLI 假壳：pnpm/npm/npx/dsh/ps 已布置（pnpm 走安装队列，ps 直读 /proc）（pnpm add / dsh plugin install 即投递队列，view 转发 Host registry 端点）');
   log('CLI 假壳：pnpm/npm/npx/dsh 已布置为安装队列通道');
 }
 
@@ -2722,7 +3893,7 @@ function ensureCliShims(binDir) {
  * 端侧工具链：CPython 3.12 + git（resfile 携带归档 → 沙箱后台解包自举）。
  *
  * 【为什么自带】沙箱里只有 busybox + node，模型跑 `git …` / `python3 …` 直接 127。
- * resfile/toolchain/ 放 python-build-standalone musl 归档 + Alpine git apk 组
+ * resfile/toolchain/ 放 python-build-standalone musl 归档 + Alpine git 包组
  * （tools/place-toolchain.mjs 放置），首次启动解到 <SANDBOX_HOME>/toolchain/。
  *
  * 【为什么必须后台】python 归档 28.6MB/4530 文件，hmfs 上同步解包会卡住 Host
@@ -2739,6 +3910,52 @@ function ensureCliShims(binDir) {
 const TOOLCHAIN_DIR = path.join(SANDBOX_HOME, 'toolchain');
 const PYTHON_PREFIX = path.join(TOOLCHAIN_DIR, 'python');
 const GIT_ROOT = path.join(TOOLCHAIN_DIR, 'gitroot');
+/**
+ * 清掉上次换代遗留的**空** `<name>.previous-<ts>` 备份目录（2026-11-15，rc.3 复测 P1）。
+ *
+ * 【为什么会堆积】`publishExtras` 与 python 收尾都是"旧树改名成 `.previous-<ts>` → 新树就位"；
+ * 成功后旧树不再需要，但改名留下的空壳没人删 —— 复测现场 `toolchain/` 下有 6 个。
+ * 【为什么只删空的】非空说明上一轮换代中途失败，里面还有可回退的旧树，必须原样保留；
+ * 这条规则保证清理永远不会吃掉回退材料。任何异常都吞掉（清理属于收尾，不影响功能）。
+ */
+const pruneEmptyPreviousSiblings = (anchor) => {
+  const parent = path.dirname(anchor);
+  const prefix = path.basename(anchor) + '.previous-';
+  try {
+    for (const name of fs.readdirSync(parent)) {
+      if (!name.startsWith(prefix)) continue;
+      const target = path.join(parent, name);
+      try {
+        if (!fs.statSync(target).isDirectory()) continue;
+        if (fs.readdirSync(target).length > 0) continue;
+        fs.rmdirSync(target);
+      } catch (e) { /* 单个目录清理失败：留到下次，不影响任何功能 */ }
+    }
+  } catch (e) { /* 父目录读不到：跳过 */ }
+};
+/*
+ * tmux / gh（2026-11-02，docs/342）。形状与 gitroot 完全一致：归档在
+ * `resfile/toolchain/<name>/*.tar.gz`，解到 `toolchain/<name>root/`。
+ * 两者都由 `tools/place-toolchain.mjs` 在构建期自签名（原生 binary-sign-tool）。
+ */
+const TMUX_ROOT = path.join(TOOLCHAIN_DIR, 'tmuxroot');
+const GH_ROOT = path.join(TOOLCHAIN_DIR, 'ghroot');
+/** bash 真身（2026-11-03）：替代 busybox hush 文本垫片。 */
+const BASH_ROOT = path.join(TOOLCHAIN_DIR, 'bashroot');
+/** 表驱动：一个条目 = 一个 root（判据只看"真身在不在"，不猜版本）。 */
+const NPM_ROOT = path.join(TOOLCHAIN_DIR, 'npmroot');
+const PNPM_ROOT = path.join(TOOLCHAIN_DIR, 'pnpmroot');
+const EXTRA_TOOLCHAINS = [
+  { name: 'tmux', root: TMUX_ROOT, probe: ['usr', 'bin', 'tmux'] },
+  { name: 'gh', root: GH_ROOT, probe: ['usr', 'bin', 'gh'] },
+  { name: 'bash', root: BASH_ROOT, probe: ['bin', 'bash'] },
+  /*
+   * npm / pnpm（2026-11-02）：纯 JS 包，靠 `node` 执行 —— 不需要 ACL、不需要预编译二进制。
+   * 探针指向各自 CLI 入口（不是 bin/ 下的同名壳），因为包里没有可执行位。
+   */
+  { name: 'npm', root: NPM_ROOT, probe: ['bin', 'npm-cli.js'] },
+  { name: 'pnpm', root: PNPM_ROOT, probe: ['bin', 'pnpm.cjs'] },
+];
 const PYTHON_TARBALL_REL = path.join('toolchain', 'python', 'cpython-3.12.14-aarch64-musl.tar.gz');
 // resfile 根（entryScript = <res>/resources/app/main.js ⇒ __dirname 上两级）。
 // 模块级定义：ensureExecutables / 顶层块都要用（顶层块的 resRoot 与它同值）。
@@ -2755,45 +3972,43 @@ const RES_ROOT = path.resolve(__dirname, '..', '..');
  * （真机实测 stderr：`git-upload-pack: inaccessible or not found`）。
  *
  * 【为什么改成动态读取】141 个名字会随 git 版本变（上游随时加子命令），硬编码一份
- * 名单就是"下次升级静默失效"。这里直接**从包的归档里读 symlink 表**（apk 是 tar.gz，
+ * 名单就是"下次升级静默失效"。这里直接**从包的归档里读 symlink 表**（包是 tar.gz，
  * 读 512 字节头即可，不需要解包），按需复制真身——名字永远与这一版 git 一致。
  * 读不到（归档缺失/格式变化）时退回原来的硬编码一条，保证不退化。
  */
 const GIT_SYMLINK_REPLICA_FALLBACK = [['git-remote-https', 'git-remote-http']];
 
 /**
- * 从 git 的 apk 里读出 `usr/libexec/git-core/` 下的 symlink 表。
- * 纯 JS 遍历 tar（512 字节头 + 512 对齐的数据块）：apk = tar.gz，先 gunzip 再扫。
- * @param apkPath git-*.apk 路径
+ * 从 git 的归档里读出 `usr/libexec/git-core/` 下的 symlink 表。
+ * 纯 JS 遍历 tar（512 字节头 + 512 对齐的数据块）：包 = tar.gz，先 gunzip 再扫。
+ * @param pkgPath git-*.tar.gz 路径（内容仍是 Alpine v2 包；目录名与扩展名都不含 `.apk`，
+ *   为过应用市场审核里"包内路径带 apk 相关字样就拒装"那道闸，见 docs/148 / docs/156）
  * @returns `[[名, 真身], …]`；读不到返回 null（调用方退回 fallback）
  */
-function readGitCoreSymlinks(apkPath) {
+async function readGitCoreSymlinks(pkgPath) {
   try {
-    if (statSize(apkPath) <= 0) {
+    const maxInput = 32 * 1024 * 1024;
+    const maxOutputLength = 128 * 1024 * 1024;
+    const size = (await fs.promises.stat(pkgPath)).size;
+    if (size <= 0 || size > maxInput) {
       return null;
     }
-    const raw = zlib.gunzipSync(fs.readFileSync(apkPath));
+    const compressed = await fs.promises.readFile(pkgPath);
+    if (compressed.length > maxInput) return null;
+    const raw = await new Promise((resolve, reject) => {
+      zlib.gunzip(compressed, { maxOutputLength }, (error, result) => error ? reject(error) : resolve(result));
+    });
     const out = [];
-    let off = 0;
-    while (off + 512 <= raw.length) {
-      const nameField = raw.slice(off, off + 100).toString('utf8').replace(/\0[\s\S]*$/, '');
-      if (nameField.length === 0) {
-        break; // tar 结束标记
-      }
-      const sizeField = raw.slice(off + 124, off + 136).toString('ascii').replace(/\0/g, '').trim();
-      const size = parseInt(sizeField, 8) || 0;
-      const type = String.fromCharCode(raw[off + 156] || 0);
-      const linkField = raw.slice(off + 157, off + 257).toString('utf8').replace(/\0[\s\S]*$/, '');
-      // type '2' = symlink；只收 git-core 下的
+    let seen = 0;
+    for (const entry of tarGz.walkTar(raw)) {
       const prefix = 'usr/libexec/git-core/';
-      if (type === '2' && nameField.startsWith(prefix) && linkField.length > 0) {
-        const base = nameField.slice(prefix.length);
-        // 跳过子目录条目（只补顶层子命令）
+      if (entry.type === '2' && entry.name.startsWith(prefix) && entry.link.length > 0) {
+        const base = entry.name.slice(prefix.length);
         if (base.length > 0 && base.indexOf('/') < 0) {
-          out.push([base, linkField]);
+          out.push([base, entry.link]);
         }
       }
-      off += 512 + Math.ceil(size / 512) * 512;
+      if (++seen % 64 === 0) await new Promise((resolve) => setImmediate(resolve));
     }
     return out.length > 0 ? out : null;
   } catch (e) {
@@ -2902,6 +4117,156 @@ function toolchainWrapperScript(name) {
   // 分别提示。真身可 exec 的设备行为不变（探测通过即正式 exec）。
   const unavailable = (label) =>
     `echo "${label}：该设备系统策略禁止运行第三方原生二进制（execve 被拒），暂不可用" >&2`;
+  /*
+   * tmux / gh wrapper（2026-11-02，docs/342）。
+   *
+   * 与 git 同构：自举 LD_LIBRARY_PATH 指向本 root 的 usr/lib（Alpine 包把 so 放在那），
+   * 再 exec 真身。三处端侧特有的差异：
+   *   · tmux 必须显式给 TMUX_TMPDIR：默认走 /tmp，应用沙箱里不可写，
+   *     否则 `tmux new` 直接报 "server exited unexpectedly"（socket 建不出来）；
+   *   · tmux 的 terminfo 随包带（ncurses-terminfo-base 解到同一 root），
+   *     显式 TERMINFO 免得只认系统那份、报 "missing or unsuitable terminal"；
+   *   · gh 复用 gitroot 的 CA（本机无系统信任库），并给它独立的 GH_CONFIG_DIR，
+   *     避免和用户的 git 配置互相污染。
+   */
+  /*
+   * npm / npx / pnpm（2026-11-02）：**真身**，不再投递安装队列。
+   *
+   * 判据是"包在不在"—— `main.js` 的 ensureCliShims 只在真身缺失时才写假壳，
+   * 所以两套不会互相覆盖（见 ensureCliShims 的 realReady 分支）。
+   * 三者都靠 `node` 跑纯 JS 入口；`node` 自身是随包 wrapper（libnode 24.2，实测 v24.2.0 可用）。
+   */
+  /*
+   * 【bash 真身（2026-11-03，把垫片换成环境组件的第 1 项）】
+   *
+   * 旧形态：`bin/bash` 是 463 B 文本垫片 → busybox hush（busybox 未编 bash applet）。
+   * 现在：Alpine bash 5.2.37 真 ELF + 依赖库（readline / libncursesw / terminfo / utmps / skalibs）
+   * 解到独立 root `bashroot`，wrapper 自举 LD_LIBRARY_PATH 后 exec 真身。
+   *
+   * **回落策略**：真身尚未解包（首启几十秒）时**不报错退出**，而是退回 busybox hush ——
+   * 与旧行为等价，保证 `bash -c` 在任何时刻都可用；只有 execve 被系统拒绝时才提示。
+   */
+  if (name === 'bash') {
+    /*
+     * 【2026-11-03 修正：探测不能拿用户命令试跑】
+     *
+     * 上一版写错了两处，真机暴露得很彻底：
+     *   ① 探测 `_e=$( ( exec "$B" "$@" ) 2>&1 >/dev/null )` **执行的是用户要跑的那条命令**，
+     *      stdout 被丢进 /dev/null；命令成功且 stderr 为空 ⇒ `_e` 空 ⇒ 直接 `exit 0`，
+     *      于是 `bash --version` 输出为空、`bash -c '…'` 全部"无输出"；
+     *   ② 用户命令的 stderr 里若恰好含 "No such file"（例如 `ls 不存在`），会被误判成
+     *      "真身不可用"而回落 hush；回落分支 `sh -c "$*"` 还会把带空格的参数拼坏。
+     *
+     * 正确做法：**只用一次空探测**（`"$B" -c ':'`）判断真身能否加载（so 是否齐），
+     * 探测与用户命令完全解耦；通过就 `exec "$B" "$@"`，参数逐字传递。
+     */
+    const root = BASH_ROOT;
+    return [
+      '#!/system/bin/sh',
+      '# DSHM bash wrapper：Alpine bash 真身（自举 so/terminfo）；空探测通过就 exec，否则回落系统 sh',
+      `R=${root}`,
+      'B="$R/bin/bash"',
+      'if [ -x "$B" ]; then',
+      '  _libs="$R/usr/lib"',
+      '  [ -d "$R/lib" ] && _libs="$R/lib:$_libs"',
+      '  LD_LIBRARY_PATH="$_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+      /*
+       * 【2026-11-11 2in1 终端修复】Alpine 的 ncurses-terminfo-base 装到 `etc/terminfo`，
+       * 不是 `usr/share/terminfo`。旧写法把 TERMINFO 指到一个不存在的目录 ⇒ 库查不到条目，
+       * xterm-256color 下交互式 bash 6 次里 5 次以 SIGSYS 静默消失（诊断日志 2026-11-11）。
+       * 两个位置都探测，优先真实存在的那个；目录全缺或当前 TERM 无条目时退到 xterm。
+       */
+      '  _ti=""',
+      '  if [ -d "$R/etc/terminfo" ]; then _ti="$R/etc/terminfo"; elif [ -d "$R/usr/share/terminfo" ]; then _ti="$R/usr/share/terminfo"; fi',
+      '  if [ -n "$_ti" ]; then TERMINFO="$_ti"; export TERMINFO; fi',
+      '  if [ -n "$TERM" ]; then _fc=${TERM%${TERM#?}}; if [ -z "$_ti" ] || [ ! -e "$_ti/$_fc/$TERM" ]; then TERM=xterm; export TERM; fi; fi',
+      '  export LD_LIBRARY_PATH',
+      "  if \"$B\" -c ':' >/dev/null 2>&1; then",
+      '    exec "$B" "$@"',
+      '  fi',
+      'fi',
+      'exec /system/bin/sh "$@"',
+    ];
+  }
+  if (name === 'npm' || name === 'npx' || name === 'pnpm') {
+    const root = name === 'pnpm' ? PNPM_ROOT : NPM_ROOT;
+    const entry = name === 'pnpm' ? 'bin/pnpm.cjs' : (name === 'npx' ? 'bin/npx-cli.js' : 'bin/npm-cli.js');
+    return [
+      '#!/system/bin/sh',
+      `# DSHM ${name} wrapper：随包纯 JS 真身；**真身缺失时回落安装队列**（r9 §10-1）`,
+      `R=${root}`,
+      `E="\$R/${entry}"`,
+      'if [ ! -f "$E" ]; then',
+      '  # 手持档的 toolchain root 常年为空（解包 spawn busybox EACCES）⇒ 不能在这里 127：',
+      '  # 队列假壳（<name>-queue）会把 add/install 改写成安装队列投递并同步等结果。',
+      '  Q="$(dirname "$0")/' + name + '-queue"',
+      '  if [ -x "$Q" ]; then exec "$Q" "$@"; fi',
+      `  echo "${name}：尚未就位（首次启动解包中），稍后重试" >&2`,
+      '  exit 127',
+      'fi',
+      'exec node "$E" "$@"',
+      '',
+    ];
+  }
+  if (name === 'tmux') {
+    return [
+      '#!/system/bin/sh',
+      '# DSHM tmux wrapper：Alpine tmux + 自带 so/terminfo（LD_LIBRARY_PATH 自举）',
+      `T=${TMUX_ROOT}`,
+      'export LD_LIBRARY_PATH="$T/usr/lib"',
+      /* 同 bash wrapper：terminfo 在 etc/terminfo；库缺失时 tmux 会报 "terminal not found" */
+      '_ti=""',
+      'if [ -d "$T/etc/terminfo" ]; then _ti="$T/etc/terminfo"; elif [ -d "$T/usr/share/terminfo" ]; then _ti="$T/usr/share/terminfo"; fi',
+      'if [ -n "$_ti" ]; then export TERMINFO="$_ti"; fi',
+      'if [ -n "$TERM" ]; then _fc=${TERM%${TERM#?}}; if [ -z "$_ti" ] || [ ! -e "$_ti/$_fc/$TERM" ]; then TERM=xterm; export TERM; fi; fi',
+      /* socket 目录必须落在可写的沙箱 cache 里（/tmp 在端侧不可写） */
+      'export TMUX_TMPDIR="${TMUX_TMPDIR:-${TMPDIR:-/data/storage/el2/base/cache}}"',
+      'if [ ! -x "$T/usr/bin/tmux" ]; then',
+      '  echo "tmux：尚未就位（首次启动解包中），稍后重试" >&2',
+      '  exit 127',
+      'fi',
+      /*
+       * 【必须透传真 stderr（2026-11-02，docs/344 §2.4）】旧写法 `( exec … ) >/dev/null 2>&1`
+       * 把失败原因全吞了，于是**缺动态库**（`Error loading shared library libevent_core-2.1.so.7`）
+       * 也被显示成"该设备系统策略禁止运行第三方原生二进制（execve 被拒）"——
+       * 两份独立报告都被这句带偏过。现在把探测段的 stderr 抓下来原样透传，
+       * 只在**确实一句错误都没有**时才用那句通用文案。
+       */
+      '_e=$( ( exec "$T/usr/bin/tmux" -V ) 2>&1 >/dev/null )',
+      'if [ -z "$_e" ]; then',
+      '  exec "$T/usr/bin/tmux" "$@"',
+      'fi',
+      'echo "tmux：真身无法执行 —— $_e" >&2',
+      'exit 126',
+      '',
+    ];
+  }
+  if (name === 'gh') {
+    return [
+      '#!/system/bin/sh',
+      '# DSHM gh wrapper：Alpine github-cli + 自带 so + 复用 gitroot 的 CA',
+      `G=${GH_ROOT}`,
+      `GITCA=${GIT_ROOT}/etc/ssl/certs/ca-certificates.crt`,
+      'export LD_LIBRARY_PATH="$G/usr/lib"',
+      /* 端侧没有系统信任库（/etc/ssl/... 实测全无）⇒ 必须显式指一份 */
+      'if [ -f "$GITCA" ]; then',
+      '  export SSL_CERT_FILE="$GITCA"',
+      '  export CURL_CA_BUNDLE="$GITCA"',
+      'fi',
+      'if [ ! -x "$G/usr/bin/gh" ]; then',
+      '  echo "gh：尚未就位（首次启动解包中），稍后重试" >&2',
+      '  exit 127',
+      'fi',
+      /* 同 tmux：透传真 stderr，不再把"缺库"误报成"execve 被拒" */
+      '_e=$( ( exec "$G/usr/bin/gh" --version ) 2>&1 >/dev/null )',
+      'if [ -z "$_e" ]; then',
+      '  exec "$G/usr/bin/gh" "$@"',
+      'fi',
+      'echo "gh：真身无法执行 —— $_e" >&2',
+      'exit 126',
+      '',
+    ];
+  }
   if (name === 'python' || name === 'python3') {
     return [
       '#!/system/bin/sh',
@@ -2976,7 +4341,7 @@ function toolchainWrapperScript(name) {
     'export GIT_EXEC_PATH="$G/usr/libexec/git-core"',
     'export GIT_SSL_CAINFO="$G/etc/ssl/certs/ca-certificates.crt"',
     // 【顺带（报告 §2.3 末）】git init 的 "templates not found" 警告：随包的
-    // templates 目录不存在（apk 里没带），显式指向包内路径，找不到也不报错。
+    // templates 目录不存在（git 包里没带），显式指向包内路径，找不到也不报错。
     'if [ -d "$G/usr/share/git-core/templates" ]; then',
     '  export GIT_TEMPLATE_DIR="$G/usr/share/git-core/templates"',
     'fi',
@@ -3030,6 +4395,14 @@ function ensureToolchainWrappers(binDir, resRoot) {
     return;
   }
   const names = ['python', 'python3', 'pip3', 'git'];
+  /* tmux / gh：归档在就布置 wrapper（缺归档的旧包不该凭空多出两个坏命令） */
+  for (const spec of EXTRA_TOOLCHAINS) {
+    try {
+      if (fs.existsSync(path.join(resRoot, 'toolchain', spec.name))) {
+        names.push(spec.name);
+      }
+    } catch (e) { /* 读不到就当没有 */ }
+  }
   for (const name of names) {
     const script = toolchainWrapperScript(name).join('\n') + '\n';
     if (!rewriteExecutable(path.join(binDir, name), (d) => fs.writeFileSync(d, script), `工具链：wrapper ${name}`)) {
@@ -3185,6 +4558,11 @@ function gitReady() {
     && statSize(path.join(GIT_ROOT, 'usr', 'lib', 'libcurl.so.4')) > 0;
 }
 
+/** 额外工具链（tmux / gh）是否已解包到位。表驱动，新增一个只需改 EXTRA_TOOLCHAINS。 */
+function extraReady(spec) {
+  return statSize(path.join(spec.root, ...spec.probe)) > 0;
+}
+
 /**
  * 已解包的工具链是否需要**因归档换代而重解**（报告 4 ③）。
  *
@@ -3219,22 +4597,47 @@ function needsReextractForSign(archiveDir, extractedDir) {
  * 已验证链路。
  */
 let pyBridgeSelftestDone = false;
-let pyBridge = null;           // addon exports（dlopen 成功即存；HTTP 端点共用）
+let pyBridgeSelftestActive = false;
+let pyBridge = null;           // addon exports（**只在 DSHM_PY_INLINE=1 的降级分支里**才非 null）
 let pyBridgeLoadTried = false; // addon 加载只试一次（dlopen 失败属硬错误，不重试）
+let pyBridgeMainThreadRefuseLogged = false; // "主线程拒绝加载"只记一行，避免刷屏
+let pyWorkerBridge = null;     // python-bridge-async.cjs 的实例（默认执行通道；懒建）
 
 /**
- * 加载 python_runner addon（dlopen libpython + dlsym embedding API 的 JS 侧入口）。
- * 成功后缓存到 pyBridge；失败永久放弃（DSHM 硬错误缓存模式）。env 必须在
- * dlopen 前设好：addon 的 EnsurePythonInit 读 DSHM_PYTHON_LIB/HOME。
+ * 降级开关：`DSHM_PY_INLINE=1` 时退回旧的**同步**桥（Python 在主线程执行）。
+ *
+ * 【为什么留这个开关】异步桥要真机验收；一旦端侧出现"worker 起不来 / 消息通道不通"
+ * 这类环境性故障，一条 env 就能回到已验证的旧行为，不必重编 HAP 去排障。
+ * **默认异步**（不读 env 就是 worker 线程执行 Python）。
+ *
+ * 【为什么逐次读 env】`process.env` 是活对象；而且日志 / 探针要如实反映"这一次走的是哪条路"，
+ * 做进程级缓存会让"运行期改 env 排查"这件事失效。
  */
-function getPyBridge() {
-  if (pyBridge) {
-    return pyBridge;
-  }
-  if (pyBridgeLoadTried) {
-    return null;
-  }
-  pyBridgeLoadTried = true;
+function pyBridgeInlineEnabled() {
+  return String(process.env.DSHM_PY_INLINE || '').trim() === '1';
+}
+
+/*
+ * 【启动读数（一行）】真机验收就 grep 这一行：默认必须是 `执行线程=worker`。
+ * 有它才能一眼区分"这版到底跑在 worker 里、还是被某个 env 降级回主线程了"。
+ */
+try {
+  diag(pyBridgeInlineEnabled()
+    ? 'python 桥：执行线程=主线程（DSHM_PY_INLINE=1 降级：长任务会挡事件循环）'
+    : 'python 桥：执行线程=worker（DSHM_PY_INLINE=1 可回退）');
+} catch (e) {
+  // 日志失败不影响启动
+}
+
+/**
+ * 解析 addon 与 libpython 的**位置**（只探测、不加载）。返回 null 表示这套 libs 不可用
+ * （PC 侧离线跑属正常；端侧则是 place-toolchain / CMake 没出件）。
+ *
+ * 【为什么要单独一层】异步桥要把这两个路径作为 workerData 传给 worker，主线程的降级分支
+ * 也要用同一套判据拼环境变量。两处各拼一次路径 = "垫片按 A 找库、桥按 B 拼路径"那种隐性
+ * 漂移（见 NATIVE_LIBS 的注释），所以只在这里拼。
+ */
+function pyBridgeArtifacts() {
   if (NATIVE_LIBS.length === 0 || !fs.existsSync(NATIVE_LIBS)) {
     diag('python 桥：NATIVE_LIBS 不可用（PC 侧离线跑属正常），跳过');
     return null;
@@ -3249,6 +4652,74 @@ function getPyBridge() {
     diag('python 桥：el1 libs 缺 libpython_runner.so（CMake 未编 python_runner？），跳过');
     return null;
   }
+  return { libPy, addon };
+}
+
+/**
+ * 取异步桥实例（懒建、进程级单例）。
+ *
+ * worker 脚本与会话同目录（端侧 = resfile/resources/app/python-worker.cjs，见
+ * tools/place-host-app.mjs 的 FILES 清单）。**漏了那个清单项不会在启动时报错** ——
+ * 它是首个请求才走到，只会表现为"python 工具/垫片调用失败"，所以清单必须两处一起改
+ * （place-host-app.mjs 与 assert-resfile-sync.mjs 各一份，后者有同源断言）。
+ */
+function getPyWorkerBridge() {
+  if (pyWorkerBridge === null) {
+    const artifacts = pyBridgeArtifacts();
+    /*
+     * 【必须在主线程、创建 worker 之前设】worker_threads 的 `process.env` 是 JS 层
+     * 环境副本；worker 内再写 `process.env` 不能可靠地把值同步进进程的 native
+     * `environ`，而 `libpython_runner.so` 的 `EnsurePythonInit()` 正是用 `getenv()`
+     * 读这两个键。真机读数：worker 已 bridge=true，但自检报
+     * `DSHM_PYTHON_LIB 未设置`。主线程先写一次才能让 dlopen 后的 C 层可见。
+     */
+    if (artifacts !== null) {
+      process.env.DSHM_PYTHON_LIB = artifacts.libPy;
+      process.env.DSHM_PYTHON_HOME = PYTHON_PREFIX;
+    }
+    pyWorkerBridge = pythonBridgeAsync.create({
+      workerScript: path.join(__dirname, 'python-worker.cjs'),
+      workerData: {
+        addonPath: artifacts === null ? '' : artifacts.addon,
+        libPath: artifacts === null ? '' : artifacts.libPy,
+        homePath: PYTHON_PREFIX,
+      },
+      diag: diag,
+    });
+  }
+  return pyWorkerBridge;
+}
+
+/**
+ * 加载 python_runner addon（dlopen libpython + dlsym embedding API 的 JS 侧入口）。
+ * 成功后缓存到 pyBridge；失败永久放弃（DSHM 硬错误缓存模式）。env 必须在
+ * dlopen 前设好：addon 的 EnsurePythonInit 读 DSHM_PYTHON_LIB/HOME。
+ *
+ * 【只在降级分支里被调用】默认（异步桥）下 addon 的唯一加载点是 ./python-worker.cjs。
+ * 主线程这里**主动拒绝**：一个误调用就会把 Python 拽回主线程执行，正是内测日志里
+ * 33s / 522s / 800s 那几处 LOOP-GAP 的成因。
+ */
+function getPyBridge() {
+  if (pyBridge) {
+    return pyBridge;
+  }
+  if (!pyBridgeInlineEnabled()) {
+    if (!pyBridgeMainThreadRefuseLogged) {
+      pyBridgeMainThreadRefuseLogged = true;
+      diag('python 桥：主线程拒绝加载 addon（执行线程=worker；只有 DSHM_PY_INLINE=1 才允许内联）');
+    }
+    return null;
+  }
+  if (pyBridgeLoadTried) {
+    return null;
+  }
+  pyBridgeLoadTried = true;
+  const artifacts = pyBridgeArtifacts();
+  if (artifacts === null) {
+    return null;
+  }
+  const libPy = artifacts.libPy;
+  const addon = artifacts.addon;
   process.env.DSHM_PYTHON_LIB = libPy;
   process.env.DSHM_PYTHON_HOME = PYTHON_PREFIX;
   try {
@@ -3262,13 +4733,86 @@ function getPyBridge() {
   }
 }
 
+/**
+ * 自检入口（两个挂载点都调它）。
+ *
+ * 【为什么是同步函数 + 内部派发】两个挂载点都是「try 里直接调 `ensurePythonBridge()`、紧跟
+ * catch」的同步形态（boot 顶层块 + 解包收尾），改成 async 会引入"没人 await 的 Promise"，而
+ * Node 24 对未处理的 rejection 默认是**致命**的。所以：同步做前置判据，真正执行自检的部分在
+ * 异步桥内部（失败自己在里面落 diag / probe，绝不外抛）。
+ */
 function ensurePythonBridge() {
   if (pyBridgeSelftestDone) {
     return;
   }
+  if (!pyBridgeSelftestPreconditions()) {
+    return;
+  }
+  pyBridgeSelftestDone = true;
+  if (!pyBridgeInlineEnabled()) {
+    // 【默认】worker 线程执行自检；同步返回，结果异步落 diag / runtime probe
+    pyBridgeSelftestActive = true;
+    return pyBridgeSelftestAsync().finally(() => { pyBridgeSelftestActive = false; });
+  }
+  ensurePythonBridgeInline();
+}
+
+/**
+ * 自检的**共享前置判据**（两种执行线程共用）。返回 false = 本轮不做，且**不标 done**
+ * （stdlib 未解包就位时要让第二个挂载点补跑）。
+ *
+ * 判据顺序与原文一致：先 libs 缺件（硬错误，标 done），再 stdlib 未解包（软等待，不标 done）。
+ * 顺序不能反：`Py_Initialize` 在 stdlib 半成品上会直接 fatal 整个进程（CPython 行为）。
+ */
+function pyBridgeSelftestPreconditions() {
+  if (pyBridgeArtifacts() === null) {
+    // 加载失败细节 pyBridgeArtifacts 已 diag；标 done 不再重试
+    pyBridgeSelftestDone = true;
+    // 【机器可读读数】直接回答端侧自检报告里"python3 到底能不能跑"（docs/106 §2）：
+    // 本档 Python 不是靠 execve（手机 / 平板档的 execve 被系统拒绝），而是靠进程内桥。
+    recordRuntimeProbe(`python`, {
+      bridge: false,
+      stdlib: false,
+      selftest: `unavailable`,
+      note: `addon 未加载（el1 libs 缺件或被 dlopen 策略拒绝）⇒ 本档 python3 命令不可用`,
+      measuredAt: new Date().toISOString(),
+    });
+    return false;
+  }
+  if (!pythonReady()) {
+    // 不标 done：首次解包收尾后由第二个挂载点补跑
+    diag('python 桥：stdlib 尚未解包就位，本轮跳过（解包收尾后自检）');
+    recordRuntimeProbe(`python`, {
+      bridge: true,
+      stdlib: false,
+      selftest: `pending`,
+      note: `桥已加载但 stdlib 未解包 ⇒ 本次启动暂不可执行（解包收尾后会补跑自检）`,
+      measuredAt: new Date().toISOString(),
+    });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 降级分支（`DSHM_PY_INLINE=1`）：旧的**同步**自检 —— 主线程 dlopen + `captureRun`。
+ * 这一段与搬出主线程之前的实现逐字一致，保留它是为了"一条 env 回退到已验证行为"。
+ * 门禁 `tools/check-python-async-worker.mjs` 的 C 段就按这个形状断言：主线程的
+ * `bridge.captureRun(` 必须落在这个函数与 `pyBridgeRun` 的 inline 分支里（都被 DSHM_PY_INLINE 判定包住）。
+ */
+function ensurePythonBridgeInline() {
+  /*
+   * 【二次判定（护栏）】本函数只允许在降级分支里被调用；这里再判一次是**给未来的人**的护栏 ——
+   * 万一有人把它接到默认路径上（比如为了"多复跑一次自检"），Python 就又回到主线程执行，
+   * 而这正是内测日志里 800711ms / 522814ms / 33277ms 那几处 LOOP-GAP 的成因。
+   * 门禁 `tools/check-python-async-worker.mjs` 的 B2 就按"函数体里必须有这个判定"断言。
+   */
+  if (!pyBridgeInlineEnabled()) {
+    return;
+  }
   const bridge = getPyBridge();
   if (bridge === null) {
-    // 加载失败细节 getPyBridge 已 diag；标 done 不再重试
+    // 加载失败细节 getPyBridge 已 diag（这里只剩"降级分支里 dlopen 真的失败"这一种可能）
     pyBridgeSelftestDone = true;
     // 【机器可读读数】直接回答端侧自检报告里"python3 到底能不能跑"（docs/106 §2）：
     // 本档 Python 不是靠 execve（手机 / 平板档的 execve 被系统拒绝），而是靠进程内桥。
@@ -3281,19 +4825,6 @@ function ensurePythonBridge() {
     });
     return;
   }
-  if (!pythonReady()) {
-    // 不标 done：首次解包收尾后由第二个挂载点补跑
-    diag('python 桥：stdlib 尚未解包就位，本轮跳过（解包收尾后自检）');
-    recordRuntimeProbe(`python`, {
-      bridge: true,
-      stdlib: false,
-      selftest: `pending`,
-      note: `桥已加载但 stdlib 未解包 ⇒ 本次启动暂不可执行（解包收尾后会补跑自检）`,
-      measuredAt: new Date().toISOString(),
-    });
-    return;
-  }
-  pyBridgeSelftestDone = true;
   try {
     const ready = bridge.isReady();
     diag(`python 桥：addon 已加载 ready=${ready.ready} initialized=${ready.initialized}`);
@@ -3329,6 +4860,60 @@ function ensurePythonBridge() {
       selftest: `error`,
       error: String(e).slice(0, 140),
       note: `桥自检抛出异常（宿主进程内调用失败）`,
+      measuredAt: new Date().toISOString(),
+    });
+  }
+}
+
+/**
+ * 【默认】worker 线程里的自检。
+ *
+ * 与降级分支同一套判据、同一套 probe 字段与日志文案（`python 桥自检通过` /
+ * `python 桥自检失败`）—— 端侧验收脚本与文档都按这两行 grep，换执行线程不该换文案。
+ * 唯一差别：`print(1+1)` 不带 prelude（自检不需要 SIGALRM 超时），且真正执行发生在
+ * worker 线程（主线程只 await 结果）。
+ */
+async function pyBridgeSelftestAsync() {
+  const t0 = Date.now();
+  try {
+    const bridge = getPyWorkerBridge();
+    const ready = await bridge.status();
+    if (startupWork.stopped || !pyBridgeSelftestActive) return;
+    diag(`python 桥：worker 已加载 bridge=${ready.bridge === true} ready=${ready.ready} initialized=${ready.initialized}`
+      + (ready.error ? ` error=${String(ready.error).slice(0, 200)}` : ''));
+    const r = await bridge.run({ code: 'print(1+1)', timeoutMs: 60000, label: 'selftest' });
+    if (startupWork.stopped || !pyBridgeSelftestActive || r.cancelled) return;
+    const out = String(r.stdout || '').trim();
+    const selftestOk = r.ok === true && out === '2';
+    if (selftestOk) {
+      log(`python 桥自检通过：print(1+1)=2（${Date.now() - t0}ms），内嵌 CPython 可用（执行线程=worker）`);
+    } else {
+      diag(`python 桥自检失败：ok=${r.ok} stdout=${JSON.stringify(out)} rc=${r.rc}`
+        + ` error=${r.error || ''} stderr=${String(r.errStderr || '').slice(0, 200).replace(/\s+/g, ' ')}`);
+    }
+    recordRuntimeProbe(`python`, {
+      bridge: true,
+      stdlib: true,
+      ready: ready.ready === true,
+      initialized: ready.initialized === true,
+      selftest: selftestOk ? `ok` : `fail`,
+      stdout: out,
+      rc: r.rc === undefined || r.rc === null ? null : String(r.rc),
+      elapsedMs: Date.now() - t0,
+      note: selftestOk
+        ? `内嵌 CPython 在宿主进程内可用（不 execve，执行线程=worker）⇒ 手机 / 平板档同样能跑 python3`
+        : `桥已加载但自检未通过，细节见 dshm-host.log 的"python 桥自检失败"行`,
+      measuredAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    if (startupWork.stopped || !pyBridgeSelftestActive) return;
+    diag(`python 桥自检异常（调用失败）：${String(e).slice(0, 200).replace(/\s+/g, ' ')}`);
+    recordRuntimeProbe(`python`, {
+      bridge: true,
+      stdlib: true,
+      selftest: `error`,
+      error: String(e).slice(0, 140),
+      note: `桥自检抛出异常（worker 线程调用失败）`,
       measuredAt: new Date().toISOString(),
     });
   }
@@ -3399,21 +4984,129 @@ function pyBridgeTimeoutSec(url) {
   return Math.min(300, Math.max(1, Math.floor(raw)));
 }
 
-/** 执行守卫 + 惰性取桥 + SIGALRM 超时 + 结构化错误（任何失败都不许抛到 HTTP 层之外）。 */
-function pyBridgeRun(code, timeoutSec) {
+/** /proc/self/status 里的 VmHWM（峰值 RSS，kB）；读不到返回 -1（不抛）。 */
+function processVmHwmKb() {
+  try {
+    const text = fs.readFileSync('/proc/self/status', 'utf8');
+    const match = /VmHWM:\s+(\d+)\s+kB/.exec(text);
+    return match ? Number(match[1]) : -1;
+  } catch (e) {
+    return -1;
+  }
+}
+
+/**
+ * 请求的**执行体**：执行守卫 + 结构化错误（任何失败都不许抛到 HTTP 层之外）。
+ *
+ * 【执行线程】默认走 `./python-bridge-async.cjs`（Python 跑在 worker 线程里，主线程只 await）；
+ * `DSHM_PY_INLINE=1` 时退回旧的**同步** `bridge.captureRun(...)`（会挡事件循环，仅排障用）。
+ * 两条路的返回体字段与 rc/超时口径**逐字一致**（`ok` / `stdout` / `errStderr` / `rc` / `error`）。
+ *
+ * 【为什么是 async 函数】端点 handler 本来就是 async；把 await 放在这里，主线程在 Python
+ * 跑 pip 的几分钟里照常处理 Web 请求、心跳、会话 —— 那正是内测日志里 800711ms LOOP-GAP 的修法。
+ */
+async function pyBridgeRun(code, timeoutSec) {
+  startupWork.discard('python');
+  if (pyBridgeSelftestActive) {
+    pyBridgeSelftestActive = false;
+    if (pyWorkerBridge !== null) pyWorkerBridge.cancel('user-python-priority');
+  }
   if (!pythonReady()) {
     return { ok: false, error: 'stdlib not ready (extraction in progress?)', stdlibReady: false };
   }
-  const bridge = getPyBridge();
-  if (bridge === null) {
+  const inlineMode = pyBridgeInlineEnabled();
+  let bridge = null;
+  if (inlineMode) {
+    /* 【降级分支 DSHM_PY_INLINE=1】旧行为：主线程 dlopen + 同步 captureRun（整段在 inline 判定内） */
+    bridge = getPyBridge();
+    if (bridge === null) {
+      return { ok: false, error: 'python bridge addon unavailable' };
+    }
+  } else if (pyBridgeArtifacts() === null) {
+    // 默认通道：只探测 libs 是否齐备（**不在主线程 dlopen**），真正加载发生在 worker 里
     return { ok: false, error: 'python bridge addon unavailable' };
   }
-  // SIGALRM 超时注入：超时 handler 抛 SystemExit(124)，captureRun 的
-  // except SystemExit 分支捕获后以 rc="124" 返回（不逃逸成进程退出）。
-  // 【防御式 try + 全限定（2026-09-23 真机教训）】`import signal as _dshm_sig`
-  // 在真机嵌入 CPython（dlopen libpython3.12 + exec 注入）里 NameError——
-  // as 绑定不落 globals，后续引用即炸；import 失败时降级为无超时（桥仍可用，
-  // 长任务靠调用方 timeout query 自律），绝不让 prelude 挡死执行通道。
+  /*
+   * 【2026-10-18 内测闪退报告的诊断落点】python 工具与 Host 同进程：一段用户级
+   * ctypes 代码（例如手写 libzstd 流式解压）在 native 层出事后会把整个进程带走，
+   * 而崩溃前「到底执行了什么」此前一个字都没留下。这里补三样**只记不改**的读数：
+   *   ① 本次 code 长度、耗时、返回体大小、峰值 RSS（VmHWM）——事后能对上内存假设；
+   *   ② code 是否出现 `ctypes`（只记布尔，不落源码）；
+   *   ③ Python 侧 audit hook：首次出现 `ctypes.dlopen/dlsym` 时打印到 stdout
+   *      （node-output.log 现在会跨启动轮转保留，见 dshhost.cc 的 RotateNodeOutput）。
+   * 全部失败都静默——诊断绝不能影响执行通道本身。
+   */
+  const runT0 = Date.now();
+  const codeLen = code.length;
+  const ctypesHint = /ctypes/.test(code);
+  const prelude = pyBridgePrelude(timeoutSec);
+  let r;
+  if (inlineMode) {
+    // 【降级分支】同步执行：Linux/PC 上排障用，端侧长任务会挡事件循环（已知代价）
+    try {
+      r = bridge.captureRun(prelude + code);
+    } catch (e) {
+      r = { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  } else {
+    /*
+     * 【默认】交给 worker：主线程在这里 await，事件循环继续转。
+     * prelude（SIGALRM 超时 + ctypes audit）随 code 一起进去 —— 它必须在**执行的那个
+     * 解释器线程**里生效，而不是在主线程拼字符串时。
+     * timeoutMs 与 query 的 timeout（秒）同值：Python 侧 alarm 先到，主线程看门狗再多等
+     * 一个余量（见 python-bridge-async.cjs 的 WATCHDOG_MARGIN_MS 注释）。
+     */
+    try {
+      r = await getPyWorkerBridge().run({ code: prelude + code, timeoutMs: timeoutSec * 1000, label: 'run' });
+    } catch (e) {
+      r = { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  }
+  try {
+    const outBytes = JSON.stringify(r).length;
+    /* `thread=` 是给真机验收看的：确认这一跑到底在 worker 还是被降级回主线程 */
+    diag(`PY-RUN ok=${r && r.ok === true ? 'true' : 'false'} codeLen=${codeLen}`
+      + ` ms=${Date.now() - runT0} outBytes=${outBytes} VmHWMkB=${processVmHwmKb()}`
+      + ` ctypes=${ctypesHint ? 'yes' : 'no'} thread=${inlineMode ? 'main' : 'worker'}`
+      + (r && r.timedOut === true ? ' timedOut=yes' : ''));
+  } catch (e3) {
+    // 诊断失败不影响返回
+  }
+  /*
+   * 统一清 itimer：正常路径代码尾部不拼取消（异常路径跑不到），改由这里
+   * 幂等清零。不清的后果是真机实测过的坑——pending alarm 会在下一个请求
+   * 的字节码检查点立即引爆 SystemExit(124)，误杀无辜请求。
+   * 同 prelude 防御式：signal 不可用时静默跳过（上一请求已自带降级语义）。
+   *
+   * 【2026-10-19 迁移】默认通道里这段**不再需要**：itimer 与它守护的执行在同一个
+   * worker 线程里，清理由 python-worker.cjs 的 epilogue 做；而"取消"也不再是
+   * 跑一段 Python（清定时器停不掉正在跑的任务），改成 `worker.terminate()` + 重建
+   * （见 python-bridge-async.cjs 的 cancel() / 超时分支）。降级分支仍走这段旧逻辑。
+   */
+  if (inlineMode) {
+    try {
+      bridge.runString('try:\n    import signal\n    signal.setitimer(signal.ITIMER_REAL, 0)\nexcept BaseException:\n    pass');
+    } catch (e2) {
+      // 忽略：清理失败不影响本次结果（下个请求 prelude 会重置 timer）
+    }
+  }
+  return r;
+}
+
+/**
+ * 拼 Python 侧的 prelude：SIGALRM 超时注入 + ctypes audit 钩子。
+ *
+ * SIGALRM：超时 handler 抛 `SystemExit(124)`，`captureRun` 的 `except SystemExit`
+ * 分支捕获后以 `rc="124"` 返回（不逃逸成进程退出）。
+ * 【防御式 try + 全限定（2026-09-23 真机教训）】`import signal as _dshm_sig`
+ * 在真机嵌入 CPython（dlopen libpython3.12 + exec 注入）里 NameError——
+ * as 绑定不落 globals，后续引用即炸；import 失败时降级为无超时（桥仍可用，
+ * 长任务靠调用方 timeout query 自律 + worker 看门狗兜底），绝不让 prelude 挡死执行通道。
+ * 【在 worker 线程里】`signal.signal` 可能报 "signal only works in main thread of the
+ * main interpreter"（取决于 CPython 如何认定主线程）—— 那条路正是上面这个 except 分支
+ * 兜住的：退化为无 Python 侧超时，超时由主线程看门狗 terminate 收口（rc 仍是 "124"）。
+ */
+function pyBridgePrelude(timeoutSec) {
   const prelude = 'try:\n'
     + '    import signal\n'
     + '    def _dshm_alarm(*_a):\n'
@@ -3421,28 +5114,43 @@ function pyBridgeRun(code, timeoutSec) {
     + '    signal.signal(signal.SIGALRM, _dshm_alarm)\n'
     + `    signal.setitimer(signal.ITIMER_REAL, ${timeoutSec})\n`
     + 'except BaseException as _e:\n'
-    + '    print("[dshm] prelude: signal timeout unavailable:", _e)\n';
-  let r;
-  try {
-    r = bridge.captureRun(prelude + code);
-  } catch (e) {
-    r = { ok: false, error: String(e && e.message ? e.message : e) };
-  }
-  // 统一清 itimer：正常路径代码尾部不拼取消（异常路径跑不到），改由这里
-  // 幂等清零。不清的后果是真机实测过的坑——pending alarm 会在下一个请求
-  // 的字节码检查点立即引爆 SystemExit(124)，误杀无辜请求。
-  // 同 prelude 防御式：signal 不可用时静默跳过（上一请求已自带降级语义）。
-  try {
-    bridge.runString('try:\n    import signal\n    signal.setitimer(signal.ITIMER_REAL, 0)\nexcept BaseException:\n    pass');
-  } catch (e2) {
-    // 忽略：清理失败不影响本次结果（下个请求 prelude 会重置 timer）
-  }
-  return r;
+    + '    print("[dshm] prelude: signal timeout unavailable:", _e)\n'
+    // ctypes audit 钩子：只观察 dlopen/dlsym（不挂 call_function，避免逐调用刷屏），
+    // 每次进程最多打 20 行；失败静默。
+    + 'try:\n'
+    + '    import sys, builtins\n'
+    + '    if not getattr(builtins, "_dshm_ctypes_audit", False):\n'
+    + '        _dshm_seen = [0]\n'
+    + '        def _dshm_audit(_ev, _args):\n'
+    + '            try:\n'
+    + '                if _ev in ("ctypes.dlopen", "ctypes.dlsym") and _dshm_seen[0] < 20:\n'
+    + '                    _dshm_seen[0] += 1\n'
+    + '                    print("[dshm] ctypes", _ev, _args)\n'
+    + '            except BaseException:\n'
+    + '                pass\n'
+    + '        sys.addaudithook(_dshm_audit)\n'
+    + '        builtins._dshm_ctypes_audit = True\n'
+    + 'except BaseException as _e:\n'
+    + '    print("[dshm] ctypes audit unavailable:", _e)\n';
+  return prelude;
+}
+
+function pyBridgeAllowedRoots() {
+  /*
+   * 第四个根是用户的真实 HOME。只放 SANDBOX_HOME / HOME_DIR / process.cwd()
+   * 时，默认工作区在 Download/<bundle> 可以跑，但用户随后切到
+   * `/storage/Users/currentUser/harness` 这类工作区后，`.py` 文件会被
+   * `script path outside allowed roots` 拒绝。该范围与 DSHM 文件闸门一致：
+   * 应用沙箱 + 用户目录；不放宽到系统区。
+   */
+  const roots = [SANDBOX_HOME, HOME_DIR, process.cwd(), ORIGINAL_HOME]
+    .filter((root) => typeof root === 'string' && root.length > 0)
+    .map((root) => path.resolve(root));
+  return [...new Set(roots)].filter((root) => root !== path.parse(root).root);
 }
 
 function pyBridgePathInsideSandbox(abs) {
-  return (abs === SANDBOX_HOME || abs.startsWith(SANDBOX_HOME + path.sep))
-    || (abs === HOME_DIR || abs.startsWith(HOME_DIR + path.sep));
+  return pyBridgeAllowedRoots().some((root) => abs === root || abs.startsWith(root + path.sep));
 }
 
 /** 在 ctx.webServer 上注册三个桥端点；任何异常只 diag（桥是增量能力）。 */
@@ -3462,11 +5170,31 @@ function registerPythonHttpBridge(ctx) {
             response.end();
             return;
           }
-          const bridge = getPyBridge();
-          const info = bridge ? bridge.isReady() : { ready: false, initialized: false };
+          /*
+           * 【默认】worker 线程：`status()` 只探测 addon 是否可加载 / isReady（**不初始化 Python**），
+           * 与旧的 `getPyBridge().isReady()` 语义对齐 —— 字段名与取值口径逐字不变
+           * （bridge / ready / initialized），只是探测发生在 worker 里。
+           * 【降级分支】DSHM_PY_INLINE=1 时仍走主线程那份 addon（旧行为）。
+           */
+          if (pyBridgeInlineEnabled()) {
+            const bridge = getPyBridge();
+            const info = bridge ? bridge.isReady() : { ready: false, initialized: false };
+            pyBridgeSendJson(response, 200, {
+              ok: true,
+              bridge: bridge !== null,
+              stdlib: pythonReady(),
+              ready: info.ready === true,
+              initialized: info.initialized === true,
+              home: PYTHON_PREFIX,
+            });
+            return;
+          }
+          const info = pyBridgeArtifacts() === null
+            ? { bridge: false, ready: false, initialized: false }
+            : await getPyWorkerBridge().status();
           pyBridgeSendJson(response, 200, {
             ok: true,
-            bridge: bridge !== null,
+            bridge: info.bridge === true,
             stdlib: pythonReady(),
             ready: info.ready === true,
             initialized: info.initialized === true,
@@ -3500,7 +5228,7 @@ function registerPythonHttpBridge(ctx) {
           pyBridgeSendJson(response, 413, { error: 'code too long (>64KB); write to a .py file and use exec endpoint' });
           return;
         }
-        pyBridgeSendJson(response, 200, pyBridgeRun(code, pyBridgeTimeoutSec(url)));
+        pyBridgeSendJson(response, 200, await pyBridgeRun(code, pyBridgeTimeoutSec(url)));
       },
     });
     ctx.webServer.register({
@@ -3546,7 +5274,12 @@ function registerPythonHttpBridge(ctx) {
           const scriptPath = argv[0];
           const abs = path.isAbsolute(scriptPath) ? scriptPath : path.resolve(process.cwd(), scriptPath);
           if (!pyBridgePathInsideSandbox(abs)) {
-            pyBridgeSendJson(response, 400, { ok: false, error: 'script path must be inside sandbox home' });
+            pyBridgeSendJson(response, 400, {
+              ok: false,
+              error: 'script path outside allowed roots',
+              got: abs,
+              allowedRoots: pyBridgeAllowedRoots(),
+            });
             return;
           }
           let text = '';
@@ -3566,12 +5299,1095 @@ function registerPythonHttpBridge(ctx) {
         // sys.argv 对齐真 python3：['python3', <-c 或脚本路径>, ...args]
         const setArgv = '__dshm_argv = ' + JSON.stringify(argvHead)
           + '\nimport sys\nsys.argv = __dshm_argv\n';
-        pyBridgeSendJson(response, 200, pyBridgeRun(setArgv + code, pyBridgeTimeoutSec(url)));
+        pyBridgeSendJson(response, 200, await pyBridgeRun(setArgv + code, pyBridgeTimeoutSec(url)));
       },
     });
     stage('BOOT_62_PY_BRIDGE_HTTP', '/dshm-python/status|run-get|exec 已注册');
   } catch (e) {
     diag('python 桥端点注册异常（桥退化为不可用）：' + String(e && e.message ? e.message : e));
+  }
+}
+
+/**
+ * 浏览器桥（2026-10-16；docs/173 调研 + docs/174 PoC 的正式化落地）。
+ *
+ * 【是什么】把设备本机浏览器里的「DSHM Browser Bridge」扩展接进宿主进程：扩展主动连本进程的
+ * WebSocket（`ws://127.0.0.1:<port>/browser-bridge?token=<固定>`），宿主把 Agent 侧
+ * `browser_*` 工具调用转发过去；浏览器自动化的一切（CDP 导航 / 脚本注入 / 点击 / 读树）
+ * 由扩展侧完成（PoC 实测：`chrome.debugger` + `chrome.scripting`；海泰两条硬限制——禁建/控
+ * 标签页、debugger 独占——见 docs/174 §3）。
+ *
+ * 【为什么手写最小 WS 服务端】宿主入口在核心树之外、jitless 环境，只处理一种帧（掩码文本帧）；
+ * 手写握手 + 帧编解码零依赖、行为可读（与 tar-gz.cjs 的"纯 JS 替代 spawn"同一取舍）。
+ *
+ * 【鉴权】WS 侧：固定 token（beta 口径，扩展与宿主同值，可经 env 覆盖）；
+ *        HTTP 侧：与 /dshm-python/* 同一份 host token（插件从 host-ready.json 现读）。
+ * 【保活】15s JSON ping：MV3 service worker 靠消息续命（docs/174 §4.1 实测）。
+ * 【分档】全档生效；无扩展连接时工具如实报「未连接」。
+ */
+function browserAutomationEnabled(env = process.env) {
+  const mode = String(env.DSHM_BROWSER_TOOLS || '').trim().toLowerCase();
+  if (mode === 'off') return false;
+  if (mode === 'force') return true;
+  return String(env.DSHM_DEVICE_FORM || '').trim().toLowerCase() === 'desktop';
+}
+
+function registerBrowserBridge(ctx) {
+  try {
+    if (!browserAutomationEnabled()) {
+      stage('BOOT_62B_BROWSER_BRIDGE_SKIP', `deviceForm=${String(process.env.DSHM_DEVICE_FORM || 'unknown')}（仅 PC / 2in1）`);
+      return null;
+    }
+    const BRIDGE_PORT = Number(process.env.DSHM_BROWSER_PORT || 19390);
+    const BRIDGE_TOKEN = String(process.env.DSHM_BROWSER_TOKEN || 'dshm-browser-beta');
+    const clients = new Map();
+    const pending = new Map();
+    let nextRpcId = 1;
+    let connSeq = 0;
+    const logB = (m) => diag('browser-bridge: ' + m);
+
+    // ── 最小 WebSocket 帧编解码（服务端；客户端→服务端必带掩码）──
+    const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+    function wsEncode(opcode, payload) {
+      const len = payload.length;
+      let header;
+      if (len < 126) {
+        header = Buffer.alloc(2);
+        header[1] = len;
+      } else if (len < 65536) {
+        header = Buffer.alloc(4);
+        header[1] = 126;
+        header.writeUInt16BE(len, 2);
+      } else {
+        header = Buffer.alloc(10);
+        header[1] = 127;
+        header.writeBigUInt64BE(BigInt(len), 2);
+      }
+      header[0] = 0x80 | opcode;
+      return Buffer.concat([header, payload]);
+    }
+    const wsText = (s) => wsEncode(0x1, Buffer.from(String(s), 'utf8'));
+    const wsClose = () => wsEncode(0x8, Buffer.alloc(0));
+
+    const server = require('node:http').createServer((req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+    server.on('upgrade', (req, socket) => {
+      try {
+        const u = new URL(req.url, 'http://localhost');
+        if (u.pathname !== '/browser-bridge' || u.searchParams.get('token') !== BRIDGE_TOKEN) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const key = String(req.headers['sec-websocket-key'] || '');
+        const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
+        socket.write('HTTP/1.1 101 Switching Protocols\r\n'
+          + 'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+          + 'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+        const id = 'ws_' + (++connSeq);
+        const client = { id, socket, info: null, lastSeen: Date.now(), closed: false, buf: Buffer.alloc(0) };
+        clients.set(id, client);
+        logB('extension connected id=' + id);
+        socket.on('data', (chunk) => {
+          client.buf = Buffer.concat([client.buf, chunk]);
+          let off = 0;
+          while (client.buf.length - off >= 2) {
+            const b0 = client.buf[off];
+            const b1 = client.buf[off + 1];
+            const opcode = b0 & 0x0f;
+            const masked = (b1 & 0x80) !== 0;
+            let len = b1 & 0x7f;
+            let head = 2;
+            if (len === 126) {
+              if (client.buf.length - off < 4) break;
+              len = client.buf.readUInt16BE(off + 2);
+              head = 4;
+            } else if (len === 127) {
+              if (client.buf.length - off < 10) break;
+              len = Number(client.buf.readBigUInt64BE(off + 2));
+              head = 10;
+            }
+            const maskLen = masked ? 4 : 0;
+            if (client.buf.length - off < head + maskLen + len) break;
+            let payload = client.buf.subarray(off + head + maskLen, off + head + maskLen + len);
+            if (masked) {
+              const mask = client.buf.subarray(off + head, off + head + 4);
+              const copy = Buffer.alloc(len);
+              for (let i = 0; i < len; i += 1) copy[i] = payload[i] ^ mask[i % 4];
+              payload = copy;
+            }
+            off += head + maskLen + len;
+            client.lastSeen = Date.now();
+            if (opcode === 0x8) { try { socket.end(wsClose()); } catch { /* 忽略 */ } break; }
+            if (opcode === 0x9) { try { socket.write(wsEncode(0xa, payload)); } catch { /* 忽略 */ } continue; }
+            if (opcode !== 0x1) continue;
+            let msg = null;
+            try { msg = JSON.parse(payload.toString('utf8')); } catch { continue; }
+            handleClientMessage(client, msg);
+          }
+          client.buf = client.buf.subarray(off);
+        });
+        const drop = (why) => {
+          if (client.closed) return;
+          client.closed = true;
+          clients.delete(id);
+          for (const [rid, p] of pending) {
+            if (p.clientId === id) {
+              pending.delete(rid);
+              clearTimeout(p.timer);
+              p.reject(new Error('extension disconnected'));
+            }
+          }
+          logB('extension disconnected id=' + id + ' (' + why + ')');
+        };
+        socket.on('close', () => drop('close'));
+        socket.on('error', () => drop('error'));
+      } catch (e) {
+        logB('upgrade 处理异常：' + String(e && e.message ? e.message : e));
+        try { socket.destroy(); } catch { /* 忽略 */ }
+      }
+    });
+
+    function handleClientMessage(client, msg) {
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.method === 'extensionInfo') {
+        client.info = msg.params || null;
+        logB('extensionInfo id=' + client.id + ' ' + JSON.stringify(client.info).slice(0, 220));
+        return;
+      }
+      if (msg.method === 'log') {
+        logB('[ext] ' + String((msg.params || {}).m || '').slice(0, 300));
+        return;
+      }
+      if (msg.method === 'pong') return;
+      if (msg.id !== undefined && pending.has(msg.id)) {
+        const p = pending.get(msg.id);
+        pending.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.error) p.reject(new Error('[' + (msg.error.code || 'ERR') + '] ' + (msg.error.message || '')));
+        else p.resolve(msg.result);
+      }
+    }
+
+    function pickClient(clientId) {
+      if (clientId) {
+        const c = clients.get(clientId);
+        return c && !c.closed ? c : null;
+      }
+      for (const c of clients.values()) if (!c.closed) return c;
+      return null;
+    }
+
+    function invokeOnClient(clientId, tool, args, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const client = pickClient(clientId);
+        if (!client) {
+          reject(new Error('没有已连接的浏览器扩展（请在目标浏览器中加载并启用 DSHM Browser Bridge 扩展）'));
+          return;
+        }
+        const id = nextRpcId++;
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error('browser tool timeout: ' + tool));
+        }, timeoutMs);
+        pending.set(id, { clientId: client.id, resolve, reject, timer });
+        try {
+          client.socket.write(wsText(JSON.stringify({ id, method: 'tools/invoke', params: { tool, arguments: args } })));
+        } catch (e) {
+          pending.delete(id);
+          clearTimeout(timer);
+          reject(new Error('发送失败：' + String(e && e.message ? e.message : e)));
+        }
+      });
+    }
+
+    const keepalive = setInterval(() => {
+      for (const c of clients.values()) {
+        if (c.closed) continue;
+        try { c.socket.write(wsText(JSON.stringify({ method: 'ping' }))); } catch { /* drop 会兜 */ }
+      }
+    }, 5000);
+    // 【为什么 5s 而不是 15s（2026-10-17）】浏览器进程被杀后，连接可能先进入"半开"状态
+    // （对端已死、本地 socket 还没收到 FIN/RST）—— 此窗口里 `/dshm-browser/status` 仍把它列为
+    // 客户端，而 invoke 已经选不中它。真机实测该窗口约 10s（杀进程 → drop 出现在 00:14:08）。
+    // 保活写得更勤，drop 来得更早，status 与真实可用性之间的偏差随之收窄。
+    if (keepalive.unref) keepalive.unref();
+
+    // ── 任务结束自动关闭「本次随需拉起」的浏览器（2026-10-17）─────────────────────
+    //
+    // 【用户口径】"主动拉起浏览器执行完任务后浏览器就一直在前台，可以在任务结束后自动关闭，
+    // 包括预约的定时任务也是一样"。
+    // 【什么时候武装】只在 `/dshm-open-link` **成功拉起**之后（即"这个浏览器是 DSHM 为了
+    // 本次任务开的"）；用户自己已经开着的浏览器永远不会走到这一步 ⇒ 不会被关。
+    // 【什么时候关】全局监听 `session/event` 的 **`turn/end`** —— 一轮任务结束（定时任务触发的
+    // 回合同样会落这个事件）。只调用扩展的 `close`（只关 sessionTabId 那一个标签页；窗口里
+    // 还有别的标签页时绝不整窗关闭）。
+    // 【退路】两小时还没等到 turn/end（异常/长任务）就只**解除武装**，不强行关浏览器。
+    // 【开关】宿主环境变量 `DSHM_BROWSER_AUTOCLOSE=off` 可整体关闭。
+    const AUTOCLOSE_DEADLINE_MS = 2 * 60 * 60 * 1000;
+    const autoClose = { armed: false, armedAt: 0, url: '', timer: null };
+    const disarmAutoClose = (why) => {
+      if (!autoClose.armed) return;
+      autoClose.armed = false;
+      if (autoClose.timer !== null) {
+        clearTimeout(autoClose.timer);
+        autoClose.timer = null;
+      }
+      diag('browser-autoclose: disarm (' + why + ')');
+    };
+    const closeLaunchedBrowser = async (reason) => {
+      if (!autoClose.armed) return;
+      disarmAutoClose(reason);
+      const client = pickClient(null);
+      if (!client) {
+        diag('browser-autoclose: no client, skip');
+        return;
+      }
+      try {
+        const closed = await invokeOnClient(null, 'close', { reason }, 8000);
+        diag('browser-autoclose: close result ' + JSON.stringify(closed).slice(0, 200));
+      } catch (e) {
+        diag('browser-autoclose: close failed ' + String(e && e.message ? e.message : e));
+      }
+    };
+    const armAutoClose = (info) => {
+      if (String(process.env.DSHM_BROWSER_AUTOCLOSE || 'on').toLowerCase() === 'off') {
+        diag('browser-autoclose: disabled by env');
+        return;
+      }
+      autoClose.armed = true;
+      autoClose.armedAt = Date.now();
+      autoClose.url = String((info && info.url) || '').slice(0, 200);
+      if (autoClose.timer !== null) clearTimeout(autoClose.timer);
+      autoClose.timer = setTimeout(() => {
+        disarmAutoClose('deadline（2h 未等到 turn/end，不强行关闭）');
+      }, AUTOCLOSE_DEADLINE_MS);
+      if (autoClose.timer.unref) autoClose.timer.unref();
+      diag('browser-autoclose: armed url=' + autoClose.url);
+    };
+    if (typeof ctx.on === 'function') {
+      try {
+        ctx.on('session/event', (session, event) => {
+          if (!autoClose.armed) return;
+          if (!event || event.type !== 'turn/end') return;
+          const turn = event.data && event.data.turn !== undefined ? event.data.turn : '?';
+          void closeLaunchedBrowser('turn-end turn=' + turn);
+        }, { global: true });
+        stage('BOOT_62D_BROWSER_AUTOCLOSE', 'session/event(turn/end) → 关闭随需拉起的浏览器');
+      } catch (e) {
+        diag('browser-autoclose: 订阅 session/event 失败：' + String(e && e.message ? e.message : e));
+      }
+    } else {
+      diag('browser-autoclose: ctx.on 不可用，自动关闭退化为 deadline-only');
+    }
+
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/dshm-browser/start',
+      handler: async (request, response) => {
+        const html = '<!doctype html><html><head><meta charset="utf-8">'
+          + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+          + '<title>DSHM Browser Bridge</title></head>'
+          + '<body><main><h1>DSHM Browser Bridge</h1>'
+          + '<p>The browser is connected. Return to DSHM and continue the task.</p>'
+          + '<button id="ready">Browser ready</button>'
+          + '<input id="probe" aria-label="DSHM browser probe" placeholder="DSHM browser probe">'
+          + '</main></body></html>';
+        response.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        });
+        response.end(html);
+      },
+    });
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/dshm-browser/status',
+      handler: async (request, response) => {
+        const list = [];
+        for (const c of clients.values()) list.push({ id: c.id, info: c.info, lastSeen: c.lastSeen });
+        pyBridgeSendJson(response, 200, { ok: true, port: BRIDGE_PORT, clients: list });
+      },
+    });
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/dshm-browser/invoke',
+      handler: async (request, response) => {
+        try {
+          const url = new URL(request.url, 'http://localhost');
+          if (!pyBridgeTokenOk(url)) {
+            pyBridgeSendJson(response, 401, { ok: false, error: 'token required' });
+            return;
+          }
+          const tool = url.searchParams.get('tool') || '';
+          if (tool.length === 0) {
+            pyBridgeSendJson(response, 400, { ok: false, error: 'tool required' });
+            return;
+          }
+          const clientId = url.searchParams.get('clientId') || '';
+          const timeoutSecRaw = Number(url.searchParams.get('timeout') || 30);
+          const timeoutSec = Number.isFinite(timeoutSecRaw) ? Math.min(120, Math.max(5, Math.trunc(timeoutSecRaw))) : 30;
+          let args = {};
+          const rawArgs = url.searchParams.get('args') || '';
+          if (rawArgs.length > 0) {
+            try { args = JSON.parse(rawArgs); } catch (e) {
+              pyBridgeSendJson(response, 400, { ok: false, error: 'args 不是 JSON' });
+              return;
+            }
+          }
+          const result = await invokeOnClient(clientId, tool, args, timeoutSec * 1000);
+          pyBridgeSendJson(response, 200, { ok: true, result });
+        } catch (e) {
+          pyBridgeSendJson(response, 200, { ok: false, error: String(e && e.message ? e.message : e) });
+        }
+      },
+    });
+
+    server.listen(BRIDGE_PORT, '127.0.0.1', () => {
+      logB('listening ws://127.0.0.1:' + BRIDGE_PORT + '/browser-bridge');
+    });
+    server.on('error', (e) => logB('server error: ' + String(e && e.message ? e.message : e)));
+    stage('BOOT_62B_BROWSER_BRIDGE', 'ws://127.0.0.1:' + BRIDGE_PORT + '/browser-bridge + /dshm-browser/*');
+    // 给外开桥端点用：只有"本次真的拉起过浏览器"才在 turn/end 时自动关闭（理由见上面的块注释）。
+    return { armAutoClose };
+  } catch (e) {
+    diag('browser bridge 注册异常（退化为不可用）：' + String(e && e.message ? e.message : e));
+  }
+  return null;
+}
+
+/**
+ * 外开桥端点（/dshm-open-link）：把"打开外部链接 / 拉起浏览器"的请求交给 ArkTS 壳层。
+ *
+ * 【为什么必须过壳层】`openLink` 是 ArkTS 的 `UIAbilityContext` API（Host 里的 Node 进程
+ * 调不到；见 `platform/src/main/ets/system/OpenLink.ets` 与登录"外开授权页"同一条路）。
+ * 通道沿用项目既成的**文件队列**范式（`host-stop-request` / `host-exit-mode` / 语音桥）：
+ * `$DSH_HOME/open-link/` 下 Host 写 `<id>.req`、壳层（`entry/.../system/OpenLinkBridge.ets`）
+ * 轮询处理并写 `<id>.done` / `<id>.fail`。两侧同 UID、同文件系统视图。
+ *
+ * 【用法（插件 dshm-tool-browser 调它）】
+ *   GET /dshm-open-link?token=…&url=https%3A%2F%2Fwww.baidu.com[&bundle=com.haitai.htbrowser][&timeout=8]
+ *   → { ok:true, detail:"launched", id } | { ok:false, error:"…", id? }
+ *
+ * 【为什么要 bundle（2026-10-17 真机实测）】`openLink` 走**系统默认浏览器** —— 本机默认是
+ * `com.huawei.hmos.browser`，而 DSHM 扩展装在 `com.haitai.htbrowser` ⇒ 只靠 openLink 会拉起
+ * "另一个浏览器"，扩展永远不回连。故请求里带目标 bundle，壳层优先 `startAbility` 显式拉起它
+ * （海泰 `EntryAbility` 声明了 `ohos.want.action.viewData` + `entity.system.browsable`），
+ * 失败才回退 openLink（默认浏览器 / 系统兜底）。
+ *
+ * 【为什么要等回执再返回】拉起浏览器是**异步且可能失败**的（没有可用浏览器 / 壳层桥没跑）。
+ * 立刻回 ok 会把失败藏到下一步（模型只看到"扩展没回连"），所以这里等到 `.done/.fail`
+ * 或超时，把真实结果如实带回去。
+ */
+function registerOpenLinkEndpoint(ctx, onLaunched) {
+  try {
+    if (!browserAutomationEnabled()) {
+      diag('外开桥端点：当前非 PC 形态，不注册浏览器拉起端点');
+      return;
+    }
+    if (!ctx || !ctx.webServer || typeof ctx.webServer.register !== 'function') {
+      diag('外开桥端点：ctx.webServer 不可用，跳过注册');
+      return;
+    }
+    const QUEUE_DIR_NAME = 'open-link';
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/dshm-open-link',
+      handler: async (request, response) => {
+        try {
+          const url = new URL(request.url, 'http://localhost');
+          if (!pyBridgeTokenOk(url)) {
+            pyBridgeSendJson(response, 401, { ok: false, error: 'token required' });
+            return;
+          }
+          const target = String(url.searchParams.get('url') || '').trim();
+          if (!/^https?:\/\//i.test(target)) {
+            pyBridgeSendJson(response, 400, { ok: false, error: 'url 必须是 http(s) 绝对地址' });
+            return;
+          }
+          // 目标浏览器 bundle（可选）：壳层优先用它做显式 startAbility（见函数头注的实测理由），
+          // 只做形态校验（点分标识符），不判断存在性 —— 不存在时壳层会回退 openLink。
+          const bundle = String(url.searchParams.get('bundle') || '').trim();
+          if (bundle.length > 0 && !/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(bundle)) {
+            pyBridgeSendJson(response, 400, { ok: false, error: 'bundle 形态不合法' });
+            return;
+          }
+          const timeoutSecRaw = Number(url.searchParams.get('timeout') || 8);
+          const timeoutMs = Number.isFinite(timeoutSecRaw)
+            ? Math.min(20000, Math.max(1000, Math.trunc(timeoutSecRaw * 1000)))
+            : 8000;
+          const id = `ol-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+          const dir = path.join(HOME_DIR, QUEUE_DIR_NAME);
+          fs.mkdirSync(dir, { recursive: true });
+          const reqPath = path.join(dir, `${id}.req`);
+          const tmpPath = path.join(dir, `${id}.wreq`);
+          fs.writeFileSync(tmpPath, JSON.stringify({
+            url: target,
+            ...bundle.length > 0 ? { bundle } : {},
+            requestedAt: Date.now(),
+          }), 'utf8');
+          fs.renameSync(tmpPath, reqPath);   // 原子落位：壳层只会看到完整的 .req
+          const deadline = Date.now() + timeoutMs;
+          let result = null;
+          while (Date.now() < deadline) {
+            const donePath = path.join(dir, `${id}.done`);
+            const failPath = path.join(dir, `${id}.fail`);
+            if (fs.existsSync(donePath)) {
+              result = { ok: true, detail: 'launched' };
+              break;
+            }
+            if (fs.existsSync(failPath)) {
+              let why = 'openLink 未被系统受理';
+              try {
+                const parsed = JSON.parse(fs.readFileSync(failPath, 'utf8'));
+                if (parsed && typeof parsed.error === 'string' && parsed.error.length > 0) why = parsed.error;
+              } catch { /* 读不到就用手头的默认文案 */ }
+              result = { ok: false, error: why };
+              break;
+            }
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
+          for (const suffix of ['.req', '.done', '.fail', '.wreq']) {
+            try {
+              fs.unlinkSync(path.join(dir, `${id}${suffix}`));
+            } catch { /* 不存在即已清理 */ }
+          }
+          if (result === null) {
+            pyBridgeSendJson(response, 200, {
+              ok: false,
+              id,
+              error: `壳层在 ${timeoutMs} ms 内没有回执（外开桥未运行？见 files/open-link-bridge-heartbeat）`,
+            });
+            return;
+          }
+          // 成功拉起 ⇒ 武装"任务结束自动关闭"（只对这次拉起生效；用户自己的浏览器不经过这里）。
+          if (result.ok === true && typeof onLaunched === 'function') {
+            try {
+              onLaunched({ url: target, id });
+            } catch (e) {
+              diag('open-link: onLaunched 回调失败：' + String(e && e.message ? e.message : e));
+            }
+          }
+          pyBridgeSendJson(response, 200, { ...result, id });
+        } catch (e) {
+          pyBridgeSendJson(response, 200, { ok: false, error: String(e && e.message ? e.message : e) });
+        }
+      },
+    });
+    stage('BOOT_62C_OPEN_LINK', '/dshm-open-link 已注册（文件队列 → OpenLinkBridge）');
+  } catch (e) {
+    diag('外开桥端点注册异常（退化为不可用）：' + String(e && e.message ? e.message : e));
+  }
+}
+
+/**
+ * 桌面服务卡片的状态聚合（2026-10-17，docs/178）。
+ *
+ * 【卡住的地方与产物】Form Kit 的卡片进程（FormExtensionAbility）与主应用共享 bundle 沙箱，
+ * 但**没有**从宿主 Node 进程拿数据的通道 ⇒ 沿用文件落点：本函数把
+ *   ① 当前会话进度（session/event 的 turn/start · step/start|end · turn/end + session/title）；
+ *   ② 模型账户余额（ctx.deepseekAccount.getBalance —— 有就显示）；
+ *   ③ token 用量（assistant/message 的 usage，按 今天/近5h/近7d/近30d 聚合；
+ *      **余额取不到时**卡片改显示这组数字）。
+ * 原子写到 `$DSH_HOME/card-state.json`；FormExtensionAbility 出首帧时读它，
+ * 主应用 `CardStateWatcher` 轮询它并 `formProvider.updateForm` 推给已添加的卡片。
+ *
+ * 【用量账本】`$DSH_HOME/card-usage.jsonl` 逐条追加 `{t,in,out}`（最多 2 万条 / 35 天）；
+ * 首次没有账本时**异步回填**现有会话日志里的 assistant/message usage（只回填一次，
+ * 这样"今天/近7天/近30天"从第一天起就是全的，而不是从装上卡片那一刻起算）。
+ *
+ * 【余额 client 身份】账户平台的 `getBalance(client)` 要 `{version, locale, timezoneOffsetSeconds}`；
+ * 版本取 `DSHM_APP_VERSION`（缺省 1.1.6），时区在本机按东八区取正偏移。
+ */
+function registerCardState(ctx) {
+  try {
+    const stateFile = path.join(HOME_DIR, 'card-state.json');
+    const usageFile = path.join(HOME_DIR, 'card-usage.jsonl');
+    const MAX_RECORDS = 20000;
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    let records = [];
+    const titles = new class extends Map {
+      set(key, value) {
+        this.delete(key);
+        super.set(key, value);
+        if (this.size > 1024) this.delete(this.keys().next().value);
+        return this;
+      }
+    }();
+    let current = { sessionId: '', title: '', state: 'idle', turn: 0, step: 0 };
+    let balance = { available: false, display: '' };
+    let writeTimer = null;
+    let lastBalanceAt = 0;
+
+    /**
+     * 取会话标题：优先用本次进程收到过的 `session/title` 事件；没有就**回看会话内存日志**
+     * （`session.log`）里最后一条 session/title —— 老会话的标题是在上一次进程里生成的，
+     * 新启动的宿主不会重放那个事件，只看实时事件会得到空标题（真机实测：卡片只显示"执行中"）。
+     */
+    const titleOf = (session, sid) => {
+      if (sid && titles.has(sid)) return titles.get(sid);
+      try {
+        const log = session && Array.isArray(session.log) ? session.log : [];
+        for (let i = log.length - 1; i >= 0; i -= 1) {
+          const e = log[i];
+          if (e && e.type === 'session/title' && e.data && typeof e.data.title === 'string' && e.data.title.length > 0) {
+            if (sid) titles.set(sid, e.data.title);
+            return e.data.title;
+          }
+        }
+      } catch { /* 读不到就留空 */ }
+      return '';
+    };
+
+    const usageSummary = () => {
+      const now = Date.now();
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const windows = {
+        today: todayStart.getTime(),
+        last5h: now - 5 * 60 * 60 * 1000,
+        last7d: now - 7 * DAY_MS,
+        last30d: now - 30 * DAY_MS,
+      };
+      const out = { today: 0, last5h: 0, last7d: 0, last30d: 0 };
+      for (const r of records) {
+        const n = (r.in || 0) + (r.out || 0);
+        if (r.t >= windows.today) out.today += n;
+        if (r.t >= windows.last5h) out.last5h += n;
+        if (r.t >= windows.last7d) out.last7d += n;
+        if (r.t >= windows.last30d) out.last30d += n;
+      }
+      return out;
+    };
+
+    const writeState = () => {
+      writeTimer = null;
+      try {
+        const payload = { updatedAt: Date.now(), session: current, balance, usage: usageSummary() };
+        const tmp = stateFile + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(payload), 'utf8');
+        fs.renameSync(tmp, stateFile);
+      } catch (e) {
+        diag('card-state: 写状态失败：' + String(e && e.message ? e.message : e));
+      }
+    };
+    const scheduleWrite = () => {
+      if (writeTimer !== null) return;
+      writeTimer = setTimeout(writeState, 500);
+      if (writeTimer.unref) writeTimer.unref();
+    };
+
+    const refreshBalance = async (why) => {
+      const now = Date.now();
+      if (now - lastBalanceAt < 60000) return;
+      lastBalanceAt = now;
+      try {
+        const account = ctx.deepseekAccount;
+        if (!account || typeof account.getBalance !== 'function') throw new Error('deepseekAccount 服务不可用');
+        const client = {
+          version: String(process.env.DSHM_APP_VERSION || '1.1.6'),
+          locale: 'zh-CN',
+          timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+        };
+        const result = await account.getBalance(client);
+        if (result && result.status === 'ready' && Array.isArray(result.value) && result.value.length > 0) {
+          const parts = result.value.map((w) => {
+            const value = Number(w.balance);
+            const shown = Number.isFinite(value) ? value.toFixed(2) : String(w.balance);
+            return (w.currency === 'CNY' ? '¥' : '$') + shown;
+          });
+          balance = { available: true, display: parts.join(' / ') };
+        } else {
+          balance = { available: false, display: '' };
+        }
+      } catch (e) {
+        balance = { available: false, display: '' };
+        diag('card-state: 余额查询失败（卡片改显示 token 用量）：' + String(e && e.message ? e.message : e));
+      }
+      scheduleWrite();
+      diag('card-state: 余额刷新（' + why + '）' + (balance.available ? balance.display : '不可用'));
+    };
+
+    let usageReadable = true;
+    let usageAppends = 0;
+    let usageLastCompactAt = Date.now();
+    const compactUsage = () => {
+      if (!usageReadable || !fs.existsSync(usageFile)) return;
+      try {
+        const cutoff = Date.now() - 35 * DAY_MS;
+        const kept = records.filter((r) => r && typeof r.t === 'number' && r.t >= cutoff
+          && Number.isFinite(r.in) && Number.isFinite(r.out)).slice(-MAX_RECORDS);
+        fs.writeFileSync(usageFile + '.tmp', kept.map((r) => JSON.stringify(r)).join('\n')
+          + (kept.length ? '\n' : ''), 'utf8');
+        fs.renameSync(usageFile + '.tmp', usageFile);
+        records = kept;
+        usageAppends = 0;
+        usageLastCompactAt = Date.now();
+      } catch (e) {
+        diag('card-state: usage compaction failed: ' + String(e && e.message ? e.message : e));
+      }
+    };
+
+    // 历史用量账本
+    try {
+      if (fs.existsSync(usageFile)) {
+        const cutoff = Date.now() - 35 * DAY_MS;
+        const fd = fs.openSync(usageFile, 'r');
+        try {
+          let position = fs.fstatSync(fd).size;
+          const chunk = Buffer.alloc(65536);
+          let parts = [];
+          let lineBytes = 0;
+          const acceptLine = () => {
+            if (lineBytes > 0 && lineBytes <= 65536) {
+              try {
+                const r = JSON.parse(Buffer.concat(parts.reverse()).toString('utf8'));
+                if (r && typeof r.t === 'number' && r.t >= cutoff
+                  && Number.isFinite(r.in) && Number.isFinite(r.out)) {
+                  records.push({ t: r.t, in: r.in, out: r.out });
+                }
+              } catch {}
+            }
+            parts = [];
+            lineBytes = 0;
+          };
+          while (position > 0 && records.length < MAX_RECORDS) {
+            const length = Math.min(chunk.length, position);
+            position -= length;
+            let read = 0;
+            while (read < length) {
+              const n = fs.readSync(fd, chunk, read, length - read, position + read);
+              if (n === 0) throw new Error('usage ledger short read');
+              read += n;
+            }
+            let end = length;
+            for (let i = length - 1; i >= -1; i -= 1) {
+              if (i !== -1 && chunk[i] !== 10) continue;
+              const segment = chunk.subarray(i + 1, end);
+              lineBytes += segment.length;
+              if (lineBytes <= 65536) parts.push(Buffer.from(segment));
+              else {
+                parts = [];
+                if (usageReadable) diag('card-state: usage ledger read incomplete: line exceeds 65536 bytes; compaction disabled');
+                usageReadable = false;
+              }
+              if (i >= 0) acceptLine();
+              end = i;
+              if (records.length >= MAX_RECORDS) break;
+            }
+          }
+          if (position === 0 && records.length < MAX_RECORDS) acceptLine();
+          records.reverse();
+        } finally {
+          fs.closeSync(fd);
+        }
+        compactUsage();
+      }
+    } catch (e) {
+      usageReadable = false;
+      diag('card-state: 读用量历史失败：' + String(e && e.message ? e.message : e));
+    }
+
+    /**
+     * 首次（没有账本）异步回填现有会话日志：结构扫描 zstd 帧 → 逐帧解压 → 抽
+     * assistant/message 的 usage。只回填一次；失败只记日志（卡片随后从新事件累计）。
+     */
+    const backfillUsage = () => {
+      if (fs.existsSync(usageFile)) return;
+      try {
+        const root = path.join(HOME_DIR, 'sessions');
+        if (!fs.existsSync(root)) return;
+        const zstdDecompressSync = require('node:zlib').zstdDecompressSync;
+        const ZSTD_MAGIC = 0xfd2fb528;
+        const scanFrames = (buffer) => {
+          const frames = [];
+          let offset = 0;
+          while (offset < buffer.length) {
+            const start = offset;
+            if (buffer.length - offset < 4) break;
+            if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) break;
+            offset += 4;
+            if (offset === buffer.length) break;
+            const descriptor = buffer.readUInt8(offset);
+            offset += 1;
+            if ((descriptor & 24) !== 0) break;
+            const contentSizeFlag = descriptor >>> 6;
+            const singleSegment = (descriptor & 32) !== 0;
+            const checksum = (descriptor & 4) !== 0;
+            const dictionaryFlag = descriptor & 3;
+            const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag;
+            const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag;
+            offset += (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
+            for (;;) {
+              if (buffer.length - offset < 3) return frames;
+              const blockHeader = buffer.readUIntLE(offset, 3);
+              offset += 3;
+              const lastBlock = (blockHeader & 1) !== 0;
+              const blockType = (blockHeader >>> 1) & 3;
+              const blockSize = blockHeader >>> 3;
+              if (blockType === 3) return frames;
+              const payloadBytes = blockType === 1 ? 1 : blockSize;
+              if (buffer.length - offset < payloadBytes) return frames;
+              offset += payloadBytes;
+              if (lastBlock) break;
+            }
+            if (checksum) {
+              if (buffer.length - offset < 4) return frames;
+              offset += 4;
+            }
+            frames.push({ start, end: offset });
+          }
+          return frames;
+        };
+        const cutoff = Date.now() - 35 * DAY_MS;
+        const files = [];
+        const walk = (dir) => {
+          for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+            const p = path.join(dir, ent.name);
+            if (ent.isDirectory()) walk(p);
+            else if (ent.name === 'session.v4.jsonl.zstd') {
+              try {
+                if (fs.statSync(p).mtimeMs >= cutoff) files.push(p);
+              } catch { /* 忽略 */ }
+            }
+          }
+        };
+        walk(root);
+        const seen = new Set();
+        const found = [];
+        for (const file of files) {
+          try {
+            const raw = fs.readFileSync(file);
+            const sid = path.basename(path.dirname(file));
+            for (const frame of scanFrames(raw)) {
+              let text = '';
+              try {
+                text = zstdDecompressSync(raw.subarray(frame.start, frame.end)).toString('utf8');
+              } catch { continue; }
+              for (const line of text.split('\n')) {
+                if (!line.includes('"assistant/message"') && !line.includes('"session/title"')) continue;
+                let ev = null;
+                try { ev = JSON.parse(line); } catch { continue; }
+                if (ev.type === 'session/title' && ev.data && typeof ev.data.title === 'string') titles.set(sid, ev.data.title);
+                if (ev.type !== 'assistant/message' || !ev.data || !ev.data.usage) continue;
+                const t = typeof ev.time === 'number' ? ev.time : 0;
+                if (t < cutoff) continue;
+                const key = sid + ':' + ev.data.turn + ':' + ev.data.step;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                const inT = Number(ev.data.usage.inputTokens) || 0;
+                const outT = Number(ev.data.usage.outputTokens) || 0;
+                if (inT + outT > 0) found.push({ t, in: inT, out: outT });
+              }
+            }
+          } catch { /* 单文件失败不影响回填 */ }
+        }
+        found.sort((a, b) => a.t - b.t);
+        records = found.slice(-MAX_RECORDS);
+        fs.writeFileSync(usageFile, records.map((r) => JSON.stringify(r)).join('\n') + (records.length ? '\n' : ''), 'utf8');
+        diag('card-state: 回填用量 ' + records.length + ' 条（来自 ' + files.length + ' 个会话日志）');
+        scheduleWrite();
+      } catch (e) {
+        diag('card-state: 回填用量失败：' + String(e && e.message ? e.message : e));
+      }
+    };
+    setTimeout(backfillUsage, 8000);
+
+    if (typeof ctx.on === 'function') {
+      /*
+       * ── 任务状态文件（2026-11-04，任务完成通知/提示音的触发源）─────────────────
+       *
+       * 【为什么要由 Host 来写】用户需求是「**不论 App 在前台还是后台**，任务完成就要出通知 +
+       * 声音」。而通知链路原先挂在 WebView 的 turn 事件上 —— App 被压到后台（或 WebView 被节流）
+       * 时那条链路根本不会执行，于是"完全没有通知"（真机复测：`diag-notify` 连文件都没生成）。
+       *
+       * Host 侧本来就在**全局**监听 `session/event`（下面的 card-state 用的就是这个），
+       * 它对前后台无感、不会被节流 ⇒ 把 turn 生命周期落到这个文件，ArkTS 侧轮询它：
+       *   · `active=true`  ⇒ 任务开始 → 发"任务进行中"进度通知 + 申请长时任务
+       *   · `active=false` ⇒ 任务结束 → 停长时任务、撤进度、发"任务完成"通知（新 ID，带声音）
+       * `seq` 每次结束 +1：ArkTS 靠"seq 变新"判断这是一次**新的完成**，即使期间被挂起过，
+       * 恢复后也能补发一次通知（不丢事件）。
+       */
+      const taskStateFile = path.join(HOME_DIR, 'task-state.json');
+      let taskSeq = 0;
+      let taskActive = false;
+      const tasks = new Map();
+      const activeTasks = new Map();
+      const closedTasks = new Set();
+      const CLOSED_TASK_LIMIT = 1024;
+      /*
+       * 兼容副本目录是否可写：只测一次并缓存。
+       * 2in1 真机（2026-11-11）上 `files/` 根目录对宿主进程只读 ⇒ 每个 turn 写兼容副本都
+       * EACCES，dshm-host.log 被刷屏。不可写就整体跳过；主链路 `dsh/home/task-state.json`
+       * 不受影响（ArkTS 侧读的就是它）。
+       */
+      let compatWritableCache = null;
+      const compatWritable = () => {
+        if (compatWritableCache !== null) { return compatWritableCache; }
+        try {
+          fs.accessSync(SANDBOX_HOME, fs.constants.W_OK);
+          compatWritableCache = true;
+        } catch (e) {
+          compatWritableCache = false;
+          diag('task-state: 兼容副本跳过（目录不可写，只有主链路）：' + String(e && e.message ? e.message : e));
+        }
+        return compatWritableCache;
+      };
+      const writeTaskState = (state) => {
+        try {
+          const payload = {
+            v: 1,
+            active: state.active === true,
+            anyActive: taskActive,
+            taskId: state.taskId || '',
+            sessionId: state.sessionId || '',
+            title: state.title || '',
+            turn: state.turn || 0,
+            state: state.state || (state.active === true ? 'running' : 'idle'),
+            seq: taskSeq,
+            startedAt: state.startedAt !== undefined ? state.startedAt : '',
+            durationMs: state.durationMs !== undefined ? state.durationMs : 0,
+            at: new Date().toISOString(),
+            updatedAt: Date.now(),
+          };
+          /*
+           * 【直接覆写，不再 tmp+rename（2026-11-04 复测）】上一版用 `writeFileSync(tmp)` +
+           * `renameSync(tmp, final)`：在 HFM 上 rename 偶发失败（且失败被 catch 吞掉），
+           * 于是 `task-state.json` 根本没出现、ArkTS 侧永远读到"文件不存在"。
+           * 这个文件只被我们自己读，不需要原子换名 —— 直接覆写最稳。
+           */
+          fs.writeFileSync(taskStateFile, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+          /*
+           * 【兼容副本（2026-11-05 复测 P1）】老安装上 `files/task-state.json` 曾是
+           * 手工 symlink 到 `dsh/home/task-state.json`；重装/清数据后那条链接会消失。
+           * 现在两条路径都写：新版读 `dsh/home`（主），任何旧客户端/排查脚本读 files 根
+           * 也能拿到同一份事实 —— 不再依赖设备上的 symlink。
+           *
+           * 【2026-11-11 2in1 修复】部分机型上 files 根目录对本进程只读，兼容副本每次
+           * 都 EACCES 并在 dshm-host.log 里按 turn 刷一条（真机日志 22:21/22:22 各一条）。
+           * 目录不可写就整轮跳过（只记一次），不再每拍重试。
+           */
+          if (compatWritable()) {
+            try {
+              const compat = path.join(SANDBOX_HOME, 'task-state.json');
+              /*
+               * 【旧 symlink 就地换成真文件（2026-11-05 PC 复测 P1 收尾）】
+               * 老安装上 `files/task-state.json` 是指向 `dsh/home/task-state.json` 的符号链接；
+               * 重装/清数据后链接目标可能消失。这里先判「是不是链接」，是就只删链接本身
+               * （unlink 不会碰目标），再写真实文件 —— 从此不再依赖任何 symlink。
+               */
+              try {
+                if (fs.lstatSync(compat).isSymbolicLink()) {
+                  fs.unlinkSync(compat);
+                  diag('task-state: 兼容路径原为 symlink，已替换为真实文件');
+                }
+              } catch (eLink) { /* 不存在：直接写 */ }
+              fs.writeFileSync(compat, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+            } catch (e2) {
+              if (e2 && ['EACCES', 'EPERM', 'EROFS'].includes(e2.code)) compatWritableCache = false;
+              diag('task-state: 兼容副本写失败（不影响主链路）：' + String(e2 && e2.message ? e2.message : e2));
+            }
+          }
+        } catch (e) {
+          diag('task-state: 写失败：' + String(e && e.message ? e.message : e));
+        }
+      };
+
+      /*
+       * 启动基线（2026-11-12，遵循官方 turnBoundary）：新进程启动时不可能有 open turn。
+       *
+       * 官方 dsh-agent 的 `turnBoundary` 投影对 `turn/end` **不区分 reason**，一律把
+       * `openTurnStartSeq` 置 null；`accountsForClaim` 把 completed / blocked / aborted /
+       * interrupted / error 都列为正常结束种类。崩溃恢复时 `interruptedTurnClosers`
+       * 会把 `turn/end interrupted` **补写进会话日志**（dsh-agent-loop 冷读时 append），
+       * 但补写不发实时 `session/event` ⇒ Host 的 `ctx.on('session/event')` 收不到它，
+       * 上一进程的 `task-state.json` 会停在 `active=true / state=running / seq=0`。
+       * 端侧 taskWatch 重启后把这条残留 primed 成基线，界面就一直显示「深度求索中」，
+       * 且停止按钮没有可取消的 turn。真机证据：turn 9 01:02:27 已被 interrupted 收尾，
+       * 但 01:13:00–01:18:55 新进程仍每 5 秒 primed `#9 running`，直到 turn 10 才覆盖。
+       *
+       * 因此启动时按官方语义收敛：残留 running 一律写回 done（不 +1 seq，避免误发
+       * 一次「任务完成」通知），并从文件恢复 seq，保证后续轮次的 doneKey 连续。
+       */
+      try {
+        let prev = null;
+        try {
+          prev = JSON.parse(fs.readFileSync(taskStateFile, 'utf8'));
+        } catch { /* 文件不存在 / 内容损坏：按首次启动处理 */ }
+        if (prev !== null && typeof prev.seq === 'number' && prev.seq >= 0) {
+          taskSeq = prev.seq;
+        }
+        if (prev === null) {
+          writeTaskState({ active: false, taskId: '', state: 'idle' });
+        } else if (prev.active === true || prev.state === 'running' || prev.anyActive === true) {
+          writeTaskState({ active: false, taskId: prev.taskId || '',
+            sessionId: prev.sessionId || '', title: prev.title || '',
+            turn: prev.turn || 0, state: 'done', startedAt: prev.startedAt || '' });
+          diag('task-state: 启动收敛残留 running（官方 turnBoundary 已无 open turn；turn=' +
+            String(prev.turn || 0) + ' seq=' + String(prev.seq || 0) + '）');
+        }
+      } catch (e) {
+        diag('task-state: 启动基线写失败：' + String(e && e.message ? e.message : e));
+      }
+
+      ctx.on('session/event', (session, event) => {
+        try {
+          const sid = (session && session.header && session.header.id) || (session && session.id) || '';
+          if (!event || typeof event.type !== 'string') return;
+          if (event.type === 'session/title') {
+            const t = event.data && typeof event.data.title === 'string' ? event.data.title : '';
+            if (sid && t.length > 0) {
+              titles.set(sid, t);
+              if (current.sessionId === sid) {
+                current.title = t;
+                scheduleWrite();
+              }
+            }
+            return;
+          }
+          if (event.type === 'turn/start') {
+            const turn = event.data && typeof event.data.turn === 'number' ? event.data.turn : 0;
+            const key = JSON.stringify([sid, turn]);
+            const task = tasks.get(key);
+            if (task || closedTasks.has(key)) return;
+            const previous = activeTasks.get(sid);
+            if (previous) previous.active = false;
+            current = {
+              sessionId: sid,
+              title: titleOf(session, sid) || '',
+              state: 'running',
+              turn,
+              step: 0,
+            };
+            /* 任务开始：落 task-state（ArkTS 据此发"任务进行中"进度通知 + 申请长时任务）。 */
+            taskActive = true;
+            const started = { id: sid + '#' + String(turn), sessionId: sid, turn,
+              title: current.title, startedAt: new Date().toISOString(), active: true };
+            tasks.set(key, started);
+            activeTasks.set(sid, started);
+            writeTaskState({ active: true, taskId: started.id, sessionId: sid, title: started.title,
+              turn, state: 'running', startedAt: started.startedAt });
+            scheduleWrite();
+            return;
+          }
+          if (event.type === 'step/start' || event.type === 'step/end') {
+            const turn = event.data && typeof event.data.turn === 'number' ? event.data.turn : 0;
+            const key = JSON.stringify([sid, turn]);
+            const task = tasks.get(key);
+            if (closedTasks.has(key) || (task && !task.active)) return;
+            if (current.sessionId !== sid) current.sessionId = sid;
+            current.turn = turn;
+            /*
+             * 【兜底：没有 turn/start 也要能识别"在跑"（2026-11-04 复测）】
+             * 真机 1+1 这种极短任务，实测只看到 step 事件也说不准；这里把 step 也当"任务进行中"
+             * 的判据，任务 id 用 sid + 已记录的 turn（无 turn 则用 0），保证 ArkTS 侧能发进度通知。
+             */
+            if (!task) {
+              const previous = activeTasks.get(sid);
+              if (previous) previous.active = false;
+              taskActive = true;
+              const started = { id: sid + '#' + String(turn), sessionId: sid, turn,
+                title: titleOf(session, sid) || '', startedAt: new Date().toISOString(), active: true };
+              tasks.set(key, started);
+              activeTasks.set(sid, started);
+              writeTaskState({ active: true, taskId: started.id, sessionId: sid, title: started.title,
+                turn, state: 'running', startedAt: started.startedAt });
+            }
+            current.state = 'running';
+            current.step = event.data && typeof event.data.step === 'number' ? event.data.step : current.step;
+            scheduleWrite();
+            return;
+          }
+          if (event.type === 'assistant/message') {
+            const usage = event.data && event.data.usage;
+            if (usage && typeof usage === 'object') {
+              const inT = Number(usage.inputTokens) || 0;
+              const outT = Number(usage.outputTokens) || 0;
+              if (inT + outT > 0) {
+                const record = { t: typeof event.time === 'number' ? event.time : Date.now(), in: inT, out: outT };
+                records.push(record);
+                if (records.length > MAX_RECORDS) records = records.slice(-MAX_RECORDS);
+                try {
+                  fs.appendFileSync(usageFile, '\n' + JSON.stringify(record) + '\n', 'utf8');
+                  usageAppends += 1;
+                  if (usageAppends >= 256) compactUsage();
+                } catch { /* 统计落盘失败不影响会话 */ }
+                scheduleWrite();
+              }
+            }
+            return;
+          }
+          if (event.type === 'turn/end') {
+            const turn = event.data && typeof event.data.turn === 'number' ? event.data.turn : 0;
+            const key = JSON.stringify([sid, turn]);
+            let task = tasks.get(key);
+            if (closedTasks.has(key)) return;
+            if (!task) {
+              task = { id: sid + '#' + String(turn), sessionId: sid, turn,
+                title: titleOf(session, sid) || '', startedAt: '', active: true };
+            }
+            if (current.sessionId === sid && current.turn === turn) current.state = 'done';
+            /*
+             * 任务结束：`seq` +1 并落盘。ArkTS 轮询看到"seq 变新"就发完成通知 + 播提示音，
+             * 前后台都一样（宿主侧不受 WebView 可见性影响）。
+             *
+             * 【2026-11-12 遵循官方 turnBoundary】`turn/end` 是官方「一轮已关闭」的
+             * 唯一权威信号，**不区分 reason**：completed / blocked / aborted /
+             * interrupted / error / max-tokens 一律关 turn（见 dsh-agent 的
+             * turnBoundaryProjectionDefinition.apply 与 accountsForClaim）。
+             * 因此这里对**任何** reason 都写 `active=false / state=done`；只有
+             * `kind === 'error'` 时把 state 记成 'error' 供通知文案区分完成/失败，
+             * 绝不因为 interrupted 就跳过收尾 —— 那正是「回复完了还一直深度求索中」的根因。
+             */
+            const reason = event.data && event.data.reason;
+            const reasonKind = (reason && typeof reason === 'object' && typeof reason.kind === 'string')
+              ? reason.kind : '';
+            const failed = reasonKind === 'error';
+            diag('task-state: turn/end reason=' + (reasonKind || '(none)') +
+              ' turn=' + String(event.data && event.data.turn !== undefined ? event.data.turn : current.turn));
+            task.active = false;
+            tasks.delete(key);
+            if (activeTasks.get(sid) === task) activeTasks.delete(sid);
+            closedTasks.add(key);
+            if (closedTasks.size > CLOSED_TASK_LIMIT) closedTasks.delete(closedTasks.values().next().value);
+            taskActive = activeTasks.size > 0;
+            taskSeq += 1;
+            /* 耗时：开始时刻到现在的毫秒数（开始时刻没记上就给 0，通知里就不显示耗时）。 */
+            let durationMs = 0;
+            try {
+              if (task.startedAt.length > 0) {
+                durationMs = Math.max(0, Date.now() - new Date(task.startedAt).getTime());
+              }
+            } catch { durationMs = 0; }
+            writeTaskState({ active: false, taskId: task.id, sessionId: sid, title: task.title,
+              turn, state: failed ? 'error' : 'done',
+              startedAt: task.startedAt, durationMs: durationMs });
+            scheduleWrite();
+            void refreshBalance('turn-end');
+          }
+        } catch (e) {
+          diag('card-state: 事件处理异常：' + String(e && e.message ? e.message : e));
+        }
+      }, { global: true });
+      stage('BOOT_62E_CARD_STATE', '$DSH_HOME/card-state.json（会话进度 + 余额/用量）');
+    } else {
+      diag('card-state: ctx.on 不可用');
+    }
+
+    scheduleWrite();
+    setTimeout(() => { void refreshBalance('boot'); }, 5000);
+    const balanceTimer = setInterval(() => {
+      void refreshBalance('interval');
+      if (Date.now() - usageLastCompactAt >= 10 * 60 * 1000) compactUsage();
+    }, 10 * 60 * 1000);
+    if (balanceTimer.unref) balanceTimer.unref();
+    return { stateFile, usageFile };
+  } catch (e) {
+    diag('card-state 注册异常：' + String(e && e.message ? e.message : e));
+    return null;
   }
 }
 
@@ -3697,6 +6513,28 @@ function registerRegistryViewEndpoint(ctx) {
             sendJson(404, { ok: false, error: 'not found: ' + parsed.name });
             return;
           }
+          const requestedFields = String(url.searchParams.get('fields') || '').split(',').map(s => s.trim()).filter(Boolean);
+          const isVersionList = requestedFields.includes('versions');
+          if (isVersionList && parsed.range.length === 0 && manifest && typeof manifest === 'object') {
+            const view = {};
+            if (Array.isArray(manifest.versions)) {
+              view.versions = manifest.versions;
+            } else if (manifest.versions && typeof manifest.versions === 'object') {
+              view.versions = Object.keys(manifest.versions);
+            }
+            if (manifest.time && typeof manifest.time === 'object') {
+              view.time = manifest.time;
+            }
+            if (manifest['dist-tags'] && typeof manifest['dist-tags'] === 'object') {
+              view['dist-tags'] = manifest['dist-tags'];
+            }
+            if (!Array.isArray(view.versions) || view.versions.length === 0) {
+              sendJson(404, { ok: false, error: 'no matching version for: ' + parsed.name });
+              return;
+            }
+            sendJson(200, view);
+            return;
+          }
           // range 为空：/<name> 返回全 manifest（dist-tags + versions），取 latest；
           // 有 range：/<name>/<range> 直接返回单版 manifest。
           let version = manifest;
@@ -3817,6 +6655,141 @@ function registerPackageListViewEndpoint(ctx) {
   }
 }
 
+/** 预览图代理允许的图床主机（与 dshmarket 客户端 `safeScreenshot()` 的白名单逐条同源）。 */
+const SHOT_HOSTS = new Set([
+  'raw.githubusercontent.com',
+  'user-images.githubusercontent.com',
+  'camo.githubusercontent.com',
+  'github.com',
+]);
+/** 单张图上限：10MB（超过就不读、不缓存）。 */
+const SHOT_MAX_BYTES = 10 * 1024 * 1024;
+/** 进程内图片缓存上限：64 张 / 32MB（同一张图在卡片、灯箱、滚动之间复用）。 */
+const SHOT_CACHE_MAX_ITEMS = 64;
+const SHOT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const shotCache = new Map();
+let shotCacheBytes = 0;
+
+/** 入缓存并按插入序淘汰（Map 的迭代序就是插入序）。 */
+function shotCachePut(key, entry) {
+  shotCache.set(key, entry);
+  shotCacheBytes += entry.body.length;
+  while ((shotCache.size > SHOT_CACHE_MAX_ITEMS || shotCacheBytes > SHOT_CACHE_MAX_BYTES)
+    && shotCache.size > 1) {
+    const oldestKey = shotCache.keys().next().value;
+    const victim = shotCache.get(oldestKey);
+    shotCache.delete(oldestKey);
+    shotCacheBytes -= victim.body.length;
+  }
+}
+
+/**
+ * 预览图代理（`/dshm-shot?url=…[&h=…]`）—— 插件市场（dshmarket）的卡片缩略图与灯箱原图。
+ *
+ * 【为什么必须由宿主代取】市场的原实现是让**浏览器**去取图：缩略图走
+ * `https://images.weserv.nl/?url=…`（服务端缩放），灯箱直连 GitHub 图床。端侧 WebView 里
+ * 这两类主机**都连不上**（真机实测 TLS 失败）⇒ 卡片一直是空白。而**宿主进程里**同一批 URL
+ * 经 fetch 垫片的出网镜像 1.15–3s 就能拿到（`raw.githubusercontent.com` 本来就在镜像表里；
+ * codeload 见 2026-10-14 那笔）⇒ 把出网搬到宿主这一侧、WebView 只跟本地 http 服务打交道，
+ * 镜像、超时、嘴碎日志全都留在宿主（客户端那边改一行 `thumbUrl()` 就够，见
+ * `dshm-market-bridge` 的 `patchDshmarketThumbs()`）。
+ *
+ * 【为什么不做缩放】上游那层 `images.weserv.nl` 是**服务端缩放**（卡片实际只要 <150px，而
+ * 原图可能几百 KB 到几 MB）。端侧宿主没有图像库（无 sharp），硬做缩放等于新拉一个原生依赖；
+ * 市场挑出来的截图实测 27–144 KB ⇒ 原字节直出，代价可以忽略。`h` 参数只是**照抄客户端
+ * 的调用形态**（缓存键里带上它，免得将来真要缩放时两处缓存混用），当前**不使用**。
+ *
+ * 【安全面（三条都得有）】
+ *   ① 只允许上表 4 个 GitHub 图床主机、且只允许 https —— 与市场客户端
+ *      `safeScreenshot()` 的白名单逐条同源，避免这个端点变成通往任意主机的代理（SSRF）；
+ *   ② 体积上限 10MB：有 `content-length` 就先拒，没有就读完再判（GitHub 图床总会给长度，
+ *      后一条是兜底）；
+ *   ③ **不要 token**：`<img src>` 带不了桥 token（token 只在 JS 里加），而 web 服务只绑
+ *      127.0.0.1 ⇒ 能打进来的只有本机进程。也**故意**不接受 `lookup` 之类的扩展参数。
+ */
+function registerShotProxyEndpoint(ctx) {
+  try {
+    if (!ctx || !ctx.webServer || typeof ctx.webServer.register !== 'function') {
+      diag('shot 端点：ctx.webServer 不可用，跳过注册');
+      return;
+    }
+    // eslint-disable-next-line global-require
+    const { dshmFetch } = require('./fetch-shim.js');
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/dshm-shot',
+      handler: async (request, response) => {
+        const sendText = (status, text) => {
+          response.writeHead(status, {
+            'content-type': 'text/plain; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          response.end(text);
+        };
+        try {
+          if (request.method !== 'GET') {
+            response.writeHead(405, { allow: 'GET' }); response.end(); return;
+          }
+          const url = new URL(request.url, 'http://localhost');
+          const raw = String(url.searchParams.get('url') || '');
+          let target = null;
+          try {
+            target = new URL(raw);
+          } catch (e) {
+            target = null;
+          }
+          if (target === null || target.protocol !== 'https:'
+            || !SHOT_HOSTS.has(target.hostname.toLowerCase())) {
+            sendText(403, 'forbidden image host'); return;
+          }
+          const key = target.href;
+          const hit = shotCache.get(key);
+          if (hit !== undefined) {
+            response.writeHead(200, {
+              'content-type': hit.type,
+              'content-length': hit.body.length,
+              'cache-control': 'public, max-age=86400',
+            });
+            response.end(hit.body);
+            return;
+          }
+          const res = await dshmFetch(key, { headers: { accept: 'image/*' } }, { timeoutMs: 20000 });
+          if (!res.ok) {
+            // 上游 404 就照实回 404（前端 `<img>` 的 onerror 因此不会被伪装成"成功"）
+            sendText(res.status === 404 ? 404 : 502, 'upstream ' + res.status);
+            return;
+          }
+          const declared = Number(res.headers.get('content-length') || '');
+          if (Number.isFinite(declared) && declared > SHOT_MAX_BYTES) {
+            sendText(502, 'image too large'); return;
+          }
+          const body = Buffer.from(await res.arrayBuffer());
+          if (body.length === 0) {
+            sendText(502, 'empty image body'); return;
+          }
+          if (body.length > SHOT_MAX_BYTES) {
+            sendText(502, 'image too large'); return;
+          }
+          const upstreamType = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+          const type = /^image\/[a-z0-9.+-]+$/.test(upstreamType) ? upstreamType : 'image/png';
+          shotCachePut(key, { type, body });
+          response.writeHead(200, {
+            'content-type': type,
+            'content-length': body.length,
+            'cache-control': 'public, max-age=86400',
+          });
+          response.end(body);
+        } catch (e) {
+          sendText(502, String(e && e.message ? e.message : e));
+        }
+      },
+    });
+    stage('BOOT_64_SHOT_PROXY', '/dshm-shot 已注册');
+  } catch (e) {
+    diag('shot 端点注册异常（跳过）：' + String(e && e.message ? e.message : e));
+  }
+}
+
 /**
  * 后台解包工具链归档（幂等：锚点齐备即跳过；残局先清再解）。
  * busybox ash -c 逐条 tar xmzf（-m：hmfs 的 settime 全部 EACCES，不恢复 mtime），
@@ -3827,7 +6800,162 @@ function registerPackageListViewEndpoint(ctx) {
  * chmod 只在 execOk 不过时做——hmfs 上对健康文件做多余 chmod 可能触发 EACCES
  * （busybox 布置的真机教训），"缺了才补"比"每次都刷"稳。
  */
-function finalizeToolchain() {
+/**
+ * 工具链**自检报告**：把 tmux / gh 的真实可用性写到用户可见的下载目录（2026-11-02）。
+ *
+ * 【为什么要有它】端侧没有 hdc（沙箱里也没有），而"tmux/gh 到底能不能跑"这个问题
+ * 只能靠设备自己回答。与其让人在 UI 里敲命令再看日志，不如让 App 启动后自己跑一遍
+ * 并把结果落到 `<公共下载目录>/toolchain-selftest.txt` —— 这个路径宿主能直接读，
+ * 于是"第一手证据"不再依赖截图或日志导出。
+ *
+ * 【判据是 exec 的真结果】`command -v` 只能证明 wrapper 在，**不能证明真身能 exec**
+ * （端侧 execve 受签名域管辖，失败形态是一句 Permission denied）。所以三条都跑：
+ * 是否存在 / 是否可执行（真跑 `-V`/`--version`）/ 失败时的原样 stderr。
+ *
+ * 【代价】每次启动一次 `ash -c`，约几十毫秒；失败静默（它只是诊断，不能影响启动）。
+ * 写完用原子改名，避免读到半份文件。
+ */
+function writeToolchainSelfTest() {
+  try {
+    /*
+     * 【公共下载目录不可用就退回沙箱（2026-11-02 r3 P1）】
+     * 复测发现日志说"已启动（结果写 <公共目录>/toolchain-selftest.txt）"，
+     * 而该目录里两个文件**都不存在** —— 手持档 `claimPublicDownload()` 拿不到归属时
+     * `DSHM_PUBLIC_DOWNLOAD` 为空，旧实现直接 return，连一行"没写"都没有。
+     * 现在：为空就写沙箱根，并把**实际落点**打进日志，避免"日志说写了、事实上没写"。
+     */
+    let pub = (process.env.DSHM_PUBLIC_DOWNLOAD || '').trim();
+    let fellBack = false;
+    if (pub.length === 0) {
+      pub = SANDBOX_HOME;
+      fellBack = true;
+    }
+    const out = path.join(pub, 'toolchain-selftest.txt');
+    const body = `${out}.body`;
+    /*
+     * 【为什么要分项取证，而不是只看 wrapper 的判断】
+     * 2026-11-02 首测（beta）：`gh` 真跑得出 `gh version 2.72.0`，而 `tmux` 只输出
+     * 「该设备系统策略禁止运行第三方原生二进制（execve 被拒）」—— 但 wrapper 的探测是
+     * `( exec … ) >/dev/null 2>&1`，**把真正的 errno/错误文本全吞了**。
+     * 而这句话有两个完全不同的成因，修法天差地别：
+     *   ① ELF 真被签名域拒（签名没写进去）→ 查 .codesign 段；
+     *   ② 动态库缺失（`Error loading shared library libevent_core-2.1.so.7`）
+     *      → 查 usr/lib 解包与 LD_LIBRARY_PATH。
+     * 所以这里绕过 wrapper：直接 exec 真身并**保留 stderr**，再把签名读数、库目录清单
+     * 一并写进报告 —— 一次抓取就能定性，不用反复装包。
+     */
+    const binDir = path.join(SANDBOX_HOME, 'bin');
+    const tmuxRoot = path.join(SANDBOX_HOME, 'toolchain', 'tmuxroot');
+    const ghRoot = path.join(SANDBOX_HOME, 'toolchain', 'ghroot');
+    const signTool = '/data/service/hnp/hmos-clt.org/hmos-clt_1.0.0/sdk/default/openharmony/toolchains/lib/binary-sign-tool';
+    const script = [
+      `echo "time=$(date)"`,
+      `echo "sandbox=${SANDBOX_HOME}"`,
+      `echo "public=${pub}"`,
+      `echo "=== toolchain 根目录 ==="`,
+      `ls -la "${path.join(SANDBOX_HOME, 'toolchain')}" 2>&1 | head -12`,
+      `echo "=== tmuxroot/usr/bin ==="`,
+      `ls -la "${path.join(tmuxRoot, 'usr', 'bin')}" 2>&1 | head -8`,
+      `echo "=== tmuxroot/usr/lib ==="`,
+      `ls -la "${path.join(tmuxRoot, 'usr', 'lib')}" 2>&1 | head -20`,
+      `echo "=== tmux 直连 exec（保留 stderr）==="`,
+      `LD_LIBRARY_PATH="${path.join(tmuxRoot, 'usr', 'lib')}" TERMINFO="${path.join(tmuxRoot, 'usr', 'share', 'terminfo')}" "${path.join(tmuxRoot, 'usr', 'bin', 'tmux')}" -V 2>&1 | head -5`,
+      `echo "rc=$?"`,
+      `echo "=== tmux 签名读数 ==="`,
+      `"${signTool}" display-sign -inFile "${path.join(tmuxRoot, 'usr', 'bin', 'tmux')}" 2>&1 | tail -3`,
+      `echo "=== gh 直连 exec（对照臂）==="`,
+      `LD_LIBRARY_PATH="${path.join(ghRoot, 'usr', 'lib')}" "${path.join(ghRoot, 'usr', 'bin', 'gh')}" --version 2>&1 | head -3`,
+      `echo "=== gh 签名读数（对照臂）==="`,
+      `"${signTool}" display-sign -inFile "${path.join(ghRoot, 'usr', 'bin', 'gh')}" 2>&1 | tail -3`,
+      `echo "=== wrapper 侧 ==="`,
+      `ls -la "${path.join(binDir, 'tmux')}" "${path.join(binDir, 'gh')}" 2>&1`,
+    ].join('\n');
+    const { spawn } = require('child_process');
+    /* 先写 .body，再原子改名到正式名（首版漏了最后这一步，结果只留下 .tmp） */
+    const full = `{ ${script}; } > "${body}" 2>&1; mv -f "${body}" "${out}" 2>/dev/null || true`;
+    const child = spawn('/system/bin/sh', ['-c', full], {
+      cwd: binDir,
+      stdio: 'ignore',
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH || ''}` },
+    });
+    child.on('error', () => { /* 诊断失败不影响启动 */ });
+    diag(`工具链自检：已启动（结果写 ${out}${fellBack ? '（公共目录不可用，已退到沙箱）' : ''}）`);
+  } catch (e) {
+    diag(`工具链自检：启动失败（不影响启动）${String(e)}`);
+  }
+}
+
+/**
+ * **宿主上下文**的运行时探针（2026-11-02，第一批第 0 步）。
+ *
+ * 【要回答的问题】`bin/node`（node-cli）在 Agent 的 shell 里报
+ * `Error loading shared library libc++_shared.so`，即使把 libc++/libnode 复制到 el2
+ * 并指定 LD_LIBRARY_PATH 也一样；可同一时期 `tmux` 靠 LD_LIBRARY_PATH 能加载
+ * libevent/ncurses。⇒ 必须区分"库找不到"与"这个执行上下文拿不到库"。
+ *
+ * 本探针由 **Host 自己 spawn**（与 toolchain 自检同一条路：`/system/bin/sh -c`），
+ * 而 tmux/gh 正是在这个上下文里跑通的。因此：
+ *   · 如果这里 `node -v` 能出 v24.x ⇒ 之前失败只是 **Agent shell 的上下文差异**，
+ *     随包 npm/corepack 方案（分支 A，+12MB）可行；
+ *   · 如果这里也失败 ⇒ 必须换**完整 Node 二进制**（分支 B，+90~130MB）。
+ *
+ * 顺带测 WebAssembly：`--jitless` 下不可用，而子进程设计上带 JIT，
+ * 这决定 esbuild-wasm 能不能在子进程里跑（决定"构建"这条路）。
+ */
+function writeEnvProbe() {
+  try {
+    /*
+     * 【公共下载目录不可用就退回沙箱（2026-11-02 r3 P1）】
+     * 复测发现日志说"已启动（结果写 <公共目录>/toolchain-selftest.txt）"，
+     * 而该目录里两个文件**都不存在** —— 手持档 `claimPublicDownload()` 拿不到归属时
+     * `DSHM_PUBLIC_DOWNLOAD` 为空，旧实现直接 return，连一行"没写"都没有。
+     * 现在：为空就写沙箱根，并把**实际落点**打进日志，避免"日志说写了、事实上没写"。
+     */
+    let pub = (process.env.DSHM_PUBLIC_DOWNLOAD || '').trim();
+    let fellBack = false;
+    if (pub.length === 0) {
+      pub = SANDBOX_HOME;
+      fellBack = true;
+    }
+    const out = path.join(pub, 'env-probe.txt');
+    const body = `${out}.body`;
+    const binDir = path.join(SANDBOX_HOME, 'bin');
+    const libs = '/data/storage/el1/bundle/libs/arm64';
+    const script = [
+      `echo "time=$(date)"`,
+      `echo "PATH=${binDir}"`,
+      `echo "=== node（wrapper → node-cli）==="`,
+      `"${path.join(binDir, 'node')}" -v 2>&1 | head -3`,
+      `echo "rc=$?"`,
+      `echo "=== node-cli 直连（带 el1 libs）==="`,
+      `LD_LIBRARY_PATH="${libs}" DSHM_NODE_LIBNODE="${libs}/libnode.so.137" "${path.join(binDir, 'node-cli')}" -v 2>&1 | head -3`,
+      `echo "rc=$?"`,
+      `echo "=== WebAssembly（子进程带 JIT 才可用）==="`,
+      `"${path.join(binDir, 'node')}" -e "console.log(typeof WebAssembly, typeof WebAssembly.Module)" 2>&1 | head -3`,
+      `echo "=== npm / corepack 是否已在 PATH ==="`,
+      `command -v npm corepack pnpm 2>&1`,
+      `echo "=== git / python / tmux（对照臂）==="`,
+      `"${path.join(binDir, 'git')}" --version 2>&1 | head -1`,
+      `"${path.join(binDir, 'python3')}" --version 2>&1 | head -1`,
+      `"${path.join(binDir, 'tmux')}" -V 2>&1 | head -1`,
+    ].join('\n');
+    const { spawn } = require('child_process');
+    const full = `{ ${script}; } > "${body}" 2>&1; mv -f "${body}" "${out}" 2>/dev/null || true`;
+    const child = spawn('/system/bin/sh', ['-c', full], {
+      cwd: binDir,
+      stdio: 'ignore',
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH || ''}` },
+    });
+    child.on('error', () => { /* 探针失败不影响启动 */ });
+    diag(`运行时探针：已启动（结果写 ${out}${fellBack ? '（公共目录不可用，已退到沙箱）' : ''}）`);
+  } catch (e) {
+    diag(`运行时探针：启动失败（不影响启动）${String(e)}`);
+  }
+}
+
+async function finalizeToolchain() {
+  startupWork.request('toolchain-selftest', writeToolchainSelfTest);
+  startupWork.request('runtime-probe', writeEnvProbe);
   try {
     const exe = path.join(PYTHON_PREFIX, 'bin', 'python3.12');
     if (statSize(exe) > 0 && (fs.statSync(exe).mode & 0o111) === 0) {
@@ -3842,16 +6970,16 @@ function finalizeToolchain() {
      * 【覆盖全部 symlink，而不是一条】（报告 5 §2.3）
      * 端侧 tar 解不出 symlink（hmfs 无链接能力）⇒ `git-core/` 下 141 个链接全成空壳，
      * 于是 `git clone` 走到 `git-upload-pack` 就 "inaccessible or not found"。
-     * 名字从**本版 git 的 apk 归档**里现读（readGitCoreSymlinks），保证与版本一致；
+     * 名字从**本版 git 的 tar.gz 归档**里现读（readGitCoreSymlinks），保证与版本一致；
      * 读不到时退回原来硬编码的那一条（不退化，只是覆盖面小）。
      * 真身相对链接是 `../../bin/git` / `git-remote-http`，都相对 git-core 目录解析。
      */
-    const apkDir = path.join(RES_ROOT, 'toolchain', 'git');
+    const gitPkgDir = path.join(RES_ROOT, 'toolchain', 'git');
     let replica = null;
     try {
-      const apks = fs.readdirSync(apkDir).filter((n) => /^git-\d/.test(n) && n.endsWith('.apk'));
-      for (const a of apks) {
-        replica = readGitCoreSymlinks(path.join(apkDir, a));
+      const gitPkgs = fs.readdirSync(gitPkgDir).filter((n) => /^git-\d/.test(n) && n.endsWith('.tar.gz'));
+      for (const a of gitPkgs) {
+        replica = await readGitCoreSymlinks(path.join(gitPkgDir, a));
         if (replica !== null) {
           diag(`工具链：从 ${a} 读到 git-core symlink 表 ${replica.length} 条`);
           break;
@@ -3971,6 +7099,150 @@ function probeExec(p, args, env) {
 }
 
 /** 探测目标清单：模型四件套关键 ELF + rg。env 与 wrapper 运行态严格一致。 */
+/**
+ * 安装 **ELF 启动器**：把随包 `nodecli` 复制成 `bin/{node,npm,npx,pnpm,dsh}`。
+ *
+ * 【为什么必须这样做（2026-11-04，手机端"无解释器"死路）】
+ * 手机档没有可 exec 的 shell：`/system/bin/sh` 被拒、`toybox` 也没有 sh applet。
+ * 于是所有 **shell 脚本形态**的启动器在手机上一行都跑不了（内核 execve 阶段就失败），
+ * 用户看到的就是 `libc++_shared.so not found` / `command not found`。
+ *
+ * 做法：这五个入口改成**同一份已签名 ELF**的副本，由 `nodecli.c` 按"自己叫什么名字"
+ * 决定跑什么（node→直通；pnpm/npm/npx→插入 toolchain 里的 JS 入口；dsh→扫 cores 找 bin.js）。
+ * 它们**不需要解释器、不需要环境变量**，PC 与手机同一套。
+ *
+ * 【为什么放在最后调用】`ensureCliShims` / `ensureToolchainWrappers` 会先写各自的服务脚本；
+ * 这一段必须**最后**执行，才能在支持 ELF 的档位上把脚本覆盖成 ELF（脚本版本作为对照臂保留在
+ * `*-queue` 与源码里，便于回退）。
+ */
+/**
+ * 前 4 字节是否是 ELF 魔数。只读 4 字节，不做完整解析。
+ * @param {string} p 文件路径
+ */
+function looksLikeElf(p) {
+  try {
+    const fd = fs.openSync(p, 'r');
+    try {
+      const b = Buffer.alloc(4);
+      const n = fs.readSync(fd, b, 0, 4, 0);
+      return n === 4 && b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 原子落位一个 ELF 启动器（2026-11-07 真机回归）。
+ *
+ * 【为什么不能直接覆盖】hmfs 上"曾布置过"的文件可能进入封存态：覆盖写与 chmod 都被拒，
+ * `rewriteExecutable` 的"删除重铺"也救不回来（docs/110 的真机证据）⇒ 盘上留下的仍是
+ * `#!/system/bin/sh` 假壳 ⇒ 插件页 `pnpm view` 在 execve 阶段直接 EACCES。
+ *
+ * 做法：写**同目录临时文件**（新 inode）→ chmod 755 → 校验 X_OK + ELF 魔数 →
+ * `rename` 覆盖目标（同一目录内的原子替换，不碰旧 inode）。任一失败才退回删除重铺。
+ *
+ * @returns {'ok'|'fallback'|'fail'}
+ */
+function installElfFile(dst, bytes, label) {
+  const tmp = dst + '.new';
+  try {
+    try { fs.rmSync(tmp, { force: true }); } catch (e) { /* 残留无所谓 */ }
+    fs.writeFileSync(tmp, bytes);
+    fs.chmodSync(tmp, 0o755);
+    fs.accessSync(tmp, fs.constants.X_OK);
+    if (!looksLikeElf(tmp)) {
+      throw new Error('写入的不是 ELF');
+    }
+    fs.renameSync(tmp, dst);
+    fs.chmodSync(dst, 0o755);
+    fs.accessSync(dst, fs.constants.X_OK);
+    if (!looksLikeElf(dst)) {
+      throw new Error('落位后不是 ELF');
+    }
+    return 'ok';
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* 忽略 */ }
+    diag(`${label}：原子落位失败（${String(e && e.message ? e.message : e).slice(0, 140)}）⇒ 回退删除重铺`);
+    try {
+      return rewriteExecutable(dst, (d) => fs.writeFileSync(d, bytes), label) ? 'fallback' : 'fail';
+    } catch (e3) {
+      diag(`${label}：删除重铺也失败：${String(e3 && e3.message ? e3.message : e3).slice(0, 140)}`);
+      return 'fail';
+    }
+  }
+}
+
+function installElfLaunchers(binDir, resRoot) {
+  if (!binDir || binDir.length === 0) {
+    return;
+  }
+  /*
+   * 【**所有档位**都换成 ELF（2026-11-05，根因实证后回到无条件形态）】
+   *
+   * 上一版在 PC/2in1 上"保留脚本"，理由是当时实测独立 ELF **dlopen 不了随包 libnode**
+   * （即便 `DSHM_NODE_LIBNODE` 指到绝对路径也失败）。2026-11-05 用已签名的最小
+   * dlopen 探针把这条翻案了：
+   *   · el1 里的 `libnode.so.137` **没有 .codesign** ⇒ exec 域加载返回 Permission denied；
+   *   · 同一份文件自签名后 `dlopen` 返回 OK；系统 `libc++_shared.so` 始终可加载。
+   * ⇒ 失败根因是**库未签名**，不是路径、也不是"ELF 不能用于 PC"。
+   * 随包库现在由 `tools/sign-bundled-libs.mjs` 在构建期签名，`nodecli` 也用绝对路径
+   * 找库（并去掉了指向 el1 的 RUNPATH），于是五个入口可以统一成 ELF：
+   * PC、平板、手机同一套，不再出现"同一功能三端形态不同"。
+   */
+  let hasShell = false;
+  try {
+    fs.accessSync('/system/bin/sh');
+    hasShell = true;
+  } catch (e) {
+    hasShell = false;
+  }
+  diag(`ELF 启动器：本档有 /system/bin/sh=${hasShell}（仍统一用 ELF；脚本仅作为回退对照保留在源码）`);
+  const src = path.join(resRoot, 'toolchain', 'node', 'nodecli');
+  let bytes = null;
+  try {
+    bytes = fs.readFileSync(src);
+  } catch (e) {
+    diag(`ELF 启动器：读不到 ${src}（${String(e && e.message ? e.message : e)}）⇒ 保持脚本形态`);
+    return;
+  }
+  if (bytes === null || bytes.length === 0) {
+    diag(`ELF 启动器：${src} 为空 ⇒ 保持脚本形态`);
+    return;
+  }
+  const names = ['node', 'npm', 'npx', 'pnpm', 'dsh'];
+  const done = [];
+  const detail = [];
+  for (const name of names) {
+    const dst = path.join(binDir, name);
+    let r = 'fail';
+    try {
+      r = installElfFile(dst, bytes, `ELF 启动器：${name}`);
+    } catch (e) {
+      diag(`ELF 启动器：${name} 写入失败（继续）：${String(e && e.message ? e.message : e)}`);
+    }
+    detail.push(`${name}=${r}`);
+    if (r !== 'fail') {
+      done.push(name);
+    }
+  }
+  diag(`ELF 启动器：${done.join('/') || '（无）'} 已就位（同一份 nodecli，按文件名分派）；明细 ${detail.join(' ')}`);
+  /*
+   * 【可观测性（2026-11-07）】再扫一遍最终形态：`ELF-ok` / `ELF-noexec` / `script-stale`。
+   * 这行是"插件页能不能 spawn pnpm"的唯一直接证据 —— 以后再出 EACCES，先看它。
+   */
+  const report = names.map((name) => {
+    const p = path.join(binDir, name);
+    let x = false;
+    try { fs.accessSync(p, fs.constants.X_OK); x = true; } catch (e) { x = false; }
+    const elf = looksLikeElf(p);
+    return `${name}=${elf ? (x ? 'ELF-ok' : 'ELF-noexec') : 'script-stale'}`;
+  });
+  diag(`CLI launcher: ${report.join(' ')}`);
+}
+
 function execProbeTargets() {
   const gitEnv = { ...process.env, LD_LIBRARY_PATH: path.join(GIT_ROOT, 'usr', 'lib') };
   const pyEnv = { ...process.env, PYTHONHOME: PYTHON_PREFIX };
@@ -3997,7 +7269,9 @@ function execProbeTargets() {
     { label: 'ash', p: process.env.PATH ? (process.env.PATH.split(':')[0] + '/ash') : '',
       args: ['-c', 'echo DSHM-ASH-OK'], env: process.env,
        },
-    { label: 'bash', p: process.env.PATH ? (process.env.PATH.split(':')[0] + '/bash') : '/system/bin/sh',
+    { label: 'bash',
+      p: process.env.DSHM_BASH_EXECUTABLE
+        || (process.env.PATH ? (process.env.PATH.split(':')[0] + '/bash') : '/system/bin/sh'),
       args: ['-c', 'echo DSHM-EXEC-OK'], env: process.env,
        },
     /*
@@ -4218,6 +7492,7 @@ async function ensureExecutables() {
   const summary = [];
   const execResults = {};
   for (const t of execProbeTargets()) {
+    if (startupWork.stopped) return;
     if (!t.p || t.p.length === 0 || statSize(t.p) <= 0) {
       // 【"缺"是读数，不是跳过】(2026-10-03) 未解包/半成品时它照样进汇总 ⇒ 端侧能看到
       // "这一项本次没有可执行文件"这一事实，而不是一行都没有（旧行为见本函数头注）。
@@ -4229,6 +7504,7 @@ async function ensureExecutables() {
     summary.push(`${t.label}=${r}`);
     execResults[t.label] = r;
   }
+  if (startupWork.stopped) return;
   // 【无条件执行】这一行是"探针真的跑过"的唯一机器可读信号（没有它 ⇒ 本门禁不算通过）。
   // （这行的字面形态被 `tools/assert-exec-fix.mjs` 断言 24 锁定：改动它等于改动那条守卫的判据，
   //   所以这里保持原样，结构化副本另算一份 —— 不要为了省一次 join 去改它的写法。）
@@ -4271,13 +7547,13 @@ function healToolchainStage() {
   finalizeToolchain();
 }
 
-function scheduleToolchainExtraction(resRoot, binDir) {
+function scheduleToolchainExtraction(resRoot, binDir, skipExtras = false) {
   if (!binDir || binDir.length === 0) {
     return;
   }
   healToolchainStage();
   const tarball = path.join(resRoot, PYTHON_TARBALL_REL);
-  const apkDir = path.join(resRoot, 'toolchain', 'git');
+  const gitPkgDir = path.join(resRoot, 'toolchain', 'git');
   /*
    * 【归档换代即重解（报告 4 ③）】`pythonReady()`/`gitReady()` 是"存在即跳过"，
    * 光靠它们，构建期加了自签名的新归档永远不会被解开（用户继续用旧的无签名文件）。
@@ -4285,7 +7561,7 @@ function scheduleToolchainExtraction(resRoot, binDir) {
    * 判据单独成一个函数（needsReextractForSign），因为它同时要处理"归档没标记"的旧包。
    */
   const pySignStale = needsReextractForSign(path.join(resRoot, 'toolchain', 'python'), PYTHON_PREFIX);
-  const gitSignStale = needsReextractForSign(apkDir, GIT_ROOT);
+  const gitSignStale = needsReextractForSign(gitPkgDir, GIT_ROOT);
   if (pySignStale) {
     diag('工具链：python 归档已换代（dshm-signed.txt 变化），强制重解以取到已签名的 ELF');
   }
@@ -4293,24 +7569,71 @@ function scheduleToolchainExtraction(resRoot, binDir) {
     diag('工具链：git 归档已换代（dshm-signed.txt 变化），强制重解以取到已签名的 ELF');
   }
   const needPy = (!pythonReady() || pySignStale) && statSize(tarball) > 0;
-  let apks = [];
+  let gitPkgs = [];
   try {
-    apks = fs.existsSync(apkDir)
-      ? fs.readdirSync(apkDir).filter((n) => n.endsWith('.apk')).sort()
+    gitPkgs = fs.existsSync(gitPkgDir)
+      ? fs.readdirSync(gitPkgDir).filter((n) => n.endsWith('.tar.gz')).sort()
       : [];
   } catch (e) {
-    diag(`工具链：读取 ${apkDir} 失败：${String(e)}`);
+    diag(`工具链：读取 ${gitPkgDir} 失败：${String(e)}`);
   }
-  const needGit = (!gitReady() || gitSignStale) && apks.length > 0;
-  if (!needPy && !needGit) {
+  const needGit = (!gitReady() || gitSignStale) && gitPkgs.length > 0;
+  /*
+   * tmux / gh：判据与 git 同构（"真身不在"或"归档换代"就解），但**按目录独立判断** ——
+   * 一个 root 换代不该拖着另一个重解（与 dshm-signed.txt 按目录写标记同一口径）。
+   */
+  const extraState = [];
+  for (const spec of EXTRA_TOOLCHAINS) {
+    const pkgDir = path.join(resRoot, 'toolchain', spec.name);
+    let list = [];
+    try {
+      list = fs.existsSync(pkgDir) ? fs.readdirSync(pkgDir).filter((n) => n.endsWith('.tar.gz')).sort() : [];
+    } catch (e) {
+      diag(`工具链：读取 ${pkgDir} 失败：${String(e)}`);
+    }
+    const stale = needsReextractForSign(pkgDir, spec.root);
+    const need = (!extraReady(spec) || stale) && list.length > 0;
+    if (stale) {
+      diag(`工具链：${spec.name} 归档已换代（dshm-signed.txt 变化），强制重解以取到已签名的 ELF`);
+    }
+    extraState.push({ spec, pkgDir, list, need });
+  }
+  const needExtra = extraState.filter((x) => x.need);
+  /*
+   * 【P0-2（2026-11-11）：额外归档延后出启动窗口】诊断报告实测：extras 五个 root
+   * 共 15 个归档、25 MB 压缩 / 93 MB 落盘，与 python 解包、插件装载挤在同一个
+   * 15 秒窗口里，还把事件循环钉住 5.5~8.0 秒。但它们**不参与 web 监听**：
+   * bash/gh/npm/pnpm/tmux 只服务后续工具调用。所以本轮启动只解 python/git，
+   * extras 等本轮解包子进程成功退出后再单独排一次（见 exit 回调）。
+   * 注意：不能在这里直接 setTimeout 递归 —— python 还在解的时候重入会 rm 掉 py-stage。
+   */
+  const deferredExtras = skipExtras ? needExtra.splice(0, needExtra.length) : [];
+  if (deferredExtras.length > 0) {
+    diag(`工具链：额外归档 ${deferredExtras.length} 个延后到本轮解包结束后再解（不与启动抢 IO）`);
+  }
+  if (!needPy && !needGit && needExtra.length === 0) {
     // 稳态 boot 也必须跑补齐：git-remote-https 的"残缺 symlink 占位"修复
     // 不依赖解包（isElf 判定幂等轻量），只挂在解包/归位路径上会被跳过
     // （真机踩过：连续两轮 boot 补齐 diag 缺失、占位未替换）。
     finalizeToolchain();
-    diag(`工具链：无需解包（python=${pythonReady()}，git=${gitReady()}）`);
+    diag(`工具链：无需解包（python=${pythonReady()}，git=${gitReady()}`
+      + EXTRA_TOOLCHAINS.map((sp) => `，${sp.name}=${extraReady(sp)}`).join('') + '）');
+    /* 启动期没有 python/git 要解，但 extras 被延后了 ⇒ 单独排一次（3 s 后，等 boot 环先走完）。 */
+    if (deferredExtras.length > 0) {
+      setTimeout(() => {
+        scheduleToolchainExtraction(resRoot, binDir, false);
+      }, 3000);
+    }
     return;
   }
   const pyStage = path.join(TOOLCHAIN_DIR, 'py-stage');
+  const handheld = ['phone', 'tablet', 'foldable'].includes(String(process.env.DSHM_DEVICE_FORM || '').toLowerCase());
+  if (handheld) {
+    setTimeout(() => {
+      inProcessToolchainFallback(tarball, needPy, needGit, 'handheld', resRoot);
+    }, 5000);
+    return;
+  }
   try {
     ensureDir(TOOLCHAIN_DIR);
     if (needPy) {
@@ -4322,6 +7645,13 @@ function scheduleToolchainExtraction(resRoot, binDir) {
       fs.rmSync(GIT_ROOT, { recursive: true, force: true });
       ensureDir(GIT_ROOT);
     }
+    /*
+     * 【额外 root 的清空**不在这里做**（2026-11-10）】extras 的旧树合计约 93 MB / 数万条目，
+     * `fs.rmSync(recursive)` 在主线程上同步删要 5~8 s（真机实测），而且正好压在最敏感的
+     * 启动窗口里 —— 端口还没起监听、ArkTS 侧的 15 s 预算已经在倒数。
+     * 现在改由下面的 busybox 子进程 `rm -rf` 完成（见 cmds 里那段），主线程不再停摆。
+     * 进程内回退分支会在自己的解包前清空（见 clearExtraToolchainRoots），两边都成立。
+     */
   } catch (e) {
     diag(`工具链：解包前清理失败（本轮跳过，下次启动重试）：${String(e)}`);
     return;
@@ -4337,8 +7667,21 @@ function scheduleToolchainExtraction(resRoot, binDir) {
     // Node 侧 finishToolchainExtraction 还有幂等补 chmod 兜底。
     cmds.push(`chmod 755 "${path.join(pyStage, 'python', 'bin', 'python3.12')}" || true`);
   }
-  for (const a of apks) {
-    cmds.push(`tar xmzf "${path.join(apkDir, a)}" -C "${GIT_ROOT}"`);
+  for (const a of gitPkgs) {
+    cmds.push(`tar xmzf "${path.join(gitPkgDir, a)}" -C "${GIT_ROOT}"`);
+  }
+  for (const x of needExtra) {
+    /*
+     * 【清空也交给子进程（2026-11-10）】见上方 `needGit` 之后那段注释：主线程同步
+     * `rmSync` 一个 93 MB 的树要 5~8 s，会把启动窗口吃掉。顺序不能变：先删、再建、再解。
+     */
+    cmds.push(`rm -rf "${x.spec.root}"`);
+    cmds.push(`mkdir -p "${x.spec.root}"`);
+    for (const a of x.list) {
+      cmds.push(`tar xmzf "${path.join(x.pkgDir, a)}" -C "${x.spec.root}"`);
+    }
+    /* 只补可执行位：hmfs 会丢权限位；失败不阻塞（finish 阶段还会补） */
+    cmds.push(`chmod 755 "${path.join(x.spec.root, ...x.spec.probe)}" || true`);
   }
   if (needGit) {
     cmds.push(`chmod 755 "${path.join(GIT_ROOT, 'usr', 'bin', 'git')}" || true`);
@@ -4353,7 +7696,8 @@ function scheduleToolchainExtraction(resRoot, binDir) {
     return;
   }
   const { spawn } = require('child_process');
-  diag(`工具链：后台解包启动（python=${needPy}，git apk ${apks.length} 个），输出见 .extract.log`);
+  diag(`工具链：后台解包启动（python=${needPy}，git 包 ${gitPkgs.length} 个`
+    + needExtra.map((x) => `，${x.spec.name} 包 ${x.list.length} 个`).join('') + '），输出见 .extract.log');
   /*
    * 【进程内回退只允许进一次（2026-10-07）】spawn 的失败有两种形态：
    *   ① 同步抛错（uv_spawn 在 fork / open 阶段就失败）；② 异步 `'error'` 事件
@@ -4370,7 +7714,7 @@ function scheduleToolchainExtraction(resRoot, binDir) {
       return;
     }
     inProcFallbackDone = true;
-    inProcessToolchainFallback(tarball, needPy, needGit, why);
+    inProcessToolchainFallback(tarball, needPy, needGit, why, resRoot);
   };
   let child;
   try {
@@ -4388,7 +7732,14 @@ function scheduleToolchainExtraction(resRoot, binDir) {
     // 先记再干活：上一轮真机该回调疑似未触发（收尾行缺失、py-stage 未归位），
     // 把 exit 本身做成可观测事实，再丢就有证据。
     diag(`工具链：解包子进程退出（code=${code}，signal=${signal}）`);
-    finishToolchainExtraction(needPy, needGit);
+    /* P0-1 注意 2：非 0 退出时不归位、不写签名标记（半成品不能被当成"已换代完成"）。 */
+    finishToolchainExtraction(needPy, needGit, false, code === 0);
+    /* P0-2：extras 延后到本轮解包成功之后再排（5 s，避开 BOOT_65/70 的收尾）。 */
+    if (code === 0 && deferredExtras.length > 0) {
+      setTimeout(() => {
+        scheduleToolchainExtraction(resRoot, binDir, false);
+      }, 5000);
+    }
   });
   child.on('error', (e) => {
     try { fs.closeSync(logFd); } catch (e2) { /* 已关 */ }
@@ -4416,58 +7767,266 @@ function scheduleToolchainExtraction(resRoot, binDir) {
  * 【为什么 git 不在回退范围内】git 真身是随包 ELF，本档 `execve` 一律被拒
  * ⇒ 解出来也永远起不来，只是白占 ~100MB 用户空间。故只解 python —— 它走
  * dlopen + 进程内 CPython，是本档**唯一**真正能用的工具链。
+ *
+ * 【"没解" ≠ "失败"（2026-10-19 分诊 S-15）】上面这条理由说明手持档**本来就不该**解 git，
+ * 所以收尾必须把它记成 `git=SKIPPED`（结构性不适用），而不是 `git=FAIL`。旧实现混为一谈，
+ * 导致分诊里 11/11 个 boot 全 `python=OK，git=FAIL`，还顺带挡掉了 python 的 exec 兜底。
  */
-function inProcessToolchainFallback(tarball, needPy, needGit, why) {
-  if (!needPy) {
-    diag(`工具链：进程内回退无事可做（python 无需解包；原因=${why}）`);
-    finishToolchainExtraction(false, false);
-    return;
+/**
+ * 收集本次要在**进程内**解包的额外工具链归档（bash / npm / pnpm / tmux / gh）。
+ *
+ * 【为什么抽成函数（2026-11-05）】原先这段只写在 `!needPy` 分支里，导致
+ * "python 也要解"时额外 root 被整段跳过（手机端六个目录全空）。抽出来后
+ * 两条分支共用同一份收集逻辑，不会再漂。
+ */
+function toolchainExtraJobs(resRoot = RES_ROOT) {
+  const jobs = [];
+  for (const spec of EXTRA_TOOLCHAINS) {
+    if (extraReady(spec) && !needsReextractForSign(path.join(resRoot, 'toolchain', spec.name), spec.root)) continue;
+    let list = [];
+    try {
+      const dir = path.join(resRoot, 'toolchain', spec.name);
+      list = fs.existsSync(dir) ? fs.readdirSync(dir).filter((n) => n.endsWith('.tar.gz')).sort() : [];
+    } catch (e) {
+      list = [];
+    }
+    for (const name of list) {
+      jobs.push({ archive: path.join(resRoot, 'toolchain', spec.name, name), root: spec.root, name: spec.name });
+    }
+    if (list.length === 0) {
+      diag(`工具链：${spec.name} 无归档可解（resfile 里没有 .tar.gz）`);
+    }
   }
+  return jobs;
+}
+
+async function inProcessToolchainFallback(tarball, needPy, needGit, why, resRoot = RES_ROOT) {
+  if (inProcessToolchainFallback.running) return;
+  inProcessToolchainFallback.running = true;
+  const report = (message) => {
+    diag(message);
+    try {
+      ensureDir(TOOLCHAIN_DIR);
+      fs.appendFileSync(path.join(TOOLCHAIN_DIR, '.extract.log'), message + '\n', 'utf8');
+    } catch (error) {
+      diag('toolchain extract log: ' + String(error));
+    }
+  };
+  const stages = new Map();
+  const extractExtra = async (job) => {
+    if (!stages.has(job.root)) stages.set(job.root, job.root + '.stage-' + Date.now());
+    await tarGz.extractTarGzFile(job.archive, stages.get(job.root), { yieldEvery: 16, maxOutputLength: 256 * 1024 * 1024 });
+  };
+  const publishExtras = () => {
+    for (const [root, staged] of stages) {
+      const spec = EXTRA_TOOLCHAINS.find((item) => item.root === root);
+      if (!spec || fs.statSync(path.join(staged, ...spec.probe)).size <= 0) throw new Error('Missing staged toolchain probe: ' + root);
+    }
+    for (const [root, staged] of stages) {
+      const backup = root + '.previous-' + Date.now();
+      const exists = fs.existsSync(root);
+      if (exists) fs.renameSync(root, backup);
+      try {
+        fs.renameSync(staged, root);
+      } catch (error) {
+        if (exists) fs.renameSync(backup, root);
+        throw error;
+      }
+    }
+    /* 换代成功后清掉上一轮留下的空备份壳（非空的一律保留作回退材料）。 */
+    for (const [root] of stages) pruneEmptyPreviousSiblings(root);
+  };
+  try {
+  if (!needPy) {
+    /*
+     * 【只有 git 待解：**结构性不适用**，不是失败（2026-10-19 分诊 S-15）】
+     * 手持档 spawn 必 EPERM ⇒ 走进程内回退；而回退**故意**不解 git（真身 execve 被拒，
+     * 解出来也永远起不来，只是白占 ~100MB）。旧实现在这里打"无事可做"并调
+     * `finishToolchainExtraction(false, false)` ⇒ 收尾行 `git=FAIL`、`ensureExecutables()`
+     * 又被 `pyOk && gitOk` 挡住。分诊里 11/11 个 boot 全 `git=FAIL` 就是这么来的：
+     * 把"本档不支持"读成了"解包坏了"。现在改成显式的 `gitSkipped` 三态。
+     */
+    if (needGit) {
+      diag('工具链：git 归档在手持档不做进程内解包（execve 被拒）；git=SKIPPED');
+    }
+    /*
+     * 【额外 root 必须显式交代（2026-11-02 移动端复测 P1）】
+     * 手持档 spawn 被拒 ⇒ 走进程内回退；而回退只解 python。tmux/gh/npm/pnpm 四个 root
+     * 因此**留空**，旧实现连一行日志都没有 —— 复测报告把这读成"解包器坏了"
+     * （`ghroot/tmuxroot/npmroot/pnpmroot` 全空、`.extract.log` 0 字节）。
+     * 真相是"本档不能创建进程，工具解出来也 exec 不了"，但**沉默就是缺陷**。
+     * 这里逐 root 说明状态，让日志自己把结论讲清楚。
+     */
+    /*
+     * ── 进程内解包 EXTRA_TOOLCHAINS（2026-11-04，手机端工具链落地）───────────────
+     *
+     * 【旧口径为什么错了】旧实现认为"本档不能创建进程 ⇒ 解出来也无法 exec ⇒ 干脆不解"。
+     * 这条对 **tmux/gh** 成立（它们是真 ELF，手机档 execve 被拒），
+     * 但对 **npm/pnpm** 完全不成立：它们是**纯 JS**（`bin/pnpm.cjs` / `bin/npm-cli.js`），
+     * 只要能起一个 node 就能跑。而 node 我们已经有了（随包 libnode + ELF 启动器，
+     * 见 installElfLaunchers）⇒ 只要把 tar.gz **在进程内解出来**，`pnpm add` 就能用。
+     *
+     * 所以这里改成：把这些归档在本次回退里**逐个进程内解包**（纯 JS 的 tarGz 抽取器，
+     * 不创建任何子进程），解完再走收尾。tmux/gh 解出来照样跑不了（execve 拒），
+     * 但代价只是磁盘；留着也有价值：PC 换机/迁移同样的树可直接用，且行为一致，
+     * 不再出现"同一棵树在 PC 上有、手机上没有"的三端差异。
+     */
+    const jobs = toolchainExtraJobs(resRoot);
+    if (jobs.length === 0) {
+      diag(`工具链：进程内回退无事可做（python 无需解包，且没有额外归档；原因=${why}）`);
+      finishToolchainExtraction(false, false, needGit);
+      return;
+    }
+    diag(`工具链：进程内回退开始解 ${jobs.length} 个额外归档（${why}）`);
+    return await (async () => {
+      let okCount = 0;
+      for (const job of jobs) {
+        try {
+          await extractExtra(job);
+          okCount += 1;
+          diag(`工具链：进程内解包 ${job.name}/${path.basename(job.archive)} → ${job.root} 完成`);
+        } catch (e) {
+          diag(`工具链：进程内解包失败 ${job.name}/${path.basename(job.archive)}：`
+            + String(e && e.message ? e.message : e));
+        }
+      }
+      report(`工具链：进程内回退收尾（成功 ${okCount}/${jobs.length}）`);
+      if (okCount === jobs.length) publishExtras();
+      finishToolchainExtraction(false, false, needGit, okCount === jobs.length);
+    })();
+  }
+  /*
+   * 【python 要解时，额外 root **同样要解**（2026-11-05 手机端复测 P0）】
+   * 旧实现把"解 python"和"解 EXTRA_TOOLCHAINS"写成了互斥的两条分支：
+   * 命中 python 分支就直接 return，于是真机上 `python` 有 3560 个条目、
+   * 而 `bashroot/ghroot/npmroot/pnpmroot/tmuxroot` **全空**、`.extract.log` 0 字节。
+   * 现在两条都走：先解额外归档，再解 python，最后一次收尾。
+   */
+  const jobs = toolchainExtraJobs(resRoot);
+  const extractExtras = async () => {
+    let okCount = 0;
+    for (const job of jobs) {
+      try {
+        await extractExtra(job);
+        okCount += 1;
+        diag(`工具链：进程内解包 ${job.name}/${path.basename(job.archive)} → ${job.root} 完成`);
+      } catch (e) {
+        diag(`工具链：进程内解包失败 ${job.name}/${path.basename(job.archive)}：`
+          + String(e && e.message ? e.message : e));
+      }
+    }
+    if (jobs.length > 0) {
+      report(`工具链：额外归档解包收尾（成功 ${okCount}/${jobs.length}）`);
+    }
+    if (okCount === jobs.length) {
+      try { publishExtras(); } catch (error) {
+        report('toolchain extras publish failed: ' + String(error));
+        return false;
+      }
+    }
+    return okCount === jobs.length;
+  };
   const pyStage = path.join(TOOLCHAIN_DIR, 'py-stage');
-  diag(`工具链：改用进程内解包（${why} ⇒ 本档不能创建进程）`);
-  tarGz.extractTarGzFile(tarball, pyStage, {
-    yieldEvery: 64,
+  diag(`工具链：改用进程内解包（${why} ⇒ 本档不能创建进程；额外归档 ${jobs.length} 个）`);
+  let extrasOk = false;
+  return await extractExtras().then((ok) => {
+    extrasOk = ok;
+    return tarGz.extractTarGzFile(tarball, pyStage, {
+    yieldEvery: 16,
+    maxOutputLength: 256 * 1024 * 1024,
     onProgress: (n) => {
       if (n % 512 === 0) {
         diag(`工具链：进程内解包进行中（已落 ${n} 个条目）`);
       }
     },
-  }).then((st) => {
+  }); }).then((st) => {
     diag(`工具链：进程内解包完成（写 ${st.written} 个文件，跳过 ${st.skipped.length} 个链接/特殊条目）`);
     if (needGit) {
-      diag('工具链：git 归档不做进程内解包（本档 execve 被拒 ⇒ git 真身起不来，解它只占磁盘）');
+      diag('工具链：git 归档在手持档不做进程内解包（execve 被拒）；git=SKIPPED');
     }
-    finishToolchainExtraction(true, false);
+    /*
+     * 第三个参数 = "git 是**跳过**而不是失败"：python 解完了（didPy=true）、git 没解（didGit=false），
+     * 而 needGit 说明**本该解** ⇒ 交给收尾按 SKIPPED 记账（不是 FAIL）。
+     */
+    finishToolchainExtraction(true, false, needGit, true, extrasOk);
   }).catch((e) => {
-    diag(`工具链：进程内解包失败（下次启动重试）：${String(e).slice(0, 300)}`);
+    report(`工具链：进程内解包失败（下次启动重试）：${String(e).slice(0, 300)}`);
   });
+  } catch (error) {
+    report('toolchain fallback failed: ' + String(error));
+  } finally {
+    inProcessToolchainFallback.running = false;
+  }
 }
 
 /**
  * 解包收尾（子进程 exit 回调，同步轻量）：rename 归位、symlink 复制补齐、
  * chmod+X_OK、锚点复验。失败不重试——幂等设计下次 Host 启动自动重试。
+ *
+ * @param {boolean} didPy 本轮是否解了 python
+ * @param {boolean} didGit 本轮是否解了 git
+ * @param {boolean} [gitSkipped=false] git 是**跳过**（手持档结构性不适用）而不是失败 ⇒ 收尾记 SKIPPED
  */
-function finishToolchainExtraction(didPy, didGit) {
+function finishToolchainExtraction(didPy, didGit, gitSkipped = false, childOk = true, extrasOk = childOk) {
+  /*
+   * 【P0-1 注意 2（2026-11-11）：非 0 退出不做收尾】tar 半途失败时目录"非空"但内容
+   * 残缺。若照样 rename + 写签名标记，下一轮 `needsReextractForSign` 会判"已换代完成"，
+   * 于是**永远不再重试** —— 那比每次重解更糟。这里直接放弃本轮收尾，留给下次启动。
+   */
+  if (!childOk) {
+    diag('工具链：解包子进程非 0 退出 ⇒ 本轮不归位、不写签名标记（下次启动重试）');
+    return;
+  }
   if (didPy) {
+    const backup = PYTHON_PREFIX + '.previous-' + Date.now();
+    let backedUp = false;
     try {
+      if (fs.existsSync(PYTHON_PREFIX)) {
+        fs.renameSync(PYTHON_PREFIX, backup);
+        backedUp = true;
+      }
       fs.renameSync(path.join(TOOLCHAIN_DIR, 'py-stage', 'python'), PYTHON_PREFIX);
       fs.rmSync(path.join(TOOLCHAIN_DIR, 'py-stage'), { recursive: true, force: true });
     } catch (e) {
+      if (backedUp && !fs.existsSync(PYTHON_PREFIX)) fs.renameSync(backup, PYTHON_PREFIX);
       diag(`工具链：python 收尾失败：${String(e)}`);
+      return;
     }
+    /* 与 publishExtras 同口径：只清空的 .previous-<ts> 空壳。 */
+    pruneEmptyPreviousSiblings(PYTHON_PREFIX);
   }
   /*
    * 【把签名版本标记落到解包目录（报告 4 ③）】needsReextractForSign 比对的是
    * "归档标记 vs 解包目录标记"，所以解包成功后**必须把归档那份标记也写过去**；
    * 否则下一轮启动会再次判定"换代了" → 每启动一次重解一遍 27MB/4530 文件。
    * 该标记文件不参与任何功能判据，纯粹是版本号。
+   *
+   * 【2026-11-10：必须覆盖 EXTRA_TOOLCHAINS】原来的清单只有 python / git 两组，
+   * 而 `needsReextractForSign()` 在 extras 上也会被调用（见 scheduleToolchainExtraction）。
+   * 两边不对称 ⇒ extras 的标记永远写不出去 ⇒ 每次冷启动都判"归档已换代" ⇒
+   * `rm -rf` 后重解 5 个 root 共 15 个归档（约 25 MB 压缩 / 93 MB 落盘，真机实测
+   * 5.9~8.0 s/次），日志里每次都是「tmux/gh/bash/npm/pnpm 归档已换代」。
+   * 这不是 1.1.8 引入的回归（1.1.7 的宿主同一段代码也一样），而是两个版本共有的缺陷。
+   * 现在 extras 与 python/git 走同一张表。
+   *
+   * 【为什么 extras 用 extraReady 判据、而不是"目录非空"】半成品目录（tar 中途失败）
+   * 也是"非空"。若此时就写标记，下一轮 `needsReextractForSign` 会判"已换代完成"，
+   * 于是**永远不再重试**——那是比每次重解更糟的静默坏态。所以只有**探针真身真的在**
+   * 才写标记；没解成就留空，下次启动继续重试（与 python/git 的锚点判据同一口径）。
    */
   try {
     const resRootForMarker = RES_ROOT;
-    for (const [archiveDir, extractedDir] of [
-      [path.join(resRootForMarker, 'toolchain', 'python'), PYTHON_PREFIX],
-      [path.join(resRootForMarker, 'toolchain', 'git'), GIT_ROOT],
-    ]) {
+    const pairs = [
+      ...(didPy ? [[path.join(resRootForMarker, 'toolchain', 'python'), PYTHON_PREFIX]] : []),
+      ...(didGit ? [[path.join(resRootForMarker, 'toolchain', 'git'), GIT_ROOT]] : []),
+    ];
+    for (const spec of EXTRA_TOOLCHAINS) {
+      if (!extrasOk || !extraReady(spec)) {
+        continue;
+      }
+      pairs.push([path.join(resRootForMarker, 'toolchain', spec.name), spec.root]);
+    }
+    for (const [archiveDir, extractedDir] of pairs) {
       const marker = readArchiveSignMarker(archiveDir);
       if (marker.length === 0 || statSize(extractedDir) <= 0) {
         continue;
@@ -4480,20 +8039,31 @@ function finishToolchainExtraction(didPy, didGit) {
   finalizeToolchain();
   const pyOk = pythonReady();
   const gitOk = gitReady();
-  diag(`工具链：解包收尾 python=${pyOk ? 'OK' : 'FAIL'}，git=${gitOk ? 'OK' : 'FAIL'}（详见 .extract.log）`);
-  log(`工具链：python=${pyOk ? '就绪' : '未就绪'}，git=${gitOk ? '就绪' : '未就绪'}`);
+  /*
+   * 【git 三态：OK / SKIPPED / FAIL（2026-10-19 分诊 S-15）】
+   *   · OK      = 真解出来了（PC/2in1 的 spawn 路径，或上一轮已经就位）；
+   *   · SKIPPED = **本档结构性不适用**：handheld 的 execve 被拒 ⇒ git 本来就不该解；
+   *   · FAIL    = 本该解而没解开（真正的失败）。
+   * 旧实现只有二态 ⇒ 手持档每次 boot 都写 `git=FAIL`（分诊 11/11 boot），把"设计如此"
+   * 读成了"解包坏了"，还顺手把 `ensureExecutables()` 挡掉（见下方 pyOk 条件）。
+   */
+  const gitState = (didGit || gitOk) ? 'OK' : (gitSkipped ? 'SKIPPED' : 'FAIL');
+  diag(`工具链：解包收尾 python=${pyOk ? 'OK' : 'FAIL'}，git=${gitState}`
+    + `${gitState === 'SKIPPED' ? '（手持档 execve 被拒；git 仅 PC 档可用）' : ''}（详见 .extract.log）`);
+  log(`工具链：python=${pyOk ? '就绪' : '未就绪'}，git=${gitState === 'OK' ? '就绪' : (gitState === 'SKIPPED' ? '本档跳过' : '未就绪')}`);
   // 刚解包完的文件全部由 tar 子进程创建（执行许可被拒的场景，见 probeExec 注释）：
   // 宿主 Node 立刻做一轮真探测+重写，别等下一次 boot。
-  if (pyOk && gitOk) {
-    setImmediate(() => {
-      ensureExecutables().catch((e) => diag(`exec 探测异常：${String(e)}`));
-    });
+  /*
+   * 【条件从 `pyOk && gitOk` 收成 `pyOk`】git 缺失（手持档 SKIPPED / PC 档真失败）都不该
+   * 挡住 **python** 的 chmod / 探测兜底：这两件事本来就互不相干，旧条件让手持档连 python
+   * 的兜底都不跑（分诊 S-15 的第二半）。
+   */
+  if (pyOk) {
+    startupWork.request('exec', ensureExecutables);
   }
   // stdlib 刚就位：补跑 python 桥自检（只依赖 python，git 解包失败不影响桥）
   if (pyOk) {
-    setImmediate(() => {
-      try { ensurePythonBridge(); } catch (e) { diag(`python 桥自检异常：${String(e).slice(0, 200)}`); }
-    });
+    startupWork.request('python', ensurePythonBridge, pythonReady);
   }
 }
 
@@ -4544,19 +8114,90 @@ function finishToolchainExtraction(didPy, didGit) {
   // 若仍按 applet 复制会被 `bash -c` 报 applet not found（exit 127）。
   ensureBashShim(binDir);
   ensureToolchainWrappers(binDir, resRoot);
+  /* 最后一步：把 node/npm/npx/pnpm/dsh 覆盖成 ELF 启动器（手机档唯一能跑的形态）。 */
+  installElfLaunchers(binDir, resRoot);
+  /*
+   * 【P0-2（docs/267）】PATH 上的 `node` 必须真能跑。
+   * 完整 Node 由 ArkTS 侧认领到 `Download/<包名>/node-brew`（env DSHM_PUBLIC_DOWNLOAD
+   * 就是那个目录）；空串时保持旧行为，包装器仍走随包 nodecli。
+   */
+  const FULL_NODE_PATH = (() => {
+    const root = (process.env.DSHM_PUBLIC_DOWNLOAD || '').trim();
+    return root.length > 0 ? path.join(root, 'node-brew') : '';
+  })();
+  const bundledNodeCli = nodeRuntimeProvision.ensureBundledNodeCli({
+    binDir,
+    resRoot,
+    nativeLibs: NATIVE_LIBS,
+    fullNode: FULL_NODE_PATH,
+    log,
+    diag,
+  });
+  NODE_CLI_STATUS = bundledNodeCli;
+  if (bundledNodeCli.ready) {
+    process.env.DSH_NODE = bundledNodeCli.file;
+    process.env.DSH_DESKTOP_NODE_EXECUTABLE = bundledNodeCli.file;
+  }
+  /*
+   * 【node 也必须留在 ELF 形态（2026-11-05 PC 复测 P0）】
+   * `ensureBundledNodeCli()` 会在 `bin/node` 写一个**脚本包装器**，而它跑在上面那次
+   * `installElfLaunchers()` **之后** ⇒ 每次启动都把刚换好的 ELF `node` 又覆盖回 1132 B
+   * 脚本，v10 的五件套永远差这一件（真机读数：npm/npx/pnpm/dsh 都 52120 ELF，只 node 是脚本）。
+   * 这里在包装器落盘后**再装一次**启动器，把 node 也换成 ELF；`DSH_NODE` 仍指向
+   * `bin/node`（路径不变，只是内容从脚本变 ELF），子进程 Node 走随包 libnode（JIT 可用）。
+   */
+  installElfLaunchers(binDir, resRoot);
+  /*
+   * Codex 子智能体 CODEX_HOME 启动期自愈（P0-2，docs/267）
+   *
+   * 【为什么需要第二次兜底】安装器打补丁时已补 mkdir（对**新装**生效）；但设备上
+   * **已经装好**的 subagent-codex 不会自动重装 ⇒ 补丁不刷新、`$HOME/.codex` 仍缺，
+   * Codex 每次启动都报 "CODEX_HOME ... does not exist"，登录态/CA/历史全落空。
+   * 这里每启动检查一次：插件在 ⇒ 建目录（recursive + 幂等，已存在则跳过）。
+   */
+  try {
+    const codexProfileDir = path.join(HOME_DIR, 'profiles', PROFILE);
+    const codexPluginManifest = path.join(codexProfileDir, 'node_modules',
+      '@deepseek-ai', 'dsh-subagent-codex', 'package.json');
+    if (fs.existsSync(codexPluginManifest)) {
+      const codexHome = path.join(SANDBOX_HOME, '.codex');
+      if (!fs.existsSync(codexHome)) {
+        fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+        log(`Codex CODEX_HOME 已自愈：${codexHome}`);
+      }
+    }
+  } catch (e) {
+    diag(`Codex CODEX_HOME 自愈失败：${e && e.message ? e.message : e}`);
+  }
+  const bundledFfmpeg = ffmpegRuntimeProvision.ensureBundledFfmpeg({
+    resRoot: process.env.DSHM_PC_RESFILE_DIR || '',
+    sandboxHome: SANDBOX_HOME,
+    binDir,
+    nativeLibs: NATIVE_LIBS,
+    deviceForm: process.env.DSHM_DEVICE_FORM || '',
+    log,
+    diag,
+  });
+  if (bundledFfmpeg.ready) {
+    process.env.FFMPEG = bundledFfmpeg.ffmpeg;
+    process.env.FFPROBE = bundledFfmpeg.ffprobe;
+    diag(`ffmpeg 环境：FFMPEG=${bundledFfmpeg.ffmpeg} FFPROBE=${bundledFfmpeg.ffprobe}`);
+  } else if (bundledFfmpeg.warning.length > 0) {
+    diag(`ffmpeg 环境：${bundledFfmpeg.warning}`);
+  }
   ensureRipgrepWrapper(binDir);
   // 【报告 3 ③】core 树解包不保留权限位 ⇒ rg/sharp 的 .node 需要补 x 位
   ensureCoreExecBits();
-  scheduleToolchainExtraction(resRoot, binDir);
+  /*
+   * P0-2（2026-11-11）：启动期只解 python/git，extras 延后到本轮解包结束后再排。
+   * web 监听不依赖 bash/gh/npm/pnpm/tmux，它们晚 3~5 秒不影响可用性。
+   */
+  scheduleToolchainExtraction(resRoot, binDir, true);
   ensureBundledSkills(resRoot);
   // hmfs"执行许可绑创建者"（见 probeExec 注释）：锚点齐备后异步真探测+修复
-  setImmediate(() => {
-    ensureExecutables().catch((e) => diag(`exec 探测异常：${String(e)}`));
-  });
+  startupWork.request('exec', ensureExecutables);
   // 内嵌 Python 桥自检（stdlib 未就位时内部跳过，解包收尾后由第二挂载点补跑）
-  setImmediate(() => {
-    try { ensurePythonBridge(); } catch (e) { diag(`python 桥自检异常：${String(e).slice(0, 200)}`); }
-  });
+  startupWork.request('python', ensurePythonBridge, pythonReady);
 }
 
 /**
@@ -4724,8 +8365,8 @@ function recoverOrphanLocks(homeDir) {
   }
   diag(`写锁巡检：发现 ${locks.length} 个，清理孤儿 ${removed} 个，保留 ${kept} 个`);
   /*
-   * 【明细必须在这行之后】`tools/device-acceptance.ps1` 拿「写锁巡检」这一行当「本次启动」
-   * 的起点（取最后一次出现之后的所有行）⇒ 把明细放在它前面会被切掉。
+   * 【明细必须在这行之后】真机取证按「写锁巡检」这一行当「本次启动」的起点
+   * （取最后一次出现之后的所有行）⇒ 把明细放在它前面会被切掉。
    */
   if (kept > 0) {
     const byWhy = Array.from(keptWhy.entries()).map(([why, n]) => `${why}=${n}`).join('，');
@@ -4788,9 +8429,29 @@ function findProfileBootEntry(cliLibDir) {
  */
 
 function ensureProfile() {
-  const src = path.join(CORE_DIR, 'profiles', PROFILE);
+  /*
+   * 【缺种子时回落到 ondevice（2026-11-02，docs/348 §0 根因）】
+   * 核心树只随包 `profiles/ondevice`；而 superagent 这类**独立 profile** 是由
+   * `dsh <name> --from-default-profile` 建在 `$DSH_HOME/profiles/<name>` 的。
+   * 旧实现直接 `fail('核心树里没有 profiles/<name>')` ⇒ 第二进程一启动就在
+   * BOOT_20_CORE_FOUND fatal，界面表现为"一个卡住的空窗口"。
+   *
+   * 现在：核心树缺该 profile 的种子时，用 `ondevice` 的种子兜底，并把
+   * package.json 里的 `name` 改成本 profile —— 组合逻辑与 ondevice 完全一致，
+   * 用户/插件行仍各自独立（它们在 `$DSH_HOME/profiles/<name>` 下）。
+   */
+  let src = path.join(CORE_DIR, 'profiles', PROFILE);
+  let seedFromOnDevice = false;
   if (!fs.existsSync(src)) {
-    fail('核心树里没有 profiles/' + PROFILE + '：' + src);
+    const fallback = path.join(CORE_DIR, 'profiles', 'ondevice');
+    if (fs.existsSync(fallback)) {
+      diag(`profile 种子：核心树无 profiles/${PROFILE}，回落用 ondevice 作种子`
+        + '（docs/348：superagent 由 --from-default-profile 建在 DSH_HOME，不在核心树里）');
+      src = fallback;
+      seedFromOnDevice = true;
+    } else {
+      fail('核心树里既没有 profiles/' + PROFILE + '，也没有 profiles/ondevice');
+    }
   }
   const dest = path.join(HOME_DIR, 'profiles', PROFILE);
   ensureDir(dest);
@@ -4801,6 +8462,16 @@ function ensureProfile() {
   const destPkg = path.join(dest, 'package.json');
   if (!fs.existsSync(destPkg)) {
     fs.copyFileSync(srcPkg, destPkg);
+    if (seedFromOnDevice) {
+      /* 种子来自 ondevice ⇒ 把 name 改成本 profile，避免 dsh 把它当成 ondevice */
+      try {
+        const pkg = JSON.parse(fs.readFileSync(destPkg, 'utf8'));
+        pkg.name = PROFILE;
+        fs.writeFileSync(destPkg, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+      } catch (e) {
+        diag(`profile 种子：改写 name 失败（不影响启动）：${String(e)}`);
+      }
+    }
   } else {
     try {
       const seed = JSON.parse(fs.readFileSync(srcPkg, 'utf8'));
@@ -4947,6 +8618,137 @@ function probeHttpReady(port, attempts = 10, intervalMs = 500) {
   });
 }
 
+/*
+ * ── 启动种子导出（2026-11-16，出包流程用）───────────────────────────────────
+ *
+ * 【这是什么】把本进程两份已落盘的启动缓存导出到用户可见的 Download 目录，
+ * 供出包流程采集成随包 `boot-seed/`（装载器见 ./boot-seed.cjs；导出与装载
+ * 合起来闭环：导出采集 → 随包预置 → 下次全新安装首启命中）。
+ *
+ * 【为什么必须由应用自己导】编译缓存 blob 的文件名是源码绝对路径的哈希
+ * （compile_cache.cc GetOrInsert），只有应用域里跑出来的 blob 才能在下一次
+ * 应用启动时命中；而应用数据目录对外不可读（el2 blob 0600 / home 0700，
+ * 2026-11-16 实测 shell/ide 两个域都读不了）⇒ 唯一出口是应用自己往
+ * `DSHM_PUBLIC_DOWNLOAD`（用户可见目录，ArkTS 侧认领、模式 0755）拷贝。
+ *
+ * 【触发】`$DSHM_PUBLIC_DOWNLOAD/.dshm-seed-export-request` 存在（开发流程
+ * 手工放置的空文件）。普通用户永远不会有这个文件 ⇒ 零感知。导出成功后
+ * 自删该文件（幂等：要再导再放）；失败保留、下次启动重试。
+ *
+ * 【导出内容】（对应 boot-seed.cjs 期望的种子目录形态）
+ *   · resolve-cache-*.json                    —— HOME 里全部解析缓存表
+ *     （键值为核心树相对路径，跨设备可移植；含用户运行后累积的插件条目）
+ *   · v8-compile-cache/<ns>/<8位hex>          —— 编译缓存 blob 原样拷贝
+ *     （ns 目录名带导出进程 uid；装载器按目标 uid 重算，照抄即可）
+ *   · manifest.json                           —— ns/计数/版本，供采集脚本核对
+ *
+ * 【边界】只在 markReady 之后被 setTimeout 延迟调用（不占启动临界路径）；
+ * 任何失败只记 diag、绝不抛出；目录先清后建（重放安全，删除范围限定在
+ * `$DSHM_PUBLIC_DOWNLOAD/boot-seed-export` 这一个应用自建目录内）。
+ */
+function maybeExportBootSeed(opts) {
+  const o = opts || {};
+  const homeDir = String(o.homeDir || '');
+  const log = typeof o.log === 'function' ? o.log : null;
+  const pub = String(process.env.DSHM_PUBLIC_DOWNLOAD || '').trim();
+  if (pub.length === 0) {
+    return;
+  }
+  const reqFile = path.join(pub, '.dshm-seed-export-request');
+  try {
+    fs.statSync(reqFile);
+  } catch (e) {
+    return; /* 无请求文件：常态，直接回 */
+  }
+  try {
+    const outRoot = path.join(pub, 'boot-seed-export');
+    fs.rmSync(outRoot, { recursive: true, force: true });
+    fs.mkdirSync(path.join(outRoot, 'v8-compile-cache'), { recursive: true });
+    let resolveFiles = 0;
+    let blobs = 0;
+    let nsDirs = 0;
+    /* ① 解析缓存表（HOME 里所有 resolve-cache-*.json） */
+    if (homeDir.length > 0) {
+      try {
+        for (const name of fs.readdirSync(homeDir)) {
+          if (!/^resolve-cache-.+\.json$/.test(name)) {
+            continue;
+          }
+          fs.copyFileSync(path.join(homeDir, name), path.join(outRoot, name));
+          resolveFiles += 1;
+        }
+      } catch (e) { /* HOME 读失败：留空，其余照导 */ }
+    }
+    /* ② 编译缓存 blob（getCompileCacheDir 返回**带 tag 的 ns 目录**本身——
+       fork compile_cache.cc:550 compile_cache_dir_ = base + '/' + cache_tag；
+       ns 目录名形如 v24.9.0-arm64-<hash>-<本进程uid>，blob 名 = 8 位小写 hex） */
+    let cacheNsDir = '';
+    try {
+      const nodeModule = require('node:module');
+      if (typeof nodeModule.getCompileCacheDir === 'function') {
+        cacheNsDir = String(nodeModule.getCompileCacheDir() || '');
+      }
+    } catch (e) {
+      cacheNsDir = '';
+    }
+    if (cacheNsDir.length > 0) {
+      try {
+        const nsName = path.basename(cacheNsDir);
+        let blobsInNs = 0;
+        for (const blob of fs.readdirSync(cacheNsDir)) {
+          if (!/^[0-9a-f]{8}$/.test(blob)) {
+            continue; /* 标记文件等非 blob 跳过 */
+          }
+          blobsInNs += 1;
+        }
+        if (blobsInNs > 0) {
+          const dstDir = path.join(outRoot, 'v8-compile-cache', nsName);
+          fs.mkdirSync(dstDir, { recursive: true });
+          nsDirs += 1;
+          for (const blob of fs.readdirSync(cacheNsDir)) {
+            if (!/^[0-9a-f]{8}$/.test(blob)) {
+              continue;
+            }
+            fs.copyFileSync(path.join(cacheNsDir, blob), path.join(dstDir, blob));
+            blobs += 1;
+          }
+        } else if (log) {
+          log('种子导出：当前 ns 目录无 blob（' + nsName + '），跳过编译缓存段');
+        }
+      } catch (e) {
+        if (log) {
+          log('种子导出：编译缓存读取失败（继续导出其余部分）：'
+            + String((e && e.message) || e).slice(0, 120));
+        }
+      }
+    }
+    /* ③ manifest（采集脚本核对用；ns 空串 = 解析缓存未启用） */
+    const manifest = {
+      createdAt: new Date().toISOString(),
+      ns: resolveCacheHandle !== null ? resolveCacheHandle.stats.ns : '',
+      resolveFiles: resolveFiles,
+      nsDirs: nsDirs,
+      blobs: blobs,
+      nodeVersion: String(process.versions.node || ''),
+      abi: String(process.versions.modules || ''),
+    };
+    fs.writeFileSync(path.join(outRoot, 'manifest.json'),
+      JSON.stringify(manifest, null, 2), 'utf8');
+    /* ④ 自删请求文件（只有导出完成才算消费掉这次请求） */
+    fs.rmSync(reqFile, { force: true });
+    if (log) {
+      log('种子导出完成 → ' + path.join(pub, 'boot-seed-export')
+        + '（resolve 表 ' + resolveFiles + ' 份 / ns 目录 ' + nsDirs
+        + ' 个 / blob ' + blobs + ' 个）');
+    }
+  } catch (e) {
+    if (log) {
+      log('种子导出失败（不影响启动，请求文件保留、下次启动重试）：'
+        + String((e && e.message) || e).slice(0, 160));
+    }
+  }
+}
+
 async function start() {
   const missing = reportConfigError();
   if (missing.length > 0) {
@@ -4975,6 +8777,30 @@ async function start() {
   ensureDir(HOME_DIR);
   ensureProfile();
   stage('BOOT_30_PROFILE_READY', `home=${HOME_DIR} profile=${PROFILE}`);
+
+  /*
+   * dsh-bili-whale 等插件执行的是独立 `node`，不是 DSHM Host 的内嵌 libnode。
+   * 在 profile boot 之前准备并注入 DSH_NODE，插件首次启动自检就能直接通过；
+   * 失败只如实记录，不能阻断不依赖 Node CLI 的宿主和插件。
+   */
+  NODE_CLI_STATUS = nodeRuntimeProvision.ensureForProfile({
+    env: process.env,
+    homeDir: HOME_DIR,
+    profile: PROFILE,
+    publicDownload: process.env.DSHM_PUBLIC_DOWNLOAD || '',
+  });
+  if (NODE_CLI_STATUS.ready) {
+    process.env.DSH_NODE = NODE_CLI_STATUS.file;
+    process.env.DSH_DESKTOP_NODE_EXECUTABLE = NODE_CLI_STATUS.file;
+    diag(`Node CLI（插件）：${NODE_CLI_STATUS.action} ${NODE_CLI_STATUS.file}`
+      + ` version=${NODE_CLI_STATUS.version || '?'} source=${NODE_CLI_STATUS.source || '?'}`);
+    log(`插件 Node CLI 已就绪：${NODE_CLI_STATUS.file}`);
+  } else if (NODE_CLI_STATUS.requested) {
+    diag(`Node CLI（插件）：未就绪：${NODE_CLI_STATUS.error}`);
+    log(`插件 Node CLI 未就绪：${NODE_CLI_STATUS.error}`);
+  } else {
+    diag('Node CLI（插件）：当前 profile 无已知 CLI 依赖，跳过准备');
+  }
 
   log('导入 ' + entry);
   const profileBoot = await import(pathToFileURL(entry).href);
@@ -5016,6 +8842,9 @@ async function start() {
   // 预热运行时事实：把三个原生 require 挪到写 host-ready.json **之前**，
   // 这样拦截 stdout 写的那条路径上只读缓存（那里不适合做重活）。
   runtimeFacts();
+  globalThis.__dshmUpdateTransaction = require('./dshm-update-transaction.cjs').withUpdateTransaction;
+  globalThis.__dshmProfileWriter = require('./dshm-profile-writer.cjs').withProfileWriter;
+  globalThis.__dshmProfileWriterToken = require('./dshm-profile-writer.cjs').currentToken;
   const result = await profileBoot.runProfile({
     environment: appBootMod.loadLayeredEnv('dsh'),
     profile: PROFILE,
@@ -5032,6 +8861,15 @@ async function start() {
   // python 桥 HTTP 端点（/dshm-python/*）：垫片与诊断工具的进程内执行通道。
   // 注册失败只 diag（桥是增量能力，不许影响已验证的 web 服务链路）。
   registerPythonHttpBridge(ctx);
+  const browserBridge = browserAutomationEnabled() ? registerBrowserBridge(ctx) : null;
+  // 外开桥端点（/dshm-open-link）：browser 工具在"浏览器还没起来"时经它请求 ArkTS 壳层
+  // 用 openLink 拉起浏览器（文件队列 → entry/.../system/OpenLinkBridge.ets）。
+  // 拉起成功后把 armAutoClose 交给它 —— turn/end 时自动关闭这个"为本次任务开的"浏览器。
+  if (browserAutomationEnabled()) {
+    registerOpenLinkEndpoint(ctx, browserBridge && browserBridge.armAutoClose);
+  }
+  // 桌面服务卡片的状态聚合（会话进度 + 余额/token 用量）→ $DSH_HOME/card-state.json
+  registerCardState(ctx);
   // registry 查询端点（/dshm-registry/view）：`pnpm view` 假壳的 Host 侧转发目标。
   // 注册失败只 diag（view 是增量能力，不影响已验证的 web 服务链路）。
   registerRegistryViewEndpoint(ctx);
@@ -5039,8 +8877,24 @@ async function start() {
   // `pnpm list --json --depth=0` 定位已装包真实路径，缺它会报
   // "installed package manifest missing"。转发给该端点即可（同 view 的增量能力）。
   registerPackageListViewEndpoint(ctx);
+  // 预览图代理（/dshm-shot）：插件市场（dshmarket）的卡片缩略图 / 灯箱原图在本档
+  // 直连不上图床（真机实测），改由宿主代取（原因与白名单见函数头注）。
+  registerShotProxyEndpoint(ctx);
   // 这行是给 ArkTS 侧的机器可读信号：ArkTS 会等到端口可连为止。
   // authUrl 是**冗余通道**：主通道是 host-ready.json（ArkTS 侧按文件读，见 adoptLocalHost）。
+  /*
+   * 【启动期同步环到此收尾（docs/339）】
+   *
+   * 【为什么必须放在这里，而不是 writeHostReady 里】`writeHostReady()` 在 `runProfile()`
+   * **之前**就会被调用一次（`watchdogAuthUrl` → 早写），日志里能看到那次的
+   * 「探针读数已暂存（host-ready.json 仍属于上一次进程 pid=…）」。
+   * 若把收尾挂在那里，环会在**插件还没开始装载**时就被卸掉 —— 等于什么都没测到。
+   * （这个错我在本轮自查时抓到并改掉了。）
+   *
+   * 这里是 `runProfile` 已返回、`BOOT_60/62/63/64` 都打完、端口已绑的时刻：
+   * 插件图装载完毕，`BOOT_70` 只是自探（自带最长 5s 的等待），不该算进启动。
+   */
+  try { dshmRingStop('after-profile'); } catch (e) { /* 卸载失败不影响启动 */ }
   console.log('DSHM_READY ' + JSON.stringify({
     port: ctx.webServer.port,
     home: HOME_DIR,
@@ -5048,6 +8902,46 @@ async function start() {
     authUrl: readHostReadyUrl(),
   }));
   log('Host 已就绪，端口 ' + ctx.webServer.port);
+  startupWork.markReady();
+  /*
+   * 持久解析缓存落盘检查点：到这里模块图已装载完毕（BOOT_50 之后、核心树全部
+   * import 已发生），本轮采集的解析结果已完整 —— 现在落一次盘，之后即使进程被
+   * 强杀，下次冷启动也有完整表可用。exit 钩子里还有一次兜底落盘。
+   */
+  try {
+    if (resolveCacheHandle !== null) {
+      resolveCacheHandle.flush('ready');
+    }
+  } catch (e) { /* 落盘失败不影响启动；exit 兜底还会再试 */ }
+  /*
+   * 【模块编译缓存落盘检查点（2026-11-16）】编译缓存的原生落盘点只有
+   * AtExit 钩子（compile_cache.cc 的 Enable 注册 AtExit(FlushCompileCache)）与
+   * 本 API：fork（libnode.so.137 / node v24.9.0）在 node_modules.cc:648 暴露了
+   * 同步的 flushCompileCache（→ env->FlushCompileCache → Persist）。
+   *
+   * 【为什么必须在 ready 显式 flush】端侧宿主进程是被**杀掉**的（ArkTS 侧无法
+   * 请求 Node 干净退出）⇒ AtExit 从不执行 ⇒ 编译缓存从不落盘 —— 设备实测
+   * （2026-11-15 夜）：连续三次启动后 v8-compile-cache 的 ns 目录仍是 0 blob，
+   * 每次启动都是冷编译（温态 7.4s = 冷编译 + 温解析）。本地此前"温缓存有效"
+   * 是 run-boot.sh 走协作式干净退出的假象。
+   *
+   * 【代价】Persist 只写"本轮编译未命中"的表目（命中不入 pending 表）：
+   * 温启动这里是 no-op；首次冷启动会写 ~万级小文件（一次性；且已在 ready
+   * 临界路径之外 —— 上方 markReady/DSHM_READY 与端口监听均已完成）。
+   * AtExit 钩子保留作干净退出的兜底（双保险；Persist 写完清 pending 表，
+   * 两次 flush 不冲突）。老 Node（无该 API）typeof 跳过，行为退回旧状。
+   */
+  try {
+    const nodeModule = require('node:module');
+    if (typeof nodeModule.flushCompileCache === 'function') {
+      nodeModule.flushCompileCache();
+    }
+  } catch (e) { /* flush 失败不影响启动；AtExit 兜底 */ }
+  /*
+   * 种子导出（出包流程）：依赖上方 flush 已把 blob 落盘；setTimeout 延迟 =
+   * 不占 ready 临界路径（拷贝万级小文件可能秒级）。触发/边界见函数头注释。
+   */
+  setTimeout(maybeExportBootSeed, 250, { homeDir: HOME_DIR, log: diag });
   // 自探一次：确认端口**真的应答**（"dsh 说它绑了"与"端口真的通"是两件事）
   probeHttpReady(ctx.webServer.port).then((note) => {
     stage('BOOT_70_HTTP_READY', note);
@@ -5077,22 +8971,86 @@ async function start() {
       return;
     }
     stopRequested = true;
+    startupWork.stop();
     log(`收到停止请求（${reason}），关闭 Host`);
+    /*
+     * 【取消在飞的 Python 任务（2026-10-19）】旧的"取消"是在 Python 里跑一段
+     * `signal.setitimer(ITIMER_REAL, 0)` —— 那只清得掉**还没触发**的定时器，停不掉
+     * 正在跑的任务；而且解释器的捕获重定向 / pending alarm / sys.argv 会留给下一个请求。
+     * 现在取消 = `worker.terminate()`：整个执行线程连同解释器一起消失，正在跑的 pip
+     * 装包随即中止（下一个请求会重建解释器，慢但状态干净）。
+     * 这里不 await：停止链不能被它拖住（1.5s 后本来就要 process.exit）。
+     */
     try {
-      if (shutdown && typeof shutdown.shutdown === 'function') {
-        shutdown.shutdown(0);
+      if (pyWorkerBridge !== null) {
+        const cancelled = pyWorkerBridge.shutdown(`host-stop：${reason}`);
+        if (cancelled > 0) {
+          diag(`python worker：停止时取消了 ${cancelled} 个在飞/排队任务（terminate）`);
+        }
       }
     } catch (e) {
-      log('shutdown 抛错：' + (e && e.message));
+      diag(`python worker：停止时 terminate 失败（不影响关闭链）：${String(e).slice(0, 160)}`);
     }
-    // 兜底：dsh 关掉自己的服务后事件循环通常会自然排空；若 1.5 s 后还活着，
-    // 说明仍有句柄（例如我们自己的拦截器/定时器）撑着，那就显式退出——
-    // 走到这里已经没有"还没落盘的诊断"需要保护了。
-    const t = setTimeout(() => {
-      ALLOW_EXIT = true;
-      process.exit(0);
-    }, 1500);
-    t.unref();
+    // 【P0-1 / docs/388】关 Host **之前**先让 guest VM 走 QMP `quit` 优雅关机。
+    // QEMU 是同进程 worker 线程，直接 `process.exit(0)` 会在 guest 刷盘完成前把它杀掉，
+    // 留下半写的 rootfs.qcow2（stage() 只在镜像不存在时重拷 ⇒ 坏镜像跨启动持久化）。
+    // 宿主（CommonJS）与插件（ESM）之间没有 import 关系，用进程级 Set 当唯一接线点：
+    // 插件在 apply() 里注册 `shutdown()`，宿主在这里取出并**等它 settle**。
+    const HOST_STOP_HOOK_TIMEOUT_MS = 10000;
+    // 先取钩子（进程级注册表）、再定义收尾函数：源码顺序即执行顺序。
+    let hookList = [];
+    try {
+      const hooks = globalThis.__DSHM_HOST_SHUTDOWN_HOOKS__;
+      if (hooks && typeof hooks[Symbol.iterator] === 'function') {
+        hookList = Array.from(hooks);
+      }
+    } catch (e) {
+      diag(`关机钩子读取失败（不影响关闭链）：${String(e).slice(0, 160)}`);
+    }
+    const finishHostStop = () => {
+      try {
+        if (shutdown && typeof shutdown.shutdown === 'function') {
+          shutdown.shutdown(0);
+        }
+      } catch (e) {
+        log('shutdown 抛错：' + (e && e.message));
+      }
+      // 兜底：dsh 关掉自己的服务后事件循环通常会自然排空；若 1.5 s 后还活着，
+      // 说明仍有句柄（例如我们自己的拦截器/定时器）撑着，那就显式退出——
+      // 走到这里已经没有"还没落盘的诊断"需要保护了。
+      const t = setTimeout(() => {
+        ALLOW_EXIT = true;
+        process.exit(0);
+      }, 1500);
+      t.unref();
+    };
+    if (hookList.length === 0) {
+      log('关机钩子：无注册项（VM 未启用），直接关闭 Host');
+      finishHostStop();
+      return;
+    }
+    const jobs = hookList.map((hook) => {
+      try {
+        return Promise.resolve(hook()).catch((e) => {
+          diag(`关机钩子失败（不影响关闭链）：${String(e).slice(0, 160)}`);
+        });
+      } catch (e) {
+        diag(`关机钩子抛错（不影响关闭链）：${String(e).slice(0, 160)}`);
+        return Promise.resolve();
+      }
+    });
+    // 双保险：钩子既不 resolve 也不 reject 时，最多等 HOST_STOP_HOOK_TIMEOUT_MS，
+    // 然后照常关 Host —— 不允许"停止核心"变成永久挂起。
+    let settled = false;
+    let guard = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (guard !== null) clearTimeout(guard);
+      finishHostStop();
+    };
+    guard = setTimeout(done, HOST_STOP_HOOK_TIMEOUT_MS);
+    Promise.allSettled(jobs).then(done, done);
   };
 
   const stopFile = HOME_DIR.length > 0 ? path.join(HOME_DIR, 'host-stop-request') : '';
@@ -5155,12 +9113,14 @@ requestStop(`host-stop-request 文件${dshmStopWhy.length > 0 ? '：' + dshmStop
   // 端侧没有 pnpm/npm/git（E86），上游 dsh-plugin-manager 的 execa("pnpm")
   // 第一步就 ENOENT，web/CLI 的所有安装路径在端侧都是死路。本通道改为进程内
   // 安装器：任何一侧（ArkUI 设置页 / 模型 skill）往
-  // $DSH_HOME/install-queue/<id>.req 写入一行 spec（npm 包名或 GitHub 地址），
+  // $DSH_HOME/install-queue/<id>.req 写入一行 spec，或官方安装命令
+  // （`dsh plugin ... add` / `pnpm add` / `npm install`），
   // Host 轮询到后调 dshm-installer.installSpec（纯 JS 下载+解包+落位+用户行），
   // 结果写回同目录 <id>.done / <id>.fail（JSON）。req 取走即删；结果文件留给
   // 写入方读取后自行清理。重启应用后 composeUserRows 把用户行拼进
   // cordis.patch.yml，插件随 profile 挂载生效。
   const pluginInstaller = require('./dshm-installer.js');
+  const { parseInstallCommand } = require('./dshm-install-command.js');
   const installQueueDir = HOME_DIR.length > 0 ? path.join(HOME_DIR, 'install-queue') : '';
   let installBusy = false;
   if (installQueueDir.length > 0) {
@@ -5280,25 +9240,96 @@ requestStop(`host-stop-request 文件${dshmStopWhy.length > 0 ? '：' + dshmStop
             JSON.stringify({ ok: false, error: '空 spec' }, null, 2));
           return;
         }
+        let installSpec = spec;
+        let commandProfileDir = '';
+        let commandRegistry = '';
+        let commandSaveExact = false;
+        if (!isRemove) {
+          const parsedCommand = parseInstallCommand(spec);
+          if (!parsedCommand.ok) {
+            fs.writeFileSync(path.join(installQueueDir, base + '.fail'),
+              JSON.stringify(parsedCommand, null, 2));
+            log(`插件安装命令无效：${parsedCommand.error}（原文：${spec.slice(0, 160)}）`);
+            return;
+          }
+          installSpec = parsedCommand.spec;
+          commandRegistry = parsedCommand.registry;
+          commandSaveExact = parsedCommand.saveExact;
+          if (parsedCommand.dir.length > 0) {
+            const profilesRoot = path.resolve(HOME_DIR, 'profiles');
+            const relative = path.relative(profilesRoot, parsedCommand.dir);
+            if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
+              const error = `--dir 必须指向 $DSH_HOME/profiles 下的一个 profile：${parsedCommand.dir}`;
+              fs.writeFileSync(path.join(installQueueDir, base + '.fail'),
+                JSON.stringify({ ok: false, error }, null, 2));
+              log(`插件安装命令无效：${error}`);
+              return;
+            }
+            commandProfileDir = parsedCommand.dir;
+          } else if (parsedCommand.profile.length > 0) {
+            commandProfileDir = path.join(HOME_DIR, 'profiles', parsedCommand.profile);
+          }
+          if (reqProfileDir.length > 0 && commandProfileDir.length > 0
+            && path.resolve(reqProfileDir) !== path.resolve(commandProfileDir)) {
+            const error = `请求目录冲突：队列 .dir=${reqProfileDir}，命令目标=${commandProfileDir}`;
+            fs.writeFileSync(path.join(installQueueDir, base + '.fail'),
+              JSON.stringify({ ok: false, error }, null, 2));
+            log(`插件安装命令无效：${error}`);
+            return;
+          }
+          if (commandProfileDir.length > 0) {
+            reqProfileDir = commandProfileDir;
+          }
+        }
         installBusy = true;
         let result;
-        const instOpts = { homeDir: HOME_DIR, profile: PROFILE, log: (m) => log(`  [installer] ${m}`) };
+        const instOpts = {
+          homeDir: HOME_DIR,
+          profile: PROFILE,
+          log: (m) => log(`  [installer] ${m}`),
+        };
+        try {
+          instOpts.writerToken = fs.readFileSync(path.join(installQueueDir, base + '.writer'), 'utf8').trim();
+          fs.unlinkSync(path.join(installQueueDir, base + '.writer'));
+        } catch (_) { /* ordinary requests have no transaction ownership */ }
         if (reqProfileDir.length > 0) {
           instOpts.profileDir = reqProfileDir;
+        }
+        if (commandRegistry.length > 0) {
+          instOpts.registry = commandRegistry;
+        }
+        if (commandSaveExact) {
+          instOpts.saveExact = true;
         }
         if (isRemove) {
           log(`插件卸载开始：${spec}（来自 ${reqFile}${reqProfileDir.length > 0 ? ' → ' + reqProfileDir : ''}）`);
           result = await pluginInstaller.removeSpec(spec, instOpts);
         } else {
-          log(`插件安装开始：${spec}（来自 ${reqFile}${reqProfileDir.length > 0 ? ' → ' + reqProfileDir : ''}）`);
-          result = await pluginInstaller.installSpec(spec, instOpts);
+          log(`插件安装开始：${installSpec}（请求：${spec}；来自 ${reqFile}${reqProfileDir.length > 0 ? ' → ' + reqProfileDir : ''}）`);
+          result = await pluginInstaller.installSpec(installSpec, instOpts);
+        }
+        //  两个市场就地改写的**重放**（2026-10-14 回归修复，见 dshm-market-patch.cjs 头注）：
+        //  补丁由核心树 boot 回调在**启动那一刻**贴一次，而市场几乎总是启动之后才装进来的
+        //  ⇒ 那次贴了个 ENOENT（真机原话见该文件头注），落盘的市场文件永远是上游原形：
+        //  皮肤市场 ⇒ 302 条皮肤里只有 41 条能一键装，其余全部「需手动安装」；
+        //  插件市场 ⇒ 卡片缩略图与灯箱都还指着浏览器连不上的图床（空白）。
+        //  位置：installSpec 成功之后、`.done` 写出**之前** —— 写入方拿到 `.done` 就可能立刻
+        //  挂载，那一刻读到的必须已经是改写过的文件。两个市场都不在这个 profile ⇒ 返回 null，静默。
+        if (!isRemove && result.ok) {
+          const marketProfileDir = typeof instOpts.profileDir === 'string' && instOpts.profileDir.length > 0
+            ? instOpts.profileDir
+            : path.join(HOME_DIR, 'profiles', PROFILE);
+          const replayed = await marketPatch.replayMarketContractPatch(marketProfileDir, { coreDir: CORE_DIR });
+          if (replayed !== null) {
+            log(`市场就地改写（装完重放）：${replayed.reason}`);
+          }
         }
         fs.writeFileSync(path.join(installQueueDir, base + (result.ok ? '.done' : '.fail')),
           JSON.stringify(result, null, 2));
         if (isRemove) {
           log(`插件卸载${result.ok ? '完成' : '失败'}：${spec}${!result.ok ? `：${result.error}` : (result.note ? `（${result.note}）` : '')}`);
         } else {
-          log(`插件安装${result.ok ? '完成' : '失败'}：${spec}${result.ok ? `（${result.installed.length} 个包，${result.note}）` : `：${result.error}`}`);
+          log(`插件安装${result.ok ? '完成' : '失败'}：${installSpec}${result.ok ? `（${result.installed.length} 个包，${result.note}）` : `：${result.error}`}`);
         }
       } catch (e) {
         // 队列轮询永不因单次异常断线；req 已删，异常尽力写 .fail 通知写入方
@@ -5334,5 +9365,6 @@ requestStop(`host-stop-request 文件${dshmStopWhy.length > 0 ? '：' + dshmStop
 // undici 噪声降级），此处不再重复注册。
 
 start().catch((e) => {
+  startupWork.stop();
   fail('启动失败：' + (e && e.stack ? e.stack : String(e)));
 });

@@ -1,0 +1,13 @@
+# DSHM 云同步 bundle patch（2026-10-30，docs/319）
+#
+# 只有一个 insert 行：把本插件的宿主半边挂进 profile。
+# 客户端半边由 dsh 的 client 加载器按 `dsh.client.platform: web` 自动注入，
+# 在浏览器侧执行 `lib/client.js` —— 那里才是注册设置分区的地方。
+#
+# 【为什么宿主半边几乎是空的】能力全在 client（UI 注册）与 ArkTS 原生（登录/传输）。
+# 但 `main` 必须指向真模块：`dsh.profile.bundles` 的每个条目都会被
+# `resolveBundleDir` 解析、读 `dsh.bundle.patch`，任一失败**启动即抛**。
+
+- insert:
+    - id: dshm-cloud-sync
+      name: '@deepseek-ai/dshm-cloud-sync'

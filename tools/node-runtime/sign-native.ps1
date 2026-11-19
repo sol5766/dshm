@@ -44,11 +44,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# 2026-10-10: DevEco was moved from C:\Program Files\Huawei\DevEco Studio to
+# D:\Program Files\Huawei\DevEco Studio; resolve the install root instead of hardcoding drives.
+. (Join-Path $PSScriptRoot '..\lib\deveco-home.ps1')
 $ToolCandidates = @(
-  'D:\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\lib\binary-sign-tool.jar',
-  'C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\lib\binary-sign-tool.jar'
+  (Get-DevEcoPath 'sdk\default\openharmony\toolchains\lib\binary-sign-tool.jar')
 )
-$Tool = $ToolCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+$Tool = $ToolCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 if (-not $Tool) {
   Write-Error "binary-sign-tool.jar not found. Looked in: $($ToolCandidates -join '; ')"
 }

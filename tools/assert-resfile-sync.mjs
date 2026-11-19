@@ -16,7 +16,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // 与 place-host-app.mjs 的 FILES 保持同步（新增文件两处一起改）
 const FILES = [
+  'dshm-update-transaction.cjs',
+  'dshm-profile-writer.cjs',
   'main.js',
+  'startup-work.cjs',
   'tar-gz.cjs',
   'jitless-env.cjs',
   'worker-bootstrap.cjs',
@@ -26,12 +29,42 @@ const FILES = [
   'require-builtin-shim.cjs',
   'internal-undici-shim.cjs',
   'dshm-installer.js',
+  'dshm-install-command.js',
+  'dshm-market-patch.cjs',
   'dshm-user-rows.js',
   'dshm-skills.js',
   'dshm-compat.js',
+  // LOOP-GAP 治理（2026-10-19）：main.js 在核心树 require 之前 `require('./fs-probe-cache.cjs')`。
+  // 漏掉它不会崩（安装点自带 try/catch，只留一行 diag），但**缓存层整段不生效** ⇒
+  // 真机 LOOP-GAP / SYNC-COUNT 与修复前一模一样，属于"静默白修"，必须一起进清单。
+  'fs-probe-cache.cjs',
+  // LOOP-GAP 除根（2026-10-19，见 docs/199 §8）：main.js 在**核心树 require 之前、负结果缓存之前**
+  // `require('./module-path-guard.cjs')`，摘掉全局模块路径里指向 `/storage/Users/currentUser` 的项
+  // （公共存储挂载，真机一次负探测可达 192s）。漏掉它不会崩（安装点自带 try/catch），但第一次
+  // 探测仍走慢路径 ⇒ 等于没除根，必须一起进清单。
+  'module-path-guard.cjs',
+  // LOOP-GAP 根因二（2026-10-19，见 docs/200）：Python 的执行搬到 worker 线程。
+  //   · python-bridge-async.cjs 被 main.js 顶层 require ⇒ 漏掉它 Host 直接起不来；
+  //   · python-worker.cjs 是 worker 入口 ⇒ 漏掉它只会让**首个 python 请求**失败
+  //     （MODULE_NOT_FOUND 被端点吞成一行 diag），启动日志毫无异常 —— 正是本门禁存在的理由。
+  'python-bridge-async.cjs',
+  'python-worker.cjs',
+  // 插件独立 Node CLI（2026-10-25）：main.js 顶层 require；漏掉它 Host 直接
+  // MODULE_NOT_FOUND。随包 nodecli 本体由 tools/build-node-cli.mjs 生成。
+  'node-runtime-provision.cjs',
+  'ffmpeg-runtime-provision.cjs',
+  // 冷启动治理（2026-11-15）：main.js 在 CORE_DIR/HOME_DIR 就绪后 require
+  // './resolve-cache.cjs' 安装持久解析缓存。漏掉它不会崩（安装点自带 try/catch，
+  // 只留一行 diag），但解析缓存整段不生效 ⇒ 冷启动白修，必须一起进清单。
+  'resolve-cache.cjs',
+  // 冷启动种子（2026-11-16）：main.js 在 installResolveCache 之前 require
+  // './boot-seed.cjs' 装载随包种子（解析表 JSON + V8 code cache blob）。
+  // 漏掉它不会崩（安装点自带 try/catch），但全新安装后的第一次启动全冷
+  // —— 静默白修，必须进清单。
+  'boot-seed.cjs',
 ];
 const SRC_DIR = join(ROOT, 'hostcore', 'app');
-const DST_DIR = join(ROOT, 'entry', 'src', 'main', 'resources', 'resfile', 'resources', 'app');
+const DST_DIR = join(ROOT, 'hostruntime', 'src', 'main', 'resources', 'resfile', 'resources', 'app');
 
 let failed = 0;
 for (const name of FILES) {

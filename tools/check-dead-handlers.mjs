@@ -119,11 +119,19 @@ const isAllowed = (file, line) => {
 const isPropDefault = (rawLines, i) => {
   const cur = rawLines[i] ?? '';
   const prev = rawLines[i - 1] ?? '';
-  /* 本行含 `= () =>` */
-  if (/\)\s*=>\s*void\s*=\s*\(\)\s*=>\s*\{\s*$/.test(cur)) return true;
-  if (/\)\s*=>\s*void\s*=\s*\(\)\s*=>\s*\{\s*\}\s*;?\s*$/.test(cur)) return true;
-  /* 跨行：上一行以 `= ` 结尾（参数类型那行），本行是裸箭头体 */
-  if (/\)\s*=>\s*void\s*=\s*$/.test(prev) && /\)\s*=>\s*\{\s*$/.test(cur)) return true;
+  /*
+   * 【2026-10-28 补一个此前漏判的形态】被赋值的箭头函数**带返回类型注解**：
+   *   onTick: (durationText: string) => void = (): void => {
+   * 旧判据只认 `= () => {`，于是这一形落到"调用处空实现"分支 ⇒
+   * MeetingPanel 的 `onTick`（第 940 行确实在用 `this.onTick(...)`）被当成死按钮。
+   * docs/258 §4.2 修过同族的"带注解"误报，这里补的是"注解出现在赋值右侧"的那一半。
+   * 判据仍然严格：右箭头必须紧跟 `{`（即默认体就是空的），真死按钮不会被放过。
+   */
+  if (/\)\s*=>\s*[\w<>\[\]|. ]+\s*=\s*\(\s*\)\s*(?::\s*[\w<>\[\]|. ]+\s*)?=>\s*\{\s*$/.test(cur)) return true;
+  if (/\)\s*=>\s*[\w<>\[\]|. ]+\s*=\s*\(\s*\)\s*(?::\s*[\w<>\[\]|. ]+\s*)?=>\s*\{\s*\}\s*;?\s*$/.test(cur)) return true;
+  /* 跨行：上一行以 `= ` 结尾（参数类型那行），本行是箭头体（可带返回类型注解） */
+  if (/\)\s*=>\s*[\w<>\[\]|. ]+\s*=\s*$/.test(prev)
+    && /\)\s*(?::\s*[\w<>\[\]|. ]+\s*)?=>\s*\{\s*$/.test(cur)) return true;
   return false;
 };
 

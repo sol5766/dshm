@@ -1,307 +1,309 @@
 /**
- * 从 dsh 的**生成调用描述符**中提取权威的 endpoint 调用契约。
- *
- * 依据：`@deepseek-ai/dsh-api-remotes/lib/client.js` 与各包的 `lib/client.js` 内含
- * 「generated InvocationDescriptor」对象，形如：
- *   {
- *     id: "@deepseek-ai/dsh-api-session-controller#session/list",
- *     service, namespace, method,
- *     invocation: { kind: "direct" | "scoped" },
- *     parameters: [ { name, wire, source, codec }, ... ],
- *     cancellation: { parameter: "signal" },   // 可选
- *     result: { mode, typeSymbol },
- *     sourceLocation: { file, line, column }
- *   }
- *
- * 这是**唯一权威**的调用契约来源：参数名（含 `_request` / `request` 这类包装名）、
- * 是否可取消、返回类型符号，全部取自此处——比反推方法名可靠得多。
- *
- * 用法：node tools/protocol-contract.mjs [--json <outfile>]
- *
- * ⚠️ **纪律（E223）：新增任何端点之前，先跑这个工具取该端点的参数表。**
- *    - REQUEST 形态的端点，其**内层字段**要另外查上游 `types.d.ts` 里的请求体接口；
- *    - **不要按"同族端点"推断字段名，也不要照抄自己别处的字段命名**——
- *      本项目因此写错过两次（`commands/execute` 的字段名、`session/selectModel` 的嵌套层级），
- *      两次都是被这套契约工具抓出来的；**设备不在时，这是唯一能提前发现"字段不符"的手段**。
- *    - 找不到上游时本脚本会**明确失败**（不要退化成"没有数据也跑完"——静默失效比报错更糟）。
+ * 从 dsh-api-remotes 与插件 lib/client.js 的完整生成调用提取全量权威端点契约。
+ * 不执行上游代码，不混收声明包中的残缺 methods 块，也不跨对象猜 package。
+ * 默认核心树来自 hostcore/core-recipe.json；环境变量仅用于显式跨版本取证。
+ * 用法：DSH_NODE_MODULES=<node_modules> node tools/protocol-contract.mjs --json <文件>
+ * 自检：node tools/protocol-contract.mjs --self-test
  */
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import assert from 'node:assert/strict';
 
-/**
- * 上游 node_modules 的位置（E218）。
- *
- * 【为什么这么写】原先这里兜底成了一个**硬编码的用户名**（`C:\Users\<别人的名字>\…`），
- * 换一台机器/换一个用户就必然找不到上游，`compat-drift` 这条门禁于是**静默失效**——
- * 门禁失效比门禁报错更糟：它让人以为"检查过了、没问题"。
- * 现在按**当前用户**推导，并在两个候选都找不到时**明确失败**（见 `requireDshNodeModules()`）。
- */
-const DSH_NM = process.env.DSH_NODE_MODULES
-  ?? join(homedir(), 'AppData', 'Roaming', 'io.github.hairyf.deepseek-harness-desktop',
-    'dependencies', 'dsh', 'node_modules');
-
-/** 找不到上游就**直接失败并说清怎么指定**，不要退化成"没有数据也跑完" */
-function requireDshNodeModules() {
-  const marker = join(DSH_NM, '@deepseek-ai');
-  if (!existsSync(marker)) {
-    console.error(`找不到上游包目录：${marker}`);
-    console.error('请用环境变量指定，例如：');
-    console.error('  DSH_NODE_MODULES=<path-to>/dependencies/dsh/node_modules node tools/protocol-contract.mjs --json .research/protocol/contracts.json');
-    console.error('（若用本仓库内置的核心树，可指向 dist/core/work/<core>/node_modules）');
-    process.exit(1);
-  }
-  return DSH_NM;
-}
-
-requireDshNodeModules();
-
-const jsonIdx = process.argv.indexOf('--json');
-const jsonOut = jsonIdx >= 0 ? process.argv[jsonIdx + 1] : undefined;
-
-/**
- * 采集对象的核心包版本。
- *
- * **只读核心包 `@deepseek-ai/dsh` 的 version**，不读外层打包包——外层版本号与协议面无关
- * （D2 §0 已记载这个判定规则）。`DSH_VERSION` 允许显式覆盖，用于脱离安装目录做版本标注。
- */
-function coreVersion() {
-  if (process.env.DSH_VERSION) {
-    return process.env.DSH_VERSION;
-  }
-  try {
-    const pkg = JSON.parse(readFileSync(join(DSH_NM, '@deepseek-ai', 'dsh', 'package.json'), 'utf8'));
-    return pkg.version ?? 'unknown';
-  } catch {
-    return 'unknown';
+/** 仅做词法切片；引号、转义、注释中的括号与逗号不参与结构配对。 */
+function* tokens(src) {
+  for (let i = 0; i < src.length;) {
+    if (/\s/.test(src[i])) { i++; continue; }
+    if (src.startsWith('//', i)) {
+      const end = src.indexOf('\n', i + 2);
+      i = end < 0 ? src.length : end + 1;
+      continue;
+    }
+    if (src.startsWith('/*', i)) {
+      const end = src.indexOf('*/', i + 2);
+      if (end < 0) throw new Error('未闭合的注释');
+      i = end + 2;
+      continue;
+    }
+    const start = i;
+    const quote = src[i];
+    if (quote === '"' || quote === "'" || quote === '`') {
+      i++;
+      while (i < src.length && src[i] !== quote) {
+        if (src[i] === '\\') i++;
+        i++;
+      }
+      if (i >= src.length) throw new Error('未闭合的字符串');
+      i++;
+    } else if (/[A-Za-z0-9_$]/.test(src[i])) {
+      while (i < src.length && /[A-Za-z0-9_$]/.test(src[i])) i++;
+    } else {
+      i++;
+    }
+    yield { text: src.slice(start, i), start, end: i };
   }
 }
 
-function walk(dir, acc) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return acc;
+function unquote(text = '') {
+  const t = text.trim();
+  return ['"', "'", '`'].includes(t[0]) && t.at(-1) === t[0] ? t.slice(1, -1) : t;
+}
+
+function closingIndex(list, start) {
+  const closing = { '{': '}', '[': ']', '(': ')' };
+  const stack = [];
+  for (let i = start; i < list.length; i++) {
+    const text = list[i].text;
+    if (Object.hasOwn(closing, text)) stack.push(closing[text]);
+    else if (['}', ']', ')'].includes(text)) {
+      if (stack.pop() !== text) throw new Error(`生成描述符括号不匹配：位置 ${list[i].start}，符号 ${text}`);
+      if (stack.length === 0) return i;
+    }
   }
-  for (const e of entries) {
+  throw new Error('生成描述符对象未闭合');
+}
+
+/** 顶层键可为标识符，或单/双/反引号字符串。 */
+function entries(objText) {
+  const list = [...tokens(objText)];
+  if (list[0]?.text !== '{' || list.at(-1)?.text !== '}') throw new Error('预期对象字面量');
+  const out = [];
+  for (let i = 1; i < list.length - 1;) {
+    if (list[i].text === ',') { i++; continue; }
+    const key = unquote(list[i++].text);
+    if (list[i++]?.text !== ':') throw new Error(`描述符键 ${key} 缺少冒号`);
+    const start = i;
+    while (i < list.length - 1 && list[i].text !== ',') {
+      if (['{', '[', '('].includes(list[i].text)) i = closingIndex(list, i) + 1;
+      else i++;
+    }
+    out.push({ key, value: objText.slice(list[start].start, list[i - 1].end) });
+  }
+  return out;
+}
+
+function fields(text) {
+  return new Map(entries(text).map(({ key, value }) => [key, value]));
+}
+
+function parameters(text = '[]') {
+  const list = [...tokens(text)];
+  if (list[0]?.text !== '[' || list.at(-1)?.text !== ']') throw new Error('预期参数数组');
+  const out = [];
+  for (let i = 1; i < list.length - 1;) {
+    if (list[i].text === ',') { i++; continue; }
+    if (list[i].text !== '{') throw new Error('预期参数对象');
+    const end = closingIndex(list, i);
+    const p = fields(text.slice(list[i].start, list[end].end));
+    const name = unquote(p.get('name'));
+    if (!name) throw new Error('参数缺少 name');
+    out.push({ name, wire: p.has('wire') ? unquote(p.get('wire')) : name });
+    i = end + 1;
+  }
+  return out;
+}
+
+function descriptor(value, id, namespace, method, streamProps) {
+  const d = fields(value);
+  const service = unquote(d.get('service'));
+  const invocationKind = unquote(fields(d.get('invocation') ?? '{}').get('kind'));
+  if (!service || !['direct', 'scoped'].includes(invocationKind)) {
+    throw new Error(`权威契约不完整：${id} 缺少 service / invocation.kind`);
+  }
+  const declPkg = id.slice(0, id.indexOf('#'));
+  // 新生成物自带顶层 mode；只有旧格式未声明 mode 时才回退装饰器。
+  const stream = d.has('mode') ? unquote(d.get('mode')) === 'stream'
+    : streamProps.has(`${declPkg}#${method}`) || streamProps.has(`${declPkg}#${service}`);
+  const result = fields(d.get('result') ?? '{}');
+  const loc = fields(d.get('sourceLocation') ?? '{}');
+  const file = unquote(loc.get('file'));
+  return {
+    id, pkg: 'dsh-api-remotes', service, namespace, method,
+    kind: stream ? 'stream' : invocationKind, invocationKind,
+    cancellable: d.has('cancellation'), params: parameters(d.get('parameters')),
+    resultSymbol: unquote(result.get('typeSymbol')),
+    source: file ? `${file}:${unquote(loc.get('line'))}` : ''
+  };
+}
+
+/** 重复 id 和重复线上 endpoint 均拒绝；不能由 Map 静默覆盖冲突。 */
+export function validateContracts(descriptors) {
+  if (!Array.isArray(descriptors) || descriptors.length === 0) throw new Error('解析到 0 个 endpoint，拒绝空契约');
+  const ids = new Set();
+  const endpoints = new Set();
+  for (const d of descriptors) {
+    const key = `${d.namespace}/${d.method}`;
+    if (!d.id || !d.namespace || !d.method) throw new Error('端点标识不完整');
+    if (ids.has(d.id)) throw new Error(`重复契约 id：${d.id}`);
+    if (endpoints.has(key)) throw new Error(`重复线上 endpoint：${key}`);
+    ids.add(d.id);
+    endpoints.add(key);
+  }
+  return descriptors;
+}
+
+export function parseRemoteDescriptors(src, streamProps = new Set()) {
+  // 客户端业务代码含正则和嵌套模板；仅对生成调用内部做词法扫描，避免把业务正则当字符串。
+  const callTexts = [];
+  const marker = /\bcreateTypertRemoteInfo\s*\(\s*\{/g;
+  let match;
+  while ((match = marker.exec(src)) !== null) {
+    const prefix = src.slice(0, match.index);
+    if (prefix.lastIndexOf('/*') > prefix.lastIndexOf('*/')) continue;
+    const start = match.index;
+    const stack = [];
+    let began = false;
+    for (const token of tokens(src.slice(start))) {
+      if (['{', '[', '('].includes(token.text)) { stack.push(token.text); began = true; }
+      else if (['}', ']', ')'].includes(token.text)) {
+        stack.pop();
+        if (began && stack.length === 0) {
+          callTexts.push(src.slice(start, start + token.end));
+          marker.lastIndex = start + token.end;
+          break;
+        }
+      }
+    }
+  }
+  const list = [...tokens(callTexts.length ? callTexts.join(';') : src)];
+  const parsedSrc = callTexts.length ? callTexts.join(';') : src;
+  const out = [];
+  let calls = 0;
+  for (let i = 0; i < list.length - 2; i++) {
+    if (list[i].text !== 'createTypertRemoteInfo' || list[i + 1].text !== '(' || list[i + 2].text !== '{') continue;
+    const callEnd = closingIndex(list, i + 1);
+    const objectEnd = closingIndex(list, i + 2);
+    const spec = fields(parsedSrc.slice(list[i + 2].start, list[objectEnd].end));
+    const pkg = unquote(spec.get('package'));
+    if (!pkg.startsWith('@deepseek-ai/') || !spec.has('methods')) throw new Error('权威 remote 调用缺少 package / methods');
+    for (const entry of entries(spec.get('methods'))) {
+      const slash = entry.key.indexOf('/');
+      if (slash <= 0 || slash === entry.key.length - 1) throw new Error(`非法 endpoint：${entry.key}`);
+      out.push(descriptor(entry.value, `${pkg}#${entry.key}`, entry.key.slice(0, slash), entry.key.slice(slash + 1), streamProps));
+    }
+    calls++;
+    i = callEnd;
+  }
+  // 旧版生成物是完整 InvocationDescriptor 对象，仅在新调用格式完全缺席时解析。
+  if (calls === 0) {
+    for (let i = 0; i < list.length - 3; i++) {
+      if (list[i].text !== '{' || unquote(list[i + 1].text) !== 'id' || list[i + 2].text !== ':') continue;
+      const end = closingIndex(list, i);
+      const value = src.slice(list[i].start, list[end].end);
+      const d = fields(value);
+      if (!d.has('namespace') || !d.has('method') || !d.has('service')) continue;
+      out.push(descriptor(value, unquote(d.get('id')), unquote(d.get('namespace')), unquote(d.get('method')), streamProps));
+      i = end;
+    }
+  }
+  validateContracts(out);
+  return out.sort((a, b) => `${a.namespace}/${a.method}`.localeCompare(`${b.namespace}/${b.method}`));
+}
+
+function walk(dir, acc = []) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
     if (e.name === 'node_modules' || e.name === '.git') continue;
-    const p = join(dir, e.name);
-    if (e.isDirectory()) walk(p, acc);
-    else if (e.isFile() && e.name.endsWith('.js')) acc.push(p);
+    const path = join(dir, e.name);
+    if (e.isDirectory()) walk(path, acc);
+    else if (e.isFile() && e.name.endsWith('.js')) acc.push(path);
   }
   return acc;
 }
 
-/** 用括号配对从 id 起始位置切出一个完整的 `{...}` 对象字面量文本 */
-function sliceObject(src, start) {
-  let depth = 0;
-  let i = start;
-  let inString = false;
-  let quote = '';
-  let escaped = false;
-  for (; i < src.length; i++) {
-    const ch = src[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === quote) inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      inString = true;
-      quote = ch;
-      continue;
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return src.slice(start, i + 1);
-    }
-  }
-  return undefined;
-}
-
-/** 在对象文本中按深度安全地找某个顶层键的值（字符串感知） */
-function topLevelValue(objText, key) {
-  let depth = 1;
-  let inString = false;
-  let quote = '';
-  let escaped = false;
-  for (let i = 1; i < objText.length - 1; i++) {
-    const ch = objText[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === quote) inString = false;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      inString = true;
-      quote = ch;
-      continue;
-    }
-    if (ch === '{' || ch === '[') {
-      depth++;
-      continue;
-    }
-    if (ch === '}' || ch === ']') {
-      depth--;
-      continue;
-    }
-    if (depth === 1 && objText.startsWith(key, i)) {
-      const before = objText[i - 1];
-      if (before !== undefined && /[A-Za-z0-9_$]/.test(before)) continue;
-      let j = i + key.length;
-      while (j < objText.length && /\s/.test(objText[j])) j++;
-      if (objText[j] !== ':') continue;
-      j++;
-      while (j < objText.length && /\s/.test(objText[j])) j++;
-      const start = j;
-      if (objText[j] === '{' || objText[j] === '[') {
-        let d = 0;
-        let s = false;
-        let q = '';
-        let esc = false;
-        for (; j < objText.length; j++) {
-          const c = objText[j];
-          if (s) {
-            if (esc) esc = false;
-            else if (c === '\\') esc = true;
-            else if (c === q) s = false;
-            continue;
-          }
-          if (c === '"' || c === "'" || c === '`') { s = true; q = c; continue; }
-          if (c === '{' || c === '[') d++;
-          else if (c === '}' || c === ']') { d--; if (d === 0) { j++; break; } }
-        }
-        return objText.slice(start, j);
+function legacyStreamProps(scope) {
+  const streams = new Set();
+  for (const pkg of readdirSync(scope, { withFileTypes: true }).filter((e) => e.isDirectory())) {
+    for (const file of walk(join(scope, pkg.name))) {
+      const src = readFileSync(file, 'utf8');
+      for (const m of src.matchAll(/_(\w+)_decorators\s*=\s*\[\s*Remote\(\s*\{\s*mode:\s*(["'`])stream\2/g)) {
+        streams.add(`@deepseek-ai/${pkg.name}#${m[1]}`);
       }
-      // 标量值
-      let end = j;
-      while (end < objText.length && !/[,}\]]/.test(objText[end])) end++;
-      return objText.slice(start, end).trim();
     }
   }
-  return undefined;
+  return streams;
 }
 
-const scope = join(DSH_NM, '@deepseek-ai');
-const packages = readdirSync(scope, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
-
-/**
- * 第一遍：找出「流式」方法。
- *
- * 为什么必须单独扫：`invocation: { kind }` 只有 `direct` / `scoped`，
- * 流式与否记录在 `Remote` **装饰器**参数里（`Remote({ mode: "stream" })`），
- * 描述符本身不携带该信息。误把流式端点当一元调用会被 Host 以
- * `gateway/signature-invalid` 拒绝（D2 §8.4 实测），因此这个标记必须准确。
- */
-const streamProps = new Set();
-/** 同时记录带 scope 与不带 scope 两种键，兼容 id 的书写形式 */
-for (const pkg of packages) {
-  for (const file of walk(join(scope, pkg), [])) {
-    let src;
-    try {
-      src = readFileSync(file, 'utf8');
-    } catch {
-      continue;
-    }
-    for (const m of src.matchAll(/_(\w+)_decorators\s*=\s*\[\s*Remote\(\s*\{\s*mode:\s*"stream"/g)) {
-      streamProps.add(`@deepseek-ai/${pkg}#${m[1]}`);
-      streamProps.add(`${pkg}#${m[1]}`);
-    }
+function selfTest() {
+  let tests = 0;
+  const check = (fn) => { fn(); tests++; };
+  for (const quote of ['"', "'", '`']) {
+    const q = (s) => `${quote}${s}${quote}`;
+    const method = `{service:${q('svc')},mode:${q('stream')},invocation:{kind:${q('scoped')}},parameters:[{name:${q('agent')},wire:${q('agentId')},codec:{mode:${q('strict')}}}],cancellation:{parameter:${q('signal')}},result:{mode:${q('strict')},typeSymbol:${q('result')}},sourceLocation:{${q('file')}:${q('path.ts')},${q('line')}:42}}`;
+    const call = `createTypertRemoteInfo({package:${q('@deepseek-ai/real')},methods:{${q('session/follow')}:${method}}},zod)`;
+    const d = parseRemoteDescriptors(`const decoy={package:${q('@deepseek-ai/wrong')},methods:{}};${call}`)[0];
+    check(() => assert.equal(d.id, '@deepseek-ai/real#session/follow'));
+    check(() => assert.equal(d.kind, 'stream'));
+    check(() => assert.equal(d.invocationKind, 'scoped'));
+    check(() => assert.deepEqual(d.params, [{ name: 'agent', wire: 'agentId' }]));
+    check(() => assert.equal(d.source, 'path.ts:42'));
+    check(() => assert.equal(d.resultSymbol, 'result'));
+    check(() => assert.equal(d.cancellable, true));
+    check(() => assert.throws(() => parseRemoteDescriptors(`${call};${call}`), /重复契约 id/));
+    check(() => assert.throws(() => parseRemoteDescriptors(`${call};${call.replace('@deepseek-ai/real', '@deepseek-ai/other')}`), /重复线上 endpoint/));
   }
+  const method = `{service:'svc',invocation:{kind:'direct'},parameters:[{name:'request',codec:{mode:'stream'}}],result:{mode:'stream',typeSymbol:'r'}}`;
+  const call = (m) => `createTypertRemoteInfo({package:'@deepseek-ai/real',methods:{'session/follow':${m}}},zod)`;
+  const streams = new Set(['@deepseek-ai/real#follow']);
+  check(() => assert.equal(parseRemoteDescriptors(call(method))[0].kind, 'direct'));
+  check(() => assert.equal(parseRemoteDescriptors(call(method), streams)[0].kind, 'stream'));
+  check(() => assert.equal(parseRemoteDescriptors(call(method.replace("service:'svc'", "mode:'unary',service:'svc'")), streams)[0].kind, 'direct'));
+  check(() => assert.deepEqual(parseRemoteDescriptors(call(method))[0].params, [{ name: 'request', wire: 'request' }]));
+  check(() => assert.throws(() => parseRemoteDescriptors(`const declaration={package:'@deepseek-ai/real',methods:{'session/follow':${method}}}`), /0 个 endpoint/));
+  check(() => assert.throws(() => parseRemoteDescriptors(call(method.replace("invocation:{kind:'direct'},", ''))), /契约不完整/));
+  check(() => assert.equal(parseRemoteDescriptors(`const old={id:'@deepseek-ai/real#session/follow',namespace:'session',method:'follow',${method.slice(1)}`, streams)[0].kind, 'stream'));
+  check(() => assert.equal(parseRemoteDescriptors(`/* createTypertRemoteInfo({wrong}) */ ${call(method)}`)[0].resultSymbol, 'r'));
+  check(() => assert.throws(() => collectContracts('/__dshm_missing_contract_target__'), /找不到权威契约源/));
+  check(() => assert.throws(() => validateContracts([]), /拒绝空契约/));
+  console.log(`协议采集自检通过：${tests} 项（引号、完整调用边界、唯一性、顶层 stream 与旧版回退）`);
 }
 
-const descriptors = [];
-const seen = new Set();
+export function recipeNodeModules(root = process.cwd()) {
+  const recipe = JSON.parse(readFileSync(join(root, 'hostcore', 'core-recipe.json'), 'utf8'));
+  return join(root, 'dist', 'core', 'work', `dsh-core-${recipe.coreVersion}`, 'node_modules');
+}
 
-for (const pkg of packages) {
-  const files = walk(join(scope, pkg), []);
+/** 核心汇总和插件的完整远端调用都是权威源；声明包的裸 methods 块不算。 */
+export function collectContracts(nm) {
+  const scope = join(nm, '@deepseek-ai');
+  const sourceFile = join(scope, 'dsh-api-remotes', 'lib', 'client.js');
+  if (!existsSync(sourceFile)) throw new Error(`找不到权威契约源：${sourceFile}；请设置 DSH_NODE_MODULES`);
+  const streams = legacyStreamProps(scope);
+  const files = [sourceFile, ...readdirSync(scope).sort().filter((pkg) => pkg !== 'dsh-api-remotes')
+    .map((pkg) => join(scope, pkg, 'lib', 'client.js')).filter((file) => existsSync(file))];
+  const byId = new Map();
+  const authorities = [];
   for (const file of files) {
-    let src;
-    try {
-      src = readFileSync(file, 'utf8');
-    } catch {
-      continue;
-    }
-    const re = /\{\s*id:\s*"([^"]+)"\s*,\s*service:\s*"([^"]*)"\s*,\s*namespace:\s*"([^"]*)"\s*,\s*method:\s*"([^"]*)"/g;
-    let m;
-    while ((m = re.exec(src)) !== null) {
-      const id = m[1];
-      if (seen.has(id)) continue;
-      const objText = sliceObject(src, m.index);
-      if (objText === undefined) continue;
-      seen.add(id);
-      const invocationText = topLevelValue(objText, 'invocation') ?? '';
-      const invocationKind = (invocationText.match(/kind:\s*"([^"]+)"/) ?? [, 'unknown'])[1];
-      // 流式判定：装饰器集合按「声明包#属性名」记录。
-      // 关键：descriptor 的**声明包**在 id 里（`<declPkg>#<ns>/<method>`），
-      // 而所有 descriptor 都集中由 dsh-api-remotes 装配，因此不能用「文件所在包」做键。
-      const declPkg = id.includes('#') ? id.slice(0, id.indexOf('#')) : pkg;
-      const isStream = streamProps.has(`${declPkg}#${m[4]}`)
-        || streamProps.has(`${declPkg}#${m[2]}`);
-      const cancelText = topLevelValue(objText, 'cancellation');
-      const paramsText = topLevelValue(objText, 'parameters') ?? '[]';
-      const params = [];
-      const pre = /name:\s*"([^"]*)"\s*,\s*wire:\s*"([^"]*)"/g;
-      let pm;
-      while ((pm = pre.exec(paramsText)) !== null) params.push({ name: pm[1], wire: pm[2] });
-      const resultText = topLevelValue(objText, 'result') ?? '';
-      const resultSymbol = (resultText.match(/typeSymbol:\s*"([^"]+)"/) ?? [, ''])[1];
-      const locText = topLevelValue(objText, 'sourceLocation') ?? '';
-      const locFile = (locText.match(/file:\s*"([^"]+)"/) ?? [, ''])[1];
-      const locLine = (locText.match(/line:\s*(\d+)/) ?? [, ''])[1];
-      descriptors.push({
-        id, pkg, service: m[2], namespace: m[3], method: m[4],
-        kind: isStream ? 'stream' : invocationKind,
-        invocationKind,
-        cancellable: cancelText !== undefined,
-        params,
-        resultSymbol,
-        source: locFile === '' ? '' : `${locFile}:${locLine}`
-      });
+    const src = readFileSync(file, 'utf8');
+    if (file !== sourceFile && !/\bcreateTypertRemoteInfo\s*\(\s*\{/.test(src)) continue;
+    const ds = parseRemoteDescriptors(src, streams);
+    authorities.push({ file, endpointCount: ds.length });
+    for (const d of ds) {
+      const prev = byId.get(d.id);
+      if (prev && JSON.stringify(prev) !== JSON.stringify(d)) throw new Error(`权威源冲突：${d.id}，${file}`);
+      if (!prev) byId.set(d.id, d);
     }
   }
+  const descriptors = validateContracts([...byId.values()]).sort((a, b) => `${a.namespace}/${a.method}`.localeCompare(`${b.namespace}/${b.method}`));
+  return { descriptors, authorities };
 }
 
-descriptors.sort((a, b) => (a.namespace + '/' + a.method).localeCompare(b.namespace + '/' + b.method));
-
-console.log(`# dsh endpoint 调用契约（${descriptors.length} 个 endpoint）\n`);
-const byNs = new Map();
-for (const d of descriptors) {
-  if (!byNs.has(d.namespace)) byNs.set(d.namespace, []);
-  byNs.get(d.namespace).push(d);
-}
-for (const ns of [...byNs.keys()].sort()) {
-  console.log(`## ${ns}`);
-  for (const d of byNs.get(ns)) {
-    const p = d.params.length === 0 ? '(无参数)' : d.params.map((x) => x.wire).join(', ');
-    console.log(`  ${d.method.padEnd(24)} ${d.kind.padEnd(8)} ${d.cancellable ? 'cancel' : '      '}  params: ${p}`);
-  }
-  console.log('');
-}
-
-if (jsonOut) {
+function main() {
+  if (process.argv.includes('--self-test')) { selfTest(); return; }
+  const nm = process.env.DSH_NODE_MODULES ?? recipeNodeModules();
+  const { descriptors, authorities } = collectContracts(nm);
+  console.log(`# dsh endpoint 调用契约（${descriptors.length} 个 endpoint / ${descriptors.filter((d) => d.kind === 'stream').length} 个流式）`);
+  for (const d of descriptors) console.log(`${d.namespace}/${d.method}  ${d.kind}  ${d.cancellable ? 'cancel' : ''}  params: ${d.params.map((p) => p.wire).join(', ')}`);
+  const jsonIdx = process.argv.indexOf('--json');
+  if (jsonIdx < 0) return;
+  const jsonOut = process.argv[jsonIdx + 1];
+  if (!jsonOut || jsonOut.startsWith('--')) throw new Error('--json 需要输出路径');
+  const version = JSON.parse(readFileSync(join(nm, '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version;
+  if (process.env.DSH_VERSION && process.env.DSH_VERSION !== version) throw new Error(`目标版本不符：${process.env.DSH_VERSION} != ${version}`);
   writeFileSync(jsonOut, JSON.stringify(descriptors, null, 2), 'utf8');
-  console.log(`已写入 ${jsonOut}`);
+  writeFileSync(`${jsonOut}.meta.json`, JSON.stringify({ corePackage: version, capturedAt: new Date().toISOString(), endpointCount: descriptors.length, nodeModules: nm, authorities }, null, 2), 'utf8');
+  console.log(`已写入 ${jsonOut} 与元数据（核心包 ${version}）`);
+}
 
-  /**
-   * 同时写一份「自描述」元数据。
-   *
-   * 存在理由（D5 升级手册）：契约文件本身是个纯数组，不带版本号，于是下游工具只能去
-   * 「当前环境里装的那个 dsh」猜版本。一旦我们为了评估新版本而把契约指向别的安装目录
-   * （`DSH_NODE_MODULES`），猜出来的版本就是错的——漂移报告会显示错误的「当前环境核心包」，
-   * 而错误的版本号会让人做出错误的兼容性判断。
-   * 让采集者自己记下版本，下游就永远不需要猜。
-   */
-  const meta = {
-    corePackage: coreVersion(),
-    capturedAt: new Date().toISOString(),
-    endpointCount: descriptors.length,
-    nodeModules: DSH_NM
-  };
-  writeFileSync(`${jsonOut}.meta.json`, JSON.stringify(meta, null, 2), 'utf8');
-  console.log(`已写入 ${jsonOut}.meta.json（核心包 ${meta.corePackage}）`);
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

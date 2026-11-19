@@ -1,0 +1,27 @@
+{
+  "name": "@deepseek-ai/dshm-vm-bash",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧「guest 虚拟机通道」：手持档（手机/平板）沙箱内既没有可 execve 的 shell、也没有可用的 pty 后端外壳，本插件把 @deepseek-ai/dsh-subprocess-local 的 spawn 与 spawnTerminal 在**该档**改接到随包 QEMU guest（HiSH 同源 Linux VM）：命令走 QGA 里的真 bash，侧边栏终端走 -device virtconsole（guest 侧 /dev/hvc<i-1> 真 tty，最多 4 个并发）。判据与 dshm-market-bridge / dshm-profile-pnpm 同源（能 spawn ⇒ 完全惰性）⇒ 桌面模式 档行为零变化。见 lib/index.js 与 lib/terminal.js 头注。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/paths.js",
+    "lib/qga.js",
+    "lib/vm.js",
+    "lib/vm-worker.cjs",
+    "lib/handle.js",
+    "lib/terminal.js",
+    "NOTICE.md",
+    "licenses/GPL-2.0.txt",
+    "licenses/HiSH-MIT.txt"
+  ],
+  "license": "MIT"
+}

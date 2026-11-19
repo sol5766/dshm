@@ -3,6 +3,10 @@
     {
       "name": "app_name",
       "value": "DSHM"
+    },
+    {
+      "name": "app_name_beta",
+      "value": "DSHM"
     }
   ]
 }

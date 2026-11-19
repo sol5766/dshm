@@ -1,0 +1,36 @@
+{
+  "name": "@deepseek-ai/dshm-cloud-sync",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 端侧插件：在官方设置面板里注册「云同步」分区（三端统一入口）。UI 由本插件用 React 渲染，与其它设置分区完全同构；真正的登录/扫描/上传/导入由 ArkTS 侧执行，经 __DSHM_BRIDGES__ 桥交互。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  }
+}

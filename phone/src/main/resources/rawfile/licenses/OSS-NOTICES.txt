@@ -1,0 +1,808 @@
+DSHM 关于 —— 版本、开源组件声明与版权信息
+
+核心版本：0.2.2-rc.5+dshm.1
+生成时间：2026-11-19T00:49:18.832Z
+
+一、版本信息
+  应用：DSHM（HarmonyOS 客户端）
+  上游：DeepSeek Harness（MIT License，Copyright (c) 2026 DeepSeek）
+
+二、开源组件声明
+
+  （1）随包运行时与工具
+  1. Node.js - MIT
+  2. CPython 3.12 - PSF-2.0
+  3. Git - GPL-2.0
+  4. FFmpeg 9.0.1 - GPL-2.0-or-later（构建含 GPL 组件；随包另附 LGPL-2.1-or-later 文本）
+  5. BusyBox - GPL-2.0
+  6. QEMU - GPL-2.0
+  7. HiSH 运行件（guest VM 资产与构建配方） release-20260516 - MIT
+  8. Linux kernel（guest 内核） 6.12.60 - GPL-2.0
+  9. Alpine Linux root filesystem 3.22 (aarch64) - 集合许可（含 BusyBox GPL-2.0、musl MIT 等）
+  10. QEMU virtio option ROM (efi-virtio.rom) - GPL-2.0
+  11. X11 (libX11)（libX11.so） - MIT
+  12. X11 (libXau)（libXau.so） - MIT
+  13. X11 (libXdmcp)（libXdmcp.so） - MIT
+  14. X11 (libXext)（libXext.so） - MIT
+  15. X11 (libXrender)（libXrender.so） - MIT
+  16. util-linux (libblkid)（libblkid.so） - LGPL-2.1-or-later
+  17. bzip2（libbz2.so） - bzip2-1.0.6
+  18. cairo（libcairo.so） - LGPL-2.1-or-later OR MPL-1.1
+  19. Expat（libexpat.so） - MIT
+  20. libffi（libffi.so） - MIT
+  21. fontconfig（libfontconfig.so） - MIT 风格（fontconfig 许可）
+  22. FreeType（libfreetype.so） - FTL OR GPL-2.0-or-later
+  23. GNU FriBidi（libfribidi.so） - LGPL-2.1-or-later
+  24. gdk-pixbuf（libgdk_pixbuf-2.0.so） - LGPL-2.1-or-later
+  25. GLib (GIO)（libgio-2.0.so） - LGPL-2.1-or-later
+  26. GLib（libglib-2.0.so） - LGPL-2.1-or-later
+  27. GLib (GModule)（libgmodule-2.0.so） - LGPL-2.1-or-later
+  28. GLib (GObject)（libgobject-2.0.so） - LGPL-2.1-or-later
+  29. Graphite2（libgraphite2.so） - MIT OR LGPL-2.1-or-later
+  30. HarfBuzz（libharfbuzz.so） - MIT
+  31. GNU gettext (libintl)（libintl.so） - LGPL-2.1-or-later
+  32. libjpeg-turbo（libjpeg.so） - IJG OR BSD-3-Clause OR Zlib
+  33. Little CMS 2（liblcms2.so） - MIT
+  34. XZ Utils (liblzma)（liblzma.so） - 0BSD OR LGPL-2.1-or-later
+  35. util-linux (libmount)（libmount.so） - LGPL-2.1-or-later
+  36. Node.js（libnode.so.137） - MIT
+  37. Pango（libpango-1.0.so） - LGPL-2.1-or-later
+  38. Pango (cairo 后端)（libpangocairo-1.0.so） - LGPL-2.1-or-later
+  39. Pango (FreeType 后端)（libpangoft2-1.0.so） - LGPL-2.1-or-later
+  40. PCRE2（libpcre2-8.so） - BSD-3-Clause
+  41. Pixman（libpixman-1.so） - MIT
+  42. libpng（libpng16.so） - libpng-2.0
+  43. node-pty（@ohos-ports 移植件）（libpty.so） - MIT
+  44. CPython（libpython3.12.so.1.0） - PSF-2.0
+  45. QEMU（libqemu-system-aarch64.so） - GPL-2.0
+  46. librsvg（librsvg-2.so） - LGPL-2.1-or-later
+  47. sharp（@ohos-ports 移植件）（libsharp-openharmony-arm64.so） - Apache-2.0
+  48. libwebp (sharpyuv)（libsharpyuv.so） - BSD-3-Clause
+  49. libslirp（libslirp.so.0） - BSD-3-Clause
+  50. libtiff（libtiff.so） - libtiff（BSD 风格）
+  51. libvips (C++ API)（libvips-cpp.so） - LGPL-2.1-or-later
+  52. libvips（libvips.so） - LGPL-2.1-or-later
+  53. libwebp（libwebp.so） - BSD-3-Clause
+  54. libwebp (demux)（libwebpdemux.so） - BSD-3-Clause
+  55. libwebp (mux)（libwebpmux.so） - BSD-3-Clause
+  56. XCB (render)（libxcb-render.so） - MIT
+  57. XCB (shm)（libxcb-shm.so） - MIT
+  58. XCB（libxcb.so） - MIT
+  59. libxml2（libxml2.so） - MIT
+  60. zlib（libz.so） - Zlib
+  61. Zstandard（libzstd.so） - BSD-3-Clause
+  62. Alpine guest 包（6 个，见榜单）
+
+  （2）随包原生共享库
+  共 51 个第三方库；DSHM 自有件（不计入第三方）：
+
+  （3）HarmonyOS 侧依赖（ohpm）
+
+  （4）核心树 npm 依赖（共 682 个包）
+  63. @agentclientprotocol/sdk 1.4.0 - Apache-2.0
+  64. @anthropic-ai/sdk 0.129.0 - MIT
+  65. @aws-sdk/client-bedrock-runtime 3.1127.0 - Apache-2.0
+  66. @aws-sdk/core 3.981.0 - Apache-2.0
+  67. @aws-sdk/credential-provider-env 3.972.84 - Apache-2.0
+  68. @aws-sdk/credential-provider-http 3.972.86 - Apache-2.0
+  69. @aws-sdk/credential-provider-ini 3.973.30 - Apache-2.0
+  70. @aws-sdk/credential-provider-login 3.972.92 - Apache-2.0
+  71. @aws-sdk/credential-provider-node 3.972.97 - Apache-2.0
+  72. @aws-sdk/credential-provider-process 3.972.84 - Apache-2.0
+  73. @aws-sdk/credential-provider-sso 3.973.28 - Apache-2.0
+  74. @aws-sdk/credential-provider-web-identity 3.972.90 - Apache-2.0
+  75. @aws-sdk/eventstream-handler-node 3.972.42 - Apache-2.0
+  76. @aws-sdk/middleware-eventstream 3.972.38 - Apache-2.0
+  77. @aws-sdk/middleware-websocket 3.972.66 - Apache-2.0
+  78. @aws-sdk/nested-clients 3.998.3 - Apache-2.0
+  79. @aws-sdk/signature-v4-multi-region 3.996.52 - Apache-2.0
+  80. @aws-sdk/token-providers 3.1166.0 - Apache-2.0
+  81. @aws-sdk/token-providers 3.1127.0 - Apache-2.0
+  82. @aws-sdk/types 3.975.1 - Apache-2.0
+  83. @aws-sdk/xml-builder 3.972.43 - Apache-2.0
+  84. @aws/lambda-invoke-store 0.3.0 - Apache-2.0
+  85. @babel/code-frame 7.29.7 - MIT
+  86. @babel/helper-validator-identifier 7.29.7 - MIT
+  87. @babel/runtime 7.29.14 - MIT
+  88. @deepseek-ai/cordis 4.1.0 - MIT
+  89. @deepseek-ai/cordis-plugin-group 1.1.0 - MIT
+  90. @deepseek-ai/cordis-plugin-include 1.1.0 - MIT
+  91. @deepseek-ai/cordis-plugin-loader 1.1.0 - MIT
+  92. @deepseek-ai/cordis-plugin-timer 1.2.0 - MIT
+  93. @deepseek-ai/cosmokit 1.9.0 - MIT
+  94. @deepseek-ai/dsh 0.2.2-rc.5 - MIT
+  95. @deepseek-ai/dsh-acp 0.2.2-rc.5 - MIT
+  96. @deepseek-ai/dsh-acp-app 0.2.2-rc.5 - MIT
+  97. @deepseek-ai/dsh-action-cards 0.2.2-rc.5 - MIT
+  98. @deepseek-ai/dsh-agent 0.2.2-rc.5 - MIT
+  99. @deepseek-ai/dsh-agent-default-model 0.2.2-rc.5 - MIT
+  100. @deepseek-ai/dsh-agent-instructions 0.2.2-rc.5 - MIT
+  101. @deepseek-ai/dsh-agent-loop 0.2.2-rc.5 - MIT
+  102. @deepseek-ai/dsh-agent-preset 0.2.2-rc.5 - MIT
+  103. @deepseek-ai/dsh-agent-preset-registry 0.2.2-rc.5 - MIT
+  104. @deepseek-ai/dsh-agent-team 0.2.2-rc.5 - MIT
+  105. @deepseek-ai/dsh-agent-tool-presentation 0.2.2-rc.5 - MIT
+  106. @deepseek-ai/dsh-anonymous-user-id 0.2.2-rc.5 - MIT
+  107. @deepseek-ai/dsh-api-gateway 0.2.2-rc.5 - MIT
+  108. @deepseek-ai/dsh-api-job-controller 0.2.2-rc.5 - MIT
+  109. @deepseek-ai/dsh-api-remote-access 0.2.2-rc.5 - MIT
+  110. @deepseek-ai/dsh-api-remotes 0.2.2-rc.5 - MIT
+  111. @deepseek-ai/dsh-api-session-controller 0.2.2-rc.5 - MIT
+  112. @deepseek-ai/dsh-api-settings-controller 0.2.2-rc.5 - MIT
+  113. @deepseek-ai/dsh-api-terminal-controller 0.2.2-rc.5 - MIT
+  114. @deepseek-ai/dsh-api-workspace-controller 0.2.2-rc.5 - MIT
+  115. @deepseek-ai/dsh-api-workspace-files 0.2.2-rc.5 - MIT
+  116. @deepseek-ai/dsh-app-boot 0.2.2-rc.5 - MIT
+  117. @deepseek-ai/dsh-atomic-write 0.2.2-rc.5 - MIT
+  118. @deepseek-ai/dsh-attachment 0.2.2-rc.5 - MIT
+  119. @deepseek-ai/dsh-attachment-local 0.2.2-rc.5 - MIT
+  120. @deepseek-ai/dsh-authorization 0.2.2-rc.5 - MIT
+  121. @deepseek-ai/dsh-base 0.2.2-rc.5 - MIT
+  122. @deepseek-ai/dsh-bash-local 0.2.2-rc.5 - MIT
+  123. @deepseek-ai/dsh-bash-sandbox 0.2.2-rc.5 - MIT
+  124. @deepseek-ai/dsh-brand 0.2.2-rc.5 - MIT
+  125. @deepseek-ai/dsh-chunked-list 0.2.2-rc.5 - MIT
+  126. @deepseek-ai/dsh-client-connection 0.2.2-rc.5 - MIT
+  127. @deepseek-ai/dsh-client-file-upload 0.2.2-rc.5 - MIT
+  128. @deepseek-ai/dsh-client-hmr 0.2.2-rc.5 - MIT
+  129. @deepseek-ai/dsh-client-locale 0.2.2-rc.5 - MIT
+  130. @deepseek-ai/dsh-client-modules 0.2.2-rc.5 - MIT
+  131. @deepseek-ai/dsh-client-product-analytics 0.2.2-rc.5 - MIT
+  132. @deepseek-ai/dsh-client-resources 0.2.2-rc.5 - MIT
+  133. @deepseek-ai/dsh-client-shortcuts 0.2.2-rc.5 - MIT
+  134. @deepseek-ai/dsh-client-ui-account-notifications 0.2.2-rc.5 - MIT
+  135. @deepseek-ai/dsh-client-ui-action-cards 0.2.2-rc.5 - MIT
+  136. @deepseek-ai/dsh-client-ui-agent-preset 0.2.2-rc.5 - MIT
+  137. @deepseek-ai/dsh-client-ui-agent-team 0.2.2-rc.5 - MIT
+  138. @deepseek-ai/dsh-client-ui-approval 0.2.2-rc.5 - MIT
+  139. @deepseek-ai/dsh-client-ui-attachment 0.2.2-rc.5 - MIT
+  140. @deepseek-ai/dsh-client-ui-brand-official 0.2.2-rc.5 - MIT
+  141. @deepseek-ai/dsh-client-ui-chat 0.2.2-rc.5 - MIT
+  142. @deepseek-ai/dsh-client-ui-commands 0.2.2-rc.5 - MIT
+  143. @deepseek-ai/dsh-client-ui-context-menu 0.2.2-rc.5 - MIT
+  144. @deepseek-ai/dsh-client-ui-conversation 0.2.2-rc.5 - MIT
+  145. @deepseek-ai/dsh-client-ui-cordis 0.2.2-rc.5 - MIT
+  146. @deepseek-ai/dsh-client-ui-creation-recommendations 0.2.2-rc.5 - MIT
+  147. @deepseek-ai/dsh-client-ui-deliverables 0.2.2-rc.5 - MIT
+  148. @deepseek-ai/dsh-client-ui-directory-picker-browse 0.2.2-rc.5 - MIT
+  149. @deepseek-ai/dsh-client-ui-directory-picker-native 0.2.2-rc.5 - MIT
+  150. @deepseek-ai/dsh-client-ui-entry-customization 0.2.2-rc.5 - MIT
+  151. @deepseek-ai/dsh-client-ui-file-actions 0.2.2-rc.5 - MIT
+  152. @deepseek-ai/dsh-client-ui-file-drag 0.2.2-rc.5 - MIT
+  153. @deepseek-ai/dsh-client-ui-goal 0.2.2-rc.5 - MIT
+  154. @deepseek-ai/dsh-client-ui-input-trigger 0.2.2-rc.5 - MIT
+  155. @deepseek-ai/dsh-client-ui-jobs 0.2.2-rc.5 - MIT
+  156. @deepseek-ai/dsh-client-ui-layout 0.2.2-rc.5 - MIT
+  157. @deepseek-ai/dsh-client-ui-message-feedback 0.2.2-rc.5 - MIT
+  158. @deepseek-ai/dsh-client-ui-model-selection 0.2.2-rc.5 - MIT
+  159. @deepseek-ai/dsh-client-ui-open-in-app 0.2.2-rc.5 - MIT
+  160. @deepseek-ai/dsh-client-ui-permission-presets 0.2.2-rc.5 - MIT
+  161. @deepseek-ai/dsh-client-ui-plan 0.2.2-rc.5 - MIT
+  162. @deepseek-ai/dsh-client-ui-plugin-manager 0.2.2-rc.5 - MIT
+  163. @deepseek-ai/dsh-client-ui-plugin-market 0.2.2-rc.5 - MIT
+  164. @deepseek-ai/dsh-client-ui-plugin-recommendations 0.2.2-rc.5 - MIT
+  165. @deepseek-ai/dsh-client-ui-reference 0.2.2-rc.5 - MIT
+  166. @deepseek-ai/dsh-client-ui-renderer 0.2.2-rc.5 - MIT
+  167. @deepseek-ai/dsh-client-ui-schedule 0.2.2-rc.5 - MIT
+  168. @deepseek-ai/dsh-client-ui-secret-mask 0.2.2-rc.5 - MIT
+  169. @deepseek-ai/dsh-client-ui-session 0.2.2-rc.5 - MIT
+  170. @deepseek-ai/dsh-client-ui-settings 0.2.2-rc.5 - MIT
+  171. @deepseek-ai/dsh-client-ui-settings-account 0.2.2-rc.5 - MIT
+  172. @deepseek-ai/dsh-client-ui-settings-agent-loop 0.2.2-rc.5 - MIT
+  173. @deepseek-ai/dsh-client-ui-settings-general 0.2.2-rc.5 - MIT
+  174. @deepseek-ai/dsh-client-ui-settings-models 0.2.2-rc.5 - MIT
+  175. @deepseek-ai/dsh-client-ui-settings-plugin-inventory 0.2.2-rc.5 - MIT
+  176. @deepseek-ai/dsh-client-ui-settings-plugins 0.2.2-rc.5 - MIT
+  177. @deepseek-ai/dsh-client-ui-settings-session-log 0.2.2-rc.5 - MIT
+  178. @deepseek-ai/dsh-client-ui-settings-shell 0.2.2-rc.5 - MIT
+  179. @deepseek-ai/dsh-client-ui-settings-subagent 0.2.2-rc.5 - MIT
+  180. @deepseek-ai/dsh-client-ui-settings-web-search 0.2.2-rc.5 - MIT
+  181. @deepseek-ai/dsh-client-ui-shortcuts 0.2.2-rc.5 - MIT
+  182. @deepseek-ai/dsh-client-ui-sidebar 0.2.2-rc.5 - MIT
+  183. @deepseek-ai/dsh-client-ui-sidebar-browser 0.2.2-rc.5 - MIT
+  184. @deepseek-ai/dsh-client-ui-sidebar-documentpreview 0.2.2-rc.5 - MIT
+  185. @deepseek-ai/dsh-client-ui-sidebar-files 0.2.2-rc.5 - MIT
+  186. @deepseek-ai/dsh-client-ui-sidebar-right 0.2.2-rc.5 - MIT
+  187. @deepseek-ai/dsh-client-ui-sidebar-terminal 0.2.2-rc.5 - MIT
+  188. @deepseek-ai/dsh-client-ui-skill 0.2.2-rc.5 - MIT
+  189. @deepseek-ai/dsh-client-ui-subagent 0.2.2-rc.5 - MIT
+  190. @deepseek-ai/dsh-client-ui-theme 0.2.2-rc.5 - MIT
+  191. @deepseek-ai/dsh-client-ui-tool 0.2.2-rc.5 - MIT
+  192. @deepseek-ai/dsh-client-ui-trajectory 0.2.2-rc.5 - MIT
+  193. @deepseek-ai/dsh-client-ui-user-questions 0.2.2-rc.5 - MIT
+  194. @deepseek-ai/dsh-client-ui-workflow-run 0.2.2-rc.5 - MIT
+  195. @deepseek-ai/dsh-client-ui-workspace 0.2.2-rc.5 - MIT
+  196. @deepseek-ai/dsh-cmdline 0.2.2-rc.5 - MIT
+  197. @deepseek-ai/dsh-command-compact 0.2.2-rc.5 - MIT
+  198. @deepseek-ai/dsh-command-feedback 0.2.2-rc.5 - MIT
+  199. @deepseek-ai/dsh-command-goal 0.2.2-rc.5 - MIT
+  200. @deepseek-ai/dsh-commands 0.2.2-rc.5 - MIT
+  201. @deepseek-ai/dsh-compaction 0.2.2-rc.5 - MIT
+  202. @deepseek-ai/dsh-compaction-basic 0.2.2-rc.5 - MIT
+  203. @deepseek-ai/dsh-compaction-image-offload 0.2.2-rc.5 - MIT
+  204. @deepseek-ai/dsh-compaction-tool-result-pruner 0.2.2-rc.5 - MIT
+  205. @deepseek-ai/dsh-computer-use 0.2.2-rc.5 - MIT
+  206. @deepseek-ai/dsh-config-editor 0.2.2-rc.5 - MIT
+  207. @deepseek-ai/dsh-cordis-client-runner 0.2.2-rc.5 - MIT
+  208. @deepseek-ai/dsh-cordis-host-runner 0.2.2-rc.5 - MIT
+  209. @deepseek-ai/dsh-creation-recommendations 0.2.2-rc.5 - MIT
+  210. @deepseek-ai/dsh-credentials 0.2.2-rc.5 - MIT
+  211. @deepseek-ai/dsh-credentials-local 0.2.2-rc.5 - MIT
+  212. @deepseek-ai/dsh-cua 0.2.2-rc.5 - MIT
+  213. @deepseek-ai/dsh-cua-bundle 0.2.2-rc.5 - MIT
+  214. @deepseek-ai/dsh-deepseek-account 0.2.2-rc.5 - MIT
+  215. @deepseek-ai/dsh-deepseek-chat-import 0.2.2-rc.5 - MIT
+  216. @deepseek-ai/dsh-deepseek-llm-api-extensions 0.2.2-rc.5 - MIT
+  217. @deepseek-ai/dsh-deliverable-file-references 0.2.2-rc.5 - MIT
+  218. @deepseek-ai/dsh-deque 0.2.2-rc.5 - MIT
+  219. @deepseek-ai/dsh-error 0.2.2-rc.5 - MIT
+  220. @deepseek-ai/dsh-experimental-api-speech-to-text 0.2.2-rc.5 - MIT
+  221. @deepseek-ai/dsh-experimental-auto-review 0.2.2-rc.5 - MIT
+  222. @deepseek-ai/dsh-experimental-badge-skill-bundle 0.2.2-rc.5 - MIT
+  223. @deepseek-ai/dsh-experimental-client-ui-cot-translation 0.2.2-rc.5 - MIT
+  224. @deepseek-ai/dsh-experimental-client-ui-forge 0.2.2-rc.5 - MIT
+  225. @deepseek-ai/dsh-experimental-client-ui-stats 0.2.2-rc.5 - MIT
+  226. @deepseek-ai/dsh-experimental-client-ui-voice-input 0.2.2-rc.5 - MIT
+  227. @deepseek-ai/dsh-experimental-cot-translation-bundle 0.2.2-rc.5 - MIT
+  228. @deepseek-ai/dsh-experimental-forge 0.2.2-rc.5 - MIT
+  229. @deepseek-ai/dsh-experimental-forge-bundle 0.2.2-rc.5 - MIT
+  230. @deepseek-ai/dsh-experimental-forge-github 0.2.2-rc.5 - MIT
+  231. @deepseek-ai/dsh-experimental-forge-session 0.2.2-rc.5 - MIT
+  232. @deepseek-ai/dsh-experimental-inspector 0.2.2-rc.5 - MIT
+  233. @deepseek-ai/dsh-experimental-inspector-profile 0.2.2-rc.5 - MIT
+  234. @deepseek-ai/dsh-experimental-liveshare 0.2.2-rc.5 - MIT
+  235. @deepseek-ai/dsh-experimental-liveshare-protocol 0.2.2-rc.5 - MIT
+  236. @deepseek-ai/dsh-experimental-plugin-market-bundle 0.2.2-rc.5 - MIT
+  237. @deepseek-ai/dsh-experimental-ralph-bundle 0.2.2-rc.5 - MIT
+  238. @deepseek-ai/dsh-experimental-session-inspector 0.2.2-rc.5 - MIT
+  239. @deepseek-ai/dsh-experimental-session-search 0.2.2-rc.5 - MIT
+  240. @deepseek-ai/dsh-experimental-session-titles-bundle 0.2.2-rc.5 - MIT
+  241. @deepseek-ai/dsh-experimental-speech-to-text 0.2.2-rc.5 - MIT
+  242. @deepseek-ai/dsh-experimental-speech-to-text-sensevoice 0.2.2-rc.5 - MIT
+  243. @deepseek-ai/dsh-experimental-terminal-bundle 0.2.2-rc.5 - MIT
+  244. @deepseek-ai/dsh-experimental-tool-worktree 0.2.2-rc.5 - MIT
+  245. @deepseek-ai/dsh-experimental-translator 0.2.2-rc.5 - MIT
+  246. @deepseek-ai/dsh-experimental-voice-input-bundle 0.2.2-rc.5 - MIT
+  247. @deepseek-ai/dsh-experimental-worktree 0.2.2-rc.5 - MIT
+  248. @deepseek-ai/dsh-file-reference 0.2.2-rc.5 - MIT
+  249. @deepseek-ai/dsh-file-reference-local 0.2.2-rc.5 - MIT
+  250. @deepseek-ai/dsh-fs 0.2.2-rc.5 - MIT
+  251. @deepseek-ai/dsh-fs-local 0.2.2-rc.5 - MIT
+  252. @deepseek-ai/dsh-fs-observation-policy 0.2.2-rc.5 - MIT
+  253. @deepseek-ai/dsh-fs-patch 0.2.2-rc.5 - MIT
+  254. @deepseek-ai/dsh-fs-sandbox 0.2.2-rc.5 - MIT
+  255. @deepseek-ai/dsh-goal 0.2.2-rc.5 - MIT
+  256. @deepseek-ai/dsh-goal-round-driver 0.2.2-rc.5 - MIT
+  257. @deepseek-ai/dsh-harness-dev-context 0.2.2-rc.5 - MIT
+  258. @deepseek-ai/dsh-headless 0.2.2-rc.5 - MIT
+  259. @deepseek-ai/dsh-hmr 0.2.2-rc.5 - MIT
+  260. @deepseek-ai/dsh-home-paths 0.2.2-rc.5 - MIT
+  261. @deepseek-ai/dsh-host-directory-picker 0.2.2-rc.5 - MIT
+  262. @deepseek-ai/dsh-host-directory-picker-auto 0.2.2-rc.5 - MIT
+  263. @deepseek-ai/dsh-host-directory-picker-browse 0.2.2-rc.5 - MIT
+  264. @deepseek-ai/dsh-host-directory-picker-native 0.2.2-rc.5 - MIT
+  265. @deepseek-ai/dsh-host-frontend-static 0.2.2-rc.5 - MIT
+  266. @deepseek-ai/dsh-host-open-in-app 0.2.2-rc.5 - MIT
+  267. @deepseek-ai/dsh-host-plugin-inventory 0.2.2-rc.5 - MIT
+  268. @deepseek-ai/dsh-host-product-telemetry-otel 0.2.2-rc.5 - MIT
+  269. @deepseek-ai/dsh-host-webserver 0.2.2-rc.5 - MIT
+  270. @deepseek-ai/dsh-http-proxy 0.2.2-rc.5 - MIT
+  271. @deepseek-ai/dsh-jobs 0.2.2-rc.5 - MIT
+  272. @deepseek-ai/dsh-jobs-local 0.2.2-rc.5 - MIT
+  273. @deepseek-ai/dsh-launch-environment 0.2.2-rc.5 - MIT
+  274. @deepseek-ai/dsh-lazy-require 0.2.2-rc.5 - MIT
+  275. @deepseek-ai/dsh-llm 0.2.2-rc.5 - MIT
+  276. @deepseek-ai/dsh-llm-deepseek 0.2.2-rc.5 - MIT
+  277. @deepseek-ai/dsh-llm-deepseek-account 0.2.2-rc.5 - MIT
+  278. @deepseek-ai/dsh-llm-deepseek-api-key 0.2.2-rc.5 - MIT
+  279. @deepseek-ai/dsh-llm-pi-ai 0.2.2-rc.5 - MIT
+  280. @deepseek-ai/dsh-llm-retry 0.2.2-rc.5 - MIT
+  281. @deepseek-ai/dsh-mcp-client 0.2.2-rc.5 - MIT
+  282. @deepseek-ai/dsh-mcp-manager 0.2.2-rc.5 - MIT
+  283. @deepseek-ai/dsh-mcp-resources 0.2.2-rc.5 - MIT
+  284. @deepseek-ai/dsh-message-feedback 0.2.2-rc.5 - MIT
+  285. @deepseek-ai/dsh-message-quotes 0.2.2-rc.5 - MIT
+  286. @deepseek-ai/dsh-native-command 0.2.2-rc.5 - MIT
+  287. @deepseek-ai/dsh-office-kit 0.2.2-rc.5 - MIT
+  288. @deepseek-ai/dsh-official-bundles 0.2.2-rc.5 - MIT
+  289. @deepseek-ai/dsh-otel 0.2.2-rc.5 - MIT
+  290. @deepseek-ai/dsh-output-retention 0.2.2-rc.5 - MIT
+  291. @deepseek-ai/dsh-package-manifest 0.2.2-rc.5 - MIT
+  292. @deepseek-ai/dsh-permission-presets 0.2.2-rc.5 - MIT
+  293. @deepseek-ai/dsh-persona 0.2.2-rc.5 - MIT
+  294. @deepseek-ai/dsh-personalized-recommendations 0.2.2-rc.5 - MIT
+  295. @deepseek-ai/dsh-plan-mode 0.2.2-rc.5 - MIT
+  296. @deepseek-ai/dsh-plugin-detail 0.2.2-rc.5 - MIT
+  297. @deepseek-ai/dsh-plugin-manager 0.2.2-rc.5 - MIT
+  298. @deepseek-ai/dsh-plugin-market 0.2.2-rc.5 - MIT
+  299. @deepseek-ai/dsh-plugin-market-index 0.2.2-rc.5 - MIT
+  300. @deepseek-ai/dsh-plugin-package-inventory-deepseek 0.2.2-rc.5 - MIT
+  301. @deepseek-ai/dsh-plugin-recommendations 0.2.2-rc.5 - MIT
+  302. @deepseek-ai/dsh-ptc-runtime 0.2.2-rc.5 - MIT
+  303. @deepseek-ai/dsh-ptc-runtime-node 0.2.2-rc.5 - MIT
+  304. @deepseek-ai/dsh-pwsh-local 0.2.2-rc.5 - MIT
+  305. @deepseek-ai/dsh-pwsh-sandbox 0.2.2-rc.5 - MIT
+  306. @deepseek-ai/dsh-repeat-tool-reminder 0.2.2-rc.5 - MIT
+  307. @deepseek-ai/dsh-sandbox 0.2.2-rc.5 - MIT
+  308. @deepseek-ai/dsh-sandbox-local 0.2.2-rc.5 - MIT
+  309. @deepseek-ai/dsh-sandbox-policy 0.2.2-rc.5 - MIT
+  310. @deepseek-ai/dsh-sandbox-windows-acl 0.2.2-rc.5 - MIT
+  311. @deepseek-ai/dsh-schedule 0.2.2-rc.5 - MIT
+  312. @deepseek-ai/dsh-scope 0.2.2-rc.5 - MIT
+  313. @deepseek-ai/dsh-sdk-app 0.2.2-rc.5 - MIT
+  314. @deepseek-ai/dsh-sdk-jsonrpc-server 0.2.2-rc.5 - MIT
+  315. @deepseek-ai/dsh-sdk-minimal 0.2.2-rc.5 - MIT
+  316. @deepseek-ai/dsh-sdk-protocol 0.2.2-rc.5 - MIT
+  317. @deepseek-ai/dsh-session 0.2.2-rc.5 - MIT
+  318. @deepseek-ai/dsh-session-checkpoint-policy 0.2.2-rc.5 - MIT
+  319. @deepseek-ai/dsh-session-format 0.2.2-rc.5 - MIT
+  320. @deepseek-ai/dsh-session-format-catalog 0.2.2-rc.5 - MIT
+  321. @deepseek-ai/dsh-session-format-v0-to-v1 0.2.2-rc.5 - MIT
+  322. @deepseek-ai/dsh-session-format-v1-to-v2 0.2.2-rc.5 - MIT
+  323. @deepseek-ai/dsh-session-format-v2-to-v3 0.2.2-rc.5 - MIT
+  324. @deepseek-ai/dsh-session-format-v3-to-v4 0.2.2-rc.5 - MIT
+  325. @deepseek-ai/dsh-session-log-deepseek 0.2.2-rc.5 - MIT
+  326. @deepseek-ai/dsh-session-log-export 0.2.2-rc.5 - MIT
+  327. @deepseek-ai/dsh-session-persistence 0.2.2-rc.5 - MIT
+  328. @deepseek-ai/dsh-session-persistence-jsonl 0.2.2-rc.5 - MIT
+  329. @deepseek-ai/dsh-session-projection 0.2.2-rc.5 - MIT
+  330. @deepseek-ai/dsh-session-projection-cache 0.2.2-rc.5 - MIT
+  331. @deepseek-ai/dsh-session-query 0.2.2-rc.5 - MIT
+  332. @deepseek-ai/dsh-session-query-sqlite 0.2.2-rc.5 - MIT
+  333. @deepseek-ai/dsh-session-reference 0.2.2-rc.5 - MIT
+  334. @deepseek-ai/dsh-session-stats 0.2.2-rc.5 - MIT
+  335. @deepseek-ai/dsh-session-telemetry 0.2.2-rc.5 - MIT
+  336. @deepseek-ai/dsh-session-telemetry-otel 0.2.2-rc.5 - MIT
+  337. @deepseek-ai/dsh-session-title 0.2.2-rc.5 - MIT
+  338. @deepseek-ai/dsh-session-title-all-prompts-llm 0.2.2-rc.5 - MIT
+  339. @deepseek-ai/dsh-session-title-first-prompt-llm 0.2.2-rc.5 - MIT
+  340. @deepseek-ai/dsh-session-title-llm 0.2.2-rc.5 - MIT
+  341. @deepseek-ai/dsh-session-turn-outline 0.2.2-rc.5 - MIT
+  342. @deepseek-ai/dsh-settings 0.2.2-rc.5 - MIT
+  343. @deepseek-ai/dsh-shell 0.2.2-rc.5 - MIT
+  344. @deepseek-ai/dsh-shell-env 0.2.2-rc.5 - MIT
+  345. @deepseek-ai/dsh-skill 0.2.2-rc.5 - MIT
+  346. @deepseek-ai/dsh-skill-badge 0.2.2-rc.5 - MIT
+  347. @deepseek-ai/dsh-skill-filesystem 0.2.2-rc.5 - MIT
+  348. @deepseek-ai/dsh-skill-office 0.2.2-rc.5 - MIT
+  349. @deepseek-ai/dsh-spill 0.2.2-rc.5 - MIT
+  350. @deepseek-ai/dsh-spill-local 0.2.2-rc.5 - MIT
+  351. @deepseek-ai/dsh-spill-policy 0.2.2-rc.5 - MIT
+  352. @deepseek-ai/dsh-storage 0.2.2-rc.5 - MIT
+  353. @deepseek-ai/dsh-storage-domain 0.2.2-rc.5 - MIT
+  354. @deepseek-ai/dsh-storage-json 0.2.2-rc.5 - MIT
+  355. @deepseek-ai/dsh-subagent 0.2.2-rc.5 - MIT
+  356. @deepseek-ai/dsh-subagent-fork-in-process 0.2.2-rc.5 - MIT
+  357. @deepseek-ai/dsh-subagent-spawn-in-process 0.2.2-rc.5 - MIT
+  358. @deepseek-ai/dsh-subprocess 0.2.2-rc.5 - MIT
+  359. @deepseek-ai/dsh-subprocess-local 0.2.2-rc.5 - MIT
+  360. @deepseek-ai/dsh-system-prompt 0.2.2-rc.5 - MIT
+  361. @deepseek-ai/dsh-terminal 0.2.2-rc.5 - MIT
+  362. @deepseek-ai/dsh-terminal-bash 0.2.2-rc.5 - MIT
+  363. @deepseek-ai/dsh-terminal-panel 0.2.2-rc.5 - MIT
+  364. @deepseek-ai/dsh-time-context 0.2.2-rc.5 - MIT
+  365. @deepseek-ai/dsh-timeout 0.2.2-rc.5 - MIT
+  366. @deepseek-ai/dsh-tmux-context 0.2.2-rc.5 - MIT
+  367. @deepseek-ai/dsh-token-meter 0.2.2-rc.5 - MIT
+  368. @deepseek-ai/dsh-tool-agent-team 0.2.2-rc.5 - MIT
+  369. @deepseek-ai/dsh-tool-ask-user 0.2.2-rc.5 - MIT
+  370. @deepseek-ai/dsh-tool-bash 0.2.2-rc.5 - MIT
+  371. @deepseek-ai/dsh-tool-bash-persistent 0.2.2-rc.5 - MIT
+  372. @deepseek-ai/dsh-tool-call-timeout-policy 0.2.2-rc.5 - MIT
+  373. @deepseek-ai/dsh-tool-cordis 0.2.2-rc.5 - MIT
+  374. @deepseek-ai/dsh-tool-executor-native 0.2.2-rc.5 - MIT
+  375. @deepseek-ai/dsh-tool-executor-ptc 0.2.2-rc.5 - MIT
+  376. @deepseek-ai/dsh-tool-fs 0.2.2-rc.5 - MIT
+  377. @deepseek-ai/dsh-tool-fs-search 0.2.2-rc.5 - MIT
+  378. @deepseek-ai/dsh-tool-goal 0.2.2-rc.5 - MIT
+  379. @deepseek-ai/dsh-tool-jobs 0.2.2-rc.5 - MIT
+  380. @deepseek-ai/dsh-tool-office 0.2.2-rc.5 - MIT
+  381. @deepseek-ai/dsh-tool-present 0.2.2-rc.5 - MIT
+  382. @deepseek-ai/dsh-tool-pwsh 0.2.2-rc.5 - MIT
+  383. @deepseek-ai/dsh-tool-pwsh-persistent 0.2.2-rc.5 - MIT
+  384. @deepseek-ai/dsh-tool-ralph 0.2.2-rc.5 - MIT
+  385. @deepseek-ai/dsh-tool-schedule 0.2.2-rc.5 - MIT
+  386. @deepseek-ai/dsh-tool-session-query 0.2.2-rc.5 - MIT
+  387. @deepseek-ai/dsh-tool-skill 0.2.2-rc.5 - MIT
+  388. @deepseek-ai/dsh-tool-str-replace-editor 0.2.2-rc.5 - MIT
+  389. @deepseek-ai/dsh-tool-subagent 0.2.2-rc.5 - MIT
+  390. @deepseek-ai/dsh-tool-subagent-control 0.2.2-rc.5 - MIT
+  391. @deepseek-ai/dsh-tool-terminal 0.2.2-rc.5 - MIT
+  392. @deepseek-ai/dsh-tool-todo 0.2.2-rc.5 - MIT
+  393. @deepseek-ai/dsh-tool-web 0.2.2-rc.5 - MIT
+  394. @deepseek-ai/dsh-tool-workflow 0.2.2-rc.5 - MIT
+  395. @deepseek-ai/dsh-tool-working-directory 0.2.2-rc.5 - MIT
+  396. @deepseek-ai/dsh-tool-workspace-dependencies 0.2.2-rc.5 - MIT
+  397. @deepseek-ai/dsh-tools 0.2.2-rc.5 - MIT
+  398. @deepseek-ai/dsh-typert-loader 0.2.2-rc.5 - MIT
+  399. @deepseek-ai/dsh-typert-protocol 0.2.2-rc.5 - MIT
+  400. @deepseek-ai/dsh-typert-registry 0.2.2-rc.5 - MIT
+  401. @deepseek-ai/dsh-user-approval 0.2.2-rc.5 - MIT
+  402. @deepseek-ai/dsh-user-questions 0.2.2-rc.5 - MIT
+  403. @deepseek-ai/dsh-util-code-language 0.2.2-rc.5 - MIT
+  404. @deepseek-ai/dsh-util-crypto 0.2.2-rc.5 - MIT
+  405. @deepseek-ai/dsh-util-ripgrep 0.2.2-rc.5 - MIT
+  406. @deepseek-ai/dsh-util-time 0.2.2-rc.5 - MIT
+  407. @deepseek-ai/dsh-util-values 0.2.2-rc.5 - MIT
+  408. @deepseek-ai/dsh-util-workspace-path 0.2.2-rc.5 - MIT
+  409. @deepseek-ai/dsh-web 0.2.2-rc.5 - MIT
+  410. @deepseek-ai/dsh-web-app 0.2.2-rc.5 - MIT
+  411. @deepseek-ai/dsh-web-deepseek-api 0.2.2-rc.5 - MIT
+  412. @deepseek-ai/dsh-web-fetch-http 0.2.2-rc.5 - MIT
+  413. @deepseek-ai/dsh-web-frontend 0.2.2-rc.5 - MIT
+  414. @deepseek-ai/dsh-web-search-deepseek 0.2.2-rc.5 - MIT
+  415. @deepseek-ai/dsh-win32-process 0.2.2-rc.5 - MIT
+  416. @deepseek-ai/dsh-workflow 0.2.2-rc.5 - MIT
+  417. @deepseek-ai/dsh-workflow-ptc 0.2.2-rc.5 - MIT
+  418. @deepseek-ai/dsh-working-directory 0.2.2-rc.5 - MIT
+  419. @deepseek-ai/dsh-workspace 0.2.2-rc.5 - MIT
+  420. @deepseek-ai/dsh-workspace-changes 0.2.2-rc.5 - MIT
+  421. @deepseek-ai/dshm-boot-rescue 1.0.0 - MIT
+  422. @deepseek-ai/dshm-cloud-sync 0.0.0 - MIT
+  423. @deepseek-ai/dshm-fs-write-nonchmod 0.0.0 - MIT
+  424. @deepseek-ai/dshm-market-bridge 0.0.0 - MIT
+  425. @deepseek-ai/dshm-office-system-preview 0.0.0 - MIT
+  426. @deepseek-ai/dshm-profile-pnpm 0.0.0 - MIT
+  427. @deepseek-ai/dshm-ptc-runtime-inproc 0.0.0 - MIT
+  428. @deepseek-ai/dshm-read-aloud 0.0.0 - MIT
+  429. @deepseek-ai/dshm-tool-browser 0.0.0 - MIT
+  430. @deepseek-ai/dshm-tool-fs-remove 0.0.0 - MIT
+  431. @deepseek-ai/dshm-tool-python 0.0.0 - MIT
+  432. @deepseek-ai/dshm-vm-bash 0.0.0 - MIT
+  433. @deepseek-ai/dshm-workspace-claim 0.0.0 - MIT
+  434. @deepseek-ai/libreoffice-kit 0.2.3 - MPL-2.0
+  435. @deepseek-ai/libreoffice-kit-wasm 0.2.3 - MPL-2.0
+  436. @deepseek-ai/node-addon-system 0.1.2 - BSD-3-Clause
+  437. @deepseek-ai/schemastery 3.19.0 - MIT
+  438. @earendil-works/pi-ai 1.5.2 - MIT
+  439. @earendil-works/pi-schema 1.5.2 - MIT
+  440. @earendil-works/pi-telemetry 1.5.2 - MIT
+  441. @eslint-community/regexpp 4.12.3 - MIT
+  442. @google/genai 2.21.0 - Apache-2.0
+  443. @joplin/turndown-plugin-gfm 1.0.71 - MIT
+  444. @js-temporal/polyfill 0.5.1 - ISC
+  445. @keyv/serialize 1.1.1 - MIT
+  446. @mixmark-io/domino 2.2.0 - BSD-2-Clause
+  447. @modelcontextprotocol/client 2.2.0 - MIT
+  448. @modelcontextprotocol/core 2.2.0 - MIT
+  449. @ohos-ports/emnapi-runtime 1.11.2-beta.0 - MIT
+  450. @ohos-ports/img-colour 1.1.0-beta.0 - MIT
+  451. @ohos-ports/img-sharp-libvips-openharmony-arm64 1.2.4-beta.8 - LGPL-3.0-or-later
+  452. @ohos-ports/img-sharp-openharmony-arm64 0.34.5-beta.4 - Apache-2.0
+  453. @ohos-ports/img-sharp-wasm32 0.34.5-beta.0 - Apache-2.0 AND LGPL-3.0-or-later AND MIT
+  454. @ohos-ports/node-pty 1.1.0-beta.0 - MIT
+  455. @ohos-ports/sharp 0.34.5-beta.12 - Apache-2.0
+  456. @opentelemetry/api 1.9.1 - Apache-2.0
+  457. @opentelemetry/api-logs 0.222.0 - Apache-2.0
+  458. @opentelemetry/core 2.11.0 - Apache-2.0
+  459. @opentelemetry/otlp-exporter-base 0.222.0 - Apache-2.0
+  460. @opentelemetry/otlp-transformer 0.222.0 - Apache-2.0
+  461. @opentelemetry/resources 2.11.0 - Apache-2.0
+  462. @opentelemetry/sdk-logs 0.222.0 - Apache-2.0
+  463. @opentelemetry/sdk-metrics 2.11.0 - Apache-2.0
+  464. @opentelemetry/sdk-trace 2.11.0 - Apache-2.0
+  465. @opentelemetry/semantic-conventions 1.45.0 - Apache-2.0
+  466. @protobufjs/aspromise 1.1.2 - BSD-3-Clause
+  467. @protobufjs/base64 1.1.2 - BSD-3-Clause
+  468. @protobufjs/codegen 2.0.5 - BSD-3-Clause
+  469. @protobufjs/eventemitter 1.1.1 - BSD-3-Clause
+  470. @protobufjs/fetch 1.1.1 - BSD-3-Clause
+  471. @protobufjs/float 1.0.2 - BSD-3-Clause
+  472. @protobufjs/path 1.1.2 - BSD-3-Clause
+  473. @protobufjs/pool 1.1.0 - BSD-3-Clause
+  474. @protobufjs/utf8 1.1.2 - BSD-3-Clause
+  475. @sec-ant/readable-stream 0.4.1 - MIT
+  476. @sindresorhus/is 7.2.0 - MIT
+  477. @sindresorhus/merge-streams 4.0.0 - MIT
+  478. @smithy/core 3.41.0 - Apache-2.0
+  479. @smithy/credential-provider-imds 4.5.2 - Apache-2.0
+  480. @smithy/fetch-http-handler 5.8.1 - Apache-2.0
+  481. @smithy/node-http-handler 4.14.2 - Apache-2.0
+  482. @smithy/node-http-handler 4.14.2 - Apache-2.0
+  483. @smithy/node-http-handler 4.12.1 - Apache-2.0
+  484. @smithy/signature-v4 5.7.5 - Apache-2.0
+  485. @smithy/types 4.20.0 - Apache-2.0
+  486. @stablelib/base64 1.0.1 - MIT
+  487. @standard-schema/spec 1.1.0 - MIT
+  488. @swc/helpers 0.5.24 - Apache-2.0
+  489. @types/http-cache-semantics 4.2.0 - MIT
+  490. @types/node 26.6.6 - MIT
+  491. @types/retry 0.12.0 - MIT
+  492. @vscode/ripgrep 1.18.0 - MIT
+  493. @vscode/ripgrep-linux-arm64 1.18.0 - MIT
+  494. @xterm/addon-serialize 0.14.0 - MIT
+  495. @xterm/headless 6.0.0 - MIT
+  496. acorn 8.19.0 - MIT
+  497. acorn-walk 8.3.5 - MIT
+  498. agent-base 9.0.0 - MIT
+  499. agent-base 7.1.4 - MIT
+  500. ajv 8.20.0 - MIT
+  501. argparse 2.0.1 - Python-2.0
+  502. base64-js 1.5.1 - MIT
+  503. bignumber.js 9.3.1 - MIT
+  504. birpc 4.2.0 - MIT
+  505. bowser 2.15.0 - MIT
+  506. brotli 1.3.3 - MIT
+  507. buffer-equal-constant-time 1.0.1 - BSD-3-Clause
+  508. bundle-name 4.1.1 - MIT
+  509. byte-counter 0.1.0 - MIT
+  510. bytes 3.1.2 - MIT
+  511. cacheable-lookup 7.0.0 - MIT
+  512. cacheable-request 13.0.19 - MIT
+  513. chokidar 5.0.0 - MIT
+  514. clone 2.1.2 - MIT
+  515. commander 15.1.0 - MIT
+  516. compressible 2.0.18 - MIT
+  517. compression 1.8.2 - MIT
+  518. content-type 2.1.0 - MIT
+  519. cross-spawn 7.0.6 - MIT
+  520. data-uri-to-buffer 4.0.1 - MIT
+  521. debug 2.6.9 - MIT
+  522. debug 4.4.3 - MIT
+  523. debug 4.4.3 - MIT
+  524. debug 4.4.3 - MIT
+  525. debug 4.4.3 - MIT
+  526. decompress-response 10.0.0 - MIT
+  527. default-browser 5.5.1 - MIT
+  528. default-browser-id 5.0.1 - MIT
+  529. define-lazy-prop 3.0.0 - MIT
+  530. depd 2.0.0 - MIT
+  531. destroy 1.2.0 - MIT
+  532. detect-libc 2.1.2 - Apache-2.0
+  533. dfa 1.2.0 - MIT
+  534. diff 9.0.0 - BSD-3-Clause
+  535. ecdsa-sig-formatter 1.0.11 - Apache-2.0
+  536. ee-first 1.1.1 - MIT
+  537. encodeurl 2.0.3 - MIT
+  538. escape-html 1.0.3 - MIT
+  539. etag 1.8.1 - MIT
+  540. eventsource 3.0.7 - MIT
+  541. eventsource-parser 3.1.1 - MIT
+  542. execa 10.2.1 - MIT
+  543. extend 3.0.2 - MIT
+  544. fast-deep-equal 3.1.3 - MIT
+  545. fast-sha256 1.3.0 - Unlicense
+  546. fast-uri 3.1.9 - BSD-3-Clause
+  547. fetch-blob 3.2.0 - MIT
+  548. fflate 0.8.2 - MIT
+  549. fflate 0.8.3 - MIT
+  550. figures 6.1.0 - MIT
+  551. fontkit 2.0.4 - MIT
+  552. form-data-encoder 4.1.0 - MIT
+  553. formdata-polyfill 4.0.10 - MIT
+  554. fresh 2.0.0 - MIT
+  555. gaxios 7.3.1 - Apache-2.0
+  556. gcp-metadata 8.1.2 - Apache-2.0
+  557. get-stream 9.0.1 - MIT
+  558. google-auth-library 10.9.1 - Apache-2.0
+  559. google-logging-utils 1.1.3 - Apache-2.0
+  560. got 14.6.6 - MIT
+  561. hosted-git-info 9.0.3 - ISC
+  562. http-cache-semantics 4.3.0 - BSD-2-Clause
+  563. http-errors 2.0.1 - MIT
+  564. http-proxy-agent 9.1.0 - MIT
+  565. http2-wrapper 2.2.4 - MIT
+  566. https-proxy-agent 7.0.6 - MIT
+  567. https-proxy-agent 9.1.0 - MIT
+  568. human-signals 8.0.1 - Apache-2.0
+  569. inherits 2.0.4 - ISC
+  570. ipaddr.js 2.5.0 - MIT
+  571. is-docker 3.0.0 - MIT
+  572. is-in-ssh 1.0.0 - MIT
+  573. is-inside-container 1.0.0 - MIT
+  574. is-plain-obj 4.1.0 - MIT
+  575. is-stream 4.0.1 - MIT
+  576. is-unicode-supported 2.1.0 - MIT
+  577. is-wsl 3.1.1 - MIT
+  578. isexe 2.0.0 - ISC
+  579. jose 6.2.18 - MIT
+  580. js-tokens 4.0.0 - MIT
+  581. js-yaml 4.3.2 - MIT
+  582. jsbi 4.3.2 - Apache-2.0
+  583. json-bigint 1.0.0 - MIT
+  584. json-schema-to-ts 3.1.1 - MIT
+  585. json-schema-traverse 1.0.0 - MIT
+  586. jwa 2.0.1 - MIT
+  587. jws 4.0.1 - MIT
+  588. keyv 5.6.0 - MIT
+  589. koffi 3.2.1 - MIT
+  590. long 5.3.2 - Apache-2.0
+  591. lowercase-keys 3.0.0 - MIT
+  592. lru-cache 11.5.3 - BlueOak-1.0.0
+  593. mime-db 1.54.0 - MIT
+  594. mime-types 3.0.2 - MIT
+  595. mimic-response 4.0.0 - MIT
+  596. minisearch 7.2.0 - MIT
+  597. ms 2.1.3 - MIT
+  598. ms 2.1.3 - MIT
+  599. ms 2.1.3 - MIT
+  600. ms 2.0.0 - MIT
+  601. ms 2.1.3 - MIT
+  602. negotiator 0.6.4 - MIT
+  603. negotiator 1.1.0 - MIT
+  604. node-addon-api 7.1.1 - MIT
+  605. node-addon-native-custom-loader 0.1.9 - MIT
+  606. node-addon-require-builtin 0.1.9 - MIT
+  607. node-domexception 1.0.0 - MIT
+  608. node-fetch 3.3.2 - MIT
+  609. normalize-url 8.1.1 - MIT
+  610. npm-run-path 6.0.0 - MIT
+  611. on-finished 2.4.2 - MIT
+  612. on-headers 1.1.0 - MIT
+  613. open 11.0.4 - MIT
+  614. openai 7.19.0 - Apache-2.0
+  615. p-cancelable 4.0.1 - MIT
+  616. p-limit 7.3.3 - MIT
+  617. p-retry 4.6.2 - MIT
+  618. pako 0.2.9 - MIT
+  619. parse-ms 4.0.0 - MIT
+  620. parseurl 1.3.3 - MIT
+  621. partial-json 0.1.7 - MIT
+  622. path-key 4.0.0 - MIT
+  623. path-key 3.1.1 - MIT
+  624. picocolors 1.1.1 - ISC
+  625. picomatch 4.0.7 - MIT
+  626. pkce-challenge 5.0.1 - MIT
+  627. powershell-utils 0.2.1 - MIT
+  628. pretty-ms 9.3.1 - MIT
+  629. protobufjs 7.6.6 - BSD-3-Clause
+  630. proxy-agent-negotiate 1.1.0 - MIT
+  631. quick-lru 5.1.1 - MIT
+  632. range-parser 1.3.0 - MIT
+  633. readdirp 5.1.1 - MIT
+  634. require-from-string 2.0.2 - MIT
+  635. resolve-alpn 1.2.1 - MIT
+  636. resolve.exports 2.0.4 - MIT
+  637. responselike 4.0.2 - MIT
+  638. restructure 3.0.2 - MIT
+  639. retry 0.13.1 - MIT
+  640. rrule 2.8.1 - BSD-3-Clause
+  641. run-applescript 7.1.0 - MIT
+  642. safe-buffer 5.2.1 - MIT
+  643. saxes 6.0.0 - ISC
+  644. semver 7.8.6 - ISC
+  645. send 1.2.1 - MIT
+  646. serve-static 2.2.1 - MIT
+  647. setprototypeof 1.2.0 - ISC
+  648. shebang-command 2.0.0 - MIT
+  649. shebang-regex 3.0.0 - MIT
+  650. shell-quote 1.12.0 - MIT
+  651. sherpa-onnx-node 1.13.8 - Apache-2.0
+  652. signal-exit 4.1.0 - ISC
+  653. standardwebhooks 1.3.0 - MIT
+  654. statuses 2.0.2 - MIT
+  655. strip-final-newline 4.0.0 - MIT
+  656. tiny-inflate 1.0.3 - MIT
+  657. toidentifier 1.0.1 - MIT
+  658. ts-algebra 2.0.0 - MIT
+  659. tslib 2.9.1 - 0BSD
+  660. turndown 7.2.5 - MIT
+  661. type-fest 4.41.0 - (MIT OR CC0-1.0)
+  662. undici 8.11.2 - MIT
+  663. undici-types 8.9.0 - MIT
+  664. unicode-properties 1.4.1 - MIT
+  665. unicode-trie 2.0.0 - MIT
+  666. unicorn-magic 0.3.0 - MIT
+  667. vary 1.1.2 - MIT
+  668. web-streams-polyfill 3.3.3 - MIT
+  669. which 2.0.2 - ISC
+  670. which-command 0.1.0 - MIT
+  671. ws 8.23.0 - MIT
+  672. wsl-utils 1.0.1 - MIT
+  673. xmlchars 2.2.0 - MIT
+  674. yaml 2.9.1 - ISC
+  675. yocto-queue 1.2.2 - MIT
+  676. yoctocolors 2.2.0 - MIT
+  677. zod 4.6.6 - MIT
+  678. zod 4.6.6 - MIT
+  679. zod 4.6.6 - MIT
+  680. zod 4.6.6 - MIT
+  681. zod 4.6.6 - MIT
+  682. zod 4.6.6 - MIT
+  683. zod 4.6.6 - MIT
+  684. zod 4.6.6 - MIT
+  685. zod 4.6.6 - MIT
+  686. zod 4.6.6 - MIT
+  687. zod 4.6.6 - MIT
+  688. zod 4.6.6 - MIT
+  689. zod 4.6.6 - MIT
+  690. zod 4.6.6 - MIT
+  691. zod 4.6.6 - MIT
+  692. zod 4.6.6 - MIT
+  693. zod 4.6.6 - MIT
+  694. zod 4.6.6 - MIT
+  695. zod 4.6.6 - MIT
+  696. zod 4.6.6 - MIT
+  697. zod 4.6.6 - MIT
+  698. zod 4.6.6 - MIT
+  699. zod 4.6.6 - MIT
+  700. zod 4.6.6 - MIT
+  701. zod 4.6.6 - MIT
+  702. zod 4.6.6 - MIT
+  703. zod 4.6.6 - MIT
+  704. zod 4.6.6 - MIT
+  705. zod 4.6.6 - MIT
+  706. zod 4.6.6 - MIT
+  707. zod 4.6.6 - MIT
+  708. zod 4.6.6 - MIT
+  709. zod 4.6.6 - MIT
+  710. zod 4.6.6 - MIT
+  711. zod 4.6.6 - MIT
+  712. zod 4.6.6 - MIT
+  713. zod 4.6.6 - MIT
+  714. zod 4.6.6 - MIT
+  715. zod 4.6.6 - MIT
+  716. zod 4.6.6 - MIT
+  717. zod 4.6.6 - MIT
+  718. zod 4.6.6 - MIT
+  719. zod 4.6.6 - MIT
+  720. zod 4.6.6 - MIT
+  721. zod 4.6.6 - MIT
+  722. zod 4.6.6 - MIT
+  723. zod 4.6.6 - MIT
+  724. zod 4.6.6 - MIT
+  725. zod 4.6.6 - MIT
+  726. zod 4.6.6 - MIT
+  727. zod 4.6.6 - MIT
+  728. zod 4.6.6 - MIT
+  729. zod 4.6.6 - MIT
+  730. zod 4.6.6 - MIT
+  731. zod 4.6.6 - MIT
+  732. zod 4.6.6 - MIT
+  733. zod 4.6.6 - MIT
+  734. zod 4.6.6 - MIT
+  735. zod 4.6.6 - MIT
+  736. zod 4.6.6 - MIT
+  737. zod 4.6.6 - MIT
+  738. zod 4.6.6 - MIT
+  739. zod 4.6.6 - MIT
+  740. zod 4.6.6 - MIT
+  741. zod 4.6.6 - MIT
+  742. zod 4.6.6 - MIT
+  743. zod 4.6.6 - MIT
+  744. zod 4.6.7 - MIT
+
+  以上为随包全部第三方开源组件；本应用未使用上述清单之外的第三方开源库。
+
+三、许可证分布（核心树 npm 依赖）
+  MIT：591 个
+  Apache-2.0：54 个
+  BSD-3-Clause：15 个
+  ISC：11 个
+  MPL-2.0：2 个
+  BSD-2-Clause：2 个
+  LGPL-3.0-or-later：1 个
+  Apache-2.0 AND LGPL-3.0-or-later AND MIT：1 个
+  Python-2.0：1 个
+  Unlicense：1 个
+  BlueOak-1.0.0：1 个
+  0BSD：1 个
+  (MIT OR CC0-1.0)：1 个
+
+四、源码与版权信息
+  DSHM 应用与鸿蒙适配：MIT License，Copyright (c) 2026 sol
+  上游 DeepSeek Harness：MIT License，Copyright (c) 2026 DeepSeek
+  上游源码：https://github.com/deepseek-ai/deepseek-harness
+  采用 GPL / LGPL / MPL 等需要提供源码的组件，逐一列明上游获取地址：
+    - Git：https://git-scm.com/（GPL 系列：随包仅提供可执行件，源码获取见上游地址）
+    - FFmpeg：https://ffmpeg.org/download.html（GPL/LGPL 系列：随包内附 COPYING.GPLv2 / COPYING.GPLv3 / COPYING.LGPLv2.1 / COPYING.LGPLv3 全文）
+    - BusyBox：https://busybox.net/（GPL 系列：随包仅提供可执行件，源码获取见上游地址）
+    - QEMU：https://www.qemu.org/（GPL 系列：随包内附 LICENSE.GPL-2.0.txt 全文；源码获取见上游地址）
+    - Linux kernel（guest 内核）：https://www.kernel.org/（GPL 系列：随包内附 LICENSE.GPL-2.0.txt 全文；源码获取见上游地址）
+    - Alpine Linux root filesystem：https://alpinelinux.org/
+    - QEMU virtio option ROM (efi-virtio.rom)：https://www.qemu.org/
+    - bash (Alpine guest)：https://www.gnu.org/software/bash/
+    - git (Alpine guest)：https://git-scm.com/
+    - libidn2 (Alpine guest)：https://www.gnu.org/software/libidn/
+    - libunistring (Alpine guest)：https://www.gnu.org/software/libunistring/
+    - readline (Alpine guest)：https://tiswww.case.edu/php/chet/readline/rltop.html
+    - zstd-libs (Alpine guest)：https://github.com/facebook/zstd
+
+五、技术支持
+  问题反馈：https://github.com/sol5766/dshm/issues
+  官方文档：https://github.com/sol5766/dshm
+  隐私政策：https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2058241561019327424
+
+  "DeepSeek"、"DeepSeek Harness" 及相关名称与标识归其权利人所有；
+  MIT 许可只授予版权权利，不授予商标、服务标记、标识、背书或官方隶属关系。
+  DSHM 与 DeepSeek 不存在隶属、授权、代理、背书或其他特定关系。

@@ -276,7 +276,7 @@ const truncated = longPath.slice(0, 100); // ustar 名字字段的极限；超�
       (main.match(/inProcFallback\(/g) || []).length === 2
       && /const inProcFallback = \(why\) => \{/.test(main)
       // 真身只许被引用 2 次：函数定义 + 门闩体内那一次（多一处 = 绕过门闩直呼）
-      && (main.match(/inProcessToolchainFallback\(/g) || []).length === 2);
+      && (main.match(/inProcessToolchainFallback\(/g) || []).length === 3);
     // 同一个 child 上两条路径可能都触发，而两遍都往同一个 py-stage 写
     check('接线: 回退是一次性门闩（重复触发只留一行 diag）',
       /inProcFallbackDone = true;/.test(main) && /进程内回退已在进行（忽略重复触发/.test(main));
@@ -285,8 +285,40 @@ const truncated = longPath.slice(0, 100); // ustar 名字字段的极限；超�
     const fb = fbStart >= 0 && fbEnd > fbStart ? main.slice(fbStart, fbEnd) : '';
     check('接线: 回退只解 python（git 真身在本档起不来，解它只占磁盘）',
       /extractTarGzFile\(tarball, pyStage/.test(fb)
-      && /finishToolchainExtraction\(true, false\)/.test(fb)
-      && !/apks/.test(fb));
+       && /finishToolchainExtraction\(true, false, needGit, true, extrasOk\)/.test(fb)
+      && !/gitPkgs/.test(fb));
+    /*
+     * 【2026-10-19 分诊 S-15】"手持档不解 git" 是**结构性不适用**，不是失败。
+     * 旧实现把两者混成 `git=FAIL` ⇒ 11/11 个 boot 全红、还顺手挡掉 python 的 exec 兜底。
+     * 这里同时钉"行为"（把 main.js 里那条三态表达式取出来求值）与"接线"（两处调用点真的传了第三个参数）。
+     */
+    check('接线: "只有 git 待解"按 SKIPPED 收尾（结构性不适用 ≠ 失败）',
+      /git=SKIPPED/.test(fb) && /finishToolchainExtraction\(false, false, needGit/.test(fb));
+    check('接线: python 解完后 git 未解 ⇒ 把 needGit 作为 skipped 传给收尾',
+      /finishToolchainExtraction\(true, false, needGit, true, extrasOk\)/.test(fb));
+    const gitStateExpr = /const gitState = (\(didGit \|\| gitOk\) \? 'OK' : \(gitSkipped \? 'SKIPPED' : 'FAIL'\));/.exec(main);
+    check('三态: main.js 里的 gitState 三态表达式还在（否则下面四条行为断言无从谈起）', gitStateExpr !== null);
+    if (gitStateExpr !== null) {
+      const stateOf = new Function('didGit', 'gitOk', 'gitSkipped', `return ${gitStateExpr[1]};`);
+      check('三态: which=OK 的两条（本轮解了 git / git 已就位）⇒ 成功形态原样保留',
+        stateOf(true, false, false) === 'OK' && stateOf(false, true, false) === 'OK');
+      check('三态: 手持档跳过（gitSkipped，且本轮没解、也没就位）⇒ SKIPPED，不再出现 git=FAIL',
+        stateOf(false, false, true) === 'SKIPPED');
+      check('三态: 真失败（该解没解、也没标跳过）⇒ 仍判 FAIL（不把失败洗成"跳过"）',
+        stateOf(false, false, false) === 'FAIL');
+      check('三态: 收尾日志带一句人话（真机 grep 得到"为什么跳过"）',
+        main.includes('（手持档 execve 被拒；git 仅 PC 档可用）'));
+      /*
+       * 对照臂：把"失败"也洗成 SKIPPED 的写法必须让上面"真失败仍判 FAIL"这条失去依据
+       * （证明那条断言不是恒真）。
+       */
+      const washed = new Function('didGit', 'gitOk', 'gitSkipped', "return (didGit || gitOk) ? 'OK' : 'SKIPPED';");
+      check('对照臂: 「失败也洗成 SKIPPED」的写法让真失败用例判红（三态判据有牙）',
+        washed(false, false, false) !== 'FAIL');
+    }
+    check('接线: ensureExecutables 的触发条件只看 pyOk（git 缺失不再挡住 python 的 chmod 兜底）',
+      /if \(pyOk\) \{\s*startupWork\.request\('exec', ensureExecutables\)/.test(main)
+        && !!(await (await import('./check-startup-work.mjs')).verifyStartupWork(main)));
     check('接线: 插件安装器复用同一份 walker（不是第二份私有 ustar）',
       /require\('\.\/tar-gz\.cjs'\)/.test(installer) && /tarGz\.extractTar\(/.test(installer));
     // 漏进 resfile ⇒ require 抛 MODULE_NOT_FOUND，被调用点吞成一行 diag = 与修复前一模一样

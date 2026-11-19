@@ -36,7 +36,7 @@
  *     「改了 A 窗口却影响 B 窗口」时的第一条线索。
  */
 
-import { AbilityStage, Want } from '@kit.AbilityKit';
+import { AbilityStage, appRecovery, application, Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { parseWindowParams, WindowKind, WindowParams } from 'platform';
@@ -55,10 +55,136 @@ const KEY_MAIN: string = 'main';
 /** 会话窗实例 key 前缀：其后拼会话 id */
 const KEY_SESSION_PREFIX: string = 'session:';
 
+/**
+ * AppStorage 键：本次进程的「应用预加载类型」（`application.AppPreloadType` 的数值）。
+ *
+ * 供启动链上的其它环节读取（例如后面对"是否走更激进的前移初始化"做决策）。
+ * 只在 `AppAbilityStage.onCreate` 里写一次；读不到（旧系统）时为 `UNSPECIFIED`。
+ */
+const KEY_APP_PRELOAD_TYPE: string = 'dshAppPreloadType';
+
+/** 枚举 → 人话（只用于日志，便于真机一眼读数） */
+function preloadTypeName(t: application.AppPreloadType): string {
+  if (t === application.AppPreloadType.TYPE_CREATE_WINDOW_STAGE) {
+    return '已预加载到窗口创建完成';
+  }
+  if (t === application.AppPreloadType.TYPE_CREATE_ABILITY_STAGE) {
+    return '已预加载到 AbilityStage 创建完成';
+  }
+  if (t === application.AppPreloadType.TYPE_CREATE_PROCESS) {
+    return '已预加载到进程创建完成';
+  }
+  return '未预加载';
+}
+
+/**
+ * 把预加载类型记进 AppStorage（失败静默）。
+ *
+ * 【为什么单独包一层 try】`AppStorage` 是 ArkUI 的全局态，**在本工程的既有代码里
+ * 从未在 AbilityStage 层用过**（其余调用点都在 EntryAbility 及之后，即 UI 上下文起来之后）。
+ * 而 AbilityStage.onCreate 可能早于 ArkUI 运行时初始化 ⇒ 直接写有抛异常打死启动的风险。
+ * 这条信息只用于后续"要不要前移初始化"的决策，**存不下也没关系**，绝不能因此起不来。
+ */
+function rememberAppPreloadType(t: application.AppPreloadType): void {
+  try {
+    AppStorage.setOrCreate<number>(KEY_APP_PRELOAD_TYPE, t as number);
+  } catch (e) {
+    const err = e as BusinessError;
+    hilog.warn(DOMAIN, TAG, 'DSHM-PRELOAD 写入 AppStorage 失败（不影响启动）：%{public}s', err.message);
+  }
+}
+
+/**
+ * 读取本进程的预加载类型（失败一律回落 `UNSPECIFIED`）。
+ *
+ * 【为什么必须包 try】这是启动路径上**第一行**平台调用：设备若跑在 API 22 以下的
+ * 系统上（本项目 target 26，但真机系统版本未必跟得上），`application.getAppPreloadType`
+ * 可能不存在。抛异常会直接打死 AbilityStage ⇒ 应用起不来。
+ * 「探针失败」绝不能升级成「启动失败」——这是本函数的唯一纪律。
+ */
+function probeAppPreloadType(): application.AppPreloadType {
+  try {
+    const t: application.AppPreloadType = application.getAppPreloadType();
+    hilog.info(DOMAIN, TAG,
+      'DSHM-PRELOAD 本进程预加载类型=%{public}d（%{public}s）',
+      t as number, preloadTypeName(t));
+    return t;
+  } catch (e) {
+    const err = e as BusinessError;
+    hilog.warn(DOMAIN, TAG, 'DSHM-PRELOAD 读取预加载类型失败（按 UNSPECIFIED 处理）：%{public}s',
+      err.message);
+    return application.AppPreloadType.UNSPECIFIED;
+  }
+}
+
 export default class AppAbilityStage extends AbilityStage {
   onCreate(): void {
+    /*
+     * ── 应用预加载（App Preload）探针（docs/338）────────────────────────────
+     *
+     * 【为什么放在最前面】`application.getAppPreloadType()` 的官方约束是：
+     * **只有在本回调（AbilityStage.onCreate）首次执行之前调用才拿得到真实值**；
+     * 一旦 AbilityStage 创建完成，预加载数据就被平台清除，之后调用恒返回 `UNSPECIFIED`。
+     * 所以这里是全应用**唯一**能读到它的一行代码。
+     *
+     * 【它回答什么问题】系统级「应用预加载」是平台按用户习惯自动做的，开发者不接代码；
+     * 但它**预加载到哪一档**决定了我们的重活能不能白拿：
+     *   UNSPECIFIED(0)             没预加载
+     *   TYPE_CREATE_PROCESS(1)     只建了进程
+     *   TYPE_CREATE_ABILITY_STAGE(2) 连 AbilityStage 都建好了
+     *   TYPE_CREATE_WINDOW_STAGE(3)  连窗口都建好了
+     * 若常见为 2/3，则把 `installBundled()` / `host.start()` 前移到本阶段可显著缩短
+     * 用户"点开→可用"的等待；若恒为 0，则 App Preload 这条路无收益，资源应全押到
+     * AppStartup 的并行解包上（那是与系统是否预加载无关的确定性收益）。
+     *
+     * 【本探针不改任何行为】只读一次枚举 + 打一行日志 + 写一个 AppStorage 键。
+     * `AppPreloadType` 自 API 22 起提供；本工程 target 26，编译期不会缺符号。
+     */
     // 基类（裸 AbilityStage）的 onCreate 是空实现；显式调用只为表明"这里没有隐藏前置条件"
     super.onCreate();
+    rememberAppPreloadType(probeAppPreloadType());
+    /*
+     * 【整机冷启动的前置开关】皮肤/插件市场「重启后生效」那条链的**唯一开关**（2026-10-09 真机实证）。
+     *
+     * 症状：appRecovery.restartApp() 调用成功、无异常、日志打完就没有下文，进程 pid 不变，
+     * App 停在「连接已断开」的死态（Host 早已 process.exit(0) 退出），用户装完皮肤点「使用」
+     * 必然落到这里。**根因不是调用姿势，而是平台的前置条件没满足**：OpenHarmony 实现
+     * frameworks/native/ability/native/recovery/app_recovery.cpp：
+     *     bool AppRecovery::ScheduleRecoverApp(StateReason reason) {
+     *         if (!ShouldRecoverApp(reason)) return false;
+     *         if (!isEnable_) {
+     *             if (GetParameter("const.dfx.sub_health_recovery.enable","") == "true") { ...; return true; }
+     *             return false;      // 没开恢复：静默 return false（JS 侧得到 undefined，不抛）
+     *         }
+     *         ...
+     *     }
+     * 而 isEnable_ **只**由 EnableAppRecovery() 置真 ⇒ 本应用此前从未调用它，
+     * 有没有 setRestartWant 都一样，restartApp() 都是那个静默 return false。
+     *
+     * 【为什么放在 AbilityStage.onCreate 而不是 EntryAbility.onCreate】平台的 ability 恢复记录
+     * 是在 **ability 创建时**（AppRecovery::AddAbility）按当时的 flag 快照建的，而 AbilityStage.onCreate
+     * 早于任何 ability 创建 ⇒ 这里开的档才对能力生效（同一份实现里 useAppSettedValue_ 就是为
+     * 「应用自己设过值」准备的）。本类与 HAP 一一对应，只跑一次。
+     *
+     * 【为什么是 RESTART_WHEN_JS_CRASH，而不是 ALWAYS_RESTART / NO_RESTART】
+     *   · NO_RESTART 会让 ShouldRecoverApp() 直接 return false ⇒ 连**手动** restartApp 也一起失效
+     *     （同一份实现的第一行判断）⇒ 不能用；
+     *   · 手动路径（StateReason::DEVELOPER_REQUEST）在**任何**非 NO_RESTART 档下都返回 true ⇒ 取最窄的
+     *     那档即可：只把「JS 崩溃自动拉起」这一种崩溃语义带进来，不额外打开 APP_FREEZE / CPP_CRASH。
+     *
+     * 【已知平台限制（写在这里省得下次再撞）】restartApp() 有 1 分钟限流：两次调用间隔 ≤ 1 分钟时
+     * **只退出不重启**；另外 DoRecoverApp() 只对**处于前台**的 ability 生效 ⇒ 后台时调用同样不重启。
+     * 两条都由 EntryAbility 侧的兜底退出接住（不留死态）。
+     */
+    try {
+      appRecovery.enableAppRecovery(appRecovery.RestartFlag.RESTART_WHEN_JS_CRASH,
+        appRecovery.SaveOccasionFlag.SAVE_WHEN_ERROR, appRecovery.SaveModeFlag.SAVE_WITH_FILE);
+      hilog.info(DOMAIN, TAG, 'DSHM-RESTART 已开启应用恢复（restartApp 生效的前置条件）');
+    } catch (err) {
+      const e = err as BusinessError;
+      hilog.error(DOMAIN, TAG, 'DSHM-RESTART 开启应用恢复失败（整机冷启动会退化为兜底退出）：%{public}s',
+        e.message);
+    }
     hilog.info(DOMAIN, TAG, 'AbilityStage.onCreate 完成（无 Electron 桥接依赖）');
   }
 
@@ -70,6 +196,16 @@ export default class AppAbilityStage extends AbilityStage {
    * 「开窗方写 sessionId、读窗方读 sid」这类静默错配（多窗口问题里最难查的一类）。
    */
   onAcceptWant(want: Want): string {
+    return this.resolveInstanceKey(want);
+  }
+
+  /**
+   * 决定本次 launched-with-`specified` 启动的实例 key（**唯一判定点**）。
+   *
+   * 【为什么同步/异步两个回调共用这一个函数】两者是同一件事的两种调用形态，
+   * 判定逻辑分两份就会漂移（一个改了另一个没改 ⇒ 同一次启动走不同 key）。
+   */
+  private resolveInstanceKey(want: Want): string {
     let key: string = KEY_MAIN;
     try {
       // want.parameters 允许为 undefined（系统重放/构造缺失），parseWindowParams 已做兜底
@@ -84,8 +220,28 @@ export default class AppAbilityStage extends AbilityStage {
       hilog.warn(DOMAIN, TAG, '解析启动参数失败，回落到主窗 key：%{public}s', e.message);
       key = KEY_MAIN;
     }
-    // 记一条决策日志：这是「开了 N 个窗口」的第一手证据，排查多窗口问题时先看它
-    hilog.info(DOMAIN, TAG, 'onAcceptWant → 实例 key = %{public}s', key);
+    return key;
+  }
+
+  /**
+   * 异步版实例 key（docs/322 首启修复）。
+   *
+   * 【为什么必须有它 —— 真机日志实证】手机首启偶发"点了图标进不去，杀进程再点才行"，
+   * 日志里每次启动都有这一行：
+   *   `AppKit: [JAS935]get 'onAcceptWantAsync' object failed`
+   * SDK 原文（`AbilityStage.d.ts`）：**API 20 起，只要实现了 `onAcceptWantAsync`，
+   * 就不会再触发同步的 `onAcceptWant`**；反之系统会先找异步版、找不到才回落。
+   * 只实现同步版时，这条回落路径在"进程刚被杀 / 首次安装"的冷启时刻并不总能走通
+   * （沙箱/AbilityStage 尚未就绪），于是启动被搁置 —— 杀掉进程后再点才恢复正常。
+   *
+   * ⇒ 两个都实现：异步版走同一判定函数，系统不再打 JAS935，也不再走那条回落。
+   * 【失败语义】这里**绝不 reject**：reject 等于"拒绝本次启动"，
+   * 表现为点了图标毫无反应；解析异常已在 `resolveInstanceKey` 内兜底为主窗 key。
+   */
+  async onAcceptWantAsync(want: Want): Promise<string> {
+    const key: string = this.resolveInstanceKey(want);
+    // 第一手证据：与同步版同一条日志文案，排查多窗口/首启时先看它
+    hilog.info(DOMAIN, TAG, 'onAcceptWantAsync → 实例 key = %{public}s', key);
     return key;
   }
 }

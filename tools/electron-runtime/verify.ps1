@@ -12,11 +12,13 @@
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 # SDK 位置：先看环境变量，再退回 IDE 安装目录的常见位置（不要写死某一台机器的路径）。
+# 2026-10-10: DevEco was moved from C:\Program Files\Huawei\DevEco Studio to
+# D:\Program Files\Huawei\DevEco Studio; resolve the install root instead of hardcoding a drive.
+. (Join-Path $PSScriptRoot '..\lib\deveco-home.ps1')
 $sdkRoot = $env:DEVECO_SDK_HOME
 if (-not $sdkRoot) {
     foreach ($c in @(
-        (Join-Path $env:ProgramFiles 'Huawei\DevEco Studio\sdk'),
-        'D:\Huawei\DevEco Studio\sdk',
+        (Get-DevEcoPath 'sdk'),
         (Join-Path $env:LOCALAPPDATA 'OpenHarmony\Sdk\26.0.0')
     )) {
         if ($c -and (Test-Path $c)) { $sdkRoot = $c; break }

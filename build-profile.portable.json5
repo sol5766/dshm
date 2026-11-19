@@ -1,0 +1,109 @@
+/*
+ * 历史迁移模板（2026-11-06 标注）：不参与正式构建。
+ * 正式配置是 build-profile.json5（含本机签名口令，不入库）；
+ * 本文件曾由 tools/export-deveco-workspace.ps1 引用，且缺 phone product/模块、
+ * caseSensitiveCheck 与正式配置相反。保留作模板，勿据此出包。
+ * 唯一正式身份：com.dshm.dshclient；beta 身份仅出包期间由 build-beta.mjs 临时切换。
+ */
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "<DevEco automatic signing will fill this on the target machine>",
+          "keyAlias": "debugKey",
+          "keyPassword": "<do not commit a real password>",
+          "profile": "<DevEco automatic signing will fill this on the target machine>",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "<DevEco automatic signing will fill this on the target machine>",
+          "storePassword": "<do not commit a real password>"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "6.1.0(23)",
+        "runtimeOS": "HarmonyOS",
+        "bundleName": "com.dshm.dshclient",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": false,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "connection",
+      "srcPath": "./connection",
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    {
+      "name": "appstate",
+      "srcPath": "./appstate",
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    {
+      "name": "dshcompat",
+      "srcPath": "./dshcompat",
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    {
+      "name": "platform",
+      "srcPath": "./platform",
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    {
+      "name": "hostruntime",
+      "srcPath": "./hostruntime",
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    }
+  ]
+}

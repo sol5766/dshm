@@ -111,6 +111,14 @@ const zh = {
 	"viewer.label": "系统预览",
 	"open.action": "系统预览",
 	"open.empty": "系统预览",
+	"location.action": "文件管理",
+	"location.done": "已在系统文件管理界面中打开这个文件的位置。",
+	"location.noPath": "还没拿到这个文件的绝对路径，稍后再试。",
+	"location.noBridge": "当前不在 DSHM 客户端里，无法打开文件管理界面。",
+	"location.empty": "文件路径为空，文件管理未受理。",
+	"location.nouri": "系统没把这个路径转成文件 URI，文件管理未受理。",
+	"location.context": "当前页面没有可用的窗口上下文。",
+	"location.threw": "调用文件管理时出错：{message}",
 	"body.hint": "这个文件由系统的文档预览窗打开，侧边栏不内嵌渲染。",
 	"body.done": "已交给系统预览窗。若没看到窗口，请再点一次。",
 	"error.noPath": "还没拿到这个文件的绝对路径，稍后再试。",
@@ -124,6 +132,14 @@ const en = {
 	"viewer.label": "System preview",
 	"open.action": "System preview",
 	"open.empty": "System preview",
+	"location.action": "Files",
+	"location.done": "Opened this file's location in the system file manager.",
+	"location.noPath": "The file's absolute path is not available yet. Try again in a moment.",
+	"location.noBridge": "Not running inside the DSHM client, so Files cannot be opened.",
+	"location.empty": "The file path was empty; Files declined it.",
+	"location.nouri": "The path could not be turned into a file URI; Files declined it.",
+	"location.context": "The current page has no usable window context.",
+	"location.threw": "Opening Files failed: {message}",
 	"body.hint": "This file opens in the system document preview window; the sidebar does not render it inline.",
 	"body.done": "Handed to the system preview window. If no window appeared, press again.",
 	"error.noPath": "The file's absolute path is not available yet. Try again in a moment.",
@@ -165,6 +181,70 @@ function invokeSystemPreview(absolutePath) {
 	}
 }
 
+/** 是否属于用户可见目录；应用沙箱路径不伪装成文件管理可浏览位置。 */
+function isUserVisiblePath(path) {
+	if (typeof path !== "string") return false;
+	const root = "/storage/Users/currentUser/";
+	const target = path.trim();
+	if (!target.startsWith(root)) return false;
+	return !target.slice(root.length).split("/").some((segment) => segment === ".." || segment === ".");
+}
+
+/** 在系统文件管理界面中定位到当前文件。 */
+function invokeFileLocation(absolutePath) {
+	const target = typeof absolutePath === "string" ? absolutePath.trim() : "";
+	if (target.length === 0) return { key: "location.noPath" };
+	const bridges = globalThis.__DSHM_BRIDGES__;
+	const call = bridges !== null && typeof bridges === "object" ? bridges.openFileLocation : void 0;
+	if (typeof call !== "function") return { key: "location.noBridge" };
+	try {
+		const status = call.call(bridges, target);
+		if (status === "ok") return null;
+		if (status === "empty") return { key: "location.empty" };
+		if (status === "context") return { key: "location.context" };
+		return { key: status === "nouri" ? "location.nouri" : "location.threw", params: { message: String(status) } };
+	} catch (error) {
+		return { key: "location.threw", params: { message: error instanceof Error ? error.message : String(error) } };
+	}
+}
+
+function FileLocationButton(props) {
+	const t = props.t;
+	const absolutePath = props.absolutePath;
+	const prominent = props.prominent === true;
+	const [banner, setBanner] = react.useState(null);
+	const seq = react.useRef(0);
+	if (!isUserVisiblePath(absolutePath)) return null;
+	const announce = (text) => {
+		seq.current += 1;
+		setBanner({ seq: seq.current, text });
+	};
+	return react_jsx_runtime.jsxs(react_jsx_runtime.Fragment, {
+		children: [
+			react_jsx_runtime.jsx(_deepseek_ai_dsh_client_ui_primitives.Button, {
+				variant: "ghost",
+				size: "sm",
+				"data-dshm-file-location": prominent ? "empty-action" : "action",
+				onClick: () => {
+					const failure = invokeFileLocation(absolutePath);
+					announce(failure === null
+						? t("location.done")
+						: t(failure.key, failure.params));
+				},
+				children: t("location.action")
+			}),
+			banner === null ? null : react_jsx_runtime.jsx(_deepseek_ai_dsh_client_ui_primitives.Toast, {
+				text: banner.text,
+				icon: react_jsx_runtime.jsx(_deepseek_ai_dsh_client_ui_primitives.IconWarningOutlineRegular, {}),
+				holdMs: 4000,
+				onDone: () => {
+					setBanner(null);
+				}
+			}, banner.seq)
+		]
+	});
+}
+
 /** 把 invokeSystemPreview 的返回值译成一句可显示的文案。 */
 function describeFailure(t, failure) {
 	return failure === null ? null : t(failure.key, failure.params);
@@ -200,6 +280,11 @@ function SystemPreviewButton(props) {
 					announce(describeFailure(t, invokeSystemPreview(absolutePath)) ?? t("body.done"));
 				},
 				children: prominent ? t("open.empty") : t("open.action")
+			}),
+			react_jsx_runtime.jsx(FileLocationButton, {
+				absolutePath,
+				t,
+				prominent
 			}),
 			banner === null ? null : react_jsx_runtime.jsx(_deepseek_ai_dsh_client_ui_primitives.Toast, {
 				text: banner.text,

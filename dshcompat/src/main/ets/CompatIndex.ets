@@ -90,7 +90,43 @@ export interface VersionCheck {
  *                 故本次升级只需重生成上表 + 更新矩阵，**不必改调用代码**。
  *                 证据：`.research/protocol/contracts-0.2.0-rc.2.json`（本地取证，
  *                 `.research/` 已被 `.gitignore` 排除）+ `compat-drift` 实跑 exit=1（2 处新增）。
- *   0.2.1-alpha.1 —— 端侧当前基线（140 端点）。相对 0.2.0-rc.2：**零漂移**——
+ *   0.2.1-rc.2 —— 端侧当前基线（144 端点）。相对 0.2.1-alpha.4：**零协议漂移**：
+ *                 · 端点数量、形状、参数名、流式标记、可取消性与声明包逐条一致。
+ *                 · Host / 前端新增 `dsh-web-deepseek-api` 与
+ *                   `dsh-client-ui-deepseek-model-label-1017` 两个已挂载的纯 JS 能力，
+ *                   但不改变 Remote endpoint 契约，也不需要新增权限或 ArkTS 调用代码。
+ *                 证据：`.research/protocol/contracts-0.2.1-rc.2.json`（`endpointCount: 144`）+
+ *                 `DSH_CONTRACTS=.research/protocol/contracts.json DSH_VERSION=0.2.1-rc.2
+ *                 node tools/compat-drift.mjs` 实跑 exit=0。
+ *   0.2.1-alpha.4 —— 前一版端侧基线（144 端点）。相对 0.2.1-alpha.2：**+5 / −3**、其余零契约变化
+ *                 （**本仓首次出现「上游移除端点」**）：
+ *                 · 新增：`pluginMarket/{listIndexes,search,setIndexes}`（均一元；`search(url,query)`、
+ *                   `setIndexes(urls)`）、`remoteAccess/follow`（流式可取消）、`terminal/attach`
+ *                   （流式可取消，参数 `agentId` / `id`）。
+ *                 · 移除：`terminal/{follow,resize,write}` —— 上游把**终端 API 重设计成单条 `attach`**。
+ *                 · 其余 137 个端点**逐条一致**（形状、参数名、流式标记、可取消性、声明包均无变化）。
+ *                 ⇒ **我方无需改调用代码**：三个被移除的端点在本仓**只存在于生成的上表里**
+ *                   （`dshcompat/src/main/ets/Endpoints.ets` 由生成器产出），`rg` 实查全仓**无手写调用点**；
+ *                   五条新增端点也不落在任何能力映射（`tools/gen-compat-endpoints.mjs` 零命中）
+ *                   ⇒ 不会有能力因为这次移除被判缺失。
+ *                 证据：`.research/protocol/contracts-0.2.1-alpha.4.json`（本地取证；`endpointCount: 144`）
+ *                 + `DSH_CONTRACTS=<新契约> node tools/compat-drift.mjs` 实跑 **exit=1（8 处漂移）**，
+ *                 刷默认快照 + 重生成上表后 **exit=0**。
+ *                 ⚠️ 同时记一条**工具侧**修订：上游自 alpha.3 起换了描述符的发射形状
+ *                   （`remoteInfo({ package, methods: { "ns/method": {…} } })`），旧正则解析到 **0 个端点
+ *                   却仍静默写盘**；`tools/protocol-contract.mjs` 已补新形状解析（保留旧形状兼容）
+ *                   + **0 端点自检**，两棵树实测：alpha.2 → 142、alpha.4 → 144。
+ *   0.2.1-alpha.2 —— 前一版端侧基线（142 端点）。相对 0.2.1-alpha.1：**+2 / −0**、零契约变化：
+ *                 · 新增 `cotTranslation/{limits,translate}`（均一元、均 cancellable；
+ *                   命名空间整体为新包 `dsh-experimental-client-ui-cot-translation`）。
+ *                 · 既有 140 个端点**逐条一致**（形状、参数名、流式标记、可取消性、声明包均无变化）。
+ *                 ⇒ `cotTranslation/*` **我方当前未调用**（无对应能力项、无 UI 入口），
+ *                 故本次升级只需重生成上表 + 更新矩阵，**不必改调用代码**。
+ *                 证据：`.research/protocol/contracts-0.2.1-alpha.2.json`（本地取证，
+ *                 `.research/` 已被 `.gitignore` 排除；`endpointCount: 142`）+
+ *                 `DSH_CONTRACTS=<新契约> DSH_VERSION=0.2.1-alpha.2 node tools/compat-drift.mjs`
+ *                 实跑 **exit=1（2 处新增）**，刷默认快照 + 重生成上表后 **exit=0**。
+ *   0.2.1-alpha.1（前一版端侧基线，140 端点）。相对 0.2.0-rc.2：**零漂移**——
  *                 · 端点数量不变（140），既有 140 个端点**逐条一致**：形状、参数名、流式标记、
  *                   可取消性、声明包全部相同 ⇒ 上表除版本号与采集时间外**一个字节都没变**。
  *                 · 这是连续第四次「契约层零意外」（0.1.5-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2 / 本次）。
@@ -99,8 +135,47 @@ export interface VersionCheck {
  *                 `.research/` 已被 `.gitignore` 排除；`endpointCount: 140`）+
  *                 `DSH_CONTRACTS=<新契约> DSH_VERSION=0.2.1-alpha.1 node tools/compat-drift.mjs`
  *                 实跑 **exit=0「无漂移」**（跨版本比对，未先动默认快照）。
+ *   0.2.2-rc.1 —— 历史混收基线（193 端点 / 20 流式 / 15 能力，非权威 remotes 单源口径）。
+ *                 2026-11-12 修复采集器后，权威同口径复采为 150 端点 / 16 流式；
+ *                 下述 +51 / −2 是旧表汇总差异，不可用于声称 rc.2 移除扩展端点。相对旧上表 144 端点：
+ *                 **+51 新增 / −2 移除 / 0 契约变化**（参数形状、流式标记、可取消性逐条未变）。
+ *                 新增集中在 forgePanel/*、liveshareShares/*、pluginManager/*、session/observe*、
+ *                 toolResults/* 等新能力命名空间，我方均未调用 ⇒ 按"默认不调用"处理，不接新能力。
+ *                 移除的 `schedule/delete`、`schedule/update` 全仓只在生成的上表里出现，
+ *                 `connection/src`/`appstate/src`/`entry/src` 零调用 ⇒ 无需降级处置；
+ *                 `CAPABILITIES` 未引用它们，重生成上表零 WARN。
+ *                 证据：`.research/protocol/contracts-0.2.2-rc.1.json`（`endpointCount: 193`，
+ *                 2026-11-05 从 `dist/core/work/dsh-core-0.2.2-rc.1+dshm.1` 实采）+
+ *                 `DSH_CONTRACTS=<新契约> DSH_VERSION=0.2.2-rc.1 node tools/compat-drift.mjs`
+ *                 实跑 **exit=1（53 处漂移）**，刷默认快照（含 `.meta.json`）+ 重生成上表后 **exit=0**。
+ *                 ⚠️ 该版本的 `engines.node >= 24.9.0`，端侧已换自建 libnode v24.9.0（docs/365、366）。
+ *   0.2.2-rc.2 —— 当前完整多源基线（223 端点 / 22 流式 / 15 能力）。
+ *                 2026-11-13 同提取器复采 rc.1=193/20、rc.2=223/22；保留插件扩展。
+ *                 下述 150→158 仅是 remotes 子集历史比较，不是完整接口面。
+ *                 两版均只采 dsh-api-remotes/lib/client.js 的完整 createTypertRemoteInfo 调用：
+ *                 rc.1 150 → rc.2 158，真实 +13 / −5；保留 145 条参数、流式与取消性均不变，
+ *                 其中 9 条 account/* 仅声明包改为 dsh-deepseek-account。
+ *                 · 新增 account 三条通知端点、agentTeams/setEnabled、mcpManager 三条端点、
+ *                   officeKit 两条端点、subagents/interruptByUser、terminal/watch、web/listProviders、
+ *                   workspaceFiles/search；officeKit 参数与旧 officeToPdf 对应端点一致。
+ *                 · 移除 account/{ackBonusNotified,getUnnotifiedBonuses}、officeToPdf/{generation,render}、
+ *                   subagents/interruptByParent；后者由 interruptByUser(childSessionId) 替换。
+ *                 · 从历史 193 条表迁移为 +13 / −48，额外 43 条是旧混收扩展声明，
+ *                   并非由两版权威源比较证实的上游删除，不可混为一谈。
+ *                 · 移除端点在 ArkTS 调用层零命中；子代理能力映射更新为 interruptByUser。
+ *                 验证：采集器 35 项自检、生成器 6 项自检、compat-drift 零漂移；仅离线契约验证。
+ *                 证据：.research/protocol/drift-0.2.2-rc.1-to-rc.2.json 与两版 authoritative 契约。
  */
 const SUPPORTED_VERSIONS: string[] = [
+  '0.2.2-rc.4',
+  '0.2.2-rc.3',
+  '0.2.2-rc.2',
+  '0.2.2-rc.1',
+  '0.2.1-rc.4',
+  '0.2.1-rc.3',
+  '0.2.1-rc.2',
+  '0.2.1-alpha.4',
+  '0.2.1-alpha.2',
   '0.2.1-alpha.1',
   '0.2.0-rc.2',
   '0.2.0-rc.1',

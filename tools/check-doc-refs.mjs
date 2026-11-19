@@ -40,6 +40,11 @@
  *   引用目标：`docs/70:878`（短式）｜`docs/70-…md:878`｜`70-…md:878`（全名）
  *   续写：紧接的 `、`/`，`/`,` + 行号（如 `` `docs/70:892-946`、`:976-987` ``），
  *         以及独立成反引号段的 `` `:976-987` ``、`` `:105` ``。
+ *         两种续写都必须**紧接**在所属引用之后（中间只许有分隔符 / 反引号 / 空格）。
+ *         2026-10-13 加此约束：`AGENTS.md` 的文档台账是**一行 2.4 万字符**，
+ *         原先"独立反引号段一律算前一个 mention 的续写"会把几万字符外那条
+ *         台账序号（`` `146` ``）算成 `` `docs/142` `` 的行号 ⇒ 假报 B/C。
+ *         门禁头部"宁可少守，也不许把假阳性塞给人看"这条原则优先。
  *   声称：**相邻**的 `§A.B`。相邻 = 中间只隔反引号/空格/括号。
  *         两种语序都认：`` `FILE:N`（§A.B） `` 与 `§A.B（FILE:N）`。
  *   自引用：`§A.B` 前带「本章 / 见 / 详见 / 本节」⇒ 不算对被引文档的声称（跳过）。
@@ -53,6 +58,10 @@
  *   - 全名形态只认 `NN-….md`（左边界须为行首/反引号/斜杠等）。因此 `docs/` 下的
  *     **非编号文档名**（如 `review-report-2026-09-29.md`）**不在判据内**：不解析、
  *     不报错——这是刻意的，之前它会被当成文件名中段的 `26-09-29.md` 而假报 B。
+ *   - 编号是 **2 位或 3 位**（`docs/70` 与 `docs/142` 都认）。2026-10-13 之前只认
+ *     2 位：那时 `docs/` 最多到 `116`，3 位引用会被切成 `docs/14` + 尾数 ⇒
+ *     既静默漏检（无行号时）、又假报 B（`docs/142` 的续写）。`docs/` 涨到 `150`
+ *     之后这条必须放宽。
  *
  * ## 用法
  *   node tools/check-doc-refs.mjs              # 检查，有问题则非零退出
@@ -77,7 +86,7 @@ const AFTER = '(?=[,，、；;)\\]）】|。`]|$)';
 /** 「相邻」允许的噪声字符：反引号、空格、开括号。 */
 const NOISE = '[\\s`（(【\\[]{0,4}';
 /** 全名形态：`70-鸿蒙移植踩坑与修复总览.md`。 */
-const FULLNAME = '(?<![\\w.\\-])[0-9]{2}-[^\\s:：`()\\[\\]，、]+?\\.md';
+const FULLNAME = '(?<![\\w.\\-])[0-9]{2,3}-[^\\s:：`()\\[\\]，、]+?\\.md';
 /**
  * 引用目标。两条分支都必须匹配到一处**文档名**：
  *   ① 全名 `70-…md`（`docs/` 前缀可省）；
@@ -93,9 +102,20 @@ const FULLNAME = '(?<![\\w.\\-])[0-9]{2}-[^\\s:：`()\\[\\]，、]+?\\.md';
  * **全名排在前面的分支**：否则 `docs/10-协议兼容事实基线.md:24` 会被短式先吃掉
  * `10`，后面的 `:24` 不再紧跟，整条引用就退化成"无声称"而被静默跳过。
  */
-const NAME = `(?:(?:docs[\\\\/])?(${FULLNAME})|docs[\\\\/]([0-9]{2}))`;
+const NAME = `(?:(?:docs[\\\\/])?(${FULLNAME})|docs[\\\\/]([0-9]{2,3}))`;
 /** 纯行号段（用于识别续写）：`:976-987`、`,268,275`、`:105`。 */
 const BARE_SPAN = /^[:：,，、]?\s*\d+(\s*[-–~]\s*\d+)?(\s*[,，、]\s*[:：]?\s*\d+(\s*[-–~]\s*\d+)?)*$/;
+/**
+ * 「独立成反引号段」的续写与**所属引用**之间允许出现的文本：反引号 / 空格 / 分隔符。
+ *
+ * 【为什么需要这条】续写的语义是"**紧接**在前一条引用之后把行号接着写"。原先
+ * `parseLine` 不判距离，任何独立数字反引号段都被塞给"本行上一个 mention" ⇒
+ * 在一行 2.4 万字符的台账（`AGENTS.md` 的文档表）上，几万字符外的一条台账序号
+ * 会被当成上一条 `docs/NN` 的行号（2026-10-13 实测：6 处假报 B/C）。
+ * 距离闸门收紧后，**只有**真正的紧接续写会被认；其余一律**不解析**（少检查一条，
+ * 而不是报一条假的——见文件头"宁可少守"）。
+ */
+const CONT_GAP = /^[`\s、，,；;：:。]{0,6}$/;
 
 // ── 纯函数部分（可被自检复用） ───────────────────────────────────────
 
@@ -185,6 +205,9 @@ export function parseLine(line) {
     // 一起吃掉（`…:4`、`:6` 里那对反引号），于是 bare item 的 start 落在
     // span.start 的**前一个字符**上，包含判据恒为假 ⇒ 同一条续写被记两次。
     if (items.some((it) => it.kind === 'bare' && it.start < s.end && it.end > s.start)) continue;
+    // 只能归给**紧接**在它前面的那条引用（见 CONT_GAP 的注释）。
+    const host = [...items].reverse().find((it) => it.kind === 'mention' && it.end <= s.start);
+    if (host === undefined || !CONT_GAP.test(line.slice(host.end, s.start))) continue;
     const re = new RegExp(`[:：]?\\s*${NUM}`, 'g');
     let t;
     while ((t = re.exec(s.inner))) {
@@ -252,13 +275,13 @@ export function scanSources(sources) {
   const byNum = new Map();
   for (const s of sources) {
     byName.set(s.name, { name: s.name, lines: s.lines, heads: headingMap(s.lines) });
-    const num = s.name.match(/^(\d{2})-/);
+    const num = s.name.match(/^(\d{2,3})-/);
     if (!num) continue;
     if (!byNum.has(num[1])) byNum.set(num[1], []);
     byNum.get(num[1]).push(s.name);
   }
   const resolve = (raw) => {
-    if (/^[0-9]{2}$/.test(raw)) {
+    if (/^[0-9]{2,3}$/.test(raw)) {
       const hits = byNum.get(raw);
       if (!hits || hints_empty(hits)) return { missing: true };
       if (hits.length > 1) return { ambiguous: hits };
@@ -340,7 +363,17 @@ function selfTest() {
     // 【为什么新样例必须加在**末尾**】本数组的下标 = 行号，上面所有用例都按 `90-乙.md:N` 断言；
     // 插在中间会让后面每个断言的"N"整体位移 —— 本次加样例时就踩过一次（3 个用例转红）。
     '不可核对：`AGENTS.md:29-34`（§1）',
+    // ── 2026-10-13 追加（同上：必须加在末尾）─────────────────────────────────
+    // 正控：中间只隔分隔符的**紧接**反引号续写仍然被认出来 ⇒ 越界照报 C
+    //       （证明下面那条距离闸门没有把"续写"这个功能整个关掉）。
+    '紧接续写仍判：`docs/10:2`：`:99`',
+    // 负控：同一行里**离得很远**的裸数字不算续写（原实现会归给它前面那条引用 ⇒ 假报 C）。
+    '远处裸数字不算续写：`docs/10:3`（§1）——这是与上面引用毫无关系的一段正文，末尾写个台账序号 `99`',
+    // 三位编号（`docs/` 已到 `150`）：必须认出 `142`，而不是切成 `14` + 尾数。
+    '三位编号：`docs/142:2`（§1）',
   ].map((s, i) => (i === 0 ? s : `- ${s}`));
+  // 三位编号的被引文档（`docs/` 涨到 3 位编号后的回归样例）。
+  const C = ['# 丙', '## 1. 一', 'x'];
   const cases = [
     ['后置声称（FILE:N（§X））落点对 ⇒ 不报', (is) => !is.some((i) => i.where.startsWith('90-乙.md:2'))],
     ['后置声称落点错 ⇒ 必须报 A', (is) => is.some((i) => i.kind === 'A 落点' && i.where.startsWith('90-乙.md:3'))],
@@ -358,10 +391,14 @@ function selfTest() {
     ['前置声称（§X（FILE:N））落点对 ⇒ 不报', (is) => !is.some((i) => i.where.startsWith('90-乙.md:13'))],
     ['前置声称落点错 ⇒ 必须报 A', (is) => is.some((i) => i.kind === 'A 落点' && i.where.startsWith('90-乙.md:14'))],
     ['同行的远处声称不当成相邻 ⇒ 不报', (is) => !is.some((i) => i.where.startsWith('90-乙.md:15'))],
+    ['紧接的反引号续写仍认（越界 ⇒ 报 C）', (is) => is.some((i) => i.kind === 'C 界内' && i.where.startsWith('90-乙.md:17'))],
+    ['远处裸数字不算续写 ⇒ 不报', (is) => !is.some((i) => i.where.startsWith('90-乙.md:18'))],
+    ['三位编号 `docs/142` 要认得出来 ⇒ 不报 B', (is) => !is.some((i) => i.where.startsWith('90-乙.md:19'))],
   ];
   const { issues, records } = scanSources([
     { name: '10-甲.md', lines: A },
     { name: '90-乙.md', lines: B },
+    { name: '142-丙.md', lines: C },
   ]);
   let failed = 0;
   console.log('# 文档引用门禁自检（注入式）\n');

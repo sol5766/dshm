@@ -23,13 +23,12 @@
  * 所以上游加一个导出（真机就发生过：`readdirp` 要 `realpath`）不会让门禁假红。
  *
  * ─────────────────── 注入式负控制（每次运行都跑，不是可选） ───────────────────
- * 第二臂用 `load` 钩子把树里那份源码的**两处** `if (isPermissionError(error)) throw …`
- * 就地删掉（URL 不变 ⇒ 依赖仍按原路径解析；只改内存，不落地、不碰核心树）⇒ 同样的调用
- * 必须退回**裸 EPERM**。若这一臂也"通过"，说明本门禁没有判别力（那正是上一条要挡的假绿）。
+ * 第二臂用 `load` 钩子在两处读取入口破坏权限转换：rc.1 删除补丁分支，rc.2 在调用
+ * 上游 fsErrorFromErrno 前仅对 EPERM/EACCES 原样抛错（URL 与依赖解析路径不变，改动仅在内存）。
+ * 同样的调用必须退回**裸 EPERM/EACCES**，非权限错仍保持该版本原有语义，否则负控制不成立。
  *
  * ─────────────────── 覆盖边界（不在本门禁内的事，别当成绿） ───────────────────
- *   · `readBytes` / `readByteRange` **不走 `stat`**（直接 `createReadStream`）⇒ 上游本来就没有
- *     这条分支，本补丁也**不覆盖**它们（照旧只有 `open` 那一步会拒）。
+ *   · 本门禁只调用 readText / editText；readBytes / readByteRange 的流式读取不在覆盖范围内。
  *   · `editHealthy` 那条对照臂只断言"**不许报权限**"，不断言"编辑一定成功"：树是**端侧 arm64**
  *     的树，宿主机（x64）上 `writeFileAtomic` 要用的 `koffi` 原生绑定加载不了，
  *     会在**更后面**以别的错失败（`Cannot find the native Koffi module`）。这不是补丁的问题，
@@ -38,6 +37,7 @@
  * 用法：node tools/check-fs-local-permission.mjs [--self-test]
  * 退出码：0 通过 / 1 失败 / 3 环境不具备（无核心树）或自检失败
  */
+import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -53,24 +53,75 @@ const EDIT_DENIED = 'cannot edit "<DIR>/edit-denied.txt": permission denied';
 
 /* ───────────────────────── 定位核心树里那份被注入的文件 ───────────────────────── */
 
-function findPatchedTree() {
-  const base = join(ROOT, 'dist', 'core', 'work');
-  if (!existsSync(base)) return null;
-  const versions = readdirSync(base).filter((n) => n.startsWith('dsh-core-')).sort().reverse();
-  for (const v of versions) {
-    const file = join(base, v, 'node_modules', '@deepseek-ai', 'dsh-fs-local', 'lib', 'index.js');
-    if (!existsSync(file)) continue;
-    const text = readFileSync(file, 'utf8');
-    if (text.includes('DSHM_FS_LOCAL_PERMISSION_HINT')) return { version: v, file, text };
+function findPatchedTree(root = ROOT, read = readFileSync, exists = existsSync) {
+  const { coreVersion } = JSON.parse(read(join(root, 'hostcore', 'core-recipe.json'), 'utf8'));
+  if (typeof coreVersion !== 'string' || !/^[0-9A-Za-z.+-]+$/.test(coreVersion)) {
+    throw new Error('core-recipe.json 的 coreVersion 非法');
   }
-  return null;
+  const version = `dsh-core-${coreVersion}`;
+  const file = join(root, 'dist', 'core', 'work', version, 'node_modules', '@deepseek-ai', 'dsh-fs-local', 'lib', 'index.js');
+  if (!exists(file)) return null;
+  // 补丁缺失也返回目标文件，让静态断言判红，不得换一棵已打补丁的旧树。
+  return { version, file, text: read(file, 'utf8') };
+}
+
+function selfTestCoreSelection() {
+  const root = resolve('/fs-selection-fixture');
+  const read = (file) => file.endsWith('core-recipe.json')
+    ? '{"coreVersion":"0.2.2-rc.2+dshm.1"}' : 'upstream without patch';
+  const selected = findPatchedTree(root, read, () => true);
+  assert.equal(selected.version, 'dsh-core-0.2.2-rc.2+dshm.1');
+  assert(staticChecks(selected.text).some((item) => !item.ok));
+  assert.equal(findPatchedTree(root, read, () => false), null);
+  assert.throws(() => findPatchedTree(root, () => '{"coreVersion":"../old"}', () => true), /coreVersion 非法/);
+  console.log('PASS：配方选树自检 4/4（目标缺补丁判红、不回退旧树）');
 }
 
 /* ───────────────────────── 静态断言（文本层） ───────────────────────── */
 
+function permissionShape(text) {
+  return text.includes('async function readFileAbortable(absolutePath, displayPath, verb, signal)')
+    ? 'upstream' : 'patched';
+}
+
+function neuterPermission(text) {
+  const upstream = text.includes('async function readFileAbortable(absolutePath, displayPath, verb, signal)');
+  let changedSites = 0;
+  let source;
+  if (upstream) {
+    source = text.replace(/throw fsErrorFromErrno\(verb, (target\.displayPath|displayPath), error\);/g, (line) => {
+      changedSites++;
+      return 'if (error && (error.code === "EPERM" || error.code === "EACCES")) throw error; ' + line;
+    });
+  } else {
+    source = text.split('\n').filter((line) => {
+      if (!line.includes('if (isPermissionError(error)) throw new FsError')) return true;
+      changedSites++;
+      return false;
+    }).join('\n');
+  }
+  return { source, changedSites, shape: upstream ? 'upstream' : 'patched' };
+}
+
 function staticChecks(text) {
   const results = [];
   const add = (ok, name, detail = '') => results.push({ ok, name, detail });
+  if (permissionShape(text) === 'upstream') {
+    const statRegion = text.slice(text.indexOf('async function statRegularFile'), text.indexOf('async function readWholeText'));
+    const readRegion = text.slice(text.indexOf('async function readFileAbortable'), text.indexOf('function versionOf'));
+    add(/import \{[^}]*\bfsErrorFromErrno\b[^}]*\} from "@deepseek-ai\/dsh-fs";/.test(text),
+      '上游形态：导入 dsh-fs 的 fsErrorFromErrno');
+    add(statRegion.includes('throw fsErrorFromErrno(verb, target.displayPath, error);'),
+      'statRegularFile：交由上游转换错误并传 displayPath');
+    add(readRegion.includes('throw fsErrorFromErrno(verb, displayPath, error);')
+      && readRegion.includes('if (isAbortError(error)) throw new FsError'),
+      'readFileAbortable：保留 abort 并转换读取错误');
+    add(text.includes('await readFileAbortable(target.targetKey, target.displayPath, "read", signal);')
+      && text.includes('await readFileAbortable(absolutePath, displayPath, "edit", signal);'),
+      '上游形态：read / edit 调用均传入 displayPath');
+    add(neuterPermission(text).changedSites === 2, '上游形态：负控制精确命中两个转换点');
+    return results;
+  }
   const marks = text.split('DSHM_FS_LOCAL_PERMISSION_HINT').length - 1;
   add(marks === 4, '树内标记恰好 4 处', `实际 ${marks} 处`);
 
@@ -123,6 +174,7 @@ function shimSource() {
 
 const FIXTURE = `
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const neuterPermission = ${neuterPermission.toString()};
 (async () => {
   const { registerHooks } = await import('node:module');
   const { pathToFileURL } = await import('node:url');
@@ -144,11 +196,10 @@ const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
       const r = nextLoad(url, context);
       if (!NEUTER) return r;
       if (!String(url).endsWith('/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js')) return r;
-      let src = typeof r.source === 'string' ? r.source : Buffer.from(r.source).toString('utf8');
-      const before = src;
-      src = src.split('\\n').filter((line) => !line.includes('if (isPermissionError(error)) throw new FsError')).join('\\n');
-      out({ case: 'neuter', removedLines: before.split('\\n').length - src.split('\\n').length });
-      return { format: 'module', source: src, shortCircuit: true };
+      const src = typeof r.source === 'string' ? r.source : Buffer.from(r.source).toString('utf8');
+      const changed = neuterPermission(src);
+      out({ case: 'neuter', changedSites: changed.changedSites, shape: changed.shape });
+      return { format: 'module', source: changed.source, shortCircuit: true };
     }
   });
 
@@ -222,7 +273,14 @@ function parse(stdout) {
   return { cases, stage };
 }
 
-function judgeFixed(c) {
+function isOtherError(result, shape) {
+  return result && result.outcome === 'rejected' && !/permission denied/.test(result.message || '')
+    && (shape === 'upstream'
+      ? result.ctor === 'FsError' && result.code === 'FS_IO_ERROR' && result.causeCode === 'EBUSY'
+      : result.ctor !== 'FsError' && result.code === 'EBUSY');
+}
+
+function judgeFixed(c, shape = 'patched') {
   const bad = [];
   const want = (ok, why) => { if (!ok) bad.push(why); };
   want(c.readStatEperm && c.readStatEperm.outcome === 'rejected', 'readStatEperm 应被拒');
@@ -232,8 +290,9 @@ function judgeFixed(c) {
   want(c.readStatEperm && c.readStatEperm.causeCode === 'EPERM', 'readStatEperm 应把原始 EPERM 留在 cause');
   want(c.readStatEacces && c.readStatEacces.code === 'FS_PERMISSION_DENIED' && c.readStatEacces.causeCode === 'EACCES',
     'readStatEacces 也吃 EACCES → FS_PERMISSION_DENIED');
-  want(c.readStatOther && c.readStatOther.outcome === 'rejected' && c.readStatOther.code === 'EBUSY'
-    && c.readStatOther.ctor !== 'FsError', 'readStatOther（EBUSY）必须原样上抛，不许翻成权限');
+  want(isOtherError(c.readStatOther, shape), shape === 'upstream'
+    ? 'readStatOther（EBUSY）必须为 FS_IO_ERROR 且 cause 保留 EBUSY，不许翻成权限'
+    : 'readStatOther（EBUSY）必须原样上抛，不许翻成权限');
   want(c.readMissing && c.readMissing.code === 'FS_NOT_FOUND' && /not found$/.test(c.readMissing.message || ''),
     'readMissing 必须仍是 FS_NOT_FOUND（顺序/分支不许把 ENOENT 也吞成 permission denied）');
   want(c.readHealthy && c.readHealthy.outcome === 'resolved' && c.readHealthy.value === 'hello-dshm\n',
@@ -248,60 +307,73 @@ function judgeFixed(c) {
   return bad;
 }
 
-function judgeNeuter(c) {
+function judgeNeuter(c, shape = 'patched') {
   const bad = [];
   const want = (ok, why) => { if (!ok) bad.push(why); };
-  want(c.neuter && c.neuter.removedLines === 2, '负控制臂应删掉 2 行权限分支');
-  want(c.readStatEperm && c.readStatEperm.ctor !== 'FsError' && c.readStatEperm.code === 'EPERM',
-    '负控制臂：删掉分支后必须退回裸 EPERM（否则本门禁没有判别力）');
-  want(c.editReadDenied && c.editReadDenied.ctor !== 'FsError' && c.editReadDenied.code === 'EPERM',
-    '负控制臂：edit 那条也必须退回裸 EPERM');
+  want(c.neuter && c.neuter.changedSites === 2 && c.neuter.shape === shape,
+    '负控制臂应精确破坏当前形态的 2 处权限转换');
+  for (const [name, code] of [['readStatEperm', 'EPERM'], ['readStatEacces', 'EACCES'], ['editReadDenied', 'EPERM']]) {
+    want(c[name] && c[name].outcome === 'rejected' && c[name].ctor !== 'FsError' && c[name].code === code,
+      '负控制臂：' + name + ' 必须退回裸 ' + code + '（否则本门禁没有判别力）');
+  }
+  want(isOtherError(c.readStatOther, shape), '负控制臂：EBUSY 非权限语义及 cause 不受影响');
   want(c.readMissing && c.readMissing.code === 'FS_NOT_FOUND', '负控制臂：not-found 仍应是 FS_NOT_FOUND（只动了权限分支）');
-  want(c.readHealthy && c.readHealthy.outcome === 'resolved', '负控制臂：正常读取不受影响');
+  want(c.readHealthy && c.readHealthy.outcome === 'resolved' && c.readHealthy.value === 'hello-dshm\n',
+    '负控制臂：正常读取不受影响');
+  want(c.readAborted && c.readAborted.code === 'FS_ABORTED', '负控制臂：abort 仍应为 FS_ABORTED');
   return bad;
 }
 
 const SELF_TESTS = [
   ['固定臂：全对 → 成立', {}, []],
   ['固定臂：readStatEperm 仍是裸错 → 不成立', { readStatEperm: { outcome: 'rejected', ctor: 'Error', code: 'EPERM' } }, ['readStatEperm']],
+  ['固定臂：权限 cause 丢失 → 不成立', { editReadDenied: { code: 'FS_PERMISSION_DENIED', message: EDIT_DENIED } }, ['cause']],
+  ['固定臂：EBUSY 被误报权限 → 不成立', { readStatOther: { outcome: 'rejected', ctor: 'FsError', code: 'FS_PERMISSION_DENIED', causeCode: 'EBUSY' } }, ['readStatOther']],
+  ['固定臂：EBUSY 原始错误丢失 → 不成立', { readStatOther: { outcome: 'rejected', ctor: 'FsError', code: 'FS_IO_ERROR' } }, ['readStatOther']],
   ['固定臂：not-found 被吞成 permission denied → 不成立', { readMissing: { code: 'FS_PERMISSION_DENIED', message: 'cannot read "x": permission denied' } }, ['readMissing']],
   ['固定臂：abort 被权限分支吞掉 → 不成立', { readAborted: { code: 'FS_PERMISSION_DENIED' } }, ['readAborted']],
-  ['负控制臂：删了分支却仍报 FS_PERMISSION_DENIED → 不成立（无判别力）',
-    { neuter: { removedLines: 2 }, readStatEperm: { ctor: 'FsError', code: 'FS_PERMISSION_DENIED' }, editReadDenied: { ctor: 'FsError', code: 'FS_PERMISSION_DENIED' }, readMissing: { code: 'FS_NOT_FOUND' }, readHealthy: { outcome: 'resolved' } },
-    ['裸 EPERM']],
+  ['负控制臂：全对 → 成立', {}, []],
+  ['负控制臂：转换未被破坏 → 不成立', { neuter: { changedSites: 0 } }, ['2 处']],
+  ['负控制臂：仍报权限 → 不成立（无判别力）',
+    { readStatEperm: { ctor: 'FsError', code: 'FS_PERMISSION_DENIED' }, editReadDenied: { ctor: 'FsError', code: 'FS_PERMISSION_DENIED' } }, ['裸 EPERM']],
+  ['负控制臂：EACCES 未退化 → 不成立', { readStatEacces: { ctor: 'FsError', code: 'FS_PERMISSION_DENIED' } }, ['裸 EACCES']],
+  ['负控制臂：EBUSY 被连带破坏 → 不成立', { readStatOther: { code: 'FS_PERMISSION_DENIED' } }, ['EBUSY']],
+  ['负控制臂：abort 被连带破坏 → 不成立', { readAborted: { code: 'FS_PERMISSION_DENIED' } }, ['abort']],
 ];
 
 if (process.argv.includes('--self-test')) {
-  const full = () => {
-    const ok = {};
-    for (const k of ['readStatEperm', 'readStatEacces', 'readStatOther', 'readMissing', 'readHealthy', 'readAborted', 'editReadDenied', 'editHealthy']) ok[k] = null;
-    ok.readStatEperm = { outcome: 'rejected', ctor: 'FsError', code: 'FS_PERMISSION_DENIED', message: READ_DENIED, causeCode: 'EPERM' };
-    ok.readStatEacces = { outcome: 'rejected', ctor: 'FsError', code: 'FS_PERMISSION_DENIED', message: READ_DENIED, causeCode: 'EACCES' };
-    ok.readStatOther = { outcome: 'rejected', ctor: 'Error', code: 'EBUSY' };
-    ok.readMissing = { outcome: 'rejected', ctor: 'FsError', code: 'FS_NOT_FOUND', message: 'cannot read "<DIR>/missing.txt": not found' };
-    ok.readHealthy = { outcome: 'resolved', value: 'hello-dshm\n' };
-    ok.readAborted = { outcome: 'rejected', ctor: 'FsError', code: 'FS_ABORTED' };
-    ok.editReadDenied = { outcome: 'rejected', ctor: 'FsError', code: 'FS_PERMISSION_DENIED', message: EDIT_DENIED, causeCode: 'EPERM' };
-    ok.editHealthy = { outcome: 'rejected', ctor: 'Error', message: 'Cannot find the native Koffi module' };
-    return ok;
-  };
-  const NEUTER_OK = {
-    neuter: { removedLines: 2 },
-    readStatEperm: { outcome: 'rejected', ctor: 'Error', code: 'EPERM' },
-    editReadDenied: { outcome: 'rejected', ctor: 'Error', code: 'EPERM' },
-    readMissing: { outcome: 'rejected', ctor: 'FsError', code: 'FS_NOT_FOUND' },
-    readHealthy: { outcome: 'resolved' },
-  };
+  const full = (shape) => ({
+    readStatEperm: { outcome: 'rejected', ctor: 'FsError', code: 'FS_PERMISSION_DENIED', message: READ_DENIED, causeCode: 'EPERM' },
+    readStatEacces: { outcome: 'rejected', ctor: 'FsError', code: 'FS_PERMISSION_DENIED', message: READ_DENIED, causeCode: 'EACCES' },
+    readStatOther: shape === 'upstream'
+      ? { outcome: 'rejected', ctor: 'FsError', code: 'FS_IO_ERROR', causeCode: 'EBUSY' }
+      : { outcome: 'rejected', ctor: 'Error', code: 'EBUSY' },
+    readMissing: { outcome: 'rejected', ctor: 'FsError', code: 'FS_NOT_FOUND', message: 'cannot read "<DIR>/missing.txt": not found' },
+    readHealthy: { outcome: 'resolved', value: 'hello-dshm\n' },
+    readAborted: { outcome: 'rejected', ctor: 'FsError', code: 'FS_ABORTED' },
+    editReadDenied: { outcome: 'rejected', ctor: 'FsError', code: 'FS_PERMISSION_DENIED', message: EDIT_DENIED, causeCode: 'EPERM' },
+    editHealthy: { outcome: 'rejected', ctor: 'Error', message: 'Cannot find the native Koffi module' },
+  });
+  selfTestCoreSelection();
   let bad = 0;
-  for (const [name, patch, wantBad] of SELF_TESTS) {
-    const c = patch === undefined || Object.keys(patch).length === 0 && name.startsWith('固定臂：全对')
-      ? full() : Object.assign(full(), patch);
-    const bads = name.startsWith('负控制臂') ? judgeNeuter(Object.assign({}, NEUTER_OK, patch)) : judgeFixed(c);
-    const ok = wantBad.length === 0 ? bads.length === 0 : wantBad.every((k) => bads.some((b) => b.includes(k)));
-    if (!ok) { bad++; console.log('FAIL  ' + name + ' → ' + JSON.stringify(bads)); }
-    else console.log('ok    ' + name);
+  for (const shape of ['patched', 'upstream']) {
+    const neuterOk = {
+      ...full(shape),
+      neuter: { changedSites: 2, shape },
+      readStatEperm: { outcome: 'rejected', ctor: 'Error', code: 'EPERM' },
+      readStatEacces: { outcome: 'rejected', ctor: 'Error', code: 'EACCES' },
+      editReadDenied: { outcome: 'rejected', ctor: 'Error', code: 'EPERM' },
+    };
+    for (const [name, patch, wantBad] of SELF_TESTS) {
+      const bads = name.startsWith('负控制臂')
+        ? judgeNeuter({ ...neuterOk, ...patch }, shape) : judgeFixed({ ...full(shape), ...patch }, shape);
+      const ok = wantBad.length === 0 ? bads.length === 0 : wantBad.every((k) => bads.some((b) => b.includes(k)));
+      if (!ok) { bad++; console.log('FAIL  ' + shape + ' ' + name + ' → ' + JSON.stringify(bads)); }
+      else console.log('ok    ' + shape + ' ' + name);
+    }
   }
-  console.log(bad === 0 ? '\n自检通过：' + SELF_TESTS.length + '/' + SELF_TESTS.length + ' 判定成立'
+  const total = SELF_TESTS.length * 2;
+  console.log(bad === 0 ? '\n自检通过：' + total + '/' + total + ' 判定成立'
     : '\n自检失败：' + bad + ' 项');
   process.exit(bad === 0 ? 0 : 3);
 }
@@ -310,7 +382,7 @@ if (process.argv.includes('--self-test')) {
 
 const tree = findPatchedTree();
 if (tree === null) {
-  console.log('环境不具备：dist/core/work/dsh-core-*/ 里没有带 DSHM_FS_LOCAL_PERMISSION_HINT 的 dsh-fs-local（先把核心树物化出来）');
+  console.log('环境不具备：配方指定的 dist/core/work/dsh-core-*/ 中没有 dsh-fs-local（先把目标核心树物化出来）');
   process.exit(3);
 }
 const statics = staticChecks(tree.text);
@@ -343,8 +415,11 @@ const fixed = await runArm(false);
 const neuter = await runArm(true);
 const pFixed = parse(fixed.stdout);
 const pNeuter = parse(neuter.stdout);
-const badFixed = judgeFixed(pFixed.cases);
-const badNeuter = judgeNeuter(pNeuter.cases);
+const shape = permissionShape(tree.text);
+const badFixed = judgeFixed(pFixed.cases, shape);
+const badNeuter = judgeNeuter(pNeuter.cases, shape);
+if (fixed.code !== 0 || pFixed.stage !== 'done') badFixed.push('固定臂未正常结束');
+if (neuter.code !== 0 || pNeuter.stage !== 'done') badNeuter.push('负控制臂未正常结束');
 
 console.log('──── 固定臂（树里那份真代码）────');
 for (const k of Object.keys(pFixed.cases)) console.log('  ' + JSON.stringify(pFixed.cases[k]));
@@ -352,16 +427,16 @@ if (pFixed.stage !== 'done') console.log('  stage=' + pFixed.stage + ' stderr=' 
 for (const b of badFixed) { console.log('  FAIL  ' + b); failed++; }
 if (badFixed.length === 0) console.log('  ok    8 组行为断言全过（含 4 条对照臂）');
 
-console.log('──── 负控制臂（删掉权限分支后必须退回裸错）────');
+console.log('──── 负控制臂（破坏两处权限转换后必须退回裸错）────');
 for (const k of Object.keys(pNeuter.cases)) console.log('  ' + JSON.stringify(pNeuter.cases[k]));
 for (const b of badNeuter) { console.log('  FAIL  ' + b); failed++; }
-if (badNeuter.length === 0) console.log('  ok    负控制成立：删掉分支就退回裸 EPERM');
+if (badNeuter.length === 0) console.log('  ok    负控制成立：权限转换退化为裸 EPERM/EACCES，其他行为不变');
 
 console.log('\n════════ 结论 ════════');
 if (failed === 0) {
   rmSync(SCRATCH, { recursive: true, force: true });
   console.log('PASS：`stat`/`open` 被平台拒 ⇒ `FS_PERMISSION_DENIED` 且文案逐字正确；ENOENT / abort / 非权限错一律不受影响；'
-    + '删掉补丁后同一调用退回裸 EPERM（判别力已证）。');
+    + '内存破坏两处权限转换后同一调用退回裸 EPERM/EACCES（判别力已证）。');
   process.exit(0);
 }
 console.log('FAIL：见上面的 FAIL 行（核心树 ' + tree.version + '）。');

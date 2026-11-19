@@ -46,8 +46,14 @@
  *   · `editText(target, edit, expected, signal, sandboxPolicy)`：同样只把中间的
  *     `writeFileAtomic()` 换成 `writeFileAtomicNoChmod()`，版本检查 / 字面替换 /
  *     行尾还原全部与上游逐字同源。
- * **不碰**：`resolve` / `stat` / `lstat` / `readText` / `streamText` / `readBytes` /
- * `readByteRange` / `listDir` / `processPath` / `fileUrl` / `contains` / `sandboxMode`。
+ * **不碰**：`processPath` / `fileUrl` / `contains` / `sandboxMode`（纯计算，无 I/O）。
+ * **加了一层闸门**（2026-10-10，用户拍板，见 docs/137）：`resolve` / `stat` / `lstat` /
+ * `readText` / `streamText` / `readBytes` / `readByteRange` / `listDir` / `watch` 与
+ * `writeText` / `editText` 在动手之前都先过 `./fs-fence.js` 的**白名单**判据
+ * （允许面 = 应用沙箱 ∪ `/storage/Users/currentUser/`，其余读写都拒）。上游本后端
+ * **没有读闸门**（`dsh-fs-sandbox` 头注："Reads pass through untouched"），而本端
+ * sandbox-policy 是 danger-full-access（连写闸门也不做）⇒ 这一层是本端补的边界。
+ * 路径语义（归一化、realpath 身份、per-target 锁、版本守卫）仍逐字继承上游。
  * **不调用**：`chmod` / `fchmod` / `handle.chmod` / `fs.promises.chmod`（本包全树除
  * 注释外零命中，由 harness 的调用计数断言复核）；也不调用 `link`（沙箱内被拒）。
  * 落盘只用 `mkdir` / `open('w')` / `write` / `close` / `rename`（同目录）/ `unlink`。
@@ -70,6 +76,7 @@
  */
 import { FsError } from "@deepseek-ai/dsh-fs";
 import { SandboxedFileSystem } from "@deepseek-ai/dsh-fs-sandbox";
+import { isAbsolute, join } from "node:path";
 import {
 	applyLiteralEdit,
 	normalizeLineEndings,
@@ -79,6 +86,7 @@ import {
 	restoreLineEndings,
 	writeFileAtomicNoChmod
 } from "./fsio-nochmod.js";
+import { assertFsScope, assertFsScopeLexical } from "./fs-fence.js";
 
 /**
  * 去 `chmod` 的本地文件系统后端：`SandboxedFileSystem` 的写入方法替换版。
@@ -95,6 +103,63 @@ export class NonChmodFileSystem extends SandboxedFileSystem {
 	 */
 	static inject = ["sandboxPolicy"];
 
+	/* ── 访问范围闸门（docs/137）─────────────────────────────────────────
+	 * 上游后端没有读闸门，`danger-full-access` 下连写闸门也不做 ⇒ 这里按用户拍板的
+	 * 策略补一道**白名单**闸门：允许面 = 应用沙箱 ∪ 用户目录，其余读写都拒。
+	 * 判据与文案在 ./fs-fence.js（与 dshm-tool-fs-remove 那份逐字节相同，
+	 * tools/check-fs-fence.mjs 钉住）。
+	 *
+	 * 【为什么判 `targetKey` 而不是 `displayPath`】`resolve()` 给的 targetKey 是
+	 * realpath 出来的**真实身份**（最深已存在祖先 realpath + 缺失尾巴词法回接），
+	 * 所以"允许面内的软链指向面外"在这里就被挡住，且不多花一次系统调用。
+	 * 收**模型原始路径**的 `lstat()` 用会 realpath 的 `assertFsScope()`。
+	 */
+	async resolve(path, opts) {
+		const target = await super.resolve(path, opts);
+		assertFsScopeLexical(target.targetKey);
+		return target;
+	}
+
+	async stat(target, signal) {
+		assertFsScopeLexical(target.targetKey);
+		return super.stat(target, signal);
+	}
+
+	async lstat(path, opts, signal) {
+		await assertFsScope(isAbsolute(path) ? path : join(opts?.cwd ?? this.config.cwd, path));
+		return super.lstat(path, opts, signal);
+	}
+
+	async readText(target, signal) {
+		assertFsScopeLexical(target.targetKey);
+		return super.readText(target, signal);
+	}
+
+	async streamText(target, signal) {
+		assertFsScopeLexical(target.targetKey);
+		return super.streamText(target, signal);
+	}
+
+	async readBytes(target, signal, maxBytes) {
+		assertFsScopeLexical(target.targetKey);
+		return super.readBytes(target, signal, maxBytes);
+	}
+
+	async readByteRange(target, range, signal) {
+		assertFsScopeLexical(target.targetKey);
+		return super.readByteRange(target, range, signal);
+	}
+
+	async listDir(target, signal) {
+		assertFsScopeLexical(target.targetKey);
+		return super.listDir(target, signal);
+	}
+
+	watch(target, changed, signal) {
+		assertFsScopeLexical(target.targetKey);
+		return super.watch(target, changed, signal);
+	}
+
 	/**
 	 * 原子创建/覆写 UTF-8 文本——与 `LocalFileSystem.writeText` 逐项同形，
 	 * 只把 `writeFileAtomic()` 换成 `writeFileAtomicNoChmod()`。
@@ -109,6 +174,7 @@ export class NonChmodFileSystem extends SandboxedFileSystem {
 		/* 路径封闭与上游 `SandboxedFileSystem.writeText` 同一调用、同一时机：
 		 * 先按本次策略算出**这一份**要写的 target，再进入临界区（无 check-here-write-there）。 */
 		const checked = await this.checkedTarget(target, sandboxPolicy);
+		assertFsScopeLexical(checked.targetKey);
 		return this.withLock(checked.targetKey, async () => {
 			const existing = await probe(checked.targetKey);
 			if (existing && existing.type !== "file") throw new FsError(`cannot write "${checked.displayPath}": not a regular file`, "FS_NOT_REGULAR_FILE");
@@ -140,6 +206,7 @@ export class NonChmodFileSystem extends SandboxedFileSystem {
 	 */
 	async editText(target, edit, expected, signal, sandboxPolicy) {
 		const checked = await this.checkedTarget(target, sandboxPolicy);
+		assertFsScopeLexical(checked.targetKey);
 		return this.withLock(checked.targetKey, async () => {
 			const existing = await probe(checked.targetKey);
 			if (!existing) throw new FsError(`cannot edit "${checked.displayPath}": file changed since it was read`, "FS_STALE_VERSION");

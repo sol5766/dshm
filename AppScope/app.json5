@@ -2,9 +2,29 @@
   "app": {
     "bundleName": "com.dshm.dshclient",
     "vendor": "dshm",
-    "versionCode": 1010000,
-    "versionName": "1.1.0",
+    /*
+     * 版本号铁律（2026-11-06 用户定）：只在用户明确说「升到 X」时才改，
+     * 不因换包 / 刷缓存 / 内容变化自行加版本。当前基线 1.1.8 / 1010018（1010016 起为结构/权限调整后的升级号，版本名不变）。
+     *
+     * 沿革：1010009→1010010 为刷新系统应用图标缓存（同 versionCode 覆盖安装不重读图标）；
+     * 之后按用户要求升至 1.1.8 / 1010015；2026-11-11 按用户要求升 versionCode 至 1010016（versionName 保持 1.1.8）。系统按 (bundleName, versionCode) 缓存图标。
+     * 2026-11-15 按用户要求升 versionCode 至 1010017（versionName 仍 1.1.8）：冷启动并行预热、guest pnpm 启动修复。
+     * 2026-11-19 按用户要求升 versionCode 至 1010018（versionName 仍 1.1.8）：核心对齐 0.2.2-rc.5。
+     */
+    "versionCode": 1010018,
+    "versionName": "1.1.8",
     "icon": "$media:layered_image",
-    "label": "$string:app_name"
+    "label": "$string:app_name",
+    /*
+     * 【端云结构化数据同步总开关】（2026-10-29，docs/304/305 路线二）
+     *
+     * 开启后用户可在「设置 → 云空间」里看到本应用的同步开关，
+     * 并且系统才会为 RDB 的分布式表建立端云同步通道。
+     *
+     * 【为什么必须有它】缺这一项时，系统侧 SyncManager 会报
+     * `GetCloudSyncInfo: load schema fail`（云调试实测），
+     * 端云同步整条链根本不会启动 —— 这不是代码问题，是应用级声明缺失。
+     */
+    "cloudStructuredDataSyncEnabled": true
   }
 }

@@ -2,6 +2,7 @@
 // 【Phase 5 拆除后口径】E1-E19 实验矩阵与"重写修复"循环已整体删除（结论定案：
 // execve 由签名域拒绝，重写 inode 救不回）；ensureExecutables 只探测+记录。
 import { readFileSync } from 'node:fs';
+import { verifyStartupWork } from './check-startup-work.mjs';
 const c = readFileSync(new URL('../hostcore/app/main.js', import.meta.url), 'utf8');
 let n = 0;
 function ok(cond, msg) { n++; if (!cond) { console.error(`FAIL ${n}: ${msg}`); process.exit(1); } }
@@ -52,10 +53,31 @@ ok(/E1-E19 实验定案/.test(c), 'ensureExecutables 注释交代拆除依据');
 ok(/function ensureRipgrepWrapper\(binDir\)/.test(c), 'ensureRipgrepWrapper 定义');
 ok(/ripgrep-linux-arm64', 'bin', 'rg'/.test(c), 'rg 真身路径拼接');
 ok(/ensureRipgrepWrapper\(binDir\);/.test(c), '顶层块调用 rg wrapper');
-ok((c.match(/ensureExecutables\(\)\.catch/g) || []).length === 2, 'ensureExecutables 两处挂载（稳态+解包收尾）');
-ok(/if \(pyOk && gitOk\) \{[\s\S]{0,140}setImmediate/.test(c), '解包收尾仅在锚点齐备时触发探测');
+await verifyStartupWork(c);
+ok((c.match(/startupWork\.request\('exec', ensureExecutables\)/g) || []).length === 2, 'exec diagnostics queued from boot and extraction, production scheduling verified');
+/*
+ * 【2026-10-19 判据收紧（分诊 S-15）】原断言是 `if (pyOk && gitOk)` —— 那要求 git 也解出来了
+ * 才跑 exec 探测。但手持档**结构性不解 git**（execve 被拒），于是 python 的 chmod / 探测兜底
+ * 连一次都没跑过（11/11 个 boot 全 `git=FAIL`）。两件事本来就互不相干 ⇒ 条件只看 pyOk。
+ */
+ok(/if \(pyOk\) \{\s*startupWork\.request\('exec', ensureExecutables\)/.test(c),
+  '解包收尾只要 python 就绪就触发探测（git 跳过不再挡住 python 的兜底）');
 ok(/hmfs 的执行许可与"文件创建者"绑定/.test(c), '根因证据注释在位');
-ok((c.match(/\( exec "\$/g) || []).length === 4, 'wrapper 子 shell 探测（python/pip3/git/rg）');
+/*
+ * 【2026-11-02 从 4 改到 6】新增 tmux / gh 两个 wrapper（docs/342），各带一条
+ * `( exec "$真身" --version )` 子 shell 探测 —— 与 python/pip3/git/rg 同款写法：
+ * exec 失败不杀父脚本，真身缺失与"被策略拒绝"分别给话。计数仍是**精确值**，
+ * 因为 wrapper 本体一一对应（python/pip3 各一支、git 一支、rg 一支、tmux 一支、gh 一支）。
+ *
+ * 【2026-11-05 修脆锚点】原判据对整份 main.js 做裸计数，而 main.js:3875 的**根因注释**
+ * 里引用了同一写法（`_e=$( ( exec "$B" "$@" ) ...)`），把计数顶到 7 ⇒ 门禁恒红。
+ * 现改为逐行剔除注释行后再精确计数；判据仍是精确值 6，不是"至少 6"。
+ */
+const codeOnly = c.split('\n')
+  .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+  .join('\n');
+ok((codeOnly.match(/\( exec "\$/g) || []).length === 6,
+  'wrapper 子 shell 探测（python/pip3/git/rg/tmux/gh，只数代码行）');
 /*
  * 【2026-10-07 收窄：从「裸短语计数」改成「完整文案断言」】原判据是短语 `execve 被拒` 恰好
  * 出现 2 次 —— 这是个**脆锚点**：任何一处解释性 diag 用了同样的措辞就会误判 FAIL（本轮

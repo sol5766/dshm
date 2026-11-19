@@ -341,11 +341,29 @@ function installInternalUndiciShim(log = NOOP) {
     } catch (e) {
       lazyState = `读取即抛错（${e && e.message}）`;
     }
-    const selfOk = exportsOk && requireOk && lazyState === 'ok';
+    /*
+     * 【导出面自检（2026-10-10 加；同一族事故的第三次）】`shim` 里那些 Web 平台名字
+     * （Node 的**惰性全局**会从本模块取用并物化到 globalThis）必须是**函数**：
+     * **键在、值为 undefined** 与"缺名"同类 —— 两者都让 `new Request(...)` 直接抛
+     * TypeError，而且都不影响启动、只在某个不相干的下游路径上炸出来。
+     * 本族前两次是 `EnvHttpProxyAgent`、`Pool`+`ProxyAgent`；第三次正是 `Request`，
+     * 根因是 `fetch-shim.js` 的 module.exports 漏了 `DshmRequest`（见该文件注释）。
+     * 【判据为什么是 typeof 而不是"键存在"】"键存在"正是让前三次溜过去的写法。
+     * 【只在 jitless 路径跑】PC/2in1 有 WASM 时本函数早就 return，一个字都不涉及。
+     */
+    const surfaceNames = ['fetch', 'Headers', 'Request', 'Response', 'FormData', 'Blob', 'File', 'MessageEvent', 'CloseEvent'];
+    let surfaceBad = [];
+    try {
+      surfaceBad = surfaceNames.filter((n) => typeof shim[n] !== 'function');
+    } catch (e) {
+      surfaceBad = ['读取即抛错'];
+    }
+    const selfOk = exportsOk && requireOk && lazyState === 'ok' && surfaceBad.length === 0;
     log(
       `内建 undici → 纯 JS 垫片（BuiltinModule 层拦截；自检 exports=${exportsOk ? 'ok' : 'FAIL'}`
       + `、require=${requireOk ? 'ok' : 'FAIL'}`
       + `、globalThis.MessageEvent=${lazyState}`
+      + `、导出面=${surfaceBad.length === 0 ? 'ok' : `缺/非函数：${surfaceBad.join(',')}`}`
       + `${wasLoaded ? '；安装前该模块已被加载过' : ''}）`,
     );
     if (!selfOk) {
@@ -417,12 +435,70 @@ function installUndiciNameHook(log = NOOP) {
       log('undici 解析钩子已注册（跳过重复注册）');
       return true;
     }
-    const { register } = require('node:module');
+    const moduleApi = require('node:module');
     const { pathToFileURL } = require('node:url');
-    register(pathToFileURL(path.join(__dirname, 'undici-loader.mjs')).href,
-      pathToFileURL(__filename).href);
-    Module.__dshmUndiciHook = true;
-    log('undici 解析钩子已注册（web_fetch 走本仓垫片，绕开 WASM）');
+    const shimUrl = pathToFileURL(path.join(__dirname, 'undici-shim.mjs')).href;
+    /*
+     * 【2026-10-18 改走**同线程** registerHooks】冷启动 CPU profile 的读数：
+     *   `makeSyncRequest @ node:internal/modules/esm/hooks:598` 自己就占 ~2.6 s，
+     *   而这段开销全部来自"每一次 ESM import 都要跨线程问一遍 loader"。
+     * `module.register()` 的钩子跑在 Node 的**独立 loader 线程**里；`registerHooks()`
+     * （Node 22.15+，端侧 v24.2.0 有）是**同步、同线程**的，同样能改写解析结果。
+     * 语义保持不变：只拦 `undici` 这一个裸说明符，其余原样交给 nextResolve。
+     * 留 `register()` 作为旧运行时的回退（真机若没有 registerHooks 仍能起）。
+     */
+    if (typeof moduleApi.registerHooks === 'function') {
+      moduleApi.registerHooks({
+        resolve(specifier, context, nextResolve) {
+          if (specifier === 'undici') {
+            // 只改 ESM 侧解析：CJS `require('undici')` 的语义保持原样（那条路由
+            // require-builtin-shim 管，指向垫片会因 format 不符直接抛错）。
+            const conds = Array.isArray(context && context.conditions) ? context.conditions : [];
+            if (conds.includes('import')) {
+              return { url: shimUrl, shortCircuit: true, format: 'module' };
+            }
+          }
+          return nextResolve(specifier, context);
+        },
+      });
+      Module.__dshmUndiciHook = true;
+      log('undici 解析钩子已注册（同线程 registerHooks，web_fetch 走本仓垫片，绕开 WASM）');
+    } else {
+      moduleApi.register(pathToFileURL(path.join(__dirname, 'undici-loader.mjs')).href,
+        pathToFileURL(__filename).href);
+      Module.__dshmUndiciHook = true;
+      log('undici 解析钩子已注册（loader 线程，web_fetch 走本仓垫片，绕开 WASM）');
+    }
+
+    /*
+     * 【导出面自检（2026-10-10 加）】把上游真实用法跑一遍：`import { … } from 'undici'`
+     * 在**解析期**就校验导出存在性（缺名 ⇒ 整个模块图 `failed to import`，而 loader 只打
+     * 一行、不带你缺的那个名字）。本仓的裸说明符钩子把 `undici` 指到 undici-shim.mjs，
+     * 所以这里就用**同一个钩子**自己 import 一次，逐个断言上游实体用到的名字。
+     *
+     * 【为什么是"名字在不在"而不是"能不能用"】名字缺了是**立刻全崩**（整图 import 失败）；
+     * 而功能可用是另一回事（例：X.509 传输需要真的 `ProxyAgent`，本仓只有"明确降级报错"
+     * 的那一支，见 undici-shim.mjs 头注）。本自检只回答"导入面完整"，**不夸大成功能可用**。
+     *
+     * 【异步 + 只落日志】不阻塞启动、不改任何行为：失败也只是多一行日志。
+     * 【为什么不能省】这条缺陷（本族第三次：`Request`）在无自检时**只会在别处炸**，
+     * 启动日志里一个字都看不到 —— 真机验收时无从判断"这台设备上的垫片导出面完不完整"。
+     */
+    void (async () => {
+      const NAMES = ['fetch', 'Request', 'Agent', 'ProxyAgent', 'EnvHttpProxyAgent', 'Pool',
+        'Dispatcher', 'RetryAgent', 'RetryHandler', 'setGlobalDispatcher', 'getGlobalDispatcher'];
+      try {
+        const mod = await import('undici');
+        const missing = NAMES.filter((n) => typeof mod[n] === 'undefined');
+        log(missing.length === 0
+          ? `undici 垫片导出面自检：ok（${NAMES.join(' / ')} 全部在）`
+          : `undici 垫片导出面自检：FAIL 缺 ${missing.join(', ')}`
+            + ' —— 上游具名导入会在解析期 failed to import（整个模块图）');
+      } catch (e) {
+        log(`undici 垫片导出面自检失败（连 import 都没过）：${e && e.message}`);
+      }
+    })();
+
     return true;
   } catch (e) {
     log(`undici 解析钩子注册失败（web_fetch 将不可用）：${e && e.message}`);
@@ -457,6 +533,24 @@ function installUndiciNameHook(log = NOOP) {
  *
  * @param {{ preloadPath: string, log?: (line: string) => void }} options
  */
+/**
+ * 从 Node 报的 `invalid execArgv flags: --a --b` 里取出被拒的标志，并把它们从 argv 里删掉。
+ *
+ * @returns 过滤后的 argv；**没得可滤**（报文里没名单、或名单与 argv 不相交）时返回 `null`,
+ *   让调用方原样抛出原始错误 —— 不许把一次真实失败吞成"重试过就算数"。
+ */
+function withoutWorkerRejectedFlags(error, argv, log) {
+  const message = String(error === null || error === undefined ? '' : error.message);
+  const m = /invalid execArgv flags?:\s*(.*)$/m.exec(message);
+  if (m === null) return null;
+  const named = m[1].split(/[\s,]+/).map((s) => s.trim()).filter((s) => s.startsWith('-'));
+  if (named.length === 0) return null;
+  const kept = argv.filter((a) => !named.includes(a) && !named.some((n) => a.startsWith(n + '=')));
+  if (kept.length === argv.length) return null;
+  log(`worker execArgv 滤掉 worker 不允许的标志（${named.join(' ')}）后重试 —— 原始报文：${m[0]}`);
+  return kept;
+}
+
 function wrapWorkerThreads(options) {
   const log = options.log === undefined ? NOOP : options.log;
   const preloadPath = options.preloadPath;
@@ -488,7 +582,24 @@ function wrapWorkerThreads(options) {
       if (!argv.includes('--expose-internals')) argv.push('--expose-internals');
       if (!argv.includes(preloadPath)) argv.push('--require', preloadPath);
       opts.execArgv = argv;
-      return new RealWorker(filename, opts);
+      /*
+       * 【2026-10-08 真机 P0：显式 execArgv 要走严格校验 ⇒ 得先滤掉 worker 不允许的标志】
+       * 插件写 `new Worker(file, { workerData })`（**不写** `execArgv`）时走的是"继承"：
+       * 上面那行把继承来的 `process.execArgv` 写成了一个**显式数组**，而 Node 对显式 `execArgv`
+       * 是严格校验的（隐式继承时它会自己过滤不允许的标志）⇒ 端侧宿主 argv 里有 `--jitless`，
+       * 于是**任何不写 execArgv 的插件 worker 一个都起不来**，实测报文逐字：
+       *   `Initiated Worker with invalid execArgv flags: --jitless`
+       * （受害现场：插件自建 worker —— 模型的工具调用直接拿到这一行。）
+       * 处置：按 Node 自己报的名单滤一遍再重试一次（名单来自 Node，不写版本相关的硬表）。
+       */
+      try {
+        return new RealWorker(filename, opts);
+      } catch (error) {
+        const retry = withoutWorkerRejectedFlags(error, argv, log);
+        if (retry === null) throw error;
+        opts.execArgv = retry;
+        return new RealWorker(filename, opts);
+      }
     }
     DshmWorker.prototype = RealWorker.prototype;
     Object.setPrototypeOf(DshmWorker, RealWorker);

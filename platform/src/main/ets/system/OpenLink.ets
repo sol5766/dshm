@@ -30,15 +30,19 @@ export function isOpenableUrl(url: string): boolean {
  * 用系统默认方式打开一个外部链接；返回是否成功。
  *
  * @param url 目标地址（非 http/https 会被直接拒绝）
+ * @param context 可选的 UIAbilityContext。不传走 `getContext()`（页面/组件语境可用）；
+ *        **从 EntryAbility 的 onCreate 里启动的常驻轮询（OpenLinkBridge）必须显式传** ——
+ *        真机教训（语音桥同款）：在 onCreate 那个阶段 `getContext()` 拿不到可靠的
+ *        UIAbilityContext，传到定时器里会更不可靠；显式传入才能保证 `openLink` 有 ctx 可用。
  */
-export async function openExternalUrl(url: string): Promise<boolean> {
+export async function openExternalUrl(url: string, context?: common.UIAbilityContext): Promise<boolean> {
   if (!isOpenableUrl(url)) {
     hilog.warn(DOMAIN, TAG, 'rejected non-http url');
     return false;
   }
   try {
-    const context = getContext() as common.UIAbilityContext;
-    await context.openLink(url.trim(), { appLinkingOnly: false });
+    const abilityCtx: common.UIAbilityContext = context ?? (getContext() as common.UIAbilityContext);
+    await abilityCtx.openLink(url.trim(), { appLinkingOnly: false });
     return true;
   } catch (err) {
     const e = err as BusinessError;

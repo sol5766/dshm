@@ -1,0 +1,18 @@
+# dshm-boot-rescue profile registration（bundle patch）。
+#
+# 行 id = `dshm-boot-rescue-builtin`，**不是包名**。
+#
+# 【为什么带 -builtin】2026-11-12（docs/410）：本包的行 id 曾与外部同名插件
+# `dshm-boot-rescue` 完全一致。bundle patch 先于 profile 种子 patch 应用、insert
+# 只追加不去重、loader 又按 id 建实体索引 ⇒ 后写的内置 1.0.0 静默顶掉用户装的 1.1.0
+# （外部 apply() 不执行、安全中心消失，启停切的是同 id 的内置那份）。
+# 改用独立 id 后，由 `dshm-user-rows.js` 的让位行决定这一次跑内置还是跑外部，
+# 两者永不共存 —— 也就不会出现 `/dshm-boot-rescue` 路由双注册。
+#
+# 【随包内置】本插件由 tools/pack-core.mjs 的 DSHM_PLUGIN_PACKAGES 落进核心树，
+# 并由 hostcore/profile/ondevice/cordis.patch.yml ⑮ 的 insert 行默认启用；
+# 这里的 bundle patch 只服务「通过插件市场重新安装」的同一份包 —— 两处 id 必须逐字一致，
+# 由 `tools/check-boot-rescue-id.mjs` 断言。
+- insert:
+    - id: dshm-boot-rescue-builtin
+      name: '@deepseek-ai/dshm-boot-rescue'

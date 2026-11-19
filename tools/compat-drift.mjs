@@ -17,9 +17,12 @@
  *   node tools/compat-drift.mjs            # 只报告，不修改文件
  *   node tools/compat-drift.mjs --update   # 有差异时给出重新生成的命令提示（不自动改）
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import assert from 'node:assert/strict';
+import { collectContracts, recipeNodeModules, validateContracts } from './protocol-contract.mjs';
 
 const ROOT = process.cwd();
 /**
@@ -34,8 +37,7 @@ const CONTRACTS = process.env.DSH_CONTRACTS
 const COMMITTED = join(ROOT, 'dshcompat', 'src', 'main', 'ets', 'Endpoints.ets');
 // 按**当前用户**推导，不要写死用户名（换台机器就必然找不到，门禁会静默失效）。同 tools/protocol-contract.mjs。
 const DSH_NM = process.env.DSH_NODE_MODULES
-  ?? join(homedir(), 'AppData', 'Roaming', 'io.github.hairyf.deepseek-harness-desktop',
-    'dependencies', 'dsh', 'node_modules');
+  ?? recipeNodeModules(ROOT);
 
 if (!existsSync(CONTRACTS)) {
   console.error(`缺少契约数据：${CONTRACTS}`);
@@ -119,7 +121,9 @@ function parseCommitted() {
 
 /** 从当前环境的上游契约推导期望值（与 gen-compat-endpoints.mjs 保持同一规则） */
 function expectedFromContracts() {
-  const contracts = JSON.parse(readFileSync(CONTRACTS, 'utf8'));
+  const contracts = validateContracts(JSON.parse(readFileSync(CONTRACTS, 'utf8')));
+  const actual = collectContracts(DSH_NM).descriptors;
+  assert.deepEqual(contracts, actual, '快照与实际目标树契约不同，必须重新采集而非信任旧快照');
   const shapeOf = (params) => {
     if (params.length === 0) return 'NONE';
     // 线上名（wire）而非上游 TS 形参名（name）：见 gen-compat-endpoints.mjs 的 shapeOf 说明。
@@ -174,6 +178,24 @@ function coreVersion() {
 
 const committed = parseCommitted();
 const expected = expectedFromContracts();
+
+if (process.argv.includes('--self-test')) {
+  const dir = mkdtempSync(join(tmpdir(), 'dshm-contract-negative-'));
+  const original = JSON.parse(readFileSync(CONTRACTS, 'utf8'));
+  for (const kind of ['missing', 'wire', 'stream', 'cancellable', 'duplicate']) {
+    const data = structuredClone(original);
+    if (kind === 'missing') data.pop();
+    if (kind === 'wire') data[0].params.push({ name: 'bad', wire: 'bad' });
+    if (kind === 'stream') data[0].kind = 'stream';
+    if (kind === 'cancellable') data[0].cancellable = !data[0].cancellable;
+    if (kind === 'duplicate') data.push(data[0]);
+    const file = join(dir, `${kind}.json`);
+    writeFileSync(file, JSON.stringify(data));
+    const probe = spawnSync(process.execPath, [process.argv[1]], { env: { ...process.env, DSH_CONTRACTS: file }, encoding: 'utf8' });
+    assert.notEqual(probe.status, 0, `${kind} 变异必须判红`);
+    console.log(`负控制 ${kind}：判红`);
+  }
+}
 
 const committedByKey = new Map(committed.entries.map((e) => [`${e.ns}/${e.method}`, e]));
 const expectedByKey = new Map(expected.map((e) => [`${e.ns}/${e.method}`, e]));

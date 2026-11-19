@@ -9,6 +9,8 @@
  */
 
 /** 候选版本的健康检查结果。 */
+import { newestVersion } from './Naming';
+
 export enum CoreHealth {
   UNKNOWN = 'unknown',
   PASS = 'pass',
@@ -143,11 +145,34 @@ export function decideRollback(state: CoreState, installed: string[]): Activatio
  *
  * 规则（安全优先，宁可少删）：
  *  - 永不删 current、永不删 previous；
+ *  - 永不删 **会真正被启动的那棵树**（current 缺失/已不在时 = `newestVersion(installed)`，见下）；
+ *  - `keepExtra` 里点名保护的（调用方"刚装进来的那一版"，见 BundledCore）同样不删；
  *  - 其余按 history 顺序（最新在前）保留 `keep` 个。
  * 返回的是**可以删**的版本号列表。
+ *
+ * 【2026-10-08 真机补上的第二、三条 —— 原判据里有个致命假设】
+ * 原判据只保护 current/previous，隐含假设"一定激活过"。而真机上 `state.json`
+ * **可以不存在**（首启只解包、从未激活：实测设备上 **15 棵树并存**、`state.current` 为空），
+ * 那种状态下 `DshHost.start()` 取的是 `newestVersion(installed)`
+ * （见 start() 注释："有 current 且它还在 ⇒ 用它；否则用**最新**的那棵"）。
+ * ⇒ 按原判据算，**正在跑的那棵树**也在"可删"名单里；真删下去就是把自己脚下的地板拆掉
+ * （下一次启动会落到"还没有安装任何核心版本、无法启动"）。
+ * 所以"清理"与"谁在跑"必须用**同一个**答案 —— 这条不变量就写在这里。
  */
-export function evictionCandidates(state: CoreState, installed: string[], keep: number): string[] {
+export function evictionCandidates(state: CoreState, installed: string[], keep: number,
+  keepExtra: string[] = []): string[] {
   const protectedVersions: string[] = [state.current, state.previous];
+  for (const extra of keepExtra) {
+    if (!protectedVersions.includes(extra)) {
+      protectedVersions.push(extra);
+    }
+  }
+  if (!installed.includes(state.current)) {
+    const live: string = newestVersion(installed);
+    if (live.length > 0 && !protectedVersions.includes(live)) {
+      protectedVersions.push(live);
+    }
+  }
   const keepSet: string[] = [];
   for (const v of state.history) {
     if (keepSet.length >= keep) {

@@ -139,6 +139,21 @@ if(EXISTS ${KOFFI_DIR}/package/src/koffi/CMakeLists.txt)
         NAPI_VERSION=NAPI_VERSION_EXPERIMENTAL
         NODE_ADDON_API_DISABLE_CPP_EXCEPTIONS
         NODE_ADDON_API_REQUIRE_BASIC_FINALIZERS)
+    # 【为什么这里必须补 NDEBUG（2026-10-08 真机 P0，根因见 docs/121）】
+    # koffi 的 lib/native/base/base.hh:66 把 K_DEBUG 绑在 !defined(NDEBUG) 上（没有 NDEBUG 就算
+    # debug），据此打开 K_ASSERT；而 src/koffi/src/call.hh:150 的 AllocStack 断言
+    # AlignLen(size,16)==size 与 src/koffi/src/abi/arm64.cc:368 的
+    # stk_size = AlignLen(19*8+so,16) + 8 **互斥**：arm64 是**故意**让栈基址落在
+    # ≡8 (mod 16) 的（abi/arm64_asm.S:47 是 add sp, x1, #152，要求“基址+152”16 对齐），
+    # 而断言要求 ≡0 (mod 16) ⇒ **arm64 上第一条 koffi 调用必然 abort**。真机实测：worker 一
+    # 进入 qemu_system_entry 就打出
+    #   call.hh:150: Assertion 'AlignLen(size, 16) == size' failed
+    # 随即整个宿主进程消失（无 faultlog、无 JS 异常、连 worker 的 exit 报文都到不了）——
+    # abort() 不给 JS 任何收尾机会。上游分发的产物都是 Release（自带 NDEBUG）⇒ 这两处断言
+    # 根本不编进来；本 HAP 走 buildMode=debug（CMake Debug 不带 NDEBUG）⇒ 在这里把 koffi 的
+    # 编译单元钉回发布口径。PRIVATE：只作用于 koffi（含同源的 lib/native/base/base.cc），
+    # 不碰本仓其它原生目标（flock / sharp / libvips 都不走这套 K_* 宏）。
+    target_compile_definitions(koffi PRIVATE NDEBUG)
     set_source_files_properties(${KOFFI_SRC}/src/ffi.cc PROPERTIES COMPILE_DEFINITIONS VERSION=3.2.1)
     target_compile_options(koffi PRIVATE
         -fno-exceptions -fno-rtti -fwrapv

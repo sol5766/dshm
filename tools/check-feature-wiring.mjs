@@ -47,7 +47,8 @@ function collect(dir) {
 }
 
 const files = SCAN_DIRS.flatMap((d) => collect(join(ROOT, d)));
-const sources = files.map((f) => ({ path: relative(ROOT, f).replace(/\\/g, '/'), text: readFileSync(f, 'utf8') }));
+/** `let`：`--self-test` 的对照臂要在**同一份代码路径**上换成变异体（见文件尾）。 */
+let sources = files.map((f) => ({ path: relative(ROOT, f).replace(/\\/g, '/'), text: readFileSync(f, 'utf8') }));
 
 function count(pattern) {
   const re = new RegExp(pattern);
@@ -104,7 +105,111 @@ const FEATURES = [
    * 长期没有任何控制点（侧栏呈现完全由形态决定），于是官方 AppFrame 那个"收起侧栏腾出宽度"
    * 的动作在本仓做不到。现在钉住三段接线：纯函数判定 + 门面开关 + 视图里的控制点。
    */
-  { name: '侧栏收起', patterns: [['sidebarPresentationOf', 2], ['onToggleSidebarExpanded', 2], ['showExpandToggle', 2]] }
+  /*
+   * 旧核心树清理（2026-10-08）。这一条**正是本门禁该拦下的那类缺口**：
+   * `CoreStore.evict()` 与它的判据（`Types.evictionCandidates`）早就写好、还配了单元用例，
+   * **却一个调用点都没有** —— 编译不报、界面不报，代价是真机上 15 棵核心树并存（≈5 GB）。
+   * 故钉两处：定义签名（唯一）+ 调用点（唯一，装入内置核心之后）。
+   */
+  { name: '旧核心树清理', patterns: [['evict\\(keep: number, keepExtra', 1], ['store\\.evict\\(0,', 1]] },
+  { name: '侧栏收起', patterns: [['sidebarPresentationOf', 2], ['onToggleSidebarExpanded', 2], ['showExpandToggle', 2]] },
+  /*
+   * 底部手势区沉浸（docs/130）。它同样是"接线断了不会有任何症状"的那一类：读数、分档闸门、
+   * 那次扩展各在一处，少任何一处编译都不报 —— 现象只是"小白条还浮在一条不属于页面的带子上"。
+   * 故钉三段：① 读数要真去读**手势导航**报数的那个类型（真机实测：TYPE_SYSTEM 报 0、
+   * TYPE_NAVIGATION_INDICATOR 报 98 —— 少读它，这条功能在手机上就是死的）；② 分档闸门
+   * （只在手持档接管，PC/2in1 一个字都不动）；③ 按避让读数的那一次扩展 —— 写成带参数的
+   * 调用形态，避免"别处随便一次 expandSafeArea"就算通过（整条链各自都要挂，故 ≥3 处）。
+   */
+  {
+    name: '底部手势区沉浸',
+    patterns: [
+      ['TYPE_NAVIGATION_INDICATOR', 2],
+      ['bottomInsetArmed', 4],
+      ['expandSafeArea\\(this\\.bottomSafeAreaTypes\\(\\)', 3]
+    ]
+  },
+  /*
+   * 分屏旋转视口回正（docs/188）。真机“窗口 460vp / 内容 313.5vp”的本质是
+   * 内容宽度停在横屏分屏值。注入脚本必须同时存在、被 Web 面积变化和主窗几何变化调用，
+   * 并把 frame 的宽度锚回 100%；少任何一环，编译都不会报错，只会在旋转后露白。
+   */
+  {
+    name: '手持档视口回正',
+    patterns: [
+      ['VIEWPORT_RECONCILE_SCRIPT', 2],
+      ['scheduleViewportReconcile\\(', 3],
+      ["frame\\.style\\.width = '100%'", 1],
+      ['\\.onAreaChange\\(', 1],
+      ['TYPE_KEYBOARD', 1],
+      ['keyboardVisible', 4],
+      ['KEYBOARD_OPEN_SCRIPT', 2],
+      ['KEYBOARD_CLOSE_SCRIPT', 2],
+      ['applyWebKeyboardState\\(', 2],
+      ["win\\.on\\('windowSizeChange', this\\.onWindowGeometryChanged\\)", 1],
+      ["win\\.on\\('windowRectChange', this\\.onWindowGeometryChanged\\)", 1]
+    ]
+  },
+  /*
+   * 收起态只显示 dsh 官方 opener（2026-11-11 用户裁决：删掉自绘浮动开关）。
+   *
+   * 【为什么还要钉】官方 opener 默认"鼠标移入才显形"，一旦那条常显规则被删/写歪，
+   * 收起态就只剩一个看不见的按钮 —— 用户会报"侧栏收不回去了，没有按钮"，
+   * 而编译、运行、日志全都不报。钉三处：① 状态属性常量仍被两处引用（CSS 与巡检）；
+   * ② 收起态常显规则在；③ 面板/右栏打开时隐去的两条也都在（否则会压住标题）。
+   */
+  {
+    name: '收起态官方 opener 常显',
+    patterns: [
+      ['SIDEBAR_STATE_ATTR', 2],
+      ["STATE_ATTR \\+ '=\"collapsed\"\\]", 2],
+      ['button\\[data-sidebar-opener\\]\\{opacity:1 !important', 1],
+      ['button\\[data-sidebar-opener\\]\\{opacity:0 !important', 2]
+    ]
+  },
+  /*
+   * 官方侧栏按钮是桌面档唯一入口（2026-11-11 用户裁决，反转 docs/136 的旧口径）。
+   *
+   * 【为什么还要钉】断掉的症状同样"没有任何报错"：顶栏那颗自绘按钮已经删了，
+   * 如果官方按钮又被垫片藏起来，桌面档就完全没有侧栏开关 —— 编译、运行、日志都不报。
+   * 钉三条：① 桌面档类名还在（垫片靠它分档）；② pcMode 桥还在；
+   * ③ 反面条在 FORBIDDEN：不得再出现 hideNativeToggle / 自绘按钮。
+   */
+  {
+    name: '官方侧栏按钮恢复为桌面档入口',
+    patterns: [
+      ["var DESKTOP_CLASS = 'dshm-desktop';", 1],
+      ['addClass\\((document\\.documentElement|htmlEl), DESKTOP_CLASS\\);', 1],
+      ["var PC_CLASS = 'dshm-pc';", 1],
+      ['platformPcMode', 1]
+    ]
+  },
+  /*
+   * 目录授权跨启动恢复必须**三端都跑**（docs/157）。
+   *
+   * 【为什么必须钉】这条接线断掉的症状是"没有任何报错"：PC 档重启后
+   * `workspaceFiles/list` 只是报 `Errno 1 Operation not permitted`，用户看到的是
+   * "工作区目录又读不到了"。旧实现正是**实现全在、只把 PC 档排除在调用之外** ——
+   * 与 E135（数据层与界面都在、触发点没了）同一类缺陷，编译与运行都不报。
+   *
+   * 钉三段：① 启动恢复的调用点存在（它**不许**再被 `isHandheldForm()` 包住，
+   * 反面条见 FORBIDDEN 的"三端授权链"）；② 两处 pick 真的走 `rememberFolderGrant()`
+   *（定义 1 处 + 调用 2 处 ⇒ ≥3：只留定义 = 调用点被删）；③ PC 支的采纳判据里真的
+   * 把 `persisted` 算进去（少了它，登记了授权也不会被采纳 —— 这一支的判据从
+   * `probePathWritable(path)` 单条件改成了 `granted.persisted || probePathWritable(path)`）。
+   */
+  {
+    name: '目录授权跨启动恢复（三端）',
+    patterns: [
+      ['restoreFolderGrants\\(this\\.context\\)', 1],
+      ['private folderGrantsReady: Promise<string>', 1],
+      ['this\\.folderGrantsReady = restoreFolderGrants\\(this\\.context\\)', 1],
+      ['await this\\.folderGrantsReady', 1],
+      ['rememberFolderGrant\\(', 3],
+      ['granted\\.persisted \\|\\| probePathWritable\\(realPath\\)', 1],
+      ['granted\\.persisted \\|\\| probePathWritable\\(path\\)', 1]
+    ]
+  }
 ];
 
 /**
@@ -127,45 +232,165 @@ const FORBIDDEN = [
   {
     name: '侧栏呈现判定不得被硬编码',
     files: ['entry/src/main/ets/view/shell/AppShell.ets'],
-    patterns: ['TrackPresentation\\.RAIL']
+    patterns: ['TrackPresentation\\.RAIL'],
+    hint: '（呈现判定必须走 sidebarPresentation()，不许写常量）'
+  },
+  /*
+   * 三端授权链不得按形态被排除（docs/157）。
+   *
+   * 【为什么是"结构"而不是"某一行"】这轮的缺陷是**两个相邻行合起来**才成立的：
+   * `if (isHandheldForm()) {` 包住 `restoreFolderGrants(...)`，以及 pick 处把 PC 支
+   * 写成不登记的占位对象（`{ persisted: false, note: '非手持档：不记授权' }`）。
+   * 逐行规则看不见这种组合 ⇒ 这里用**多行**规则（`textPatterns`，在剥掉注释的整段
+   * 正文上匹配），命中即报出**起止行号**，让下次的修法一眼看到是哪一处又分了档。
+   */
+  {
+    name: '三端授权链不得按形态排除',
+    files: [
+      'entry/src/main/ets/entryability/EntryAbility.ets',
+      'platform/src/main/ets/system/FilePicker.ets',
+      'entry/src/main/ets/pages/WebApp.ets'
+    ],
+    patterns: [],
+    hint: '（授权链必须三端同一套，见 docs/157）',
+    textPatterns: [
+      // 启动恢复被手持档闸门包住（旧实现的原形）
+      'if\\s*\\(\\s*isHandheldForm\\(\\)\\s*\\)\\s*\\{[\\s\\S]{0,120}?restoreFolderGrants',
+      // pick 处把授权登记按形态分叉（旧实现的原形：手持档才 remember）
+      'handheld\\s*\\?\\s*await\\s+rememberFolderGrant',
+      // 旧的"非手持档不记授权"占位读数（保留它 = 那条分支还在）
+      '非手持档：不记授权'
+    ]
   }
 ];
 
-/** 剥掉块注释与行注释（只做这一步：规则关心的常量名不会出现在字符串字面量里） */
+/**
+ * 剥掉块注释与行注释（只做这一步：规则关心的常量名不会出现在字符串字面量里）。
+ *
+ * 【为什么把注释换成等量空白而不是直接删掉】删掉会让**行号整体前移**，报错指到别的行
+ *（实测：真文件第 539 行的闸门被报成 248 行）⇒ 下次排查得自己倒推。换成空白后
+ * 行号与真文件一一对应，`file:line` 可以直接跳过去。
+ */
 function stripComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const blank = (m) => m.replace(/[^\n\r]/g, ' ');
+  return text.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/\/\/[^\n]*/g, blank);
 }
 
-const problems = [];
-for (const f of FEATURES) {
-  for (const [pattern, min] of f.patterns) {
-    const { n, where } = count(pattern);
-    if (n < min) {
-      problems.push(`  ✗ ${f.name}：接线 "${pattern}" 只找到 ${n} 处（期望 ≥${min}）`);
+/**
+ * 跑一遍全部判据，返回问题清单（空数组 = 全绿）。
+ *
+ * 【为什么收成函数】`--self-test` 的对照臂要在**同一条代码路径**上跑变异体：
+ * 把变异体喂给另一份"简化版判据"，等于用另一份判据做实验 —— 那种对照臂是假的。
+ */
+function collectProblems() {
+  const problems = [];
+  for (const f of FEATURES) {
+    for (const [pattern, min] of f.patterns) {
+      const { n } = count(pattern);
+      if (n < min) {
+        problems.push(`  ✗ ${f.name}：接线 "${pattern}" 只找到 ${n} 处（期望 ≥${min}）`);
+      }
     }
   }
-}
 
-for (const rule of FORBIDDEN) {
-  for (const rel of rule.files) {
-    const src = sources.find((x) => x.path === rel);
-    if (src === undefined) {
-      problems.push(`  ✗ ${rule.name}：受检文件不存在 ${rel}`);
-      continue;
-    }
-    const body = stripComments(src.text);
-    const lines = body.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      for (const pattern of rule.patterns) {
-        if (new RegExp(pattern).test(lines[i])) {
-          problems.push(`  ✗ ${rule.name}：${rel}:${i + 1} 出现了 "${pattern.replace(/\\/g, '')}"`
-            + '（呈现判定必须走 sidebarPresentation()，不许写常量）');
+  for (const rule of FORBIDDEN) {
+    for (const rel of rule.files) {
+      const src = sources.find((x) => x.path === rel);
+      if (src === undefined) {
+        problems.push(`  ✗ ${rule.name}：受检文件不存在 ${rel}`);
+        continue;
+      }
+      // 注释先剥掉：本轮修复留下的说明文字里就写着被禁的形态（不剥 = 门禁拦自己的注释）
+      const body = stripComments(src.text);
+      const lines = body.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        for (const pattern of rule.patterns ?? []) {
+          if (new RegExp(pattern).test(lines[i])) {
+            problems.push(`  ✗ ${rule.name}：${rel}:${i + 1} 出现了 "${pattern.replace(/\\/g, '')}"`
+              + (rule.hint ?? ''));
+          }
+        }
+      }
+      for (const pattern of rule.textPatterns ?? []) {
+        const m = new RegExp(pattern).exec(body);
+        if (m !== null) {
+          const line = body.slice(0, m.index).split('\n').length;
+          problems.push(`  ✗ ${rule.name}：${rel}:${line} 命中多行规则 `
+            + `"${pattern.replace(/\\/g, '').slice(0, 60)}…"` + (rule.hint ?? ''));
         }
       }
     }
   }
+  return problems;
 }
 
+/** 造一份"只改一个文件"的变异体（找不到锚点 = 对照臂自身失效，必须报红而不是静默跳过）。 */
+function mutate(rel, search, replace) {
+  const target = sources.find((s) => s.path === rel);
+  if (target === undefined || target.text.indexOf(search) < 0) {
+    throw new Error(`对照臂失效：${rel} 里找不到锚点 ${JSON.stringify(search.slice(0, 60))}`);
+  }
+  const copy = sources.map((s) => (s.path === rel
+    ? { path: s.path, text: s.text.replace(search, replace) }
+    : s));
+  return copy;
+}
+
+/**
+ * `--self-test`：把**已修好的形态**退回成旧的"按形态分档"形态，判据必须翻红。
+ *
+ * 【为什么必须有对照臂】只测"现在是绿的"证明不了判据有牙 —— 一个永远返回空的
+ * 判据也是绿的。四条对照臂各自退回一处旧实现（启动闸门 / 未等待授权 / pick 分叉 / 采纳判据），
+ * 少任何一条都得判红。
+ */
+if (process.argv.includes('--self-test')) {
+  const ENTRY = 'entry/src/main/ets/entryability/EntryAbility.ets';
+  const PICKER = 'platform/src/main/ets/system/FilePicker.ets';
+  const WEBAPP = 'entry/src/main/ets/pages/WebApp.ets';
+  const arms = [
+    {
+      name: '把启动恢复重新包进 isHandheldForm() 闸门',
+      sources: mutate(ENTRY, '    this.folderGrantsReady = restoreFolderGrants(this.context).then(',
+        '    if (isHandheldForm()) {\n      this.folderGrantsReady = restoreFolderGrants(this.context).then(')
+    },
+    {
+      name: '宿主启动前不再等待目录授权恢复',
+      // 【2026-11-05 锚点更新】启动等待改成了「let grants: string; … try { grants = await … } finally」，
+      // 旧锚点 `const grants: string = await` 早已不在 ⇒ 对照臂注入失败把自检打成 rc=1。
+      sources: mutate(ENTRY, '        grants = await this.folderGrantsReady;',
+        "        grants = '不等待授权恢复';")
+    },
+    {
+      name: '把 pick 处的授权登记退回"非手持档不记授权"',
+      sources: mutate(PICKER, '  const granted: GrantOutcome = await rememberFolderGrant(context, uri, realPath);',
+        "  const granted: GrantOutcome = handheld\n    ? await rememberFolderGrant(context, uri, realPath)\n"
+        + "    : { persisted: false, note: '非手持档：不记授权' };")
+    },
+    {
+      name: '把 PC 支的采纳判据退回"只看探写"',
+      sources: mutate(WEBAPP, '      : (granted.persisted || probePathWritable(path));',
+        '      : probePathWritable(path);')
+    }
+  ];
+  const saved = sources;
+  let failures = 0;
+  for (const arm of arms) {
+    sources = arm.sources;
+    const problems = collectProblems();
+    sources = saved;
+    if (problems.length === 0) {
+      failures += 1;
+      console.log(`  ✗ 对照臂没判红：${arm.name}（判据无牙）`);
+    } else {
+      console.log(`  ✓ 对照臂判红：${arm.name}（${problems.length} 条）`);
+      console.log(`      ${problems[0].trim()}`);
+    }
+  }
+  console.log(`# 对照臂 ${arms.length - failures}/${arms.length} 通过`);
+  process.exit(failures === 0 ? 0 : 1);
+}
+
+const problems = collectProblems();
 console.log(`# 功能接线回归（扫描 ${files.length} 个文件，${FEATURES.length} 个功能，${FORBIDDEN.length} 条反面规则）`);
 if (problems.length === 0) {
   console.log('✅ 全部功能的接线都在（中枢实现 + 界面调用点）。');

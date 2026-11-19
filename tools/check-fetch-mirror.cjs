@@ -23,7 +23,7 @@
 const http = require('node:http');
 const assert = require('node:assert');
 
-const { dshmFetch } = require('../hostcore/app/fetch-shim.js');
+const { dshmFetch, mirrorUrlFor } = require('../hostcore/app/fetch-shim.js');
 
 let failures = 0;
 async function check(name, fn) {
@@ -71,6 +71,40 @@ function hits(needle) {
       lastPath(),
       '/https://raw.githubusercontent.com/kingOfSoySauce/dsh-skin-market/main/data/catalog.json',
     );
+  });
+
+  /* ── ①b codeload.github.com：**真正下包字节**的那台（2026-10-14 加入表里） ──
+   * 插件安装器（`dshm-installer.js` 的 `fetchBuffer`）直拼的 GitHub tarball 地址、
+   * 皮肤市场走 pnpm 契约最后也落到这条。真机实测的差距不是"能不能通"而是"能不能用"：
+   * 同一个 4.6MB tarball 直连 2m39s、经本镜像 16.65s（解压后逐字节一致）。
+   * 形态与前缀式代理一致 ⇒ 断言口径与 ① 逐字相同（path 里是**完整原始 URL**）。 */
+  await check('①b codeload.github.com → 前缀式代理（下包那台也吃镜像）', async () => {
+    seen.length = 0;
+    process.env.DSHM_FETCH_MIRROR_PREFIX = prefix;
+    await dshmFetch('http://codeload.github.com/owner/repo/tar.gz/abcdef1234567890', {}, opts);
+    assert.strictEqual(
+      lastPath(),
+      '/https://codeload.github.com/owner/repo/tar.gz/abcdef1234567890',
+    );
+  });
+
+  /* ── ①c `mirrorUrlFor()`：给**不走 globalThis.fetch** 的调用方（插件安装器的 node:https） ──
+   * 判据必须只有一份：安装器不自己维护镜像表，而是拿这个函数改写下载地址（见
+   * `dshm-installer.js` 的 `fetchBuffer` 与 `mirrorUrlFor` 的头注）。这里断言三件事：
+   * 表内主机真的被改写（**且与 ① 同一形态**）、表外主机**原样返回**（可达主机不许被吸进来）、
+   * 开关置 0 时同 `onceFetch` 一样整体关闭。 */
+  await check('①c mirrorUrlFor()：表内改写 / 表外原样 / 开关 0 时关闭（判据单份）', async () => {
+    process.env.DSHM_FETCH_MIRROR_PREFIX = prefix;
+    const inside = 'https://codeload.github.com/owner/repo/tar.gz/deadbeef';
+    assert.strictEqual(mirrorUrlFor(inside), `${prefix}/https://codeload.github.com/owner/repo/tar.gz/deadbeef`);
+    const outside = 'https://registry.npmmirror.com/dshmarket';
+    assert.strictEqual(mirrorUrlFor(outside), outside, '表外主机被改写了：镜像表加了未实测的条目');
+    process.env.DSHM_FETCH_MIRROR = '0';
+    assert.strictEqual(mirrorUrlFor(inside), inside, 'DSHM_FETCH_MIRROR=0 时 mirrorUrlFor 仍在改写');
+    delete process.env.DSHM_FETCH_MIRROR;
+    // 不能删掉前缀：① 起就是"本地镜像端口"这条口径，② 还依赖它（删了会打到真镜像，
+    // 本地一个请求都收不到 ⇒ ② 假红）。这里只把开关还原成"开着"。
+    process.env.DSHM_FETCH_MIRROR_PREFIX = prefix;
   });
 
   /* ── ② 换主机保路径 ──

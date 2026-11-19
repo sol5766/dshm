@@ -3,9 +3,7 @@
     "name": "connection",
     "type": "har",
     "deviceTypes": [
-      "phone",
-      "tablet",
-      "2in1"
+      "tablet", "2in1"
     ]
   }
 }

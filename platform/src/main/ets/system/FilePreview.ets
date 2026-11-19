@@ -36,7 +36,7 @@
  */
 
 import { common } from '@kit.AbilityKit';
-import { fileUri } from '@kit.CoreFileKit';
+import { fileUri, picker } from '@kit.CoreFileKit';
 import { filePreview } from '@kit.PreviewKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -227,5 +227,43 @@ export async function closeSystemPreview(context: common.UIAbilityContext): Prom
     const e = err as BusinessError;
     hilog.info(DOMAIN, TAG,
       'closePreview 未成功（窗不存在时属预期）：code=%{public}d msg=%{public}s', e.code, e.message);
+  }
+}
+
+/**
+ * 打开系统文件选择器并定位到指定文件所在位置。
+ * 返回值供同步 JavaScriptProxy 桥使用：ok / empty / nouri / context / threw。
+ */
+export function openFileLocation(context: common.UIAbilityContext | common.Context,
+  path: string): string {
+  const target: string = typeof path === 'string' ? path.trim() : '';
+  if (target.length === 0) {
+    return 'empty';
+  }
+  const uri: string = uriFromPath(target);
+  if (uri.length === 0) {
+    return 'nouri';
+  }
+  if (context === undefined || context === null) {
+    return 'context';
+  }
+  try {
+    const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
+    options.defaultFilePathUri = uri;
+    options.maxSelectNumber = 1;
+    options.selectMode = picker.DocumentSelectMode.FILE;
+    const view: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+    view.select(options).then((): void => {
+      hilog.info(DOMAIN, TAG, '文件管理器定位选择器已返回：%{public}s', uri);
+    }).catch((err: BusinessError): void => {
+      hilog.warn(DOMAIN, TAG, '文件管理器定位选择器结束：code=%{public}d msg=%{public}s',
+        err.code, err.message);
+    });
+    return 'ok';
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '打开文件管理器定位失败：code=%{public}d msg=%{public}s',
+      e.code, e.message);
+    return 'threw';
   }
 }

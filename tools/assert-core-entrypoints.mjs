@@ -160,6 +160,7 @@ function isPackageRoot(dir, nm) {
  */
 function checkTree(nm) {
   const missing = [];
+  const docOnly = [];
   let packages = 0;
   let unparsable = 0;
   let resolved = 0;
@@ -184,10 +185,24 @@ function checkTree(nm) {
         continue;
       }
       // rel 统一用 `/` 作分隔符：自检的期望串与报错输出都不该随平台变（Windows 下 join 给的是 `\`）。
-      missing.push({ rel: pkgPath.slice(nm.length + 1).split(sep).join('/'), label, spec });
+      const rel = pkgPath.slice(nm.length + 1).split(sep).join('/');
+      /*
+       * 【文档导出豁免（2026-10-28，与 docs/267 P1-1 同轮）】
+       * `exports` 指向 `*.md` 的声明**不是运行期入口**：裁剪规则 `**\/*.md` 的既定意图就是
+       * "包内文档不参与运行"（core-recipe 那条 why 逐字这么写）。本门禁判的是"被 require/import
+       * 的入口解析得到吗"，README 不在其中。
+       * 实测来源：上游 rc.4 把 bowser 2.14.1 → **2.15.0**，新增 `exports["./README.md"]`
+       * ⇒ 裁剪后本门禁报红。该文件在配方里另有**定点保留**规则（pack-core 的
+       * PRUNE_KEEP_EXPORTS_README）：保留时本条不触发；这里豁免"确实被裁掉"的合法情形。
+       */
+      if (/\.md$/i.test(spec)) {
+        docOnly.push({ rel, label, spec });
+        continue;
+      }
+      missing.push({ rel, label, spec });
     }
   }
-  return { packages, resolved, unparsable, skipped, missing };
+  return { packages, resolved, unparsable, skipped, missing, docOnly };
 }
 
 // ── 注入式负测试：把「检测器真会红」证明出来 ──────────────────────────────
@@ -221,6 +236,12 @@ if (process.argv.includes('--self-test')) {
     mk('node_modules/custom-cond/dist/index.cjs', 'module.exports = 5;\n');
     // 负控 ③：包体内部的 package.json（非包根）⇒ **不得**报（fast-uri/benchmark 的同形）
     mk('node_modules/ok/benchmark/package.json', JSON.stringify({ name: 'benchmark', private: true, main: 'index.js' }));
+    // 负控 ④：`exports` 指向**不存在的 .md**（文档导出、非运行期入口）⇒ 不得进 missing，
+    // 但必须进 docOnly（证明是识别了，不是没看见）。上游 bowser 2.15.0 的同形。
+    mk('node_modules/md-export/package.json', JSON.stringify({
+      name: 'md-export', main: 'index.js', exports: { '.': './index.js', './README.md': './README.md' },
+    }));
+    mk('node_modules/md-export/index.js', 'module.exports = 6;\n');
 
     const r = checkTree(join(stage, 'node_modules'));
     const misses = r.missing.map((m) => `${m.rel} ${m.label}=${m.spec}`);
@@ -229,12 +250,16 @@ if (process.argv.includes('--self-test')) {
     // 对照臂：能解析的（精确文件 / 目录 index）、"types 指向 .d.ts"、以及三条负控都**不得**被报。
     const okB = !misses.some((m) => m.startsWith('ok/') || m.startsWith('dir-main/')
       || m.startsWith('types-only/') || m.startsWith('bundler-only/')
-      || m.startsWith('custom-cond/'));
+      || m.startsWith('custom-cond/') || m.startsWith('md-export/'));
     const okC = r.skipped === 1; // 只有 ok/benchmark 那一个按"非包根"跳过
-    if (okA && okB && okC) {
+    // 负控 ④ 的正面断言：那条 md 导出必须被记进 docOnly，且不在 missing 里。
+    const okD = r.docOnly.some((m) => m.rel === 'md-export/package.json' && m.spec === './README.md')
+      && !misses.some((m) => m.startsWith('md-export/'));
+    if (okA && okB && okC && okD) {
       console.log('PASS：对照实验成立 —— 合成的缺失入口被逐条报出；可解析的、`types` 指向 .d.ts 的、'
         + 'bundler 专用字段、非 Node 自定义条件、非包根 package.json 一律不误报。');
       console.log(`      报出 ${r.missing.length} 条：${misses.join('；')}（另有 ${r.skipped} 个非包根跳过）`);
+      console.log('      md 文档导出（豁免、仅记说明）' + r.docOnly.length + ' 条：' + (r.docOnly.map((m) => m.spec).join('；') || '（无）'));
       process.exit(0);
     }
     console.error('FAIL：自检未按预期 ——');
@@ -287,6 +312,11 @@ if (existsSync(trapPkg)) {
 
 if (r.missing.length === 0) {
   console.log('结果：PASS —— 所有运行期入口声明都解析得到包内文件，裁剪没有删掉任何入口。');
+  if (r.docOnly.length > 0) {
+    console.log('（说明：另有 ' + r.docOnly.length + ' 条 exports 指向 *.md 的**文档导出**因裁剪不存在，'
+      + '按"文档不参与运行"的既定口径豁免，不计入失败）');
+    for (const m of r.docOnly.slice(0, 6)) console.log('   · ' + m.rel + ' ' + m.label + ' → ' + m.spec);
+  }
   process.exit(0);
 }
 console.error(`结果：FAIL —— ${r.missing.length} 条运行期入口声明解析不到文件（裁剪删错了东西）：`);

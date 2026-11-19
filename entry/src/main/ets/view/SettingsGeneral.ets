@@ -17,6 +17,7 @@
 
 import { Fs, Radius, SettingGroup, SettingItem, Sp } from 'appstate';
 import { SettingRow } from './SettingRow';
+import { SettingsUsage } from './SettingsUsage';
 
 
 /**
@@ -68,6 +69,8 @@ export struct SettingsGeneral {
   // 【ArkUI 约束】组件的 build() 只能有一个根节点 ⇒ 多段内容包进 Column
   build() {
     Column({ space: Sp.L }) {
+          /* 用量统计（docs/178）：桌面卡片同源数据，应用内也能看四档 token 用量 */
+          SettingsUsage()
           /*
            * 【权限模式：只读说明，不给假档位（E116）】
            *

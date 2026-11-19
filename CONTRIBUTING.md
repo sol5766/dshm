@@ -26,7 +26,7 @@
 
 ```bash
 devecocli build
-hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
+hdc install -r <hap>  # 仅 Windows 开发端；本机无 hdc 服务端，交付证据上限 = 离线门禁 + 包结构
 ```
 
 ## 动手前必读：真机数据保全
@@ -38,6 +38,7 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 判断依据只有一条：**这条命令会不会碰 `el2`？会，就是禁止的。**
 
 装机一律用覆盖安装 `hdc install -r <hap>` —— 它只换 `el1`（代码与资源），不动 `el2`。
+> 环境边界：本机无 hdc 服务端（UDS bind 被拒），上述命令**本机不可执行**；交付证据只到「离线门禁 + 包结构」，真机结论须分开写。
 
 ## 回归纪律
 

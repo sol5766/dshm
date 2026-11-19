@@ -1,0 +1,21 @@
+{
+  "name": "@deepseek-ai/dshm-tool-python",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM PC 工程的进程内 Python 工具：把模型可见的 `python` 工具接到主进程里的内嵌 CPython（/dshm-python/* 桥），提供不依赖 shell 的稳定结构化入口。见 lib/index.js 头注与 docs/165。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5"
+  }
+}

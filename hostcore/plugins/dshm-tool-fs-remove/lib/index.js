@@ -81,18 +81,23 @@
  * 不经过任何 fs 策略瀑布。理由与影响面：
  *   · 上游本来就没有"删除意图"的策略事件可走（见上），所以这不是"绕开一道闸门"，
  *     而是"这道闸门不存在"；
- *   · 端侧 fs 后端是 `danger-full-access`（`hostcore/profile/ondevice/cordis.patch.yml`
- *     的 `sandbox-policy` 行），本来就不加路径范围限制，故实际影响有限。
+ *   · 上游本来就不加路径范围限制（`danger-full-access`），故"绕过策略瀑布"这件事
+ *     本身不改变可见面；真正的边界在下面「路径范围」一节说的地方 —— 2026-10-10 起
+ *     由 `ctx.fs` 后端的 `resolve()` 闸门承担，而本插件的两端**正是**走 `resolve()`。
  * 恢复条件：上游 `@deepseek-ai/dsh-fs` 若提供 remove/rename（含策略事件），
  * 把下面两处 `rm/rename` 改回 `ctx.fs.*` 即可，其余代码不用动。
  *
- * ── 路径范围：工具层**完全不设限**（用户明确要求）────────────────────────
- * 本插件在工具层**不做任何路径范围判断、不做任何确认/审批握手、不接 approval 服务**：
- * 绝对路径、会话 cwd 之外的路径，一律照常执行。唯一的闸门是**操作系统的路径授权**
- * （端侧 `sandbox-policy: danger-full-access` 且 `permission-presets` 的
- * `danger-full-access ⇒ approval: never`，见 cordis.patch.yml —— 工具层没有任何审批
- * 闸门；某个路径能不能删 / 移动 / 写入，由 OS 按包名/沙箱归属决定：自己包名目录内可
- * 删，其余用户目录由 OS 返回拒绝，本插件把该错误**原样上报**）。
+ * ── 路径范围：**有闸门**，判据落在 `ctx.fs`（2026-10-10 更正，见 docs/137）──
+ * 【历史】2026-10-03 按用户当时的要求，本插件在工具层**不做任何路径范围判断、
+ * 不接 approval 服务**，那时的说法是"唯一的闸门是操作系统的路径授权"。
+ * 【现状】2026-10-10 用户拍板了新策略：**允许面 = 应用沙箱 ∪
+ * `/storage/Users/currentUser/`，其余（系统数据区 / 别人的沙箱 / 挂载点）读写都拒**。
+ * 落实点是 `ctx.fs` 后端（`dshm-fs-write-nonchmod`）的 `resolve()` / `lstat()` 闸门
+ * （判据文件 `./fs-fence.js`，与那边逐字节相同）——本插件的 remove / move 两端与
+ * publish 的源**都要经 `ctx.fs.resolve()`**，所以这三处由后端闸门覆盖，不在这里重复判。
+ * 唯一不过 `ctx.fs` 的是 **publish 的目标**（本插件自己用 `node:fs` 落盘）⇒
+ * 那一处在这里显式调 `assertFsScope()`。
+ * 仍然**不做**确认/审批握手（不接 approval 服务）：用户要的是"范围"，不是"先问一句"。
  * 工具层唯一保留的失败情形是**解析不了**：相对路径在会话没有 cwd 时无从解析，
  * 此时如实报错而不是退到进程 cwd 去猜（`dsh-fs-local` 的 `resolve()` 在 `opts.cwd`
  * 缺省时会静默用 `config.cwd`，那会变成一个没有报错的错误路径）。
@@ -107,6 +112,7 @@ import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "nod
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { FsError, FsVersion } from "@deepseek-ai/dsh-fs";
 import { describeWriteFailure } from "./denial-hints.js";
+import { assertFsScope, fsScopeEnabled, fsScopeRoots } from "./fs-fence.js";
 
 /** Stable Loader identity. */
 const name = "tool-fs-remove";
@@ -146,6 +152,9 @@ async function resolveTarget(ctx, exec, requestedPath, tool) {
 	}
 	// resolve() 只用来拿 displayPath（词法绝对路径）；它的 targetKey（realpath）不参与删除/移动。
 	const target = await ctx.fs.resolve(requestedPath, { cwd, signal: exec.signal });
+	// 【范围闸门就在这里】本进程的 `ctx.fs`（dshm-fs-write-nonchmod）在 `resolve()` 里
+	// 判允许面 ⇒ 面外路径**已经**在上面那一句抛 FS_PERMISSION_DENIED（带允许面文案），
+	// 不会走到下面的 lstat / rm / rename。判据与文案见 ./fs-fence.js（docs/137）。
 	const opts = hasCwd ? { cwd } : {};
 	// 不跟随末段符号链接 —— 软链按"链接文件"处理，悬空链也可见。
 	// 解析这一步本身也可能被平台拒（策略更严的设备会连 stat 都不放行）⇒ 同样翻成人话，
@@ -332,7 +341,7 @@ async function writeFileAtomicBytes(absolutePath, bytes, mode, signal) {
 function applyPublishTool(ctx) {
 	ctx.tools.register(defineTool({
 		name: "publish",
-		description: "Publish one file from the sandbox into this app's user-visible download directory (Download/<bundle>/), so the user can open it in the file manager. Use it when the session workspace lives inside the sandbox and a plain write therefore cannot reach the user-visible directory: write the file in the sandbox first, then publish it. The bytes are copied as-is (binary-safe, no text re-encoding), and missing parent directories of the destination are created. Relative paths resolve against the session cwd; a relative target resolves against the download directory. The tool imposes no path restriction — whether the copy is permitted is decided by the operating system, and its error is reported as-is. The copy is atomic: the bytes are written to a hidden temporary file in the destination directory and renamed into place, so a failed or interrupted copy leaves an existing destination file untouched (a destination that did not exist stays absent).",
+		description: "Publish one file from the sandbox into this app's user-visible download directory (Download/<bundle>/), so the user can open it in the file manager. Use it when the session workspace lives inside the sandbox and a plain write therefore cannot reach the user-visible directory: write the file in the sandbox first, then publish it. The bytes are copied as-is (binary-safe, no text re-encoding), and missing parent directories of the destination are created. Relative paths resolve against the session cwd; a relative target resolves against the download directory. Source and destination are both checked against this app's path scope: this app's own sandbox and the user's home directory (/storage/Users/currentUser/) are allowed, while the system data area (/system, /etc, /data outside this app's sandbox, /proc, /mnt), other apps' sandboxes and mount points are refused for reading and writing alike; a refusal is this app's own policy, so retrying with different wording cannot succeed. The copy is atomic: the bytes are written to a hidden temporary file in the destination directory and renamed into place, so a failed or interrupted copy leaves an existing destination file untouched (a destination that did not exist stays absent).",
 		parameters: {
 			source: {
 				type: "string",
@@ -389,6 +398,9 @@ function applyPublishTool(ctx) {
 				throw new Error(`publish: "${from.target.displayPath}" is not a regular file${sourceInfo.isDirectory() ? " (it is a directory)" : ""}; publish copies one file.`);
 			}
 			const destination = publishDestination(root, args.source, args.target);
+			/* 【范围闸门】publish 的目标由**本插件自己**用 node:fs 落盘，不过 ctx.fs ⇒
+			 * 必须在动手之前显式判一次（源的路径已经由 resolveTarget 里的 ctx.fs.resolve 判过）。 */
+			await assertFsScope(destination);
 			throwIfAborted(exec.signal, "publish");
 			/* 目标是否已存在 —— 决定返回的 operation，并在这里就拒绝**存在但不是普通文件**
 			 * （目录等）：否则会走进 `open(…,'w')` 的 EISDIR，错误文案远不如直接说清来源。 */
@@ -437,7 +449,7 @@ function applyPublishTool(ctx) {
 function applyRemoveTool(ctx) {
 	ctx.tools.register(defineTool({
 		name: "remove",
-		description: "Delete one file, one symbolic link, or one directory. A symbolic link is removed as the link itself — its target is untouched — and never needs recursive, even when it points at a directory. A directory requires recursive=true. Relative paths resolve against the session cwd; absolute paths are used as given. The tools themselves impose no path restriction — whether the deletion is permitted is decided by the operating system, and its error is reported as-is.",
+		description: "Delete one file, one symbolic link, or one directory. A symbolic link is removed as the link itself — its target is untouched — and never needs recursive, even when it points at a directory. A directory requires recursive=true. Relative paths resolve against the session cwd; absolute paths are used as given. Every path is first checked against this app's path scope: this app's own sandbox and the user's home directory (/storage/Users/currentUser/) are allowed, while the system data area (/system, /etc, /data outside this app's sandbox, /proc, /mnt), other apps' sandboxes and mount points are refused for reading and writing alike; a refusal is this app's own policy, so retrying with different wording cannot succeed.",
 		parameters: {
 			path: {
 				type: "string",
@@ -497,7 +509,7 @@ function applyRemoveTool(ctx) {
 function applyMoveTool(ctx) {
 	ctx.tools.register(defineTool({
 		name: "move",
-		description: "Move or rename one file, one symbolic link, or one directory. A symbolic link is moved as the link itself — its target is untouched. Relative paths resolve against the session cwd; absolute paths are used as given. The tools themselves impose no path restriction — whether the operation is permitted is decided by the operating system, and its error is reported as-is. The destination directory must already exist.",
+		description: "Move or rename one file, one symbolic link, or one directory. A symbolic link is moved as the link itself — its target is untouched. Relative paths resolve against the session cwd; absolute paths are used as given. Both endpoints are checked against this app's path scope: this app's own sandbox and the user's home directory (/storage/Users/currentUser/) are allowed, while the system data area (/system, /etc, /data outside this app's sandbox, /proc, /mnt), other apps' sandboxes and mount points are refused for reading and writing alike; a refusal is this app's own policy, so retrying with different wording cannot succeed. The destination directory must already exist.",
 		parameters: {
 			source: {
 				type: "string",
@@ -552,6 +564,11 @@ function applyMoveTool(ctx) {
  * @param ctx - agent- or deployment-scoped services.
  */
 function apply(ctx) {
+	/* 启动期一条读数：范围闸门的**允许面**到底算成了什么（真机排障时不必再去猜 env）。
+	 * 判据文件与 dshm-fs-write-nonchmod 是同一份（./fs-fence.js），所以这条打印的就是
+	 * 那边 `ctx.fs` 真正在用的允许面。 */
+	const scope = fsScopeEnabled() ? "允许面 = " + fsScopeRoots().join("、") : "已关闭（DSHM_FS_SCOPE=off）";
+	console.log("[dshm] 文件访问范围闸门：" + scope);
 	ctx.systemPrompt.section({
 		name: "tool:remove",
 		/*
@@ -573,7 +590,7 @@ function apply(ctx) {
 			if (ctx.tools.get("remove", scope) !== void 0) lines.push("Use remove to delete files or directories, and move to rename or relocate them.");
 			if (ctx.tools.get("publish", scope) !== void 0) lines.push("Use publish to copy a file out of the sandbox into the user-visible download directory (Download/<bundle>/): when the session workspace is inside the sandbox, write the file there first and then publish it, and tell the user the final path publish returns.");
 			if (lines.length === 0) return "";
-			return `${lines.join(" ")} Relative paths resolve against the session cwd and absolute paths are used as given; the tools themselves restrict no path — permission comes from the operating system, whose error is reported as-is.`;
+			return `${lines.join(" ")} Relative paths resolve against the session cwd and absolute paths are used as given; every path is checked against this app's path scope first (this app's own sandbox and the user's home directory /storage/Users/currentUser/ are allowed; the system data area, other apps' sandboxes and mount points are refused for reading and writing alike).`;
 		}
 	});
 	applyRemoveTool(ctx);

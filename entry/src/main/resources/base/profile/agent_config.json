@@ -1,0 +1,51 @@
+{
+  "agentCards": [
+    {
+      "agentId": "dshm_session_agent",
+      "name": "DSHM",
+      "description": "DSHM 的端侧会话智能体：接收系统侧请求，在 DSHM 中执行会话相关操作（如新建会话）。",
+      "version": "1.0.0",
+      "capabilities": {
+        "streaming": false,
+        "pushNotifications": false,
+        "stateTransitionHistory": false
+      },
+      "defaultInputModes": [
+        "text/plain"
+      ],
+      "defaultOutputModes": [
+        "text/plain"
+      ],
+      "skills": [
+        {
+          "id": "new-session",
+          "name": "新建会话",
+          "description": "在 DSHM 中新建一个 AI 会话。",
+          "tags": [
+            "DSHM",
+            "会话",
+            "新建"
+          ],
+          "examples": [
+            "打开 DSHM 新建会话"
+          ],
+          "inputModes": [
+            "text/plain"
+          ],
+          "outputModes": [
+            "text/plain"
+          ],
+          "extension": "{}"
+        }
+      ],
+      "iconUrl": "common/dshm_agent_icon.png",
+      "category": "productivity",
+      "extension": "{}",
+      "appInfo": {
+        "bundleName": "com.dshm.dshclient",
+        "moduleName": "entry",
+        "abilityName": "AgentExtAbility"
+      }
+    }
+  ]
+}

@@ -21,8 +21,8 @@
  * 其它 git host 不支持（如实报错，不猜）。
  *
  * 【GitHub 仓库不一定装得上（2026-09-30 用户报"插件入口给 github 地址装不上"）】
- * GitHub 源形态有两类失败，**都不是网络问题**（实测 codeload 直连可用，设备侧
- * `wget` 也能把 32MB 的 tar.gz 完整拉下来）：
+ * GitHub 源形态有两类失败，**都不是"装不上"而是"装不对"**（codeload 是可达的，只是慢，
+ * 见下）：
  *   ① **monorepo**：根目录只有子目录，每个子包各有一份 package.json（如
  *      `Small-tailqwq/dsh-deep-whale/{maid-atelier,orca-link,skin-manager}/`）。
  *      这类必须由 spec 指明子目录——`&path:/<子目录>`、`?path=<子目录>`、
@@ -34,6 +34,13 @@
  *      源码树装下来也起不来 ⇒ 落位校验必然失败。处置见 `repositoryMatchesRequest`
  *      ＋ installSpecInner 里的 githubFallback 一段（改用 registry 上的同名 npm 包）。
  * 判据写在这里，免得下一个人重新发明。
+ *
+ * 【2026-10-14 订正：codeload 直连"能通"但**慢到不能用**】上一行原文写的是"实测 codeload
+ * 直连可用"，那句只验了"拉得下来"、没量速度，结果被当成了"网络没问题"的依据。真机重测：
+ * 同一个 4.6MB tarball，直连 **2m39s**、经 `gh-proxy.com`（已有的出网镜像）**16.65s**，
+ * 解压后逐字节一致；皮肤市场一次安装要下两遍，直连合计 ~131s。所以下载点（fetchBuffer）
+ * 现在过 `mirrorUrlFor()` 这一跳 —— 判据**单份**在 `fetch-shim.js`（那里同时管着
+ * `globalThis.fetch` 那条路），本文件不再自己维护第二张镜像表。
  *
  * 【为什么纯 JS 解 tar 而不 spawn busybox tar】busybox 副本虽有 tar 能力，
  * 但 spawn 在端侧始终带平台级不确定性（执行位/权限策略），而 tgz =
@@ -51,9 +58,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const https = require('node:https');
 const zlib = require('node:zlib');
+const crypto = require('node:crypto');
 // 与启动期预检（composeUserRows/sanitizeDependencies）同判据的入口检查——
 // 两边判据不一致就是"装完即被拒拼/隔离"的配方（真机实证见 installSpecInner 落位校验注释）。
 const { userRowLoadable } = require('./dshm-user-rows.js');
+// 出网镜像改写（**单份判据**在 fetch-shim.js）：本文件用 node:https 直连下载，
+// 走不到 fetch 垫片那处改写 ⇒ 下载点必须显式过这一跳（原因与实测数字见文件头注）。
+const { mirrorUrlFor } = require('./fetch-shim.js');
 
 /** 默认 registry：npmmirror（大陆 CDN，完整 npm 镜像）；可在 <homeDir>/installer.json 覆盖。 */
 const DEFAULT_REGISTRY = 'https://registry.npmmirror.com';
@@ -115,7 +126,12 @@ function httpGet(urlStr, redirectsLeft) {
       }
       if (code !== 200) {
         res.resume();
-        reject(new Error('HTTP ' + code + '：' + urlStr));
+        // 文案必须带上原因短语：上游 classifyInstallFailure（install-failure.js 的
+        // LOG_KINDS：/ERR_PNPM_FETCH_404|\bE404\b|404 Not Found|Not Found - GET/）
+        // 就是靠 `404 Not Found` 这类形态把失败判成 not-found 的。只写 `HTTP 404：`
+        // 会掉进 unknown ⇒ 用户看到的是通用文案而不是"未找到相关插件"。
+        const statusText = res.statusMessage || (code === 404 ? 'Not Found' : '');
+        reject(new Error('HTTP ' + code + (statusText ? ' ' + statusText : '') + '：' + urlStr));
         return;
       }
       resolve(res);
@@ -127,13 +143,168 @@ function httpGet(urlStr, redirectsLeft) {
   });
 }
 
-async function fetchBuffer(urlStr) {
-  const res = await httpGet(urlStr, 5);
-  const chunks = [];
-  for await (const c of res) {
-    chunks.push(c);
+/*
+ * 进程内下载缓存（2026-10-14）。
+ *
+ * 【为什么需要】市场装一个包会对**同一个 URL** 下两遍：市场的 CLI 链路先做
+ * `prefetch()` 隔离预取（`--dir <临时目录>`，见 dshm-market-bridge 的
+ * targetDirFromArgv），再对 live profile 正式落位 —— 两跳都落到这个函数。
+ * 真机实测（+dshm.49 前的口径）：皮肤 tarball 直连 ~48s / 镜像 ~18s，
+ * 一次安装合计 ~131s / ~36s；第二遍纯属重复字节。
+ *
+ * 【为什么是上限而不是"全缓存"】宿主是内存敏感进程（历史上被 VM 撑爆过），
+ * 所以只留最近几次、且总字节封顶；过期即丢，命中即刷新（LRU）。
+ */
+const DOWNLOAD_CACHE_TTL_MS = 120000;
+const DOWNLOAD_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const DOWNLOAD_CACHE_MAX_ITEMS = 8;
+const downloadCache = new Map(); // url -> { at: number, buf: Buffer }
+let downloadCacheBytes = 0;
+
+function downloadCacheGet(url) {
+  const hit = downloadCache.get(url);
+  if (hit === undefined) {
+    return null;
   }
-  return Buffer.concat(chunks);
+  if (Date.now() - hit.at > DOWNLOAD_CACHE_TTL_MS) {
+    downloadCache.delete(url);
+    downloadCacheBytes -= hit.buf.length;
+    return null;
+  }
+  downloadCache.delete(url);
+  downloadCache.set(url, hit); // 重排到队尾（LRU）
+  // 打一行：这是"同一个包为什么第二次装得快"的唯一直接证据（真机日志里据此分辨
+  // 「走了缓存」与「又下了一遍」——两者在用户那里长得一模一样，都是转圈）。
+  console.error(`DSHM 下载缓存命中（${hit.buf.length} B，${Math.round((Date.now() - hit.at) / 1000)} s 前下的同上一个 URL）：${url}`);
+  return hit.buf;
+}
+
+function downloadCachePut(url, buf) {
+  if (buf.length > DOWNLOAD_CACHE_MAX_BYTES) {
+    return; // 单条就超上限（不该发生）：宁可不下缓存，也不把内存顶起来
+  }
+  const old = downloadCache.get(url);
+  if (old !== undefined) {
+    downloadCache.delete(url);
+    downloadCacheBytes -= old.buf.length;
+  }
+  downloadCache.set(url, { at: Date.now(), buf });
+  downloadCacheBytes += buf.length;
+  while (downloadCache.size > DOWNLOAD_CACHE_MAX_ITEMS || downloadCacheBytes > DOWNLOAD_CACHE_MAX_BYTES) {
+    const oldest = downloadCache.keys().next();
+    if (oldest.done === true) {
+      break;
+    }
+    const drop = downloadCache.get(oldest.value);
+    downloadCache.delete(oldest.value);
+    downloadCacheBytes -= drop.buf.length;
+  }
+}
+
+/**
+ * 校验 npm tarball 的完整性（SRI `sha512-…` / `sha1-…`，或旧的 `shasum` 十六进制）。
+ *
+ * 【为什么必须做（2026-10-29）】npm 客户端装包时会按 `dist.integrity` 校验；本仓的
+ * 端侧进程内安装通道此前**只保留 tarball 地址**，下载后直接解包落位 ⇒ registry 镜像、
+ * CDN、重定向或被污染的本地缓存给什么就装什么，只要"入口文件在"就算成功。
+ * 这条通道装的是要进宿主进程执行的插件，完整性不该只靠 TLS。
+ *
+ * 【判据】优先 `integrity`（可多段，空格分隔，取任一 supported 算法命中即过）；
+ * 没有 integrity 时退回 `shasum`（sha1 十六进制）。两者都没有 ⇒ **拒绝安装**并点名
+ * 原因，而不是静默放行 —— 宁可不装，也不装一个来路不明的包（与"半残包宁可不装"同口径）。
+ *
+ * @param buf 下载到的 tarball 字节
+ * @param spec `{ name, version, integrity, shasum }`（`resolveSpec` 的 npm 形态）
+ * @returns '' = 通过；否则为可读的失败原因
+ */
+function verifyTarballIntegrity(buf, spec) {
+  const integrity = typeof spec.integrity === 'string' ? spec.integrity.trim() : '';
+  const shasum = typeof spec.shasum === 'string' ? spec.shasum.trim().toLowerCase() : '';
+  const label = `${spec.name}@${spec.version}`;
+  const algos = { sha512: 'sha512', sha384: 'sha384', sha256: 'sha256', sha1: 'sha1' };
+  if (integrity.length > 0) {
+    const supported = [];
+    for (const part of integrity.split(/\s+/)) {
+      const m = /^([a-z0-9]+)-([A-Za-z0-9+/=]+)(?:\?.*)?$/.exec(part);
+      if (m && algos[m[1]] !== undefined) {
+        supported.push({ algo: m[1], digest: m[2] });
+      }
+    }
+    /*
+     * 【"读不懂"≠"被篡改"】registry 未来可能声明我们没实现的算法（例如 blake3）。
+     * 这种情况按**不可判**处理：退到 `shasum`（若 registry 给了），两者都不可判才拒绝。
+     * 反过来，"支持的算法一个都没命中"是**确定的不符**，必须判红。
+     */
+    if (supported.length > 0) {
+      for (const { algo, digest } of supported) {
+        const actual = crypto.createHash(algos[algo]).update(buf).digest('base64');
+        if (actual === digest) {
+          return '';
+        }
+      }
+      return `${label} 的 tarball 与 registry 声明的 integrity 不符（算法 ${supported.map((x) => x.algo).join('/')}）`;
+    }
+    // 走到这里：integrity 存在但一段 supported 都没有 ⇒ 当作不可判，继续看 shasum
+  }
+  if (shasum.length > 0) {
+    const actual = crypto.createHash('sha1').update(buf).digest('hex');
+    if (actual === shasum) {
+      return '';
+    }
+    return `${label} 的 tarball 与 registry 声明的 shasum 不符`;
+  }
+  if (integrity.length > 0) {
+    /*
+     * registry 声明了 integrity，但其中**没有我们能算的算法**，且没给 shasum。
+     * 这是"我们读不懂"，不是"包被篡改" ⇒ 不误杀：放行并在日志里留一行，
+     * 将来新增算法时能一眼看到"这台设备认不出这种 integrity"。
+     * （对照：**两者都没有**才算"无据可依"，直接拒绝 —— 见下一行。）
+     */
+    console.error(`DSHM-INTEGRITY ${label} 的 integrity 只含不支持的算法（${integrity.slice(0, 60)}），`
+      + '本端无法校验：按不可判放行');
+    return '';
+  }
+  return `${label} 的 registry 元数据里没有 integrity/shasum，无法校验 tarball 完整性（已拒绝安装）`;
+}
+
+async function fetchBuffer(urlStr) {
+  const cached = downloadCacheGet(urlStr);
+  if (cached !== null) {
+    return cached;
+  }
+  const grab = async (u) => {
+    const res = await httpGet(u, 5);
+    const chunks = [];
+    for await (const c of res) {
+      chunks.push(c);
+    }
+    return Buffer.concat(chunks);
+  };
+  // 下载地址过镜像（表外主机原样返回，registry 那两条链不受影响）。
+  const url = mirrorUrlFor(urlStr);
+  let buf = null;
+  try {
+    buf = await grab(url);
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    if (url === urlStr) {
+      throw new Error(message);
+    }
+    /*
+     * 【镜像失败必须回退直连】（2026-10-14 本机实测）
+     *
+     * 镜像会按出口 IP 拦人：同一时刻 `https://gh-proxy.com/https://codeload…`
+     * 回 `403 Access to this resource is forbidden.`（37 字节，raw 与 codeload 一样），
+     * 而 `https://codeload.github.com/...` 直连 200 —— 硬改写会把"能通但慢"
+     * 变成"直接装不上"。所以镜像只当**加速**：它给的任何失败（连接层 / 4xx / 5xx）
+     * 都退回原地址重下一次；直连的失败才是真失败（`404 Not Found` 那类文案
+     * 也就仍然是上游给的，不受镜像杂音污染）。
+     */
+    console.error(`DSHM-MIRROR 镜像下载失败（${message}），回退直连：${urlStr}`);
+    buf = await grab(urlStr);
+  }
+  downloadCachePut(urlStr, buf);
+  return buf;
 }
 
 async function fetchJson(urlStr) {
@@ -239,6 +410,35 @@ function pickVersion(range, versions, latest) {
   return latest || null;
 }
 
+/**
+ * 从 registry 元数据里选目标版本。
+ *
+ * 【为什么显式版本和 dist-tag 必须先判】npm 的 `dist-tags.latest` 并不保证是最高版本；
+ * 例如 `@deepseek-ai/dsh-subagent-codex` 的 latest 长期停在 `0.0.1-rc.1`，而
+ * `0.2.1-rc.2` 只在 `next` tag 与 versions 表里。旧逻辑先把 prerelease 全过滤掉，
+ * 再用简化 semver 解析 `0.2.1-rc.2`；解析失败后错误回退 latest，导致显式请求
+ * `@0.2.1-rc.2` 实际下载 `0.0.1-rc.1`。
+ *
+ * 判据顺序：
+ *   1. range 精确命中 versions 键 ⇒ 原样返回（含 prerelease）；
+ *   2. range 命中 dist-tags（latest / next / alpha…）⇒ 返回 tag 指向版本；
+ *   3. 其余范围（^ / ~ / 精确稳定版 / *）才进入稳定版选择。
+ */
+function selectRegistryVersion(range, allVersions, distTags) {
+  const versions = Array.isArray(allVersions) ? allVersions.slice() : [];
+  const tags = distTags !== null && typeof distTags === 'object' ? distTags : {};
+  const clean = String(range || '').trim();
+  if (clean.length > 0 && versions.includes(clean)) {
+    return clean;
+  }
+  if (clean.length > 0 && Object.prototype.hasOwnProperty.call(tags, clean)
+    && typeof tags[clean] === 'string' && tags[clean].length > 0) {
+    return tags[clean];
+  }
+  const stable = versions.filter((v) => !v.includes('-')).sort(cmpVersionByKey);
+  return pickVersion(clean, stable, typeof tags.latest === 'string' ? tags.latest : null);
+}
+
 // ── spec 解析（npm 包名 / GitHub 三形态）───────────────────────────────
 
 /**
@@ -295,8 +495,54 @@ function parseGitHub(spec) {
   subpath = subpath.replace(/^\.?\//, '').replace(/\/+$/, '');
   // npm 的 github: 简写（github:owner/repo、github:owner/repo.git）——skin-market
   // 等插件市场传的就是这种。剥掉 github: 前缀后再按 owner/repo 走。
-  if (/^github:/.test(s) && !/^github:\//.test(s)) {
+  const githubPrefix = /^github:/.test(s) && !/^github:\//.test(s);
+  if (githubPrefix) {
     s = s.slice('github:'.length);
+  }
+  /*
+   * 【GitHub 页面地址归一化（2026-10-13，用户报"插件入口给 github 地址装不上"）】
+   * 手打 `owner/repo` 的是少数；多数人是从浏览器**地址栏**复制，而地址栏给的常常不是仓库名
+   * 而是页面路径：看分支/子目录是 `/tree/<ref>[/<sub>]`，看某个文件是 `/blob/<ref>/<file>`，
+   * 仓库首页点过 README 页签会带 `?tab=readme-ov-file`。旧实现只认两段式 ⇒
+   *   · `/tree/…` 直接落进"无法识别的插件标识"；
+   *   · `?tab=…` 更隐蔽：`?` 在旧正则的 `[^/\s#]` 里是合法字符，于是它被并进**仓库名**
+   *     （`repo?tab=readme-ov-file`），拼出的 codeload 地址必然 404。
+   * 这里先把无用的查询串剥掉，再把页面段折回 `owner/repo[#ref][&path:sub]`。
+   */
+  {
+    // `?path=` 已在上面摘走，剩下的 `?` 只可能是页面参数（？tab= / ?q= / ?plain= …）。
+    const queryAt = s.indexOf('?');
+    if (queryAt >= 0) {
+      s = s.slice(0, queryAt).trim();
+    }
+    const urlPage = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s?#]+)\/([^/\s?#]+?)(?:\.git)?\/(.*)$/i.exec(s);
+    const shortPage = (urlPage === null && githubPrefix)
+      ? /^([^/\s?#]+)\/([^/\s?#]+?)(?:\.git)?\/(.*)$/.exec(s)
+      : null;
+    const page = urlPage !== null ? urlPage : shortPage;
+    if (page !== null) {
+      const segments = page[3].split('/').filter((seg) => seg.length > 0);
+      const head = (segments[0] || '').toLowerCase();
+      let pageRef = '';
+      let pagePath = '';
+      if (head === 'tree' || head === 'blob') {
+        pageRef = segments[1] || '';
+        const tail = segments.slice(2).join('/');
+        // `/blob/<ref>/<file>` 指的是文件 ⇒ 取它所在目录（子目录装包要的是目录）
+        pagePath = head === 'tree' ? tail : tail.replace(/\/?[^/]*$/, '');
+      } else if (head === 'releases' && (segments[1] || '').toLowerCase() === 'tag') {
+        // `/releases/tag/v1.2.3`：这一段就是 ref，比 default 分支靠谱。
+        pageRef = segments[2] || '';
+      }
+      // 其余段（issues / pulls / actions / wiki / settings…）都不是仓库名的一部分，丢弃。
+      s = 'github.com/' + page[1] + '/' + page[2];
+      if (pageRef.length > 0) {
+        branch = pageRef;
+      }
+      if (subpath.length === 0 && pagePath.length > 0) {
+        subpath = pagePath;
+      }
+    }
   }
   let m = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#]+?)(?:\.git)?\/?$/.exec(s);
   if (m === null) {
@@ -320,6 +566,16 @@ function parseGitHub(spec) {
 
 function parseNpm(spec) {
   const s = (spec || '').trim();
+  /*
+   * npm alias：dependentName@npm:realName@version。
+   * @openai/codex 的 optionalDependencies 使用这种写法把同一平台包发布到
+   * `@openai/codex-linux-arm64` 目录。旧解析器只支持 name@version，导致 alias
+   * 依赖无法安装；即便装上，落位也必须使用 alias 名而不是 manifest 内的真名。
+   */
+  const alias = /^((?:@[^/\s]+\/)?[^@\s/]+)@npm:((?:@[^/\s]+\/)?[^@\s/]+)@([^@\s]+)$/.exec(s);
+  if (alias !== null) {
+    return { kind: 'npm', aliasName: alias[1], name: alias[2], range: alias[3] };
+  }
   if (s.includes('://') || s.includes('@') && s.indexOf('@') === 0 && !/^@[^/\s]+\/[^@\s]+(@[^@\s]+)?$/.test(s)) {
     return null;
   }
@@ -346,7 +602,9 @@ async function resolveSpec(spec, registry) {
   }
   const np = parseNpm(spec);
   if (np === null) {
-    throw new Error('无法识别的插件标识：' + spec + '（支持 npm 包名或 GitHub 仓库地址）');
+    throw new Error('无法识别的插件标识：' + spec
+      + '（支持 npm 包名；GitHub 仓库地址或页面地址，如 https://github.com/owner/repo/tree/main；'
+      + '以及简写 github:owner/repo#分支&path:/子目录）');
   }
   // npm 元数据查询：优先给到的 registry（默认 npmmirror），查不到则回退官方 npmjs。
   // 皮肤/插件市场传的 `@dsh-external/dsh-client-ui-skin-*` 等 scoped 包部分只在官方
@@ -369,9 +627,8 @@ async function resolveSpec(spec, registry) {
     throw new Error('registry 元数据异常：' + np.name);
   }
   const all = Object.keys(meta.versions);
-  const stable = all.filter((v) => !v.includes('-'));
   const distTags = meta['dist-tags'] || {};
-  const version = pickVersion(np.range, stable.sort(cmpVersionByKey), distTags.latest);
+  const version = selectRegistryVersion(np.range, all, distTags);
   if (version === null) {
     throw new Error('registry 上找不到满足「' + np.range + '」的版本：' + np.name);
   }
@@ -379,7 +636,24 @@ async function resolveSpec(spec, registry) {
   if (!vMeta || !vMeta.dist || !vMeta.dist.tarball) {
     throw new Error('版本缺 tarball 地址：' + np.name + '@' + version);
   }
-  return { kind: 'npm', name: np.name, version, tarballUrl: vMeta.dist.tarball };
+  return {
+    kind: 'npm',
+    name: np.name,
+    ...np.aliasName !== undefined ? { aliasName: np.aliasName } : {},
+    version,
+    tarballUrl: vMeta.dist.tarball,
+    /*
+     * 【2026-10-29 修：带出 registry 的完整性元数据】
+     *
+     * 此前只取 `dist.tarball`，**丢掉 `dist.integrity` / `dist.shasum`**，下载后直接
+     * gunzip + 落位，只校验"入口文件在"。npm 客户端本身会按 SRI 校验 tarball；
+     * 我们这条进程内安装通道不校验，等于把"包内容正确"完全托付给传输层
+     * （registry 镜像 / CDN / 重定向 / 本地中间缓存任意一环）。
+     * 现在把两个字段一起带出去，由 `verifyTarballIntegrity()` 在解包**之前**判死。
+     */
+    integrity: typeof vMeta.dist.integrity === 'string' ? vMeta.dist.integrity : '',
+    shasum: typeof vMeta.dist.shasum === 'string' ? vMeta.dist.shasum : '',
+  };
 }
 
 function cmpVersionByKey(a, b) {
@@ -394,6 +668,36 @@ function cmpVersionByKey(a, b) {
   return cmpVersion(pa, pb);
 }
 
+/**
+ * optionalDependency 是否适用于当前 openharmony/arm64 设备。
+ * 只过滤包名里明确带平台/架构后缀的 optional 依赖，未知形态仍按“尽力安装”处理。
+ */
+function optionalDependencyApplies(depName) {
+  const name = String(depName || '').toLowerCase();
+  const m = /-(win32|darwin|linux|openharmony|android|freebsd)-(x64|arm64|ia32|arm|ppc64|s390x)$/.exec(name);
+  if (m === null) {
+    return true;
+  }
+  return (m[1] === 'linux' || m[1] === 'openharmony') && m[2] === 'arm64';
+}
+
+/** 把包 manifest 的 dependencies / 适配后的 optionalDependencies 追加到安装队列。 */
+function enqueuePackageDependencies(queue, pkgMeta, depth) {
+  if (depth >= MAX_DEPTH || pkgMeta === null || typeof pkgMeta !== 'object') {
+    return;
+  }
+  const deps = pkgMeta.dependencies || {};
+  for (const depName of Object.keys(deps)) {
+    queue.push({ spec: depName + '@' + deps[depName], depth: depth + 1 });
+  }
+  const optional = pkgMeta.optionalDependencies || {};
+  for (const depName of Object.keys(optional)) {
+    if (optionalDependencyApplies(depName)) {
+      queue.push({ spec: depName + '@' + optional[depName], depth: depth + 1 });
+    }
+  }
+}
+
 // ── profile 落位（node_modules / package.json / 用户行）───────────────
 
 function readJsonSafe(p) {
@@ -406,6 +710,235 @@ function readJsonSafe(p) {
 
 function ensureProfileDirs(profileDir) {
   fs.mkdirSync(path.join(profileDir, 'node_modules'), { recursive: true });
+}
+
+/**
+ * 查找鸿蒙 PC 上已有的原生 Codex（brew 安装）。
+ *
+ * `DSHM_CODEX_USE_BREW=off` 可强制使用 npm 的 @openai/codex；
+ * `DSHM_CODEX_BIN` 可覆盖可执行文件位置。
+ */
+function externalCodexBinary() {
+  if (String(process.env.DSHM_CODEX_USE_BREW || '').trim().toLowerCase() === 'off') {
+    return '';
+  }
+  const candidates = [
+    String(process.env.DSHM_CODEX_BIN || '').trim(),
+    process.env.DSHM_PUBLIC_DOWNLOAD
+      ? path.join(String(process.env.DSHM_PUBLIC_DOWNLOAD), 'codex-brew')
+      : '',
+    '/storage/Users/currentUser/Download/com.dshm.dshclient/codex-brew',
+  ].filter((p) => p.length > 0);
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch (e) {
+      // 继续找下一个
+    }
+  }
+  return '';
+}
+
+/**
+ * Codex 原生二进制要复用的 CA 包。
+ *
+ * 鸿蒙应用的进程 uid 与桌面 shell 不同：后者能从系统证书目录完成 TrustAsia 等站点
+ * 校验，Codex 的 Rust TLS 栈却不会自动拿到同一组根证书。真机表现为
+ * `Reconnecting... waiting for network`，而同一时刻 Python 访问
+ * `https://api.deepseek.com/` 的 TCP/TLS 实际可达。
+ *
+ * 优先使用应用私有副本（由 tools/setup-codex-for-dshm.mjs 同步），再回退到用户可见
+ * Download 目录。空串表示没有显式 CA；patch 会保留宿主原环境，不强行指向坏文件。
+ */
+function externalCodexCaFile() {
+  const appHome = String(process.env.HOME || '').trim();
+  const candidates = [
+    String(process.env.DSHM_CODEX_CA_FILE || '').trim(),
+    String(process.env.SSL_CERT_FILE || '').trim(),
+    appHome ? path.join(appHome, '.codex', 'codex-ca.pem') : '',
+    process.env.DSHM_PUBLIC_DOWNLOAD
+      ? path.join(String(process.env.DSHM_PUBLIC_DOWNLOAD), 'codex-ca.pem')
+      : '',
+    '/data/storage/el2/base/haps/entry/files/.codex/codex-ca.pem',
+    '/storage/Users/currentUser/Download/com.dshm.dshclient/codex-ca.pem',
+  ].filter((p) => p.length > 0);
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isFile()) {
+        fs.accessSync(candidate, fs.constants.R_OK);
+        return candidate;
+      }
+    } catch (e) {
+      // 继续找下一个
+    }
+  }
+  return '';
+}
+
+/**
+ * 为 @deepseek-ai/dsh-subagent-codex 生成 npm 形状的 @openai/codex shim。
+ *
+ * 上游插件会 `require.resolve('@openai/codex/package.json')`，再把 manifest.bin.codex
+ * 交给 process.execPath 执行。shim 保持同一形状，但把 app-server 参数原样转发给
+ * 原生 brew codex；不下载 npm 平台二进制，也不改第三方插件源码。
+ */
+function installExternalCodexShim(profileDir, externalBin, requestedVersion) {
+  const dest = path.join(profileDir, 'node_modules', '@openai', 'codex');
+  const externalCa = externalCodexCaFile();
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(path.join(dest, 'bin'), { recursive: true });
+  const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(requestedVersion || '')
+    ? requestedVersion
+    : '0.0.0-dshm-brew';
+  fs.writeFileSync(path.join(dest, 'package.json'), JSON.stringify({
+    name: '@openai/codex',
+    version,
+    private: true,
+    bin: { codex: 'bin/codex.js' },
+  }, null, 2) + '\n', 'utf8');
+  const wrapper = `#!/usr/bin/env node
+'use strict';
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const candidates = [process.env.DSHM_CODEX_BIN, ${JSON.stringify(externalBin)}].filter(Boolean);
+const bin = candidates.find((p) => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } });
+if (!bin) {
+  console.error('subagent-codex: brew codex binary not found');
+  process.exit(127);
+}
+const childEnv = Object.assign({}, process.env, {
+  CODEX_HOME: process.env.CODEX_HOME || (process.env.HOME ? process.env.HOME + '/.codex' : '')
+});
+const caFile = process.env.DSHM_CODEX_CA_FILE || process.env.SSL_CERT_FILE || ${JSON.stringify(externalCa)};
+if (caFile && !childEnv.SSL_CERT_FILE) {
+  childEnv.SSL_CERT_FILE = caFile;
+  childEnv.SSL_CERT_DIR = childEnv.SSL_CERT_DIR || '/etc/security/certificates';
+}
+const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit', env: childEnv });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { try { child.kill(sig); } catch {} });
+}
+child.on('error', (e) => { console.error('subagent-codex: spawn failed: ' + e.message); process.exit(127); });
+child.on('exit', (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  else process.exit(code === null ? 1 : code);
+});
+`;
+  fs.writeFileSync(path.join(dest, 'bin', 'codex.js'), wrapper, { encoding: 'utf8', mode: 0o755 });
+  return { name: '@openai/codex', version: `${version}+dshm-brew`, files: 2, skippedLinks: 0 };
+}
+
+/**
+ * 把 dsh-subagent-codex 的进程启动方式改成原生 brew Codex。
+ *
+ * 上游固定执行 `[process.execPath, @openai/codex/bin/codex.js, app-server, --stdio]`。
+ * DSHM 的 Node 是嵌入式 libnode，process.execPath 是 appspawn，不是 Node CLI；
+ * 因此必须移除第一跳，直接执行 brew 的 OHOS ELF。
+ */
+function patchCodexSubagentForExternalCodex(profileDir, packageName) {
+  if (packageName !== '@deepseek-ai/dsh-subagent-codex') {
+    return { patched: false, reason: 'not-subagent-codex' };
+  }
+  const externalBin = externalCodexBinary();
+  if (externalBin.length === 0) {
+    return { patched: false, reason: 'external-codex-missing' };
+  }
+  const file = path.join(profileDir, 'node_modules', packageName, 'lib', 'index.js');
+  if (!fs.existsSync(file)) {
+    return { patched: false, reason: 'plugin-entry-missing' };
+  }
+  let text = fs.readFileSync(file, 'utf8');
+  const externalCa = externalCodexCaFile();
+  const marker = '/* DSHM_EXTERNAL_CODEX_BIN: 使用 brew/系统原生 Codex；嵌入式 libnode 的 process.execPath 不是 Node CLI。 */';
+  /*
+   * 这整段同时负责三件事：
+   *   ① 直接 exec 原生 Codex，跳过不存在的 Node CLI；
+   *   ② 明确 CODEX_HOME，避免 app-server 与 CLI 看成两个目录；
+   *   ③ 给 Rust TLS 显式 CA。应用域默认 CA 为空时 DeepSeek HTTPS 会卡在重连。
+   *
+   * spec.env 最后覆盖默认值，保留插件配置的手动逃生口。
+   */
+  const externalBlock = marker + '\n'
+    /*
+     * 【P0-2（docs/267 §2）】CODEX_HOME 必须真实存在。
+     *
+     * 补丁把 CODEX_HOME 指向 `$HOME/.codex`，而此前没人创建它 ⇒ 实测 Codex 每次
+     * 启动都报 `CODEX_HOME points to "…", but that path does not exist`，登录态 /
+     * CA / 会话历史全部落空（2026-10-26 真机原文见 docs/267）。安装器在这里补一次
+     * mkdir；用别名 import 是为了不和本模块既有的 node:fs 绑定重名。
+     */
+    + 'import { mkdirSync as dshmMkdirSync } from "node:fs";\n'
+    + `const CODEX_PACKAGE_BIN = process.env.DSHM_CODEX_BIN || ${JSON.stringify(externalBin)};\n`
+    + 'const DSHM_CODEX_HOME = process.env.CODEX_HOME || (process.env.HOME ? process.env.HOME + "/.codex" : "/data/storage/el2/base/haps/entry/files/.codex");\n'
+    + `const DSHM_CODEX_CA_FILE = process.env.DSHM_CODEX_CA_FILE || process.env.SSL_CERT_FILE || ${JSON.stringify(externalCa)};\n`
+    + 'function dshmCodexSpawnEnv(spec) {\n'
+    // 必须从 Host 完整环境继承：嵌入 libnode 的 PATH 里才有沙箱 bin，后者再分发
+    // python/git/rg 等 DSHM 包装器。只用 spec.env 会让 Codex 的子命令看不到这些工具。
+    + '  const env = Object.assign({}, process.env, spec && spec.env ? spec.env : {});\n'
+    + '  env.CODEX_HOME = env.CODEX_HOME || DSHM_CODEX_HOME;\n'
+    + '  try { dshmMkdirSync(env.CODEX_HOME, { recursive: true }); } catch (e) { /* 建不出来时交给 Codex 自报，不阻断子代理 */ }\n'
+    + '  const sandbox = typeof env.DSHM_SANDBOX_HOME === "string" ? env.DSHM_SANDBOX_HOME.trim() : "";\n'
+    + '  if (sandbox.length > 0) {\n'
+    + '    const toolBin = sandbox + "/bin";\n'
+    + '    const pathParts = typeof env.PATH === "string" ? env.PATH.split(":").filter(Boolean) : [];\n'
+    + '    env.PATH = [toolBin].concat(pathParts.filter((part) => part !== toolBin)).join(":");\n'
+    + '  }\n'
+    + '  if (typeof env.CODEX_HOME !== "string" || env.CODEX_HOME.length === 0) env.CODEX_HOME = DSHM_CODEX_HOME;\n'
+    + '  if (typeof DSHM_CODEX_CA_FILE === "string" && DSHM_CODEX_CA_FILE.length > 0\n'
+    + '    && (typeof env.SSL_CERT_FILE !== "string" || env.SSL_CERT_FILE.length === 0)) {\n'
+    + '    env.SSL_CERT_FILE = DSHM_CODEX_CA_FILE;\n'
+    + '    if (typeof env.SSL_CERT_DIR !== "string" || env.SSL_CERT_DIR.length === 0) env.SSL_CERT_DIR = "/etc/security/certificates";\n'
+    + '  }\n'
+    + '  return env;\n'
+    + '}\n';
+  let refreshedExistingPatch = false;
+  if (text.includes(marker)) {
+    /*
+     * 旧版本已经打过“只换二进制”的补丁：从 marker 到权限模式常量之间整块刷新，
+     * 这样升级安装器时不会保留旧版缺少 CA 的 helper。
+     */
+    const begin = text.indexOf(marker);
+    const endAnchor = '\n/** Native non-interactive Codex modes';
+    const end = text.indexOf(endAnchor, begin);
+    if (end < 0) {
+      throw new Error('subagent-codex 启动代码形态变化，拒绝静默不改：旧 DSHM 补丁块边界不匹配');
+    }
+    text = text.slice(0, begin) + externalBlock + text.slice(end);
+    refreshedExistingPatch = true;
+  } else {
+    const resolveBlock = 'const codexPackageJsonPath = createRequire(import.meta.url).resolve("@openai/codex/package.json");\n'
+      + 'const codexPackageManifest = JSON.parse(readFileSync(codexPackageJsonPath, "utf8"));\n'
+      + '/** Absolute package-local JavaScript wrapper selected by the package manifest. */\n'
+      + 'const CODEX_PACKAGE_BIN = resolve(dirname(codexPackageJsonPath), codexPackageManifest.bin.codex);';
+    const argvBlock = 'return [\n\t\tprocess.execPath,\n\t\tCODEX_PACKAGE_BIN,\n\t\t"app-server",\n\t\t"--stdio"\n\t];';
+    if (!text.includes(resolveBlock) || !text.includes(argvBlock)) {
+      throw new Error('subagent-codex 启动代码形态变化，拒绝静默不改：lib/index.js 的 Codex argv 锚点不匹配');
+    }
+    text = text.replace(resolveBlock, externalBlock);
+    text = text.replace(argvBlock,
+      'return [\n\t\tCODEX_PACKAGE_BIN,\n\t\t"app-server",\n\t\t"--stdio"\n\t];');
+  }
+  /*
+   * 上游把插件配置 env 原样交给 spawn。改成经 helper 合并，才能稳定注入
+   * CODEX_HOME / SSL_CERT_FILE。锚点不存在时拒绝静默保留“能导入但一采样就断网”的形态。
+   */
+  const spawnEnvAnchor = /env:\s*spec\.env\b,?/;
+  if (spawnEnvAnchor.test(text)) {
+    text = text.replace(spawnEnvAnchor, 'env: dshmCodexSpawnEnv(spec),');
+  }
+  if (!text.includes('env: dshmCodexSpawnEnv(spec),')) {
+    throw new Error('subagent-codex 启动代码形态变化，拒绝静默不改：spawn env 锚点不匹配');
+  }
+  fs.writeFileSync(file, text, 'utf8');
+  return {
+    patched: true,
+    reason: refreshedExistingPatch ? 'already-patched' : 'patched',
+    bin: externalBin,
+    ca: externalCa,
+  };
 }
 
 /**
@@ -604,7 +1137,7 @@ function dependencyValueFor(item) {
   const raw = typeof item.spec === 'string' ? item.spec.trim() : '';
   const version = typeof item.version === 'string' ? item.version : '';
   if (raw.length === 0) {
-    return '^' + version;
+    return item.exact === true ? version : '^' + version;
   }
   // git / GitHub 形态：原样记录（市场就是按这个字符串做来源比对）。
   if (parseGitHub(raw) !== null) {
@@ -612,6 +1145,13 @@ function dependencyValueFor(item) {
   }
   if (/^(git\+|git:|https?:\/\/.*\.git)/i.test(raw)) {
     return raw;
+  }
+  const alias = parseNpm(raw);
+  if (alias && alias.aliasName) {
+    return 'npm:' + alias.name + '@' + (item.exact === true ? version : alias.range);
+  }
+  if (item.exact === true && version.length > 0) {
+    return version;
   }
   // npm 形态：name@range ⇒ 记录 range；纯包名 ⇒ ^version。
   const at = raw.lastIndexOf('@');
@@ -621,7 +1161,7 @@ function dependencyValueFor(item) {
       return range;
     }
   }
-  return '^' + version;
+  return item.exact === true ? version : '^' + version;
 }
 
 /**
@@ -734,11 +1274,28 @@ function appendProfileBundle(profileDir, name) {
  * 那正是这次修掉的错误。判据写在这里，免得下一个人重新发明。
  */
 
+function normalizeRegistry(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return '';
+  }
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+    return '';
+  }
+  return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+}
+
 /** 读 <homeDir>/installer.json 的 registry 配置（缺省 npmmirror）。 */
 function readRegistry(homeDir) {
   const cfg = readJsonSafe(path.join(homeDir, 'installer.json'));
-  if (cfg && typeof cfg.registry === 'string' && cfg.registry.startsWith('https://')) {
-    return cfg.registry;
+  const configured = normalizeRegistry(cfg && cfg.registry);
+  if (configured.length > 0) {
+    return configured;
   }
   return DEFAULT_REGISTRY;
 }
@@ -751,12 +1308,46 @@ function readRegistry(homeDir) {
  * opts: { homeDir, profile, log? }
  */
 async function installSpec(spec, opts) {
+  const writer = require('./dshm-profile-writer.cjs');
+  const profileDir = opts.profileDir || path.join(opts.homeDir, 'profiles', opts.profile || 'ondevice');
+  fs.mkdirSync(profileDir, { recursive: true });
+  writer.assertQueueOwnership(profileDir, opts.writerToken);
+  return writer.withProfileWriter(profileDir, () => installSpecOwned(spec, opts), opts.writerToken);
+}
+
+async function installSpecOwned(spec, opts) {
+  const backups = new Map();
+  const preserve = (dest) => {
+    if (backups.has(dest) || !fs.existsSync(dest)) return;
+    const owned = fs.mkdtempSync(path.join(path.dirname(dest), '.dshm-install-'));
+    const backup = path.join(owned, 'package');
+    fs.renameSync(dest, backup);
+    backups.set(dest, { owned, backup });
+  };
+  let succeeded = false;
+  let result;
   try {
-    return await installSpecInner(spec, opts);
+    result = await installSpecInner(spec, { ...opts, preserve });
+    succeeded = result.ok === true;
   } catch (e) {
     // 契约：本函数不抛错，失败也走返回值（main.js 队列段按 ok 字段写 .done/.fail）
-    return { ok: false, error: e && e.message ? e.message : String(e) };
+    result = { ok: false, error: e && e.message ? e.message : String(e) };
+  } finally {
+    for (const [dest, entry] of backups) {
+      try {
+        if (!succeeded) {
+          fs.rmSync(dest, { recursive: true, force: true });
+          fs.renameSync(entry.backup, dest);
+        }
+        fs.rmSync(entry.owned, { recursive: true, force: true });
+      } catch (rollbackError) {
+        const diagnostic = `本地${succeeded ? '清理' : '恢复'}失败：${rollbackError.message}；备份=${entry.owned}`;
+        if (succeeded) result.note = (result.note || '') + '；' + diagnostic;
+        else result.error = (result.error || '') + '；' + diagnostic;
+      }
+    }
   }
+  return result;
 }
 
 async function installSpecInner(spec, opts) {
@@ -769,7 +1360,11 @@ async function installSpecInner(spec, opts) {
   const profileDir = (typeof opts.profileDir === 'string' && opts.profileDir.length > 0)
     ? opts.profileDir
     : path.join(homeDir, 'profiles', profile);
-  const registry = readRegistry(homeDir);
+  const requestedRegistry = opts.registry === undefined ? '' : normalizeRegistry(opts.registry);
+  if (opts.registry !== undefined && requestedRegistry.length === 0) {
+    return { ok: false, error: '无效的 registry：只接受无账号、无 query/hash 的 HTTPS 地址' };
+  }
+  const registry = requestedRegistry.length > 0 ? requestedRegistry : readRegistry(homeDir);
   ensureProfileDirs(profileDir);
   const tmpRoot = path.join(homeDir, '.installer-tmp');
   fs.mkdirSync(tmpRoot, { recursive: true });
@@ -796,6 +1391,22 @@ async function installSpecInner(spec, opts) {
   const queue = [{ spec: spec.trim(), depth: 0 }];
   while (queue.length > 0) {
     const job = queue.shift();
+    const directNpm = parseNpm(job.spec);
+    if (directNpm !== null && directNpm.name === '@openai/codex'
+      && directNpm.aliasName === undefined) {
+      const externalBin = externalCodexBinary();
+      if (externalBin.length > 0) {
+        const shim = installExternalCodexShim(profileDir, externalBin, directNpm.range);
+        seen.add('@openai/codex');
+        installed.push(shim);
+        log('复用 brew codex：' + externalBin + ' → @openai/codex shim');
+        if (job.depth === 0 && topName.length === 0) {
+          topName = '@openai/codex';
+          topVersion = shim.version;
+        }
+        continue;
+      }
+    }
     let resolved = null;
     try {
       resolved = await resolveSpec(job.spec, registry);
@@ -826,6 +1437,13 @@ async function installSpecInner(spec, opts) {
       const drifted = versionDrifted(resolved, haveVersion);
       if (userRowLoadable(profileDir, resolved.name).length === 0 && !drifted) {
         seen.add(resolved.name);
+        /*
+         * 顶层包可能已完整，但上次整单在后续依赖失败后回滚/残留，导致依赖缺失。
+         * 幂等分支不能只 continue；要从已装 manifest 继续补齐依赖。
+         * 真机现场：subagent-codex 主包已在，@openai/codex 缺失，启动时才报
+         * Cannot find module '@openai/codex/package.json'。
+         */
+        enqueuePackageDependencies(queue, readJsonSafe(path.join(dest, 'package.json')), job.depth);
         continue; // 已装、完整、且版本一致（真幂等）
       }
       if (drifted) {
@@ -835,10 +1453,21 @@ async function installSpecInner(spec, opts) {
         log('已装目录不完整（' + resolved.name + '），清除残留并重新安装…');
       }
       beforeVersions.set(resolved.name, haveVersion);
-      fs.rmSync(dest, { recursive: true, force: true });
+      opts.preserve(dest);
     }
     log('下载 ' + resolved.name + '@' + resolved.version + ' …');
     const tgz = await fetchBuffer(resolved.tarballUrl);
+    /*
+     * 【解包之前先验完整性（2026-10-29）】npm 形态必须是"registry 声明什么就装什么"；
+     * 校验失败直接抛（由外层 job 记成失败），**绝不**把未经验证的字节解包落位。
+     * GitHub 源码树（kind='github'）没有 registry 声明的 integrity，按原逻辑只做落位校验。
+     */
+    if (resolved.kind === 'npm') {
+      const integrityError = verifyTarballIntegrity(tgz, resolved);
+      if (integrityError.length > 0) {
+        throw new Error(integrityError);
+      }
+    }
     const tar = zlib.gunzipSync(tgz);
     const tmp = path.join(tmpRoot, resolved.name.replace(/[\/@:]/g, '_') + '-' + Date.now());
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -925,13 +1554,16 @@ async function installSpecInner(spec, opts) {
         + '（该仓库根目录没有 package.json，且未找到子包目录；'
         + '若它是 monorepo，请在地址后加 &path:/<子目录>）');
     }
-    // GitHub spec 的包名以 tarball 内声明为准（修正占位名）
-    const finalName = pkgMeta.name;
+    // npm alias 必须落位到 alias 目录（manifest 内仍是真实包名）；其余以 tarball 声明为准。
+    const finalName = typeof resolved.aliasName === 'string' && resolved.aliasName.length > 0
+      ? resolved.aliasName
+      : pkgMeta.name;
     const finalDest = path.join(profileDir, 'node_modules', finalName);
     if (seen.has(finalName)) {
       fs.rmSync(tmp, { recursive: true, force: true });
       continue;
     }
+    opts.preserve(finalDest);
     fs.rmSync(finalDest, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(finalDest), { recursive: true });
     fs.renameSync(realRoot, finalDest);
@@ -1013,14 +1645,23 @@ async function installSpecInner(spec, opts) {
       // 不要在循环末再读一次文件（那会多一次 I/O，也容易读到别的东西）。
       topPkgForRow = pkgMeta;
     }
-    if (job.depth < MAX_DEPTH) {
-      const deps = Object.assign({}, pkgMeta.dependencies || {}, pkgMeta.optionalDependencies || {});
-      for (const depName of Object.keys(deps)) {
-        queue.push({ spec: depName + '@' + deps[depName], depth: job.depth + 1 });
-      }
-    }
+    enqueuePackageDependencies(queue, pkgMeta, job.depth);
   }
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+  const requestedNpm = parseNpm(spec.trim());
+  const topPatchName = topName.length > 0
+    ? topName
+    : (requestedNpm === null ? '' : (requestedNpm.aliasName || requestedNpm.name));
+  if (topPatchName.length > 0) {
+    try {
+      const patched = patchCodexSubagentForExternalCodex(profileDir, topPatchName);
+      if (patched.reason === 'patched' || patched.reason === 'already-patched') {
+        log('subagent-codex 已切换到原生 Codex：' + patched.bin);
+      }
+    } catch (e) {
+      throw e;
+    }
+  }
   if (installed.length === 0) {
     // 之前 "没有新装任何包" 被 web/市场侧判成失败（ok:false + .fail），但真 pnpm add
     // 幂等：包早已装好 → 应视为成功（ok:true）。且【关键是】已有目录不一定登记进了
@@ -1053,7 +1694,9 @@ async function installSpecInner(spec, opts) {
       // 【登记门控（2026-09-25 报告）】幂等分支同样按"登记到哪"的判定走：从**已落位
       // manifest 现读一次**（不能复用 topPkgForRow——那条路径没被走到）。
       const disp2 = topPackageDisposition(metaPkg);
-      mergeDependencies(profileDir, [{ name: topIdRaw, version: ver, spec: spec.trim() }]);
+      mergeDependencies(profileDir, [{
+        name: topIdRaw, version: ver, spec: spec.trim(), exact: opts.saveExact === true,
+      }]);
       if (disp2.kind === 'bundle') {
         const added2 = appendProfileBundle(profileDir, topIdRaw);
         log(added2
@@ -1080,7 +1723,9 @@ async function installSpecInner(spec, opts) {
   // lock/node_modules）；端侧 dependencies 字段的唯一读者就是该 diff——cordis
   // 挂载认 node_modules 落位 + patch 行，不认它。子包明细仍完整保留在返回值
   // installed 数组（.done JSON → UI 安装详情）。
-  mergeDependencies(profileDir, [{ name: topName, version: topVersion, spec: spec.trim() }]);
+  mergeDependencies(profileDir, [{
+    name: topName, version: topVersion, spec: spec.trim(), exact: opts.saveExact === true,
+  }]);
   // 【登记门控（2026-09-25 报告：billion-context 装了不生效）】见 topPackageDisposition
   // 的完整证据：声明 dsh.bundle 的包落点是 **dsh.profile.bundles**（与上游 reconcile 一致），
   // **不写用户行**（它的 entry 由它自己的 patch 插入，行名对不上 ⇒ 孤儿行 + 市场 toggle 报错）。
@@ -1117,6 +1762,14 @@ async function installSpecInner(spec, opts) {
  * cordis.patch.yml 里对应的 name / - id: 行。幂等：本不存在也返回 ok。
  */
 async function removeSpec(spec, opts) {
+  const writer = require('./dshm-profile-writer.cjs');
+  const profileDir = opts.profileDir || path.join(opts.homeDir, 'profiles', opts.profile || 'ondevice');
+  fs.mkdirSync(profileDir, { recursive: true });
+  writer.assertQueueOwnership(profileDir, opts.writerToken);
+  return writer.withProfileWriter(profileDir, () => removeSpecOwned(spec, opts), opts.writerToken);
+}
+
+async function removeSpecOwned(spec, opts) {
   try {
     return await removeSpecInner(spec, opts);
   } catch (e) {
@@ -1470,10 +2123,19 @@ module.exports = {
   extractTar,
   resolveSpec,
   readRegistry,
+  normalizeRegistry,
   DEFAULT_REGISTRY,
   dshmSkinAlias,
   readInstalledVersion,
   versionDrifted,
+  selectRegistryVersion,
+  optionalDependencyApplies,
+  parseNpm,
+  enqueuePackageDependencies,
+  externalCodexBinary,
+  externalCodexCaFile,
+  installExternalCodexShim,
+  patchCodexSubagentForExternalCodex,
   // 【为什么导出这两个纯函数】它们的判据是"猜测"性质的（下探哪个目录、回退到哪个包），
   // 靠集成测试只能覆盖到手上恰好有的那几个仓库。导出后可在门禁里用临时目录把边界
   // （多候选、node_modules 干扰、不同仓库、repository 缺失）逐条钉住，零网络。

@@ -320,8 +320,25 @@ export class CoreStore {
    * 把容器解包并落成 `cores/<version>`。
    * 注意：本方法**只负责让它"存在且看起来完整"**，健康检查由调用方做，
    * 通过后才调用 activate()。这样"装上了"与"敢用它"是两件事。
+   *
+   * 【2026-10-29 拆成两段】`stage()`（解包 + 四道校验，**不碰目标目录**）与
+   * `commitStaged()`（落位）。拆开的理由只有一个：**同版本换树**时，旧树必须
+   * 一直活着，直到新树已经解包校验通过才能被替换 —— 否则"新容器损坏"就会把
+   * 设备上唯一能跑的树删掉（`BundledCore` 的注释有完整事故描述）。
    */
-  async stageFromZip(zipPath: string, version: string): Promise<OpResult> {
+  async stageFromZip(zipPath: string, version: string, commit: boolean = true): Promise<OpResult> {
+    const staged: OpResult = await this.stage(zipPath, version);
+    if (!staged.ok || !commit) {
+      return staged;
+    }
+    return await this.commitStaged(version);
+  }
+
+  /**
+   * 第一段：解包到 `staging/<version>` 并做校验。**目标目录一个字节都不碰**。
+   * 成功后 staging 里留着一棵完整的树，等调用方决定何时 `commitStaged()`。
+   */
+  async stage(zipPath: string, version: string): Promise<OpResult> {
     if (!isSafeVersion(version)) {
       return fail(`版本号不可用作目录名：${version}`);
     }
@@ -330,7 +347,6 @@ export class CoreStore {
       return layout;
     }
     const staging: string = this.stagingDir(version);
-    const target: string = this.coreDir(version);
     const inner: string = `${staging}/${topDirOf(version)}`;
 
     try {
@@ -375,22 +391,39 @@ export class CoreStore {
       return fail(`校验 staging 失败：${err.code} ${err.message}`);
     }
 
-    // 落位：目标已存在时，只有"它不是当前运行版本"才允许替换
-    const state: CoreState = this.readState();
+    // 到这里为止**目标目录一个字节都没碰**（落位是 commitStaged() 的事）
+    return ok(`已解包并校验 ${version}（staging 就绪，等待落位）`);
+  }
+
+  /**
+   * 第二段：把 `stage()` 留下的 staging 树落位到 `cores/<version>`。
+   *
+   * 【谁该调它】同版本换树（旧树还在原处）的调用方：它需要先把旧树改名挪开，
+   * 再调本方法；本方法**不检查也不删除**任何已存在的目标 —— 那一步由调用方负责，
+   * 因为只有调用方知道旧树挪到哪里、失败时怎么搬回来。
+   *
+   * @param allowExisting 目标已存在时是否仍然落位（`fs.renameSync` 会覆盖同名目录）。
+   *   默认 false：目标还在就如实失败，绝不静默覆盖一棵可能正在被使用的树。
+   */
+  async commitStaged(version: string, allowExisting: boolean = false): Promise<OpResult> {
+    const staging: string = this.stagingDir(version);
+    const target: string = this.coreDir(version);
+    const inner: string = `${staging}/${topDirOf(version)}`;
     try {
-      if (fs.accessSync(target)) {
-        if (state.current === version) {
-          await this.dropStaging(staging);
-          return fail(`版本 ${version} 正在使用中，拒绝覆盖（请先切到别的版本）`);
-        }
-        // 旧树同样是"几万个文件"级别：异步删，别锁主线程（E47）
-        await fs.rmdir(target);
+      if (!fs.accessSync(inner)) {
+        return fail(`staging 里没有已解包好的树：${inner}（先调 stage()）`);
+      }
+      if (!allowExisting && fs.accessSync(target)) {
+        return fail(`目标 ${target} 已存在，拒绝覆盖（换树请先移走旧树）`);
       }
       fs.renameSync(inner, target);
-      await fs.rmdir(staging);
+      try {
+        await fs.rmdir(staging);
+      } catch (e) {
+        // staging 壳子删不掉不影响结果：它不含树本身，下次 stage() 会清
+      }
     } catch (e) {
       const err: BusinessError = e as BusinessError;
-      await this.dropStaging(staging);
       return fail(`落位到 ${target} 失败：${err.code} ${err.message}`);
     }
     return ok(`已落位 ${version}`);
@@ -487,11 +520,17 @@ export class CoreStore {
     return decision;
   }
 
-  /** 清理旧版本；返回真正被删掉的版本号（current/previous 永不删）。 */
-  async evict(keep: number): Promise<string[]> {
+  /**
+   * 清理旧版本；返回真正被删掉的版本号。
+   *
+   * 永不删：current、previous、以及**会真正启动的那棵树**（current 缺失时 = 最新那棵）
+   * 和调用方点名的 `keepExtra` —— 判据全在 `Types.evictionCandidates`（纯函数，可单测）。
+   * 调用点见 `BundledCore.installBundledCores`（每次装入内置核心之后）。
+   */
+  async evict(keep: number, keepExtra: string[] = []): Promise<string[]> {
     const state: CoreState = this.readState();
     const removed: string[] = [];
-    for (const v of evictionCandidates(state, this.listInstalled(), keep)) {
+    for (const v of evictionCandidates(state, this.listInstalled(), keep, keepExtra)) {
       try {
         // 一棵核心树是几万个文件：必须走异步删，否则会锁住 ArkUI 主线程（E47）
         await fs.rmdir(this.coreDir(v));

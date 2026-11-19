@@ -11,8 +11,10 @@
  *   `libnode.so` 之类运行期产物即可跑通 —— 这把 UI 层重新纳入可自动验证的范围。
  *   本脚本就是把那条命令固定下来，免得它退回成"某次聊天里提过的一句命令"。
  *
- * 退出码：0 通过；1 编译失败；3 **环境受阻**（找不到 CLT / SDK / JDK），沿用本项目既有约定
+ * 退出码：0 通过；1 编译失败；3 **环境受阻**（找不到 CLT / SDK），沿用本项目既有约定
  *         —— **不把"没跑成"说成"通过"**。
+ *         （2026-11-10：JDK 已从硬条件中移除 —— 实测 CLT 自带工具链无需 JDK，
+ *          详见 `resolveJavaHome` 调用点上方注释。）
  *
  * 用法：
  *   node tools/check-arkts-entry.mjs              # 编 entry 的 ArkTS
@@ -22,6 +24,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { devecoRootCandidates } from './lib/deveco-home.mjs';
 
 const ROOT = process.cwd();
 const MODULE = 'entry';
@@ -51,9 +54,18 @@ function cltCandidates() {
   const list = [];
   if (process.env.DEVECO_CLI_CLT_PATH) list.push(process.env.DEVECO_CLI_CLT_PATH);
   list.push('/home/node/deveco-clt/command-line-tools');
-  const programFiles = process.env.ProgramFiles ?? process.env.PROGRAMFILES;
-  if (programFiles !== undefined && programFiles.length > 0) {
-    list.push(join(programFiles, 'Huawei', 'DevEco Studio', 'tools'));
+  // 【2026-10-10 改】原先只试 `%ProgramFiles%\Huawei\DevEco Studio\tools`。用户把 DevEco 从 C 盘
+  // 卸载、改装到 `D:\Program Files\Huawei\DevEco Studio` 后这一条恒落空 ⇒ 脚本 exit 3，
+  // 而 exit 3 很容易被读成"环境受限，没办法"（本文件 :41-47 记的正是同一个教训）。
+  // 改用统一解析口 tools/lib/deveco-home.mjs（候选列表 + 必须真的含 hvigorw.js）。
+  // 【2026-11-10 修】`devecoRootCandidates()` 已经能解析出两种布局的根：
+  //   · IDE：<IDE>  → hvigor 在 <IDE>\tools\hvigor
+  //   · CLT：/data/service/hnp/hmos-clt.org/hmos-clt_1.0.0 → hvigor 直接在根下（**无 tools/ 前缀**）
+  // 原来只 push `join(root,'tools')`，CLT 布局恒落空 ⇒ 本机明明有 DevEco（hvigorw 7.26.8）
+  // 却被判 exit 3，正是本文件 :41-47 记的那个教训又犯了一次。两种都收。
+  for (const devEcoRoot of devecoRootCandidates()) {
+    list.push(devEcoRoot);
+    list.push(join(devEcoRoot, 'tools'));
   }
   return list;
 }
@@ -179,10 +191,18 @@ if (!clt) {
   process.exit(3);
 }
 const javaHome = resolveJavaHome(clt);
+/*
+ * 【2026-11-10 修】JDK 不再作为"环境受阻"的硬条件。
+ * 实测（DevEco CLT 7.26.8，本机无任何 JDK：`which java` 空、无 jbr 目录）：
+ * `hvigorw assembleApp` 能完整跑通并产出已签 .app（110 tasks / BUILD SUCCESSFUL），
+ * 说明签名与编译走的是 CLT 自带的原生工具链，不需要独立 JDK。
+ * 原来的 exit 3 会把"本机明明能编"说成"环境受限，没跑成"，等于把这一层门禁永久作废
+ * ——正是本文件 :41-47 记的教训。改为：无 JDK 就**照常尝试**，只是把 JAVA_HOME/PATH 留在原样；
+ * 判定依旧只看 hvigor 自己的结论行，失败就是真失败（exit 1），不会造成假通过。
+ */
 if (javaHome === null) {
-  console.error('环境受阻：找不到 JDK（试过 JAVA_HOME、/home/node/jdk/jdk-17.0.20.1+1、<IDE>/jbr）。');
-  console.error('  ⚠️ 退出码 3 = 没跑成，不是通过。');
-  process.exit(3);
+  console.log('注：未找到 JDK（试过 JAVA_HOME、/home/node/jdk/jdk-17.0.20.1+1、<IDE>/jbr）。');
+  console.log('    按实测不需要 JDK，继续用 CLT 自带工具链编译；若失败请先看下方 hvigor 结论。\n');
 }
 const sdkHome = resolveSdkHome(clt);
 if (sdkHome === null) {
@@ -200,11 +220,13 @@ const childEnv = {
   DEVECO_CLI_CLT_PATH: clt,
   DEVECO_SDK_HOME: sdkHome,
   OHOS_SDK_HOME: sdkHome,
-  JAVA_HOME: javaHome,
   // 【必须是平台分隔符】原来写死 `:`：Windows 的 PATH 分隔符是 `;`，
   // 拼出来的值会被整段当成**一个**目录 ⇒ java 找不到，报的是 `spawn java ENOENT`
   // （与本机基线构建时踩过的坑同一个），与"没有 JDK"完全无关，极易误判。
-  PATH: `${join(javaHome, 'bin')}${delimiter}${process.env.PATH || ''}`
+  ...(javaHome === null ? {} : {
+    JAVA_HOME: javaHome,
+    PATH: `${join(javaHome, 'bin')}${delimiter}${process.env.PATH || ''}`,
+  }),
 };
 
 const args = [

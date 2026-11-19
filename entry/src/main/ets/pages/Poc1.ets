@@ -16,9 +16,7 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
-import { DshHost } from 'hostruntime';
-// NodeRuntime 是**本模块（entry）**的运行时实现，不在 hostruntime 里（分层：机制在 entry）
-import { NodeRuntime } from '../runtime/NodeRuntime';
+import { DshHost, NodeRuntime } from 'hostruntime';
 import {
   AuthOutcome,
   Connection,
@@ -97,7 +95,7 @@ struct Poc1 {
       // 第 3 实参 = UIAbility 上下文（与 EntryAbility / Index 两处构造点同口径）：
       // `NodeRuntime.start()` 要用它认领 `Download/<包名>/`，缺了它默认工作区会退回沙箱。
       const host: DshHost = new DshHost(ctx.filesDir,
-        new NodeRuntime(`${ctx.resourceDir}/resources/app/main.js`, ctx.filesDir, ctx));
+        new NodeRuntime('', ctx.filesDir, ctx));
       const url: string = host.localHostReadyUrl();
       if (url.length === 0) {
         this.prefillNote = '本机核心还没写下启动链接（未启动？）。地址已按默认端口 3120 填好；'

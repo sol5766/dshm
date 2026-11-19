@@ -12,11 +12,13 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 
 **它不是 PC 上 dsh 的遥控器**，也不需要在电脑上常驻任何服务：装上即用，数据只在本机应用沙箱内。
 
-支持 HarmonyOS 手机 / 折叠屏 / 平板 / 2in1。
+**当前版本**：`1.1.8 / 1010018`，端侧核心 `0.2.2-rc.5+dshm.1`（真源分别为 `AppScope/app.json5` 与 `hostcore/core-recipe.json`）。
+
+支持 HarmonyOS 手机 / 折叠屏 / 平板 / 2in1。交付面只有两个：**`entry` = 平板 + 2in1**（PC / Edge / Pro Max 共用）、**`phone` = 手机**；折叠屏按系统上报的形态进入对应档。
 
 > **这是一次平台移植**：把官方面向桌面（Electron）的运行时，搬到 OpenHarmony arm64 上自足运行。
 > 移植过程中与鸿蒙平台语义的每一处冲突、根因与修法，都汇总在
-> **[`docs/70-鸿蒙移植踩坑与修复总览.md`](docs/70-鸿蒙移植踩坑与修复总览.md)**（按技术主题组织）。
+> **[`docs/PITFALLS.md`](docs/PITFALLS.md)**（按风险类型组织）。
 > **两条根本约束**决定了后面几乎所有设计：`jitless ⇒ WebAssembly === undefined`，
 > 以及 **execve 受签名域管辖 ⇒ 所有端侧原生二进制必须构建期自签名**。
 
@@ -33,26 +35,29 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 
 | 官方形态依赖的前提 | 鸿蒙端侧现状 | 本仓库的补法 |
 |---|---|---|
-| 系统提供 Node 运行时 | 沙箱内无 Node，且只能执行**自己签名域内**的原生二进制 | 运行时与原生库随包分发（Node、koffi、node-pty、sherpa-onnx、libvips 等），构建期自签名；Host 跑在应用进程内，只监听 `127.0.0.1` |
+| 系统提供 Node 运行时 | 沙箱内无 Node，且只能执行**自己签名域内**的原生二进制 | 运行时与原生库随包分发（Node、koffi、node-pty、（已移除：语音走系统 Core Speech Kit）、libvips 等），构建期自签名；Host 跑在应用进程内，只监听 `127.0.0.1` |
 | 上游直接 `import('undici')` 可用 | 端侧 `jitless ⇒ WebAssembly === undefined`，而 undici 的 HTTP 解析器是 WASM | 增加 `undici` 模块名解析钩子与全局 `fetch` 垫片，**不改上游源码、不改核心树**，由 `tools/check-web-fetch-jitless.mjs` 守着（自带对照实验） |
 | 桌面工具链随手可用 | 沙箱里没有可执行文件 | git、Python 3.12、busybox、ripgrep 随包分发并自签名，启动时逐项 `exec` 探测 |
 | Electron 提供窗口 / 托盘 / 文件选择器 | 平台是 ArkUI | 由 ArkUI 宿主提供窗口、菜单、托盘、系统文件选择器、剪贴板、通知与多形态布局 |
-| 单机单形态 | 手机、折叠屏、平板、2in1 共用一份安装包 | 形态由断点判定，四种形态共享同一套信息架构 |
+| 单机单形态 | 手机、折叠屏、平板、2in1 的设备类型不同 | 两个 entry 交付面：`entry`（tablet + 2in1）、`phone`（phone），同一 `.app` 内按设备类型分发；布局形态另由断点判定 |
 
 具体落成四件事：
 
-- **运行时不依赖系统，随包分发。** HAP 内自带 Node 运行时与全部原生库，构建期完成自签名以进入应用签名域。代价是包体（约 300 MiB），换来"装上就能跑，不必先配环境"。
+- **运行时不依赖系统，随包分发。** HAP 内自带 Node 运行时与全部原生库，构建期完成自签名以进入应用签名域。当前 AGC 合并 .app 约 566 MB（2026-11-06 瘦身后；旧读数 417 MiB 已作废），换来"装上就能跑，不必先配环境"。
 - **核心树可切换、可回滚。** dsh 核心树以归档形式随包分发，首次启动解包进应用数据目录下的版本仓库（`dsh/cores/<version>`），通过激活事务切换版本，失败可回滚 ⇒ **升级上游 = 换一个核心归档**，App 代码不动。
 - **宿主重写，界面不重写。** 界面内容仍是官方 Web 前端；ArkUI 侧只承担平台宿主职责，设计令牌从官方 `--dsw-*` 映射到鸿蒙语义色与系统符号，不做 Web CSS 的像素级翻译——官方主题更新时不需要重做整套界面。
-- **上架友好、数据保全优先。** 权限共 **11 项**（6 项普通 + 5 项 ACL 受限，逐项见 `entry/src/main/module.json5`），**不含** JIT / 可写可执行内存一类（无 `ohos.permission.kernel.*`、无 `ALLOW_WRITABLE_CODE_MEMORY`）；装机一律 `hdc install -r` 覆盖安装，应用数据原地保留（详见下文「真机数据保全」）。
+- **上架友好、数据保全优先。** 权限面固定为 **entry 18 条 / phone 9 条**（含 8 条已审批 ACL：`ALLOW_EXTERNAL_NATIVE_CODE`、`FILE_ACCESS_PERSIST`、`CUSTOM_SANDBOX`、`READ_PASTEBOARD`、`ACCESS_USER_FULL_DISK` 与三个目录读写；2026-11-11 全盘权限获批），逐项见 `entry/src/main/module.json5` 与 `phone/src/main/module.json5`；**不接受**任何未获批的受限条目（旧的「恒 8 条」口径已作废，按它删条目会删掉 `CUSTOM_SANDBOX` 导致工具/终端/工作区全废）。装机一律 `hdc install -r` 覆盖安装，应用数据原地保留（详见下文「真机数据保全」）。
 
-端侧与官方的逐项对照（哪些对齐、哪些存在边界）登记在 [`docs/parity-matrix.md`](docs/parity-matrix.md)，由 `tools/check-parity.mjs` 强制维护；移植过程中踩到的坑按主题汇总在 [`docs/70-鸿蒙移植踩坑与修复总览.md`](docs/70-鸿蒙移植踩坑与修复总览.md)。
+端侧与官方的逐项对照（哪些对齐、哪些存在边界）登记在 [`docs/parity-matrix.md`](docs/parity-matrix.md)，由 `tools/check-parity.mjs` 强制维护；移植过程中踩到的坑汇总在 [`docs/PITFALLS.md`](docs/PITFALLS.md)。
 
 ### 已知边界
 
 - **WASM 缺席是全局前提。** 凡是上游直接 `import('undici')` 的功能都必须走垫片；新接入的上游功能若未覆盖，在端侧会直接失败。垫片覆盖由门禁守住，不靠自觉。
-- **长连接抖动**：官方网关默认心跳间隔（2 s）对有重计算的会话偏紧，可能表现为连接短暂中断后自动恢复；这是 profile 层参数，可按机器调整。
-- **冷启自退**：曾在旧核心版本上出现一次（启动约 40 s 后 `process.exit(0)`），当前版本长时间连续运行未复现，仍在定位中。
+- **API 23 手持档不能选择任意系统目录。** HarmonyOS 6.1.0 没有 `FolderSelection`，应用会退到 `Download/<包名>` 专属工作区；2in1 和 API 26 手持档不受影响。
+- **浏览器自动化只在 PC / 2in1 提供。** 移动端没有海泰扩展能力，不注册 `browser_*` 工具。
+- **平板与 API 23 仍需真机复验。** 手机和 PC 已覆盖安装验证，不能把两端读数替代缺失设备。
+- **A2A 等待平台审核。** 端侧骨架和 AgentCard 已落位，真实协议联调必须等开放平台和应用上线条件满足。
+- **QEMU 原生崩溃仍需观察。** 后台冷启动闸门和资源预留已收紧，但 APMS 趋势仍要在新版发布后持续跟踪。
 
 ## 能力
 
@@ -65,7 +70,7 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 | **插件** | 查看随包插件清单与运行阶段；按行启用/禁用，并可恢复部署默认 |
 | **核心版本** | 同时安装多个核心版本，一键**切换 / 回滚**（停旧起新，逐版本校验后激活） |
 | **多语言** | 界面文案跟随系统语言，默认中文 |
-| **上架友好** | 全部按 `jitless` 运行，**不申请** JIT / 可写可执行内存（无 `ohos.permission.kernel.*`、无 `ALLOW_WRITABLE_CODE_MEMORY`）；权限共 **11 项** = 6 项普通（网络、网络信息、后台保活、终止前回调、持久化数据、麦克风）+ **5 项 ACL 受限**（用户文件读写、文件访问持久化、全盘访问、自定义沙箱、外部原生代码加载）——ACL 这 5 项都服务于"用户可见目录读写 + 自定义沙箱"，随签名 profile 的 `acls` 声明，上架时按 ACL 清单在应用市场申请（逐项见 `entry/src/main/module.json5`） |
+| **上架友好** | 全部按 `jitless` 运行；权限面 **entry 18 / phone 9**（8 条已审批 ACL + 免申请条目），由 `node tools/check-permission-surface.mjs` **两侧逐条**强制（含顺序与 reason 字符串） |
 
 ## 架构
 
@@ -117,9 +122,9 @@ WASM 因果证据），注册后必须全过，且**跨源跳转仍须被拒**�
 改写工具链归档——Windows 上只有它能在保住归档内 symlink 的前提下改字节；缺失时
 `place-toolchain` 会告警跳过签名，归档仍可用，只是端侧 `git`/`python3.12` 真身继续被执行策略拒绝）。
 
-> **SDK 版本口径**：`compatibleSdkVersion` / `targetSdkVersion` 固定为 **`6.1.1(24)`**（决策，2026-09-14）。
-> 代价是**不能用 API 26 的「沉浸光感」材质**（官方要求 `targetAPIVersion ≥ 26`）——
-> 界面层次当前由系统阴影表达；升级路径与要改的几处列在 `appstate/ui/HarmonyTheme.ets` 的 `HarmonyMaterial`。
+> **SDK 版本口径**：`compatibleSdkVersion` 为 **`6.1.0(23)`**（2026-10-17 下探，见 `docs/archive/183-*`）；
+> `targetSdkVersion` 为 **`26.0.0`**（API 26 档不带括号，见 `docs/archive/147-*`）⇒ 产物 minAPIVersion 60100023 / targetAPIVersion 260000026。
+> 代价是启用 API 26 的 3 条 ArkUI 行为变更（弹层沉浸材质默认开 / 按钮热区 28→32vp / 内置文本换行优化）；沉浸光感材质**已接入**（`module.json5` 的 `ohos.arkui.UIMaterial.state = enable`，`HarmonyMaterial.IMMERSIVE_ENABLED = true`，2026-10-11 拍板；设备 API < 26 时被平台忽略），另已接入带执行结果的窗口朝向设置（`docs/archive/147-*` §13）。
 
 **不入库的产物（新克隆必须先备齐，否则编不过）**：
 
@@ -127,15 +132,17 @@ WASM 因果证据），注册后必须全过，且**跨源跳转仍须被拒**�
 |---|---|---|
 | Node 头文件 | `entry/src/main/cpp/node-headers/` | 编 `libdshhost` 只需要它（`libnode` **不参与链接**） |
 | 原生库 | `entry/libs/<abi>/` | 运行期需要（含 `libnode.so.137`）；也是"编不编 koffi/flock"的门 |
-| git 兼容垫片 | `entry/libs/arm64-v8a/libdshm-gitcompat.so` | 由 CMake 从 `entry/src/main/cpp/gitcompat.c`（**源码在库里**）编出；git 子进程类命令的 `LD_PRELOAD` 垫片（见 `docs/device-validation.md` 批次备注十三 三） |
+| git 兼容垫片 | `entry/libs/arm64-v8a/libdshm-gitcompat.so` | 由 CMake 从 `entry/src/main/cpp/gitcompat.c`（**源码在库里**）编出；git 子进程类命令的 `LD_PRELOAD` 垫片（见 `docs/archive/device-validation.md` 批次备注十三 三） |
 | 核心包 | `entry/src/main/resources/resfile/*.zip` | 首启解包出端侧核心树 |
 | 工具链归档 | `entry/src/main/resources/resfile/toolchain/{python,git}/` | 由 `node tools/place-toolchain.mjs` 从 `third_party/` 放置并**自签名**（端侧 execve 只放行带 `.codesign` 的 ELF） |
 | 入口脚本 | `entry/src/main/resources/resfile/resources/app/` | 由 `node tools/place-host-app.mjs` 从 `hostcore/app/` 生成 |
-| 鲸鱼 SVG | `entry/src/main/resources/base/media/fish_logo.svg` | 由 `node tools/gen-fish-logo.mjs` 从核心树的官方 `dsh-client-ui-primitives` **逐字节**复制路径生成（`Image.fillColor` 按主题着色） |
+| 顶栏按钮 SVG | `entry/src/main/resources/base/media/sidebar_toggle.svg` | 顶栏左上角侧栏开关图标（`Image.fillColor` 按主题着色）。同目录的 `fish_logo.svg`（官方鲸鱼，由 `node tools/gen-fish-logo.mjs` 逐字节复制核心树 primitives 的 path 生成）自 2026-10-10 顶栏改侧栏按钮后不再被运行时引用，保留归档 |
 
-```bash
+```powershell
 # 1) 打完整体（HAP + 原生库 + 内置核心资源）
-devecocli build
+# 先由 tools/lib/deveco-home.ps1 解析 DevEco 安装根，再调用当前 hvigorw。
+# 日常开发推荐直接跑 .\tools\update-device.ps1（仅 Windows 开发端）。本机无 hdc 服务端，装机/UI 验证做不了，交付证据上限 = 离线门禁 + 包结构。
+.\tools\update-device.ps1
 
 # 2) 需要重新打包核心树时（素材来自 dist/core/，产物落到应用资源目录）
 node tools/pack-core.mjs --skip-install --place-in-app
@@ -144,19 +151,21 @@ node tools/place-host-app.mjs
 # 2b) 需要重建工具链归档时（放置 + 自签名；会就地改写 resfile/toolchain/ 下的归档）
 node tools/place-toolchain.mjs
 
-# 2c) 重建顶栏鲸鱼 SVG 资源（从核心树的官方 primitives 包逐字节复制路径；内含
+# 2c) 重建鲸鱼 SVG 功能资源（从核心树的官方 primitives 包逐字节复制路径；内含
 #     "真实包围盒 == 官方 viewBox" 与"落盘后仍与官方一致"两条自检，失败即退出）
 node tools/gen-fish-logo.mjs
 
-# 2d) 重建 **APP 图标**（官方鲸鱼 + HM/OS 角标）。需要 Python 3 + Pillow。
-#     ⚠ 它**只写 APP 图标**：AppScope 与 entry 的 {foreground,background}.png、
-#       docs/brand/dshm-icon.png、dshm-mark.png。**不写** startIcon.png / logo_dark.png
-#       —— 那两个是**启动画面**资源，必须保持原版（正本归档在 third_party/brand-original/）。
-#     全部自检通过才写盘；失败则一个文件都不动（含"归档比对"与"mark 不得带角标"两项）。
+# 2d) 重建**全部品牌物料**（图标 / 启动画面 / 托盘 / 展示图）。需要 Python 3（图标管线已不依赖 Pillow/numpy，见 `docs/archive/320-*`）。
+#     母版在 third_party/brand-source/（本地素材，不入库）；产出 10 个文件：
+#     AppScope 与 entry 的 {foreground,background}.png、startIcon.png、logo_dark.png、
+#     docs/brand/{dshm-icon,dshm-mark}.png、rawfile/{tray_white,tray_black}.png。
+#     2026-10-11 用户要求把品牌标"一并改掉" ⇒ 启动画面也改用品牌标（旧鲸鱼归档在
+#     third_party/brand-original/，现只作"不得回退"判据）。全部自检通过才写盘；失败则
+#     一个文件都不动。
 python tools/make-icon.py
 
-# 3) 安装到已连接设备（注意：产物是 **unsigned**；签名材料不在库内）
-hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
+# 3) 使用已签名 HAP 覆盖安装（不要 uninstall）
+hdc install -r <hap>（仅 Windows 开发端；本机不可执行）
 ```
 
 ## 设计体系：Web 语义 + HarmonyOS 原生表达
@@ -194,12 +203,12 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 | `platform/` | 系统能力封装（文件选择、剪贴板、通知、窗口记忆等） |
 | `dshcompat/` | 与上游协议有关的**全部**事实：端点、参数形状、事件类型与投影键 |
 | `tools/` | 构建与检查脚本（核心打包、依赖闭包、上架红线、协议往返、死按钮扫描等） |
-| `docs/` | 文档基线，索引见 [`docs/README.md`](docs/README.md)；**接手先读 [`docs/HANDOFF.md`](docs/HANDOFF.md)**（现状 + 未完成事项 + Windows 端重装步骤） |
+| `docs/` | 文档索引见 [`docs/README.md`](docs/README.md)；**接手先读 [`AGENT-HANDOFF.md`](AGENT-HANDOFF.md) 与 [`docs/HANDOFF.md`](docs/HANDOFF.md)**；功能台账 [`docs/FEATURES.md`](docs/FEATURES.md)；历史在 `docs/archive/` |
 
 ## 设计原则
 
 1. **不 fork、不魔改 dsh**：端侧差异只通过 dsh 自己的组合面（profile / `cordis.patch.yml` / bundle）表达。
-2. **不申请 JIT / 可写可执行内存**：需要它们作前提的方案一律不进入选型（这是 `--jitless` 的由来）。**ACL 受限权限只在文件访问与自定义沙箱必需处申请**——当前 5 项（用户文件读写、文件访问持久化、全盘访问、自定义沙箱、外部原生代码加载），随签名 profile 的 `acls` 声明，逐项见 `entry/src/main/module.json5`。
+2. **不申请 JIT**：需要它作前提的方案一律不进入选型（这是 `--jitless` 的由来）。当前权限面 entry 18 / phone 9，其中 8 条是已审批 ACL；**不新增未获批的受限条目**（声明了也拿不到，反而让整包按 `PERMISSION_ACL_RULE` 拒装）。
 3. **界面不撒谎**：失败必须给出下一步；空态说明"可以做什么"；不可用的动作把原因写在旁边，而不是给一个点了没反应的入口。
 4. **上游知识只出现在 `dshcompat`**：字段名、端点形状、事件类型集中一处，升级上游时改一个地方。
 5. **产品语义跟 Web，视觉与交互用鸿蒙原生**：信息架构与行为对齐官方 Web（对等矩阵逐行登记），
@@ -210,17 +219,22 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 
 ### 只想装上用
 
-到本仓库 **Releases** 下载最新的 `DSHM-1.1.0-core0.2.1-alpha.1+dshm.13-arm64-signed.hap`，然后：
+当前 Beta 交付件在 `dist/beta/<时间戳>/`（`node tools/build-beta.mjs --combined-app` 产出，含 `SHA256SUMS`）：
 
-```bash
-hdc install -r DSHM-1.1.0-core0.2.1-alpha.1+dshm.13-arm64-signed.hap
+```text
+DSHM-beta-<version>-<versionCode>-combined-debug.app
 ```
 
-首次启动会解包核心树（约 60–90 秒），期间停在启动页，属正常。
+然后覆盖安装：
+
+```powershell
+hdc install -r <当前交付件>（仅 Windows 开发端；本机不可执行）
+```
+
+首次启动会解包核心树，期间会显示启动/初始化状态。
 下载后请用同目录的 `SHA256SUMS.txt` 校验。
 
-> Release 里附的是 **debug 签名的侧载包**，供尝鲜与验证；
-> 正式分发请用 DevEco 生成你自己的发布签名。
+> 该件是 Beta 调试签名侧载包，只用于内测和真机覆盖安装；正式分发走 AGC 发布签名链路。
 
 ### 想从源码构建
 
@@ -240,14 +254,15 @@ hdc install -r <hap>
 ```
 
 判据：这条命令会不会碰 `el2`？会，就是禁止的。
-完整事故复盘与流程见 [`docs/80-真机更新与数据保全.md`](docs/80-真机更新与数据保全.md)。
+完整事故复盘与流程见 [`docs/archive/80-真机更新与数据保全.md`](docs/archive/80-真机更新与数据保全.md)。
 
 ## 许可
 
-见 [`LICENSE`](LICENSE)。
+见 [`LICENSE`](LICENSE) 与 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 本项目是**移植**：把官方面向桌面的 dsh 运行时搬到鸿蒙。`dsh` / DeepSeek Harness 的商标与上游代码版权归其各自所有者，
-本仓库只包含客户端侧的实现、适配与文档。
+MIT 许可只授予代码权利，不授予商标、Logo、官方背书或合作关系。DSHM 是独立客户端，
+用户可见品牌使用 DSHM 自有标识；上游版权和第三方许可见随包声明。
 
 ## 赞赏支持
 
