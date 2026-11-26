@@ -34,14 +34,12 @@ const BETA_BUNDLE = 'com.dshm.dshmbeta';
 const BETA_APP_ID = '6918745051729970584';
 /*
  * 品牌显示名（与 AppScope/entry/phone 的 string.json 同源）。
- * 2026-10-30 应用正式更名「DSHM」后，旧写死的 DSHM→DSHM beta 替换与断言会
- * 让 Beta 出包失败；改为**只替换当前正式名**，不再假设旧品牌名。
+ * 正式名统一为「DSHM」，中英文一致；Beta 只替换当前正式名，不再为旧品牌保留
+ * 额外映射——旧名一旦混进来，会让出包断言与实际资源对不上。
  * 包名仍由上面的 PROD_BUNDLE/BETA_BUNDLE 处理，互不相干。
  */
 const PROD_LABEL = 'DSHM';
 const BETA_LABEL = 'DSHM beta';
-const PROD_LABEL_EN = 'Jinghong';
-const BETA_LABEL_EN = 'Jinghong beta';
 const BETA_PROFILE = join(ROOT,
   'signing/debug/default_desktop.ohos.arm64_H6ERYybQIgIZaVstkvwvtC9vr-nLxAUfZBhCBJKkRhw=.p7b');
 const BETA_ACLS = [
@@ -340,7 +338,6 @@ try {
     }
     if (rel.endsWith('/element/string.json')) {
       text = text.replaceAll(`"value": "${PROD_LABEL}"`, `"value": "${BETA_LABEL}"`);
-      text = text.replaceAll(`"value": "${PROD_LABEL_EN}"`, `"value": "${BETA_LABEL_EN}"`);
     }
     write(rel, text);
   }

@@ -153,14 +153,8 @@ node tools/place-toolchain.mjs
 #     "真实包围盒 == 官方 viewBox" 与"落盘后仍与官方一致"两条自检，失败即退出）
 node tools/gen-fish-logo.mjs
 
-# 2d) 重建**全部品牌物料**（图标 / 启动画面 / 托盘 / 展示图）。需要 Python 3（图标管线已不依赖 Pillow/numpy）。
-#     母版在 third_party/brand-source/（本地素材，不入库）；产出 10 个文件：
-#     AppScope 与 entry 的 {foreground,background}.png、startIcon.png、logo_dark.png、
-#     docs/brand/{dshm-icon,dshm-mark}.png、rawfile/{tray_white,tray_black}.png。
-#     2026-10-11 用户要求把品牌标"一并改掉" ⇒ 启动画面也改用品牌标（旧鲸鱼归档在
-#     third_party/brand-original/，现只作"不得回退"判据）。全部自检通过才写盘；失败则
-#     一个文件都不动。
-python tools/make-icon.py
+# 2d) 刷新 README 展示图（由 AppScope 的 background + foreground 合成 512²）
+python3 -c "from PIL import Image as I;bg=I.open('AppScope/resources/base/media/background.png').convert('RGBA');fg=I.open('AppScope/resources/base/media/foreground.png').convert('RGBA');I.alpha_composite(bg,fg).convert('RGB').resize((512,512),I.LANCZOS).save('docs/brand/app-icon-512.png',optimize=True)"
 
 # 3) 使用已签名 HAP 覆盖安装（不要 uninstall）
 hdc install -r <hap>（仅 Windows 开发端；本机不可执行）

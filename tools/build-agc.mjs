@@ -217,9 +217,8 @@ const releaseDir = join(ROOT, 'dist', 'release-test');
  * `0.2.1-rc.4+dshm.98` → 段 `dshm.98`（去掉上游前缀，文件名短一点；`+` 不能出现在
  * 文件名里）。文件名前缀走**拼音/拉丁**形式，避免非 ASCII 文件名在 AGC/命令行两侧出编码问题。
  *
- * 【2026-11-01 品牌回退】应用显示名从「鲸鸿」改回 **DSHM**（鲸鸿与华为自有品牌
- * 「鲸鸿动能」撞名，见 docs/341）。文件名前缀同步改回 `dshm`，否则交付件名与实际品牌
- * 再次"撒谎"。
+ * 【品牌名口径】应用显示名统一为 **DSHM**（2026-11-01 起中英文一致）。文件名前缀
+ * 同步用 `dshm`，否则交付件名与实际品牌对不上。
  */
 const CORE_TAG = (CORE_VERSION.split('+')[1] ?? CORE_VERSION).replace(/[^A-Za-z0-9.]/g, '');
 const finalApp = join(releaseDir,

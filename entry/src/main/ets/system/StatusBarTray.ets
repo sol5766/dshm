@@ -82,7 +82,7 @@ const BG_ABILITY_NAME: string = 'BackGroundAbility';
 /*
  * 【2026-11-03：托盘图标换成新版彩色品牌标】
  *
- * 之前这两处指向 `tray_white.png` / `tray_black.png`（72×72）—— 那是**鲸鸿时期的黑鸟剪影**，
+ * 之前这两处指向 `tray_white.png` / `tray_black.png`（72×72）—— 那是**旧版品牌的黑鸟剪影**，
  * 也就是用户看到的"一个灰色的旧图标"。这条路径此前一直被忽略：改 `app.icon`、
  * `abilities[].icon`、`startWindowIcon` 都不会影响托盘，因为托盘图标由本文件在运行时
  * 用 `statusBarManager.addToStatusBar` 的 PixelMap 挂上去。
