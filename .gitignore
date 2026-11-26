@@ -147,3 +147,31 @@ JD/**/*-evidence/
 !/demo/pc-app-label-repro/build-profile.json5
 /demo/build-profile.json5
 /demo/*/local.properties
+
+# ── 公开仓库边界：个人过程物与内部资料只留本地（2026-11-26）───────────────
+# 【判据】能让他人构建、使用、二次开发的才入库；个人记录、运营物料、内部台账
+# 一律留在本机，不再随仓库分发。文件仍在磁盘上，只是不被跟踪。
+/JD/
+/metadata/
+/website/
+/spec/
+/demo/
+/devrel/
+/docs/archive/
+/docs/sponsor/
+/docs/brand/app-icon-concepts/
+/AGENTS.md
+/AGENT-HANDOFF.md
+/APPID-CHANGE.md
+/BROWSER-EXTENSION-REPAIR.md
+/START-HERE.md
+/docs/HANDOFF.md
+/docs/FEATURES.md
+/docs/PITFALLS.md
+/docs/DECISIONS.md
+/docs/ARCHITECTURE.md
+/docs/parity-matrix.md
+/docs/README.md
+/docs/19[0-9]-*.md
+/docs/2[0-9][0-9]-*.md
+/docs/HarmonyOS生态能力接入/

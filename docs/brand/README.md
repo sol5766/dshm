@@ -25,10 +25,15 @@ python3 tools/make-icon.py           # 从母版生成全部品牌物料（图�
 
 | 文件 | 用途 | 尺寸 |
 |---|---|---|
-| `jinghong-icon.png` | README / 商店之外的展示图（白底合成版，看起来就是一个应用图标） | 512 |
+| `app-icon-512.png` | **README 展示图**：由 `AppScope` 当前分层图标（`background` + `foreground`）合成，与安装后的桌面图标同图 | 512 |
+| `jinghong-icon.png` | 鲸鸿标展示图（2026-10-30 换标期，保留归档） | 512 |
 | `jinghong-mark.png` | 纯标记、**透明底**（做物料时用） | 256 |
 | `jinghong-icon-1024.png` | **AGC 商店图标上传件**（白底合成、正方形、RGB 无 alpha、**不烘圆角**） | 1024 |
 | `jinghong-icon-216.png` | 同上（AGC 允许的另一档尺寸） | 216 |
+
+> `app-icon-512.png` 的重放方式（源件随仓库走，不依赖 `third_party/`）：
+> `python3 -c "from PIL import Image as I;bg=I.open('AppScope/resources/base/media/background.png').convert('RGBA');fg=I.open('AppScope/resources/base/media/foreground.png').convert('RGBA');I.alpha_composite(bg,fg).convert('RGB').resize((512,512),I.LANCZOS).save('docs/brand/app-icon-512.png',optimize=True)"`
+> 换图标时先改 `AppScope/`（并同步 `entry/`、`phone/`），再跑这一行刷新 README 展示图。
 
 > 上一代 `dshm-icon*.png` / `dshm-mark.png` **保留未删**（可能被历史文档引用），但已不是当前品牌；
 > AGC 上架请用 `jinghong-icon-1024.png` / `jinghong-icon-216.png`。

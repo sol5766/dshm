@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/brand/dshm-icon.png" alt="DSHM" width="112" />
+<img src="docs/brand/app-icon-512.png" alt="DSHM" width="112" />
 
 # DSHM
 
@@ -12,13 +12,11 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 
 **它不是 PC 上 dsh 的遥控器**，也不需要在电脑上常驻任何服务：装上即用，数据只在本机应用沙箱内。
 
-**当前版本**：`1.1.8 / 1010019`，端侧核心 `0.2.2-rc.5+dshm.1`（真源分别为 `AppScope/app.json5` 与 `hostcore/core-recipe.json`）。
+**当前版本**：`1.1.8 / 1010020`，端侧核心 `0.2.2-rc.5+dshm.1`（真源分别为 `AppScope/app.json5` 与 `hostcore/core-recipe.json`）。
 
 支持 HarmonyOS 手机 / 折叠屏 / 平板 / 2in1。交付面只有两个：**`entry` = 平板 + 2in1**（PC / Edge / Pro Max 共用）、**`phone` = 手机**；折叠屏按系统上报的形态进入对应档。
 
 > **这是一次平台移植**：把官方面向桌面（Electron）的运行时，搬到 OpenHarmony arm64 上自足运行。
-> 移植过程中与鸿蒙平台语义的每一处冲突、根因与修法，都汇总在
-> **[`docs/PITFALLS.md`](docs/PITFALLS.md)**（按风险类型组织）。
 > **两条根本约束**决定了后面几乎所有设计：`jitless ⇒ WebAssembly === undefined`，
 > 以及 **execve 受签名域管辖 ⇒ 所有端侧原生二进制必须构建期自签名**。
 
@@ -46,9 +44,9 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 - **运行时不依赖系统，随包分发。** HAP 内自带 Node 运行时与全部原生库，构建期完成自签名以进入应用签名域。当前 AGC 合并 .app 约 566 MB（2026-11-06 瘦身后；旧读数 417 MiB 已作废），换来"装上就能跑，不必先配环境"。
 - **核心树可切换、可回滚。** dsh 核心树以归档形式随包分发，首次启动解包进应用数据目录下的版本仓库（`dsh/cores/<version>`），通过激活事务切换版本，失败可回滚 ⇒ **升级上游 = 换一个核心归档**，App 代码不动。
 - **宿主重写，界面不重写。** 界面内容仍是官方 Web 前端；ArkUI 侧只承担平台宿主职责，设计令牌从官方 `--dsw-*` 映射到鸿蒙语义色与系统符号，不做 Web CSS 的像素级翻译——官方主题更新时不需要重做整套界面。
-- **上架友好、数据保全优先。** 权限面固定为 **entry 18 条 / phone 9 条**（含 8 条已审批 ACL：`ALLOW_EXTERNAL_NATIVE_CODE`、`FILE_ACCESS_PERSIST`、`CUSTOM_SANDBOX`、`READ_PASTEBOARD`、`ACCESS_USER_FULL_DISK` 与三个目录读写；2026-11-11 全盘权限获批），逐项见 `entry/src/main/module.json5` 与 `phone/src/main/module.json5`；**不接受**任何未获批的受限条目（旧的「恒 8 条」口径已作废，按它删条目会删掉 `CUSTOM_SANDBOX` 导致工具/终端/工作区全废）。装机一律 `hdc install -r` 覆盖安装，应用数据原地保留（详见下文「真机数据保全」）。
+- **上架友好、数据保全优先。** 权限面固定为 **entry 19 条 / phone 9 条**（含 8 条已审批 ACL：`ALLOW_EXTERNAL_NATIVE_CODE`、`FILE_ACCESS_PERSIST`、`CUSTOM_SANDBOX`、`READ_PASTEBOARD`、`ACCESS_USER_FULL_DISK` 与三个目录读写；2026-11-11 全盘权限获批），逐项见 `entry/src/main/module.json5` 与 `phone/src/main/module.json5`；**不接受**任何未获批的受限条目（旧的「恒 8 条」口径已作废，按它删条目会删掉 `CUSTOM_SANDBOX` 导致工具/终端/工作区全废）。装机一律 `hdc install -r` 覆盖安装，应用数据原地保留（详见下文「真机数据保全」）。
 
-端侧与官方的逐项对照（哪些对齐、哪些存在边界）登记在 [`docs/parity-matrix.md`](docs/parity-matrix.md)，由 `tools/check-parity.mjs` 强制维护；移植过程中踩到的坑汇总在 [`docs/PITFALLS.md`](docs/PITFALLS.md)。
+端侧与官方的逐项对照（哪些对齐、哪些存在边界）由 `tools/check-parity.mjs` 强制维护。
 
 ### 已知边界
 
@@ -70,7 +68,7 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 | **插件** | 查看随包插件清单与运行阶段；按行启用/禁用，并可恢复部署默认 |
 | **核心版本** | 同时安装多个核心版本，一键**切换 / 回滚**（停旧起新，逐版本校验后激活） |
 | **多语言** | 界面文案跟随系统语言，默认中文 |
-| **上架友好** | 全部按 `jitless` 运行；权限面 **entry 18 / phone 9**（8 条已审批 ACL + 免申请条目），由 `node tools/check-permission-surface.mjs` **两侧逐条**强制（含顺序与 reason 字符串） |
+| **上架友好** | 全部按 `jitless` 运行；权限面 **entry 19 / phone 9**（8 条已审批 ACL + 免申请条目），由 `node tools/check-permission-surface.mjs` **两侧逐条**强制（含顺序与 reason 字符串） |
 
 ## 架构
 
@@ -100,7 +98,7 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 已实测证实的一个实例：`dsh-web-fetch-http` 不用全局 `fetch`，而是 `await import('undici')` 自建 `Agent`
 再传 `dispatcher`，于是 `web_fetch` 打不开任何网页和 IP，而走本仓纯 JS `node:http` 垫片的 `web_search` 照常工作。
 同一核心树、同一个本地 HTTP 服务下，只有 `--jitless` 一个变量就能复现两组结果（有 WASM → 200；
-无 WASM → `fetch failed / WebAssembly is not defined`）。细节与在飞修复见 `docs/parity-matrix.md` §3.2。
+无 WASM → `fetch failed / WebAssembly is not defined`）。
 
 因此新增/升级核心版本时，除了跑既有门禁，还要**搜一遍核心树里对 `undici` 的直接依赖**，并把垫片覆盖率当作一项验收项。
 
@@ -122,9 +120,9 @@ WASM 因果证据），注册后必须全过，且**跨源跳转仍须被拒**�
 改写工具链归档——Windows 上只有它能在保住归档内 symlink 的前提下改字节；缺失时
 `place-toolchain` 会告警跳过签名，归档仍可用，只是端侧 `git`/`python3.12` 真身继续被执行策略拒绝）。
 
-> **SDK 版本口径**：`compatibleSdkVersion` 为 **`6.1.0(23)`**（2026-10-17 下探，见 `docs/archive/183-*`）；
-> `targetSdkVersion` 为 **`26.0.0`**（API 26 档不带括号，见 `docs/archive/147-*`）⇒ 产物 minAPIVersion 60100023 / targetAPIVersion 260000026。
-> 代价是启用 API 26 的 3 条 ArkUI 行为变更（弹层沉浸材质默认开 / 按钮热区 28→32vp / 内置文本换行优化）；沉浸光感材质**已接入**（`module.json5` 的 `ohos.arkui.UIMaterial.state = enable`，`HarmonyMaterial.IMMERSIVE_ENABLED = true`，2026-10-11 拍板；设备 API < 26 时被平台忽略），另已接入带执行结果的窗口朝向设置（`docs/archive/147-*` §13）。
+> **SDK 版本口径**：`compatibleSdkVersion` 为 **`6.1.0(23)`**（2026-10-17 下探）；
+> `targetSdkVersion` 为 **`26.0.0`**（API 26 档不带括号）⇒ 产物 minAPIVersion 60100023 / targetAPIVersion 260000026。
+> 代价是启用 API 26 的 3 条 ArkUI 行为变更（弹层沉浸材质默认开 / 按钮热区 28→32vp / 内置文本换行优化）；沉浸光感材质**已接入**（`module.json5` 的 `ohos.arkui.UIMaterial.state = enable`，`HarmonyMaterial.IMMERSIVE_ENABLED = true`，2026-10-11 拍板；设备 API < 26 时被平台忽略），另已接入带执行结果的窗口朝向设置。
 
 **不入库的产物（新克隆必须先备齐，否则编不过）**：
 
@@ -132,7 +130,7 @@ WASM 因果证据），注册后必须全过，且**跨源跳转仍须被拒**�
 |---|---|---|
 | Node 头文件 | `entry/src/main/cpp/node-headers/` | 编 `libdshhost` 只需要它（`libnode` **不参与链接**） |
 | 原生库 | `entry/libs/<abi>/` | 运行期需要（含 `libnode.so.137`）；也是"编不编 koffi/flock"的门 |
-| git 兼容垫片 | `entry/libs/arm64-v8a/libdshm-gitcompat.so` | 由 CMake 从 `entry/src/main/cpp/gitcompat.c`（**源码在库里**）编出；git 子进程类命令的 `LD_PRELOAD` 垫片（见 `docs/archive/device-validation.md` 批次备注十三 三） |
+| git 兼容垫片 | `entry/libs/arm64-v8a/libdshm-gitcompat.so` | 由 CMake 从 `entry/src/main/cpp/gitcompat.c`（**源码在库里**）编出；git 子进程类命令的 `LD_PRELOAD` 垫片 |
 | 核心包 | `entry/src/main/resources/resfile/*.zip` | 首启解包出端侧核心树 |
 | 工具链归档 | `entry/src/main/resources/resfile/toolchain/{python,git}/` | 由 `node tools/place-toolchain.mjs` 从 `third_party/` 放置并**自签名**（端侧 execve 只放行带 `.codesign` 的 ELF） |
 | 入口脚本 | `entry/src/main/resources/resfile/resources/app/` | 由 `node tools/place-host-app.mjs` 从 `hostcore/app/` 生成 |
@@ -155,7 +153,7 @@ node tools/place-toolchain.mjs
 #     "真实包围盒 == 官方 viewBox" 与"落盘后仍与官方一致"两条自检，失败即退出）
 node tools/gen-fish-logo.mjs
 
-# 2d) 重建**全部品牌物料**（图标 / 启动画面 / 托盘 / 展示图）。需要 Python 3（图标管线已不依赖 Pillow/numpy，见 `docs/archive/320-*`）。
+# 2d) 重建**全部品牌物料**（图标 / 启动画面 / 托盘 / 展示图）。需要 Python 3（图标管线已不依赖 Pillow/numpy）。
 #     母版在 third_party/brand-source/（本地素材，不入库）；产出 10 个文件：
 #     AppScope 与 entry 的 {foreground,background}.png、startIcon.png、logo_dark.png、
 #     docs/brand/{dshm-icon,dshm-mark}.png、rawfile/{tray_white,tray_black}.png。
@@ -203,12 +201,12 @@ hdc install -r <hap>（仅 Windows 开发端；本机不可执行）
 | `platform/` | 系统能力封装（文件选择、剪贴板、通知、窗口记忆等） |
 | `dshcompat/` | 与上游协议有关的**全部**事实：端点、参数形状、事件类型与投影键 |
 | `tools/` | 构建与检查脚本（核心打包、依赖闭包、上架红线、协议往返、死按钮扫描等） |
-| `docs/` | 文档索引见 [`docs/README.md`](docs/README.md)；**接手先读 [`AGENT-HANDOFF.md`](AGENT-HANDOFF.md) 与 [`docs/HANDOFF.md`](docs/HANDOFF.md)**；功能台账 [`docs/FEATURES.md`](docs/FEATURES.md)；历史在 `docs/archive/` |
+| `docs/` | 品牌资源（`docs/brand/`），README 顶部图标即 `docs/brand/app-icon-512.png` |
 
 ## 设计原则
 
 1. **不 fork、不魔改 dsh**：端侧差异只通过 dsh 自己的组合面（profile / `cordis.patch.yml` / bundle）表达。
-2. **不申请 JIT**：需要它作前提的方案一律不进入选型（这是 `--jitless` 的由来）。当前权限面 entry 18 / phone 9，其中 8 条是已审批 ACL；**不新增未获批的受限条目**（声明了也拿不到，反而让整包按 `PERMISSION_ACL_RULE` 拒装）。
+2. **不申请 JIT**：需要它作前提的方案一律不进入选型（这是 `--jitless` 的由来）。当前权限面 entry 19 / phone 9，其中 8 条是已审批 ACL；**不新增未获批的受限条目**（声明了也拿不到，反而让整包按 `PERMISSION_ACL_RULE` 拒装）。
 3. **界面不撒谎**：失败必须给出下一步；空态说明"可以做什么"；不可用的动作把原因写在旁边，而不是给一个点了没反应的入口。
 4. **上游知识只出现在 `dshcompat`**：字段名、端点形状、事件类型集中一处，升级上游时改一个地方。
 5. **产品语义跟 Web，视觉与交互用鸿蒙原生**：信息架构与行为对齐官方 Web（对等矩阵逐行登记），
@@ -254,7 +252,6 @@ hdc install -r <hap>
 ```
 
 判据：这条命令会不会碰 `el2`？会，就是禁止的。
-完整事故复盘与流程见 [`docs/archive/80-真机更新与数据保全.md`](docs/archive/80-真机更新与数据保全.md)。
 
 ## 许可
 
@@ -263,20 +260,3 @@ hdc install -r <hap>
 本项目是**移植**：把官方面向桌面的 dsh 运行时搬到鸿蒙。`dsh` / DeepSeek Harness 的商标与上游代码版权归其各自所有者，
 MIT 许可只授予代码权利，不授予商标、Logo、官方背书或合作关系。DSHM 是独立客户端，
 用户可见品牌使用 DSHM 自有标识；上游版权和第三方许可见随包声明。
-
-## 赞赏支持
-
-DSHM 是**业余时间**做的移植：官方的 dsh 运行时没有鸿蒙端，端侧差异、沙箱绕行、手持档适配，
-以及两百多条回归门禁，都是照着真机读数一条条抠出来的。
-
-项目**完全免费、没有付费墙** —— 赞赏不会改变任何功能取舍，也不会影响 issue 的处理顺序。
-只是如果它正好省了你的事，愿意请我喝杯咖啡，我会很受用。
-
-<table>
-  <tr>
-    <td align="center"><img src="docs/sponsor/wechat.jpg" alt="微信赞赏码" width="320"><br><sub>微信</sub></td>
-    <td align="center"><img src="docs/sponsor/alipay.jpg" alt="支付宝赞赏码" width="320"><br><sub>支付宝</sub></td>
-  </tr>
-</table>
-
-提 issue、附上复现步骤、或者把「已知边界」里少写的那条补给我们 —— 同样是实实在在的帮忙。谢谢。
