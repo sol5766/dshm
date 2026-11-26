@@ -104,6 +104,9 @@ const READY_TIMEOUT_COLD_MS: number = 120000;
  * 失败重试只是重建一个 loopback socket，代价可忽略。
  */
 const READY_POLL_INTERVAL_MS: number = 250;
+const FOREGROUND_READY_POLL_INTERVAL_MS: number = 64;
+const FOREGROUND_READY_POLL_START_MS: number = 2000;
+const FOREGROUND_READY_POLL_END_MS: number = 5000;
 /**
  * 单次 TCP 探测的 connect 超时。
  *
@@ -170,10 +173,14 @@ const AUTH_URL_RETRY: number = 100;
  * 再等一个 500 ms 周期就是纯粹的墙钟浪费，而它正好落在"启动页已经盖满屏"的尾段。
  */
 const AUTH_URL_RETRY_INTERVAL_MS: number = 150;
+// TCP 在文件写回前几十毫秒就可达。仅在首个重试间隔内增加三次读取。
+const AUTH_URL_FIRST_RETRY_DELAYS_MS: number[] = [16, 24, 40];
+const FOREGROUND_AUTH_URL_FIRST_RETRY_DELAYS_MS: number[] = [12, 12, 16, 16, 20, 20, 24];
 
 export class NodeRuntime implements RuntimePort {
   /** 启动期 CPU 锁（RUNNING_LOCK 消费点），到期由系统释放 */
   private startupLock: runningLock.RunningLock | null = null;
+  private startupListeningCallback: (() => void) | undefined = undefined;
 
   private entryScript: string;
   private readonly sandboxHome: string;
@@ -490,6 +497,11 @@ export class NodeRuntime implements RuntimePort {
         + `（Node 线程${alive ? '仍在运行' : '已经退出'}）`);
     }
     hilog.info(DOMAIN, TAG, 'Host 已就绪：127.0.0.1:%{public}d', port);
+    const onListening = this.startupListeningCallback;
+    this.startupListeningCallback = undefined;
+    if (onListening !== undefined) {
+      onListening();
+    }
     /*
      * 【为什么句柄里的 url 要带 token】dsh 的 `/api` 前面是 browser-trust fence：
      * 不带 token 一律 401（入口脚本自探 `GET /` 得到的就是 401，那是**正确**响应）。
@@ -498,7 +510,7 @@ export class NodeRuntime implements RuntimePort {
      * 这里把它读出来放进句柄，上层就能把 baseUrl 与 token 一起交给客户端。
      * 读不到就退回不带 token 的基址——**不阻塞启动**，只是客户端会停在 401。
      */
-    const authUrl: string = await this.readAuthUrlWithRetry(homeDir, port);
+    const authUrl: string = await this.readAuthUrlWithRetry(homeDir, port, onListening !== undefined);
     if (authUrl.length > 0) {
       hilog.info(DOMAIN, TAG, '已从 host-ready.json 取到带 token 的地址（tokenLen=%{public}d）',
         authUrl.length - authUrl.indexOf('token=') - 'token='.length);
@@ -516,13 +528,26 @@ export class NodeRuntime implements RuntimePort {
    * AUTH_URL_RETRY 的注释）——这里的重试负责跨过这个窗口，避免把「慢了半拍」
    * 误报成「没有 authenticatedUrl」，进而把无 token 的地址发布给 Web 壳页（永久 401）。
    */
-  private async readAuthUrlWithRetry(homeDir: string, port: number): Promise<string> {
+  private async readAuthUrlWithRetry(homeDir: string, port: number, foreground: boolean): Promise<string> {
+    const firstRetryDelays: number[] = foreground ?
+      FOREGROUND_AUTH_URL_FIRST_RETRY_DELAYS_MS : AUTH_URL_FIRST_RETRY_DELAYS_MS;
     for (let attempt: number = 0; attempt < AUTH_URL_RETRY; attempt++) {
       const url: string = this.readAuthUrl(homeDir, port);
       if (url.length > 0) {
         return url;
       }
-      await this.sleep(AUTH_URL_RETRY_INTERVAL_MS);
+      let remaining: number = AUTH_URL_RETRY_INTERVAL_MS;
+      if (attempt === 0) {
+        for (const delay of firstRetryDelays) {
+          await this.sleep(delay);
+          remaining -= delay;
+          const earlyUrl: string = this.readAuthUrl(homeDir, port);
+          if (earlyUrl.length > 0) {
+            return earlyUrl;
+          }
+        }
+      }
+      await this.sleep(remaining);
     }
     return '';
   }
@@ -615,7 +640,11 @@ export class NodeRuntime implements RuntimePort {
     }
   }
 
-  /** 轮询回环端口直到有 HTTP 应答。任何应答（哪怕 404）都说明"在监听"。 */
+  setStartupListeningCallback(callback: () => void): void {
+    this.startupListeningCallback = callback;
+  }
+
+  /** 轮询回环端口直到 TCP 连接成功。 */
   private async waitListening(port: number, budgetMs: number): Promise<boolean> {
     const startedAt: number = Date.now();
     const deadline: number = startedAt + budgetMs;
@@ -640,7 +669,11 @@ export class NodeRuntime implements RuntimePort {
         hilog.info(DOMAIN, TAG, '等待端口：已等 %{public}d ms / 预算 %{public}d ms（宿主%{public}s）',
           now - startedAt, budgetMs, dshhost.isHostRunning() ? '仍在运行' : '未在运行');
       }
-      await this.sleep(READY_POLL_INTERVAL_MS);
+      const elapsed: number = now - startedAt;
+      // 桌面主窗常规冷启动在这段绑定端口。其余时间仍用常规间隔。
+      const foreground: boolean = this.startupListeningCallback !== undefined &&
+        elapsed >= FOREGROUND_READY_POLL_START_MS && elapsed < FOREGROUND_READY_POLL_END_MS;
+      await this.sleep(foreground ? FOREGROUND_READY_POLL_INTERVAL_MS : READY_POLL_INTERVAL_MS);
     }
     return false;
   }

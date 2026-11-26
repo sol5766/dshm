@@ -1,6 +1,6 @@
 'use strict';
 
-function create({ onError = () => {}, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+function create({ onError = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, companionFor } = {}) {
   const tasks = new Map();
   let ready = false;
   let idle = false;
@@ -20,18 +20,36 @@ function create({ onError = () => {}, setTimer = setTimeout, clearTimer = clearT
     void drain();
   }
 
+  async function runCompanion(task) {
+    if (stopped || !idle || task.done) return;
+    try {
+      if (!task.available()) return;
+      task.done = true;
+      await task.run();
+    } catch (error) {
+      task.done = true;
+      try { onError(error); } catch (_) {}
+    }
+  }
+
   async function drain() {
     if (!ready || !idle || stopped) return;
     if (running) { pending = true; return; }
     running = true;
     try {
-      for (const task of tasks.values()) {
+      for (const [key, task] of tasks) {
         if (stopped || !idle) break;
         if (task.done) continue;
         try {
           if (!task.available()) continue;
           task.done = true;
-          await task.run();
+          const companion = companionFor && tasks.get(companionFor(key));
+          const concurrent = companion && runCompanion(companion);
+          try {
+            await task.run();
+          } finally {
+            if (concurrent) await concurrent;
+          }
         } catch (error) {
           task.done = true;
           try { onError(error); } catch (_) {}

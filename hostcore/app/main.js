@@ -53,6 +53,7 @@ const nodeRuntimeProvision = require('./node-runtime-provision.cjs');
 const ffmpegRuntimeProvision = require('./ffmpeg-runtime-provision.cjs');
 const startupWork = require('./startup-work.cjs').create({
   onError: (error) => diag(`startup diagnostic failed: ${String(error)}`),
+  companionFor: startupDiagnosticCompanion,
 });
 
 /*
@@ -1764,7 +1765,10 @@ keepAliveWithoutWindows();
  *   BOOT_10_ENV_READY    环境/路径已解析（打出实际取值，便于核对是否指向错目录）
  *   BOOT_20_CORE_FOUND   核心树与 dsh CLI 入口都在
  *   BOOT_30_PROFILE_READY 端侧 profile 已就位（bundle 列表 + patch 层）
- *   BOOT_40_PROFILE_BOOT 即将 runProfile（插件树从这里开始挂载）
+ *   BOOT_40_PROFILE_BOOT 宿主启动预检
+ *   BOOT_41_LOCKS_READY  鉴权监听及旧锁恢复完成
+ *   BOOT_42_NATIVE_READY 启动所需的原生预检完成
+ *   BOOT_45_PROFILE_START 配置就位，进入 runProfile
  *   BOOT_50_DSH_INIT     runProfile 返回且拿到 ctx
  *   BOOT_60_HTTP_BIND    ctx.webServer 存在（dsh 已绑定端口）
  *   BOOT_70_HTTP_READY   我们自探一次 HTTP，确认端口**真的应答**（不是"应该应答"）
@@ -1880,6 +1884,7 @@ function watchdogAuthUrl() {
  * 这一行会立刻给出结论。
  */
 let RUNTIME_FACTS_CACHE = null;
+let RUNTIME_FACTS_COMPLETE = false;
 /**
  * exec / 终端探针读数的**内存暂存**（键 = `runtime.<key>`，值 = 该段的对象）。
  *
@@ -1945,10 +1950,14 @@ function writePtyDlopenCache(record) {
   }
 }
 
-function runtimeFacts() {
-  if (RUNTIME_FACTS_CACHE !== null) {
-    return RUNTIME_FACTS_CACHE;
-  }
+function deferNativeRuntimeFacts() {
+  return process.env.DSHM_PLATFORM === 'ohos'
+    && PROFILE === 'ondevice'
+    && process.env.DSHM_DEFER_NATIVE_RUNTIME_FACTS === '1'
+    && process.env.DSHM_PTY_DLOPEN_PROBE !== 'on';
+}
+
+function basicRuntimeFacts() {
   const facts = {
     nodeVersion: process.version,
     platform: `${process.platform}/${process.arch}`,
@@ -1963,17 +1972,26 @@ function runtimeFacts() {
   } catch (e) {
     facts.zstd = false;
   }
+  return facts;
+}
+
+function runtimeFacts(complete = !deferNativeRuntimeFacts()) {
+  const previous = RUNTIME_FACTS_CACHE;
+  if (previous !== null && (!complete || RUNTIME_FACTS_COMPLETE)) {
+    return previous;
+  }
+  const facts = previous === null
+    ? basicRuntimeFacts()
+    : { ...previous, natives: [...previous.natives] };
   /*
-   * 三个硬原生依赖：**当场 require 一次**并把结论（含失败原因）带上。
-   * 这比在 UI 上写"未探测"有用得多：装错平台 / DT_NEEDED 不对 / 少拷了 .so，
-   * 都会在这里留下人话，而不用等到某个功能被使用时才炸。
+   * koffi 是宿主使用的运行时依赖。图片和 PTY 能力探测仍返回原实测结果，
+   * 端侧可在工作区加载后完成这两个诊断，避免提前触发未使用的原生库。
    */
-  const probes = [
-    ['koffi', 'koffi'],
-    ['sharp', 'sharp'],
-    ['node-pty', 'node-pty'],
-  ];
-  for (const [label, mod] of probes) {
+  const probes = previous === null ? ['koffi'] : [];
+  if (complete) {
+    probes.push('sharp', 'node-pty');
+  }
+  for (const mod of probes) {
     try {
       const loaded = require(path.join(CORE_DIR, 'node_modules', mod));
       let note = '';
@@ -1998,10 +2016,10 @@ function runtimeFacts() {
           note = `真件原生绑定加载失败，图片附件已降级：${message.slice(0, 160)}`;
         }
       }
-      facts.natives.push({ name: label, ok: ok, note: note });
+      facts.natives.push({ name: mod, ok: ok, note: note });
     } catch (e) {
       facts.natives.push({
-        name: label,
+        name: mod,
         ok: false,
         note: (e && e.message ? String(e.message) : String(e)).slice(0, 200),
       });
@@ -2013,16 +2031,22 @@ function runtimeFacts() {
    * 才硬报 `Cannot find module .../package.json`（见 docs/PITFALLS.md §2.14）。
    * boot 时解析一次：缺包只记诊断、不阻断其余能力，但排查第一眼可见。
    */
-  try {
-    require.resolve(path.join(CORE_DIR, 'node_modules', '@deepseek-ai',
-      'libreoffice-kit-wasm', 'package.json'));
-    facts.natives.push({ name: 'office-kit-wasm', ok: true, note: 'libreoffice-kit-wasm 随核心在包' });
-  } catch (e) {
-    facts.natives.push({
-      name: 'office-kit-wasm',
-      ok: false,
-      note: '缺 @deepseek-ai/libreoffice-kit-wasm：office_render/convert 不可用（核心打包回归）',
-    });
+  if (previous === null) {
+    try {
+      require.resolve(path.join(CORE_DIR, 'node_modules', '@deepseek-ai',
+        'libreoffice-kit-wasm', 'package.json'));
+      facts.natives.push({ name: 'office-kit-wasm', ok: true, note: 'libreoffice-kit-wasm 随核心在包' });
+    } catch (e) {
+      facts.natives.push({
+        name: 'office-kit-wasm',
+        ok: false,
+        note: '缺 @deepseek-ai/libreoffice-kit-wasm：office_render/convert 不可用（核心打包回归）',
+      });
+    }
+  }
+  if (!complete) {
+    RUNTIME_FACTS_CACHE = facts;
+    return facts;
   }
   // ── ACL 权限专项探针（ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE 生效性实测）──
   // E39 之前的结论是"沙箱解包出来的 .node，dlopen 被系统拦"——整个 HAP libs
@@ -2106,7 +2130,14 @@ function runtimeFacts() {
   // 缓存：这三个 require 是**一次性的重活**，而 `runtimeFacts()` 会在
   // "拦截 stdout 写"的路径上被调用——那条路径上绝不能每次都重新加载原生件。
   RUNTIME_FACTS_CACHE = facts;
+  RUNTIME_FACTS_COMPLETE = true;
   return facts;
+}
+
+function scheduleNativeRuntimeFacts(work) {
+  if (deferNativeRuntimeFacts()) {
+    work.request('native-facts', () => recordRuntimeProbe('natives', runtimeFacts(true).natives));
+  }
 }
 /**
  * 把 authenticatedUrl 拆成 baseUrl + token，写 `<HOME_DIR>/host-ready.json`。
@@ -2146,7 +2177,7 @@ function writeHostReady(authUrl) {
         jitless: facts.jitless,
         zstd: facts.zstd,
         listenAddress: facts.listenAddress,
-        natives: facts.natives,
+        natives: RUNTIME_FACTS_COMPLETE ? facts.natives : [],
         nodeCli: NODE_CLI_STATUS,
       },
     };
@@ -2523,6 +2554,16 @@ const DEVICE_SANDBOX_PREFIXES = ['/data/storage', '/storage/Users'];
 if (process.platform === 'openharmony'
   || DEVICE_SANDBOX_PREFIXES.some((p) => SANDBOX_HOME.startsWith(p) || HOME_DIR.startsWith(p))) {
   process.env.DSHM_PLATFORM = 'ohos';
+  if (PROFILE === 'ondevice') {
+    process.env.DSHM_CREDENTIALS_BOUNDED_READ = '1';
+    process.env.DSHM_SCHEDULE_OUTPUT_PRECOMPILED = '1';
+    process.env.DSHM_WORKBENCH_STARTUP = '1';
+    process.env.DSHM_DEFER_NATIVE_RUNTIME_FACTS = '1';
+    process.env.DSHM_HMR_OBSERVE_FAST = '1';
+    process.env.DSHM_HMR_RECONCILE_FAST = '1';
+    process.env.DSHM_INSTALLATION_MANIFEST_PATH_FAST = '1';
+    process.env.DSHM_PYTHON_IDLE_OVERLAP = '1';
+  }
   diag('平台标识：DSHM_PLATFORM=ohos（鸿蒙端侧：平台名或沙箱路径）');
 }
 for (const key of ['NO_PROXY', 'no_proxy']) {
@@ -4735,6 +4776,12 @@ let pyWorkerBridge = null;     // python-bridge-async.cjs 的实例（默认执�
  */
 function pyBridgeInlineEnabled() {
   return String(process.env.DSHM_PY_INLINE || '').trim() === '1';
+}
+
+function startupDiagnosticCompanion(key) {
+  if (key === 'exec' && process.env.DSHM_PLATFORM === 'ohos' && PROFILE === 'ondevice' &&
+      process.env.DSHM_PYTHON_IDLE_OVERLAP === '1' && !pyBridgeInlineEnabled()) return 'python';
+  return undefined;
 }
 
 /*
@@ -9062,20 +9109,34 @@ async function start() {
   // 这种情况比"卸载时机"更容易出错。
   watchdogAuthUrl();
   recoverOrphanLocks(HOME_DIR);
-  // 预热运行时事实：把三个原生 require 挪到写 host-ready.json **之前**，
-  // 这样拦截 stdout 写的那条路径上只读缓存（那里不适合做重活）。
+  stage('BOOT_41_LOCKS_READY');
+  // 在认证 URL 落盘前准备事实缓存。端侧可以保留 koffi 预热，将仅用于
+  // 诊断的图片和 PTY 探测交给工作区加载之后的空闲队列。
   runtimeFacts();
+  stage('BOOT_42_NATIVE_READY');
   globalThis.__dshmUpdateTransaction = require('./dshm-update-transaction.cjs').withUpdateTransaction;
   globalThis.__dshmProfileWriter = require('./dshm-profile-writer.cjs').withProfileWriter;
   globalThis.__dshmProfileWriterToken = require('./dshm-profile-writer.cjs').currentToken;
   // dsh-pet 桌面宿主：必须在 runProfile（插件 apply）之前生效，否则插件会去 spawn Electron。
   process.env.DSH_PET_IN_PROCESS = '1';
   process.env.DSH_PET_OPEN_TARGET = process.env.DSH_PET_OPEN_TARGET || 'web';
+  const environment = appBootMod.loadLayeredEnv('dsh');
+  const refreshSettingsRevisionsOnly = process.env.DSHM_PLATFORM === 'ohos'
+    && PROFILE === 'ondevice' && process.env.DSHM_WORKBENCH_STARTUP === '1'
+    && process.env.DSHM_DEVICE_FORM === 'desktop';
+  if (refreshSettingsRevisionsOnly) {
+    globalThis.__dshmStartupSettingsRevisions = true;
+  }
+  stage('BOOT_45_PROFILE_START');
   const result = await profileBoot.runProfile({
-    environment: appBootMod.loadLayeredEnv('dsh'),
+    environment,
     profile: PROFILE,
     patchFiles: [],
     args: args,
+  }).finally(() => {
+    if (refreshSettingsRevisionsOnly) {
+      delete globalThis.__dshmStartupSettingsRevisions;
+    }
   });
   stage('BOOT_50_DSH_INIT', 'runProfile 已返回');
 
@@ -9144,6 +9205,7 @@ async function start() {
     authUrl: readHostReadyUrl(),
   }));
   log('Host 已就绪，端口 ' + ctx.webServer.port);
+  scheduleNativeRuntimeFacts(startupWork);
   startupWork.markReady();
   /*
    * 持久解析缓存落盘检查点：到这里模块图已装载完毕（BOOT_50 之后、核心树全部

@@ -521,12 +521,32 @@ export class CoreStore {
   }
 
   /**
-   * 清理旧版本；返回真正被删掉的版本号。
+   * 将可清理的旧版本移入后台回收目录，返回移出的版本号。
    *
    * 永不删：current、previous、以及**会真正启动的那棵树**（current 缺失时 = 最新那棵）
    * 和调用方点名的 `keepExtra` —— 判据全在 `Types.evictionCandidates`（纯函数，可单测）。
    * 调用点见 `BundledCore.installBundledCores`（每次装入内置核心之后）。
    */
+  retireUnused(keep: number, keepExtra: string[] = []): string[] {
+    const candidates: string[] = evictionCandidates(this.readState(), this.listInstalled(), keep, keepExtra);
+    const retired: string[] = [];
+    for (const version of candidates) {
+      try {
+        const source: string = this.coreDir(version);
+        const backup: string = source + '.retired-' + Date.now() + '.tmp';
+        if (!fs.lstatSync(source).isDirectory() || fs.accessSync(backup)) {
+          continue;
+        }
+        fs.renameSync(source, backup);
+        retired.push(version);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, '旧版本 %{public}s 退役待重试：%{public}s', version, String(e));
+      }
+    }
+    return retired;
+  }
+
+  // 使用相同保留规则直接删除旧版本，返回已删除的版本号。
   async evict(keep: number, keepExtra: string[] = []): Promise<string[]> {
     const state: CoreState = this.readState();
     const removed: string[] = [];

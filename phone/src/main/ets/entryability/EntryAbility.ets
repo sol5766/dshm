@@ -31,7 +31,7 @@
  *   4. 窗口生命周期里**只清理本实例自己的东西**——关任一窗口不得影响其他窗口。
  */
 
-import { AbilityConstant, common, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, bundleManager, common, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { webview } from '@kit.ArkWeb';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -40,12 +40,14 @@ import { appRecovery } from '@kit.AbilityKit';
 import { process } from '@kit.ArkTS';
 import fs from '@ohos.file.fs';
 import {
+  BundledCoreVerification,
   DshHost,
   HostModulePaths,
   HostStartResult,
   NodeRuntime,
   OpResult,
   probeNativeBindings,
+  preverifyBundledCore,
   resolveHostModulePaths
 } from 'hostruntime';
 // HMS 语音识别桥（ArkTS 侧）：轮询 Host 写的请求文件并调 speechRecognizer
@@ -548,6 +550,7 @@ export default class EntryAbility extends UIAbility {
    * 写 host-stop-request → 等 Node 线程退出），只有持有实例才调得到。
    */
   private host: DshHost | undefined = undefined;
+  private bundledCoreVerification: Promise<BundledCoreVerification | undefined> | undefined = undefined;
   /**
    * 用户已请求「真正退出应用」。
    *
@@ -777,6 +780,24 @@ export default class EntryAbility extends UIAbility {
     // 先于 onWindowStageCreate 发布：窗口标签与「是否主窗」的判断都依赖它
     this.applyLaunchParams(want);
     if (this.launchParams.kind === WindowKind.MAIN) {
+      if (!this.launchHostProvided) {
+        this.bundledCoreVerification = resolveHostModulePaths(this.context)
+          .then((paths: HostModulePaths) => {
+            let installation: string = '';
+            try {
+              const bundle: bundleManager.BundleInfo =
+                bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+              if (bundle.installTime > 0 && bundle.updateTime > 0) {
+                installation = JSON.stringify([bundle.name, bundle.installTime, bundle.updateTime]);
+              }
+            } catch (e) {
+              // 安装身份读不到时仍做完整摘要校验。
+            }
+            return preverifyBundledCore(paths.resourceDir,
+              this.context.cacheDir + '/dshm-bundled-core-identity-v1.txt', installation);
+          })
+          .catch((): undefined => undefined);
+      }
       // 部分大屏移动形态没有把 onForeground 排在本回调之后；这里先落一次，
       // 保证 host 延迟启动时 vm.js 一定能读到同 pid 的前台状态。
       writeAppLifecycle(this.context.filesDir, true, 'onCreate');
@@ -953,6 +974,11 @@ export default class EntryAbility extends UIAbility {
     // `DSHM_PUBLIC_DOWNLOAD` 为空 ⇒ 默认工作区静默退回沙箱，用户可见存储上零足迹（40 轮真机实证）。
     const runtime = new NodeRuntime('', ctx.filesDir,
       this.context as common.UIAbilityContext);
+    if (this.launchParams.kind === WindowKind.MAIN && !this.launchHostProvided) {
+      runtime.setStartupListeningCallback((): void => {
+        hilog.info(DOMAIN, TAG, 'DSHM-TRACE 手机主窗宿主端口已监听');
+      });
+    }
     const host = new DshHost(ctx.filesDir, runtime);
     // 存成字段：退出流程要调 `host.stop()` 干净地停掉宿主（见 host 字段的说明）
     this.host = host;
@@ -967,8 +993,11 @@ export default class EntryAbility extends UIAbility {
       if (!p.available) {
         throw new Error(`核心运行时不可用：${p.note}`);
       }
-      return resolveHostModulePaths(this.context).then((paths: HostModulePaths) =>
-        host.installBundled(paths.resourceDir, ctx.cacheDir));
+      return resolveHostModulePaths(this.context).then((paths: HostModulePaths) => {
+        const verification = this.bundledCoreVerification;
+        this.bundledCoreVerification = undefined;
+        return host.installBundled(paths.resourceDir, ctx.cacheDir, verification);
+      });
     }).then((r) => {
       AppStorage.setOrCreate<boolean>(KEY_CORE_INSTALLING, false);
       hilog.warn(DOMAIN, TAG, 'DSHM-AUTO 安装内置核心：installed=%{public}s failed=%{public}d note=%{public}s',
@@ -1468,12 +1497,7 @@ export default class EntryAbility extends UIAbility {
         clearInterval(ticker);
       }
       this.autoStartHostForDiagnosis();
-      /*
-       * 【2026-11-15 冷启动优化】宿主线程已在跑插件图，UI 线程空着 ⇒ 并行预热 ArkWeb 引擎。
-       * 位置在 `autoStartHostForDiagnosis()` **之后**：`initializeWebEngine()` 同步执行，
-       * 放在前面会把宿主线程创建整体推后同样时长。前提（SDK 明文）三条都满足：
-       * UI 线程同步调用、全局一次、早于任何 Web 组件初始化（Web 在 `phase !== BOOTING` 才挂载）。
-       */
+      // Web 仍在宿主完成鉴权导航后挂载，提前完成引擎初始化。
       this.warmWebEngineOnce();
     }, delayMs);
   }

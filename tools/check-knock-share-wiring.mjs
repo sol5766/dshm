@@ -118,7 +118,8 @@ export function judge(f) {
   if (!f.ability.includes('KnockShareReceiver.release(')) {
     out.push('EntryAbility 的窗口销毁路径未调用 KnockShareReceiver.release()')
   }
-  if (!/aboutToDisappear[\s\S]{0,400}?detachPage\(\)/.test(f.entryShell)) {
+  const pageCleanup = bodyOf(f.entryShell, '  aboutToDisappear(): void')
+  if (!pageCleanup.includes('this.knockReceiver.detachPage()')) {
     out.push('entry 壳 aboutToDisappear 未调用 detachPage()（页面销毁未摘钩子）')
   }
 
@@ -223,6 +224,13 @@ if (process.argv.includes('--self-test')) {
       }),
     },
     {
+      name: '页面销毁不 detachPage',
+      apply: (f) => ({
+        ...f,
+        entryShell: f.entryShell.replace('this.knockReceiver.detachPage();', ''),
+      }),
+    },
+    {
       name: '垫片未注册进 document-start 清单',
       apply: (f) => ({
         ...f,
@@ -248,6 +256,6 @@ if (process.argv.includes('--self-test')) {
 }
 
 console.log(fail === 0
-  ? `\n✅ 通过：${pass} 项（${process.argv.includes('--self-test') ? '含 7 个变异体' : '基线'}）`
+  ? `\n✅ 通过：${pass} 项（${process.argv.includes('--self-test') ? '含 8 个变异体' : '基线'}）`
   : `\n❌ 失败 ${fail} 项：\n  - ${failures.join('\n  - ')}`)
 process.exit(fail === 0 ? 0 : 1)

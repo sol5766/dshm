@@ -23,6 +23,21 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { patchManagerLifecycle } from './lib/manager-lifecycle.mjs';
+import { prepareZodLocales } from './lib/zod-locales.mjs';
+import { isBundledZodBenchmarks, prepareZodFactories } from './lib/zod-factories-startup.mjs';
+import { bundledDevelopmentFiles, bundledEmptyDevelopmentDirectories } from './lib/bundled-development-files.mjs';
+import { deferPluginSubprocessImports } from './lib/plugin-startup.mjs';
+import { patchRuntimeScopeStartup } from './lib/runtime-scope-startup.mjs';
+import { deferProfilePluginImports } from './lib/profile-plugin-startup.mjs';
+import { patchCredentialsLocalStartup } from './lib/credentials-local-startup.mjs';
+import { useScheduleOutputPrecompile } from './lib/schedule-tool-startup.mjs';
+import { patchHmrObserveStartup } from './lib/hmr-observe-startup.mjs';
+import { patchHmrStartupSnapshot } from './lib/hmr-startup-snapshot.mjs';
+import { patchWorkbenchStartupMode } from './lib/workbench-startup-mode.mjs';
+import { patchWorkbenchStartup } from './lib/workbench-startup.mjs';
+import { patchSettingsStartup } from './lib/settings-startup.mjs';
+import { patchCordisStartup } from './lib/cordis-startup.mjs';
+import { patchPostStartupImports } from './lib/post-startup-imports.mjs';
 /*
  * 【语法检查子进程的启动标志（2026-10-31）】检测用的 `node --check` 是**子进程**，
  * 不继承父进程的 `--jitless`。而本机（HarmonyOS 端侧）内核拒绝 JIT 所需的
@@ -5218,6 +5233,8 @@ const DOS_TIME = (12 << 11);
 const DOS_DATE = (((2026 - 1980) << 9) | (1 << 5) | 1);
 
 function writeZip(zipPath, baseDir, topName) {
+  const omissions = bundledDevelopmentFiles(baseDir, log);
+  const emptyDevelopmentDirectories = bundledEmptyDevelopmentDirectories(baseDir, log);
   const fd = openSync(zipPath, 'w');
   const central = [];
   let offset = 0;
@@ -5264,13 +5281,19 @@ function writeZip(zipPath, baseDir, topName) {
   };
 
   const walk = (dir, rel) => {
-    for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (isBundledZodBenchmarks(baseDir, rel)) return;
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .filter(e => e.isDirectory() || e.isFile())
+      .sort((a, b) => (a.name < b.name ? -1 : 1));
+    // ZIP extraction creates parent directories from file paths. Keep a
+    // directory entry for an empty leaf so the extracted tree still matches.
+    if (rel && entries.length === 0 && !emptyDevelopmentDirectories.has(rel)) addEntry(`${topName}/${rel}/`, Buffer.alloc(0), true);
+    for (const e of entries) {
       const full = join(dir, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) {
-        addEntry(`${topName}/${r}/`, Buffer.alloc(0), true);
         walk(full, r);
-      } else if (e.isFile()) {
+      } else if (!omissions.has(r)) {
         addEntry(`${topName}/${r}`, readFileSync(full), false);
       }
     }
@@ -5451,6 +5474,8 @@ log(`[pack-core] 宿主 Node ${process.version} / ${process.platform}`);
 
 materialize();
 prune();
+prepareZodLocales(STAGE, join(WORK_ROOT, '.pack-core-pristine'), log);
+prepareZodFactories(STAGE, log);
 replaceKoffiJs();
 const sig = verify();
 addPlatformAliases();
@@ -5608,6 +5633,18 @@ patchSensevoiceForHms();
 patchVoiceInputNoiseSuppression();
 patchVoiceInputNativeCapture();
 embedProfile();
+deferPluginSubprocessImports(STAGE);
+patchRuntimeScopeStartup(STAGE);
+deferProfilePluginImports(STAGE);
+patchCredentialsLocalStartup(STAGE);
+patchHmrObserveStartup(STAGE);
+patchHmrStartupSnapshot(STAGE);
+await useScheduleOutputPrecompile(STAGE);
+patchWorkbenchStartupMode(STAGE);
+patchWorkbenchStartup(STAGE);
+patchSettingsStartup(STAGE);
+patchCordisStartup(STAGE);
+patchPostStartupImports(STAGE);
 /*
  * 【报告 3 ③】构建期自签名**必须放在最后、pack() 之前**。
  * 踩过的坑：最初放在 replaceKoffiJs() 之后，结果签名被后续的
@@ -5629,7 +5666,7 @@ const manifest = writeManifest({ ...packed, ...sig, selfSign });
 
 log('\n[pack-core] ✓ 完成');
 log(`  核心版本   ${manifest.coreVersionInstalled}`);
-log(`  解包体积   ${(manifest.nodeModules.unpackedBytes / 1048576).toFixed(1)} MB / ${manifest.nodeModules.fileCount} 文件`);
+log(`  暂存依赖   ${(manifest.nodeModules.unpackedBytes / 1048576).toFixed(1)} MB / ${manifest.nodeModules.fileCount} 文件`);
 log(`  分发包     ${manifest.package.file}  ${(manifest.package.bytes / 1048576).toFixed(1)} MB / ${manifest.package.entries} 条目`);
 log(`  sha256     ${manifest.package.sha256}`);
 log(`  签名       ${manifest.native.signatureCheckSkipped ? '未校验' : `${manifest.native.signed.length} 通过 / ${manifest.native.unsigned.length} 未检出`}`);

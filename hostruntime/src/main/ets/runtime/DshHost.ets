@@ -23,7 +23,7 @@ import { process } from '@kit.ArkTS';
 import { ActivationDecision, ActivationAction, CoreHealth, CoreState, CoreVersionRecord } from '../core/Types';
 import { CoreStore, CorePluginRow, CorePluginTotals, CoreTreeInfo, OpResult } from '../core/CoreStore';
 import { newestVersion } from '../core/Naming';
-import { BundledInstallResult, installBundledCores } from '../core/BundledCore';
+import { BundledCoreVerification, BundledInstallResult, installBundledCores, scheduleRetiredCoreCleanup } from '../core/BundledCore';
 import { UserPluginRow, clearUserRows, readUserRows, writeUserRows } from '../core/PluginRows';
 import { HostHandle, NativeFact, RuntimePort, RuntimeProbe, RuntimeKind } from '../runtime/RuntimePort';
 
@@ -806,17 +806,22 @@ fs.writeSync(f.fd, `${Date.now()} ${reason}\n`);
     return this.store.installedRecords();
   }
 
+  scheduleRetiredCoreCleanup(): void {
+    scheduleRetiredCoreCleanup(this.store);
+  }
+
   /**
    * 安装**随应用内置**的核心包（首启解包；幂等）。
    *
    * 与 start() 的关键区别：这一步**不需要运行时载体**——它只是把 zip 解包落位。
    * 因此运行时还没接线时也应当允许用户先装好（核心页据此把"安装内置核心"设为可用）。
    */
-  async installBundled(resourceDir: string, workDir: string): Promise<BundledInstallResult> {
+  async installBundled(resourceDir: string, workDir: string,
+    verification?: Promise<BundledCoreVerification | undefined>, deferEviction: boolean = false): Promise<BundledInstallResult> {
     this.transient = HostState.EXTRACTING;
     this.lastFailureNote = '';
     try {
-      const result: BundledInstallResult = await installBundledCores(resourceDir, workDir, this.store);
+      const result: BundledInstallResult = await installBundledCores(resourceDir, workDir, this.store, verification, deferEviction);
       if (result.failed.length > 0) {
         this.lastFailureNote = result.note;
       }
