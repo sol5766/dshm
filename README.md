@@ -254,3 +254,12 @@ hdc install -r <hap>
 本项目是**移植**：把官方面向桌面的 dsh 运行时搬到鸿蒙。`dsh` / DeepSeek Harness 的商标与上游代码版权归其各自所有者，
 MIT 许可只授予代码权利，不授予商标、Logo、官方背书或合作关系。DSHM 是独立客户端，
 用户可见品牌使用 DSHM 自有标识；上游版权和第三方许可见随包声明。
+
+## 赞赏支持
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/sponsor/wechat.jpg" alt="微信赞赏码" width="320"><br><sub>微信</sub></td>
+    <td align="center"><img src="docs/sponsor/alipay.jpg" alt="支付宝赞赏码" width="320"><br><sub>支付宝</sub></td>
+  </tr>
+</table>
