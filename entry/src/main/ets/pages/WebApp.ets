@@ -43,7 +43,15 @@ import type { PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { curves, router, window, uiMaterial, ComponentContent } from '@kit.ArkUI';
 import { Fs, HarmonySpacing, Radius, Sp, parseNotifyRoute } from 'appstate';
+import { DESKTOP_PROGRESSIVE_STARTUP, DESKTOP_WEB_LOADED, DESKTOP_WEB_NETWORK_LOADED, DESKTOP_WEB_START, DesktopHostStartupStage,
+  DESKTOP_WORKBENCH_PAINTED_EVENT, DESKTOP_WORKBENCH_PAINT_OBSERVER, DESKTOP_WORKBENCH_PAINT_PREFIX,
+  KEY_DESKTOP_HOST_STARTUP,
+  TABLET_STARTUP_WEB_HANDOFF,
+  StartupFrameCallback,
+  buildDesktopWorkbenchPaintScript, desktopWorkbenchPaintPage } from '../common/DesktopStartup';
+import { DesktopStartupProgress } from '../common/DesktopStartupProgress';
 import { BRAND_SHIM_JS } from 'dshcompat';
+import { ACCOUNT_MENU_SHIM_JS } from 'dshcompat';
 // Web 权限裁决的纯逻辑（真机 bug 修复：getOrigin() 带结尾斜杠）
 import { isLoopbackOrigin, shouldGrantWebPermission } from 'appstate';
 // 语音音频换算（路线 A）：HMS 只收 16k/单声道/16位，且 writeAudio 只收 640/1280 字节
@@ -204,6 +212,13 @@ interface WebContextMenuItem {
 interface WebContextMenuPanelParams {
   items: WebContextMenuItem[];
   themeDark: boolean;
+}
+
+interface WebAccountMenu {
+  content: ComponentContent<WebContextMenuPanelParams>;
+  requestId: number;
+  action: number;
+  disposed: boolean;
 }
 
 /**
@@ -2092,7 +2107,14 @@ const GLASS_SKIN_JS: string = `(function () {
   tick();
   setInterval(tick, 1500);
   try {
-    var obs = new MutationObserver(function () { setTimeout(tick, 250); });
+    var pendingScan = 0;
+    var obs = new MutationObserver(function () {
+      if (pendingScan) { return; }
+      pendingScan = setTimeout(function () {
+        pendingScan = 0;
+        tick();
+      }, 250);
+    });
     obs.observe(document.documentElement, { childList: true, subtree: true });
   } catch (e) { /* 观测失败：定时巡检仍在 */ }
   globalThis.__DSHM_GLASS__ = true;
@@ -3597,16 +3619,74 @@ interface WorkspaceBrowserRoot {
   path: string;
 }
 
+class WebConsoleFileSink {
+  private readonly path: string;
+  private readonly pending: string[] = [];
+  private timer: number = -1;
+  private flushing: boolean = false;
+  private opened: boolean = false;
+  private lines: number = 0;
+
+  constructor(path: string) {
+    this.path = path;
+  }
+
+  append(record: string, timestamp: string): void {
+    if (this.lines >= CONSOLE_SINK_LINE_CAP) {
+      return;
+    }
+    this.pending.push(record);
+    this.lines++;
+    if (this.lines === CONSOLE_SINK_LINE_CAP) {
+      this.pending.push(
+        timestamp + ' === 已达 ' + CONSOLE_SINK_LINE_CAP + ' 行上限，后续 console 不再落盘 ===\n');
+    }
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushing || this.timer >= 0 || this.pending.length === 0) {
+      return;
+    }
+    this.timer = setTimeout((): void => {
+      this.timer = -1;
+      this.flush();
+    }, 48);
+  }
+
+  private async flush(): Promise<void> {
+    this.flushing = true;
+    const batch: string = this.pending.splice(0, 48).join('');
+    try {
+      const first: boolean = !this.opened;
+      const mode: number = fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE |
+        (first ? fileIo.OpenMode.TRUNC : fileIo.OpenMode.APPEND);
+      const file: fileIo.File = await fileIo.open(this.path, mode);
+      try {
+        const header: string = first ? new Date().toISOString() +
+          ' === diag-web-console 本次冷启动开始（上限 ' + CONSOLE_SINK_LINE_CAP + ' 行）===\n' : '';
+        await fileIo.write(file.fd, header + batch);
+        this.opened = true;
+      } finally {
+        await fileIo.close(file.fd);
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'console 落盘失败：%{public}s', (error as Error).message);
+    } finally {
+      this.flushing = false;
+      this.scheduleFlush();
+    }
+  }
+}
+
 class DshDirectoryPickerBridge {
   private readonly hostContext: () => common.Context | undefined;
   private readonly controller: () => webview.WebviewController;
   private readonly openWorkspaceBrowser: (ctx: common.Context) => Promise<WorkspaceBrowserPickResult>;
   /** 单飞行守卫：系统选择器一次只能有一个；startPick 重入直接返回 'busy' */
   private picking: boolean = false;
-  /** `diag-web-console` 是否已在本次冷启动写过首行（决定 TRUNC 还是 APPEND） */
-  private consoleSinkOpened: boolean = false;
-  /** 本次冷启动已落盘的 console 行数（与 `CONSOLE_SINK_LINE_CAP` 比较） */
-  private consoleSinkLines: number = 0;
+  /** diag-web-console 按进程和路径共用一条写入队列，串行落盘。 */
+  private static readonly consoleSinks: Map<string, WebConsoleFileSink> = new Map();
 
   constructor(hostContext: () => common.Context | undefined,
     controller: () => webview.WebviewController,
@@ -3653,7 +3733,7 @@ class DshDirectoryPickerBridge {
    * 而网页端的错误恰恰是本端绝大多数界面问题的第一现场（例：右侧栏 `files`
    * 页签被占位后文件树空白，网页端会刷 `already registered`，本端却看不到）。
    *
-   * 【做法】与既有 `writeDiagMarker` 同一套（filesDir + 追加 + 写失败静默），
+   * 【做法】在 filesDir 异步分批追加。
    * 但有三点不同，都是为"console 是高频流"这一事实：
    *   1. **每次冷启动截断**（首次写入用 TRUNC，之后 APPEND）——只保留本次运行，
    *      否则跨次启动混在一起根本读不出时序；
@@ -3678,44 +3758,24 @@ class DshDirectoryPickerBridge {
       if (ctx === undefined) {
         return;
       }
-      if (this.consoleSinkLines >= CONSOLE_SINK_LINE_CAP) {
-        return;
+      const path: string = ctx.filesDir + '/diag-web-console';
+      let sink = DshDirectoryPickerBridge.consoleSinks.get(path);
+      if (sink === undefined) {
+        sink = new WebConsoleFileSink(path);
+        DshDirectoryPickerBridge.consoleSinks.set(path, sink);
       }
-      /*
-       * 【为什么先做类型收敛】真机首轮实测：本方法一行都没落盘，文件压根没被创建。
-       * 而 `flat` 是在 `openSync` **之前**算的 ⇒ 只要 `message` 不是字符串
-       * （`ConsoleMessage.getMessage()` 对某些来源可能给到空/未定义），
-       * `.split` 就会在建文件前抛，整个方法被 catch 吃掉，现象正是"文件不存在"。
-       * 宁可把这一层收敛写死，也不要让整条诊断通道被单条异常消息带走。
-       */
-      const raw: string = typeof message === 'string' ? message : `${message}`;
+      const raw: string = typeof message === 'string' ? message : String(message);
       const src: string = typeof source === 'string' ? source : '';
       const ln: number = typeof line === 'number' ? line : 0;
       const lv: number = typeof level === 'number' ? level : 0;
       const flat: string = raw.split('\n').join('\\n');
-      const body: string = flat.length > 2000 ? `${flat.substring(0, 2000)}…[单条已截断]` : flat;
-      const p: string = `${ctx.filesDir}/diag-web-console`;
-      const mode: number = this.consoleSinkOpened
-        ? (fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.APPEND)
-        : (fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
-      const file: fileIo.File = fileIo.openSync(p, mode);
-      if (!this.consoleSinkOpened) {
-        this.consoleSinkOpened = true;
-        fileIo.writeSync(file.fd,
-          `${new Date().toISOString()} === diag-web-console 本次冷启动开始（上限 ${CONSOLE_SINK_LINE_CAP} 行）===\n`);
-      }
-      this.consoleSinkLines += 1;
-      fileIo.writeSync(file.fd, `${new Date().toISOString()} L${lv} ${src}:${ln} ${body}\n`);
-      if (this.consoleSinkLines >= CONSOLE_SINK_LINE_CAP) {
-        fileIo.writeSync(file.fd,
-          `${new Date().toISOString()} === 已达 ${CONSOLE_SINK_LINE_CAP} 行上限，后续 console 不再落盘 ===\n`);
-      }
-      fileIo.closeSync(file);
-    } catch (e) {
-      hilog.warn(DOMAIN, TAG, 'console 落盘失败：%{public}s', (e as Error).message);
+      const body: string = flat.length > 2000 ? flat.substring(0, 2000) + '…[单条已截断]' : flat;
+      const timestamp: string = new Date().toISOString();
+      sink.append(timestamp + ' L' + lv + ' ' + src + ':' + ln + ' ' + body + '\n', timestamp);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'console 收集失败：%{public}s', (error as Error).message);
     }
   }
-
 
   /**
    * 同步入口（methodList 注册）：web 垫片调它启动选择流程，立即返回状态。
@@ -4055,15 +4115,47 @@ function decorTopInsetVp(handheld: boolean, decorPresent: boolean, appTopBarVisi
  * 状态栏/窗口底色改用 `windowChromeFor(this.systemAppearance())`。深色系统下从首帧起就是深底
  * 浅图标，不再「先白后深」。
  */
+const SPLASH_BG: string = '#FFFFFF';
+const STARTUP_BLANK_URL: string = 'about:blank';
+const DESKTOP_STARTUP_PAINT_FALLBACK_MS: number = 400;
+const TABLET_STARTUP_PAINT_FALLBACK_MS: number = 1000;
+const TABLET_STARTUP_WEB_PREPARE_DELAY_MS: number = 1100;
+const TABLET_STARTUP_BRAND_HOLD_MS: number = 2400;
+const DESKTOP_STARTUP_FADE_MS: number = 132;
+const TABLET_STARTUP_BACKDROP_FADE_MS: number = 96;
+const TABLET_STARTUP_PROGRESS_FADE_MS: number = 66;
+const TABLET_STARTUP_REVEALED_BG: string = '#59' + SPLASH_BG.substring(1);
 
-@Entry
+@Entry({ useSharedStorage: true })
 @Component
 struct WebApp {
+  @LocalStorageProp('dshStartupMainWindow') private startupMainWindow: boolean = false;
+  @StorageProp(KEY_DESKTOP_HOST_STARTUP) private startupHostStage: number = DesktopHostStartupStage.WaitingForFolders;
+  private startupProgressVisible: boolean = false;
+  @State private desktopStartupComplete: boolean = false;
+  @State private desktopStartupFinishing: boolean = false;
+  @State private desktopStartupBackdrop: string = SPLASH_BG;
+  @State private tabletStartupBrandReleased: boolean = false;
+  private tabletStartupBrandTimer: number = -1;
+  @State private startupWebProgress: number = DESKTOP_WEB_START;
+  private startupPaintTimer: number = -1;
+  private desktopPaintMessage: string = '';
+  private webWorkbenchPaintReported: boolean = false;
   @StorageProp(KEY_HOST_LAUNCH_URL) @Watch('onLaunchUrlChanged') launchUrl: string = '';
   @StorageProp(KEY_HOST_BOOT_ERROR) @Watch('onHostBootErrorChanged') hostBootError: string = '';
   @State @Watch('onPhaseChanged') phase: WebPhase = WebPhase.BOOTING;
   /** 启动页是否用深色：按系统当前深浅色，在 aboutToAppear 里定（web 主题上报前）。 */
   @State splashDark: boolean = false;
+  @State private startupWebPrepared: boolean = false;
+  private startupWebPrepareTimer: number = -1;
+  private startupPageActive: boolean = false;
+  private startupDocumentScripts: Array<ScriptItem> = [];
+  private startupControllerAttached: boolean = false;
+  private preparedLaunchUrl: string = '';
+  private webAttachReported: boolean = false;
+  private webNavigationStarted: boolean = false;
+  private webFirstPaintReported: boolean = false;
+  private webVisibleFrameReported: boolean = false;
   /** ERROR 覆盖层展示的原因（不含任何凭据） */
   @State errorText: string = '';
   // ── 启动加载页品牌动效 ────────────────────────────────────────────────
@@ -4524,6 +4616,8 @@ struct WebApp {
      * 写进 `files/diag-glass`，真机一条 `cat` 就能判"没生效"是内核不支持、还是选择器没命中。
      */
     ,'writeGlassDiag': (detail: string): void => this.dirPickerBridge.writeDiagMarkerPublic('diag-glass', detail)
+    ,'openWebAccountMenu': (id: number, x: number, y: number, settings: string, feedback: string,
+      account: string): boolean => this.openWebAccountMenu(id, x, y, [settings, feedback, account])
     /*
      * 形态读数（2026-10-09）：侧栏垫片用它决定要不要开"移动端抽屉"（SIDEBAR_SHIM_JS §B）。
      * 【为什么必须由原生回答】手持档判据只有一处真源（platform.isHandheldForm()，
@@ -5529,6 +5623,7 @@ struct WebApp {
     { script: SIDEBAR_SHIM_JS, scriptRules: ['*'] },
     /* 外壳玻璃（docs/359 一期）：排在侧栏垫片之后——它要认 .dshm-sbcol 这个钩子。 */
     { script: GLASS_SKIN_JS, scriptRules: ['*'] },
+    { script: ACCOUNT_MENU_SHIM_JS, scriptRules: ['*'] },
     /* AI 生成标识：同样认 .dshm-frame 的主列；排在侧栏/玻璃之后即可。 */
     { script: AI_DISCLOSURE_SHIM_JS, scriptRules: ['*'] },
   { script: COMPOSER_PIN_SHIM_JS, scriptRules: ['*'] },
@@ -5582,6 +5677,7 @@ struct WebApp {
   private hmsE2eDetail: string = '';
 
   aboutToAppear(): void {
+    this.startupPageActive = true;
     this.nativeCaptureDisposed = false;
     // 启动页首帧就要定深浅：web 主题还没上报，只能读系统 colorMode（见 systemAppearance）。
     this.splashDark = this.systemAppearance() === 'dark';
@@ -5880,6 +5976,14 @@ struct WebApp {
   aboutToDisappear(): void {
     this.nativeCaptureDisposed = true;
     this.cancelNativeCapture();
+    this.closeWebAccountMenu();
+    this.startupPageActive = false;
+    this.clearTabletStartupBrandTimer();
+    if (this.startupWebPrepareTimer !== -1) {
+      clearTimeout(this.startupWebPrepareTimer);
+      this.startupWebPrepareTimer = -1;
+    }
+    this.clearDesktopStartupPaintTimer();
     this.readAloud.release();
     // 碰一碰：只摘本页钩子，不注销系统监听、不丢挂起队列（docs/421 WP1：
     // 窗口还在时页面重载不应让系统侧失去接收方；真正注销在 onWindowStageDestroy）
@@ -6377,10 +6481,222 @@ struct WebApp {
       rounded, this.bottomInsetVp > 0 ? '沉浸扩展' : '不接管');
   }
 
-  /** 宿主重启后会带新 token 再次发布：Web 的 src 变化即触发重新加载 */
+  private prepareDesktopWebAfterFrame(): void {
+    const prepare = (): void => {
+      this.startupWebPrepareTimer = -1;
+      if (!this.startupPageActive || this.phase !== WebPhase.BOOTING || this.launchUrl.length > 0) {
+        return;
+      }
+      this.startupDocumentScripts = this.pickerShimScripts.map((item: ScriptItem): ScriptItem => {
+        return {
+          script: "if (location.href.indexOf('about:blank') !== 0) {\n" + item.script + "\n}",
+          scriptRules: item.scriptRules
+        };
+      });
+      this.startupDocumentScripts.push({ script: DESKTOP_WORKBENCH_PAINT_OBSERVER, scriptRules: ['*'] });
+      if (this.rawDeviceType === 'tablet') {
+        this.startupDocumentScripts.push({ script: TABLET_STARTUP_WEB_HANDOFF, scriptRules: ['*'] });
+      }
+      this.startupWebPrepared = true;
+    };
+    this.getUIContext().postFrameCallback(new StartupFrameCallback((): void => {
+      if (!this.startupPageActive) return;
+      if (this.rawDeviceType === 'tablet') {
+        this.startupWebPrepareTimer = setTimeout(prepare, TABLET_STARTUP_WEB_PREPARE_DELAY_MS);
+      } else {
+        prepare();
+      }
+    }));
+  }
+
+  private webDocumentStartScripts(): Array<ScriptItem> {
+    if (this.startupWebPrepared) return this.startupDocumentScripts;
+    if (!this.usesDesktopStartup() || this.rawDeviceType !== 'tablet') return this.pickerShimScripts;
+    const handoff: ScriptItem = { script: TABLET_STARTUP_WEB_HANDOFF, scriptRules: ['*'] };
+    return this.pickerShimScripts.concat(handoff);
+  }
+
+  private isStartupBlankNavigation(url: string): boolean {
+    return this.startupWebPrepared && (this.launchUrl.length === 0 || url === STARTUP_BLANK_URL);
+  }
+
+  private loadPreparedHostPage(): boolean {
+    if (!this.startupPageActive || !this.startupWebPrepared || !this.startupControllerAttached ||
+      this.launchUrl.length === 0 || this.launchUrl === this.preparedLaunchUrl) {
+      return false;
+    }
+    const url: string = this.launchUrl;
+    try {
+      this.controller.loadUrl(url);
+      this.preparedLaunchUrl = url;
+    } catch (e) {
+      this.fail('未能打开本地核心页面');
+    }
+    return true;
+  }
+
+  private reportWebVisibleFrame(): void {
+    if (this.webVisibleFrameReported || this.phase !== WebPhase.READY ||
+      (!this.webFirstPaintReported && !this.webWorkbenchPaintReported)) {
+      return;
+    }
+    this.getUIContext().postFrameCallback(new StartupFrameCallback((): void => {
+      if (this.startupPageActive && this.phase === WebPhase.READY && !this.webVisibleFrameReported) {
+        this.webVisibleFrameReported = true;
+        hilog.warn(DOMAIN, TAG, 'DSHM-TRACE ArkWeb 内容可见帧');
+      }
+    }));
+  }
+
+  private usesDesktopStartup(): boolean {
+    return DESKTOP_PROGRESSIVE_STARTUP && this.desktopForced && this.startupMainWindow;
+  }
+
+  private scheduleTabletStartupBrandRelease(): void {
+    if (this.rawDeviceType !== 'tablet' || this.desktopStartupComplete || this.tabletStartupBrandReleased) return;
+    this.tabletStartupBrandTimer = setTimeout((): void => {
+      this.tabletStartupBrandTimer = -1;
+      if (!this.startupPageActive || this.desktopStartupComplete || this.phase === WebPhase.ERROR) return;
+      this.tabletStartupBrandReleased = true;
+    }, TABLET_STARTUP_BRAND_HOLD_MS);
+  }
+
+  private clearTabletStartupBrandTimer(): void {
+    if (this.tabletStartupBrandTimer !== -1) {
+      clearTimeout(this.tabletStartupBrandTimer);
+      this.tabletStartupBrandTimer = -1;
+    }
+  }
+
+  private waitsForTabletWorkspace(): boolean {
+    return this.usesDesktopStartup() && this.rawDeviceType === 'tablet' &&
+      desktopWorkbenchPaintPage(this.launchUrl).length > 0;
+  }
+
+  private desktopStartupPaintWait(): number {
+    return this.waitsForTabletWorkspace() ? TABLET_STARTUP_PAINT_FALLBACK_MS : DESKTOP_STARTUP_PAINT_FALLBACK_MS;
+  }
+
+  private clearDesktopStartupPaintTimer(): void {
+    this.desktopPaintMessage = '';
+    if (this.startupPaintTimer !== -1) {
+      clearTimeout(this.startupPaintTimer);
+      this.startupPaintTimer = -1;
+    }
+  }
+
+  private resetDesktopStartupNavigation(): void {
+    if (this.usesDesktopStartup() && !this.desktopStartupComplete) {
+      this.clearDesktopStartupPaintTimer();
+      this.startupWebProgress = DESKTOP_WEB_START;
+      this.webNavigationStarted = false;
+      this.webFirstPaintReported = false;
+      this.webWorkbenchPaintReported = false;
+    }
+  }
+
+  private completeDesktopStartup(): void {
+    if (!this.startupPageActive || this.phase !== WebPhase.READY || this.loadFailed || this.desktopStartupComplete) {
+      return;
+    }
+    this.clearDesktopStartupPaintTimer();
+    this.clearTabletStartupBrandTimer();
+    this.desktopStartupFinishing = this.startupProgressVisible && !this.tabletStartupBrandReleased;
+    this.startupWebProgress = 100;
+    this.desktopStartupComplete = true;
+    if (this.rawDeviceType === 'tablet' && this.desktopStartupFinishing && this.webWorkbenchPaintReported) {
+      this.getUIContext().animateTo({ duration: TABLET_STARTUP_BACKDROP_FADE_MS, curve: Curve.EaseOut }, (): void => {
+        this.desktopStartupBackdrop = this.splashDark ? '#59151517' : TABLET_STARTUP_REVEALED_BG;
+      });
+    }
+    hilog.info(DOMAIN, TAG, 'DSHM-TRACE 桌面启动进度完成（首绘=%{public}s）',
+      this.webFirstPaintReported ? 'true' : 'false');
+  }
+
+
+  private requestDesktopWorkbenchPaint(url: string): void {
+    if (!this.webNavigationStarted || this.desktopStartupComplete || this.phase !== WebPhase.READY ||
+      this.loadFailed || !this.startupPageActive || this.desktopPaintMessage.length > 0) {
+      return;
+    }
+    const page: string = desktopWorkbenchPaintPage(url);
+    if (page.length === 0 || page !== desktopWorkbenchPaintPage(this.launchUrl)) {
+      return;
+    }
+    try {
+      const message: string = DESKTOP_WORKBENCH_PAINT_PREFIX + util.generateRandomUUID(true);
+      this.desktopPaintMessage = message;
+      const script: string = buildDesktopWorkbenchPaintScript(page, message, this.desktopStartupPaintWait(),
+        this.waitsForTabletWorkspace());
+      this.controller.runJavaScript(script,
+        (err: BusinessError, _result: string): void => {
+          if (err && this.desktopPaintMessage === message) {
+            this.desktopPaintMessage = '';
+          }
+        });
+    } catch (_error) {
+      this.desktopPaintMessage = '';
+    }
+  }
+
+  private acceptDesktopWorkbenchPaint(message: string): boolean {
+    if (!message || !message.startsWith(DESKTOP_WORKBENCH_PAINT_PREFIX)) {
+      return false;
+    }
+    if (message !== this.desktopPaintMessage || !this.usesDesktopStartup() ||
+      !this.startupPageActive || this.phase !== WebPhase.READY || this.loadFailed || this.desktopStartupComplete) {
+      return true;
+    }
+    try {
+      const page: string = desktopWorkbenchPaintPage(this.controller.getUrl());
+      if (page.length === 0 || page !== desktopWorkbenchPaintPage(this.launchUrl)) {
+        return true;
+      }
+    } catch (_error) {
+      return true;
+    }
+    this.webWorkbenchPaintReported = true;
+    hilog.info(DOMAIN, TAG, 'DSHM-TRACE 工作区绘制确认');
+    this.completeDesktopStartup();
+    this.reportWebVisibleFrame();
+    this.getUIContext().getHostContext()?.eventHub.emit(DESKTOP_WORKBENCH_PAINTED_EVENT);
+    return true;
+  }
+
+  private finishDesktopStartupLoad(): void {
+    if (this.desktopStartupComplete) {
+      return;
+    }
+    this.startupWebProgress = DESKTOP_WEB_LOADED;
+    if (this.webFirstPaintReported && !this.waitsForTabletWorkspace()) {
+      this.completeDesktopStartup();
+      return;
+    }
+    // 部分页面没有 FCP 回调。只有成功完成主导航才启动该兜底。
+    this.clearDesktopStartupPaintTimer();
+    this.startupPaintTimer = setTimeout(() => {
+      this.startupPaintTimer = -1;
+      this.completeDesktopStartup();
+    }, this.desktopStartupPaintWait());
+  }
+
+  private async logWebBundleVersion(): Promise<void> {
+    try {
+      const info: bundleManager.BundleInfo = await bundleManager.getBundleInfoForSelf(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      hilog.info(CLOUD_DOMAIN, TAG, '[dshm-web] version=%{public}s (%{public}d)', info.versionName, info.versionCode);
+    } catch (error) {
+      hilog.warn(CLOUD_DOMAIN, TAG, '[dshm-web] version 读不到：%{public}s', (error as Error).message);
+    }
+  }
+
+  /** 预挂载的 Web 已经加载空页，宿主发布新地址时用已附着的控制器导航。 */
   private onLaunchUrlChanged(): void {
     if (this.launchUrl.length > 0) {
       this.enterLoading();
+      this.loadPreparedHostPage();
+    } else {
+      this.preparedLaunchUrl = '';
     }
   }
 
@@ -6393,6 +6709,7 @@ struct WebApp {
       return;
     }
     this.clearAutoRetry();
+    this.clearDesktopStartupPaintTimer();
     this.loadFailed = true;
     this.errorText = this.hostBootError;
     this.phase = WebPhase.ERROR;
@@ -6415,6 +6732,7 @@ struct WebApp {
      * （判据写在 ticker 内部：READY/ERROR 才停）。这样进度条在整个启动页可见期间
      * 都在按时间平滑推进，就绪时自然是"从 8x% 补到 100%"而不是从冻结值猛跳。
      */
+    this.resetDesktopStartupNavigation();
     this.phase = WebPhase.LOADING;
     /* 新一轮加载开始：清掉上一轮的失败标记，否则 onPageEnd 会一直被拦住 */
     this.loadFailed = false;
@@ -6449,6 +6767,7 @@ struct WebApp {
    * @param message 展示给用户的原因（不含凭据）
    */
   private fail(message: string): void {
+    this.clearDesktopStartupPaintTimer();
     this.loadFailed = true;
     this.errorText = message;
     hilog.warn(DOMAIN, TAG, 'web UI 加载失败：%{public}s', message);
@@ -6699,6 +7018,7 @@ struct WebApp {
 
   private retry(): void {
     this.clearAutoRetry();
+    this.resetDesktopStartupNavigation();
     this.loadFailed = false;
     if (this.hostBootError.length > 0) {
       this.phase = WebPhase.ERROR;
@@ -6716,6 +7036,9 @@ struct WebApp {
     }
     this.phase = WebPhase.LOADING;
     this.errorText = '';
+    if (this.loadPreparedHostPage()) {
+      return;
+    }
     try {
       this.controller.refresh();
     } catch (e) {
@@ -7107,7 +7430,7 @@ struct WebApp {
 
   // ── 启动加载页品牌动效 ────────────────────────────────────────────────
   // mark 淡入（640ms Friction，延迟 80ms）→ 常驻呼吸（1800ms EaseInOut 往返，
-  // 延迟 720ms）；进度条 220ms 一格、+3 循环。幂等：ticker 已在跑则只补动画。
+  // 延迟 720ms）。普通平板和会话窗继续使用原计时器。
   private startBrandAnimation(): void {
     /*
      * 【2026-10-30 换标 + 动效改用物理弹簧（用户口径："开屏启动动画调用这个特性 curves.springMotion"）】
@@ -7142,7 +7465,7 @@ struct WebApp {
     }, () => {
       this.brandBreath = 1.09;
     });
-    if (this.loadTicker === -1) {
+    if (!this.usesDesktopStartup() && this.loadTicker === -1) {
       this.progressValue = 0;
       this.progressFinishing = false;
       /*
@@ -7361,6 +7684,103 @@ struct WebApp {
   private webMenuContent: ComponentContent<WebContextMenuPanelParams> | undefined = undefined;
   private webMenuResult: WebContextMenuResult | undefined = undefined;
   private webMenuClosed: boolean = true;
+  private webAccountMenu: WebAccountMenu | undefined = undefined;
+
+  private openWebAccountMenu(id: number, x: number, y: number, labels: string[]): boolean {
+    if (!this.desktopForced || !this.startupMainWindow || !this.webReady || this.webAccountMenu !== undefined ||
+      this.webMenuContent !== undefined || deviceInfo.sdkApiVersion < 26 || this.lastWebAreaWidth <= 0 ||
+      this.lastWebAreaHeight <= 0 || !Number.isSafeInteger(id) || id <= 0 || !Number.isFinite(x) ||
+      !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1 ||
+      labels.some((label: string): boolean => label.length === 0 || label.length > 80)) {
+      return false;
+    }
+    try {
+      const local = /^http:\/\/127\.0\.0\.1:[0-9]+(?=\/|$)/.exec(this.launchUrl);
+      const caller: string = this.controller.getLastJavascriptProxyCallingFrameUrl();
+      if (local === null || !caller.startsWith(local[0] + '/') ||
+        caller.split('#')[0] !== this.controller.getUrl().split('#')[0] || !uiMaterial.isImmersiveMaterialSupported()) {
+        return false;
+      }
+      const material = immersiveMaterialOf(uiMaterial.ImmersiveStyle.THIN, false);
+      if (material === undefined) {
+        return false;
+      }
+      const ui: UIContext = this.getUIContext();
+      const items: WebContextMenuItem[] = labels.map((label: string, index: number): WebContextMenuItem => {
+        return { label: label, run: (): void => this.selectWebAccountMenuItem(id, index) };
+      });
+      const params: WebContextMenuPanelParams = { items: items, themeDark: this.themeMode === 'dark' };
+      const content = new ComponentContent<WebContextMenuPanelParams>(ui, wrapBuilder(WebContextMenuPanel), params);
+      const menu: WebAccountMenu = { content: content, requestId: id, action: -1, disposed: false };
+      this.webAccountMenu = menu;
+      const options: MenuOptions = {
+        anchorPosition: { x: x * this.lastWebAreaWidth, y: y * this.lastWebAreaHeight },
+        systemMaterial: material,
+        onAppear: (): void => this.dirPickerBridge.writeDiagMarkerPublic('diag-webmenu', 'account native appear'),
+        onDisappear: (): void => this.finishWebAccountMenu(menu, menu.action)
+      };
+      ui.getPromptAction().openMenu(content, { id: 'dshm-web-menu-anchor' }, options).catch((): void => {
+        this.dirPickerBridge.writeDiagMarkerPublic('diag-webmenu', 'account native fallback');
+        this.finishWebAccountMenu(menu, -2);
+      });
+      return true;
+    } catch (e) {
+      if (this.webAccountMenu !== undefined) {
+        this.finishWebAccountMenu(this.webAccountMenu, -2);
+      }
+      return false;
+    }
+  }
+
+  private selectWebAccountMenuItem(id: number, action: number): void {
+    const menu = this.webAccountMenu;
+    if (menu === undefined || menu.requestId !== id || menu.action !== -1) {
+      return;
+    }
+    menu.action = action;
+    this.dirPickerBridge.writeDiagMarkerPublic('diag-webmenu', `account native select ${action}`);
+    this.dismissWebAccountMenu(menu);
+  }
+
+  private closeWebAccountMenu(): void {
+    const menu = this.webAccountMenu;
+    this.webAccountMenu = undefined;
+    if (menu !== undefined) {
+      this.dismissWebAccountMenu(menu);
+    }
+  }
+
+  private dismissWebAccountMenu(menu: WebAccountMenu): void {
+    try {
+      this.getUIContext().getPromptAction().closeMenu(menu.content).catch((): void => {
+        this.finishWebAccountMenu(menu, menu.action);
+      });
+    } catch (e) {
+      this.finishWebAccountMenu(menu, menu.action);
+    }
+  }
+
+  private finishWebAccountMenu(menu: WebAccountMenu, action: number): void {
+    if (menu.disposed) {
+      return;
+    }
+    menu.disposed = true;
+    try {
+      menu.content.dispose();
+    } catch (e) {
+      // 窗口销毁时系统可能已释放内容。
+    }
+    if (this.webAccountMenu !== menu) {
+      return;
+    }
+    this.webAccountMenu = undefined;
+    try {
+      this.controller.runJavaScript(`window.__DSHM_ACCOUNT_MENU__?.finish(${menu.requestId}, ${action});`)
+        .catch((): void => {});
+    } catch (e) {
+      // 导航后旧文档可能已经销毁。
+    }
+  }
 
   /**
    * 收菜单（幂等）：告诉 ArkWeb「菜单已关」（closeContextMenu），网页恢复交互。
@@ -7883,8 +8303,11 @@ struct WebApp {
       }
       Stack() {
       // Web 放最底层：ERROR 时也不卸载（保持 controller 可用，重试走 refresh）
-      if (this.phase !== WebPhase.BOOTING) {
-        Web({ src: this.launchUrl, controller: this.controller })
+      if (this.phase !== WebPhase.BOOTING || this.startupWebPrepared) {
+        Web({
+          src: this.startupWebPrepared ? STARTUP_BLANK_URL : this.launchUrl,
+          controller: this.controller
+        })
           .attributeModifier(WEB_CONTEXT_MENU_COMPAT)
           // 沉浸光感·混合承载（2026-11-17）：网页右键/长按菜单由应用侧接管，
           // openMenu 弹带 systemMaterial 的原生菜单（内容相关毛玻璃）。
@@ -7900,7 +8323,7 @@ struct WebApp {
           // JS 执行（官方文档原文），即先于官方 wire bootstrap → 官方前端
           // native 面的 apply() 读 __DSH_DIRECTORY_PICKER__ 时垫片已就位。
           // ⚠ 验收信号：DOM 探针的 p/c/r 字段应为 "object"/"object"/"function"。
-          .javaScriptOnDocumentStart(this.pickerShimScripts)
+          .javaScriptOnDocumentStart(this.webDocumentStartScripts())
           // 第 1 段之同步桥：javaScriptProxy 只暴露**同步**方法 startPick
           //（官方 FAQ 定论：javaScriptProxy 仅支持同步调用，异步方法无法把
           // 结果回传 H5——asyncMethodList 路线实测死路，diag-pick-called
@@ -7940,22 +8363,51 @@ struct WebApp {
              * entry 侧是迁移遗漏。bridge 对象本体（'platformPcMode': …）一直在
              * bridges 里定义着，只是名单漏登记。
              */
-            methodList: ['startPick', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture', 'cancelNativeCapture', 'openExternal', 'openFilePreview', 'openFileLocation', 'writeGlassDiag', 'platformHandheld', 'platformForm', 'platformPcMode', 'requestSystemBack', 'openCloudSync', 'cloudSyncState', 'cloudSyncAction', 'readAloud', 'stopReadAloud', 'shareText'],
+            methodList: ['startPick', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture', 'cancelNativeCapture', 'openExternal', 'openFilePreview', 'openFileLocation', 'writeGlassDiag', 'openWebAccountMenu', 'platformHandheld', 'platformForm', 'platformPcMode', 'requestSystemBack', 'openCloudSync', 'cloudSyncState', 'cloudSyncAction', 'readAloud', 'stopReadAloud', 'shareText'],
             controller: this.controller
           })          // 官方 web UI 自己按 prefers-color-scheme 适配暗色：跟随系统、不强制反色
           .darkMode(WebDarkMode.Auto)
           .forceDarkAccess(false)
-          .onPageBegin(() => {
+          .onControllerAttached(() => {
+            this.startupControllerAttached = true;
+            if (!this.webAttachReported) {
+              this.webAttachReported = true;
+              hilog.warn(DOMAIN, TAG, 'DSHM-TRACE ArkWeb 控制器已挂载');
+            }
+            this.loadPreparedHostPage();
+          })
+          .onFirstContentfulPaint(() => {
+            if (this.webNavigationStarted && !this.webFirstPaintReported && !this.loadFailed) {
+              this.webFirstPaintReported = true;
+              hilog.warn(DOMAIN, TAG, 'DSHM-TRACE ArkWeb 首次内容绘制');
+              if (this.usesDesktopStartup() && !this.waitsForTabletWorkspace()) {
+                this.completeDesktopStartup();
+              }
+              this.reportWebVisibleFrame();
+            }
+          })
+          .onProgressChange((event: OnProgressChangeEvent) => {
+            if (event.newProgress === 100 && this.usesDesktopStartup() && !this.desktopStartupComplete &&
+              this.webNavigationStarted && this.phase === WebPhase.LOADING && !this.loadFailed &&
+              this.startupWebProgress < DESKTOP_WEB_NETWORK_LOADED) {
+              this.startupWebProgress = DESKTOP_WEB_NETWORK_LOADED;
+            }
+          })
+          .onPageBegin((event: OnPageBeginEvent) => {
             this.cancelNativeCapture();
             // 【顺序不可换】上一行必须是本回调的第一个动作（`check-native-capture-lifecycle`
-            // 断言 `{\s*this.cancelNativeCapture();`），且紧跟的必须是 // 注释行
-            //（同一门禁自测的 mutant 4 用它做锚点）。启动标记只能放在这之后。
-            // S6：Web 开始导航（S5→S6 是"URL 已发布但 Web 尚未起导航"的间隔）
+            // 的主检和变异体依赖此顺序）。
+            this.closeWebAccountMenu();
+            if (this.isStartupBlankNavigation(event.url)) {
+              return;
+            }
             startupMarks.mark('S6', StartupPhase.WEB, 'page_begin');
             // 整页导航（含 303 后的落地）重新进入加载期；SPA 内部路由不受影响
             if (this.phase === WebPhase.READY) {
+              this.resetDesktopStartupNavigation();
               this.phase = WebPhase.LOADING;
             }
+            this.webNavigationStarted = true;
             // 新一轮加载：注入脚本要等 onPageEnd 才保证 DOM 在位（docs/172 §5.2）
             this.webReady = false;
             this.clearPostLoadSettle();
@@ -8003,21 +8455,16 @@ struct WebApp {
               return false;
             }
           })
-          .onPageEnd(() => {
+          .onPageEnd((event: OnPageEndEvent) => {
+            if (this.isStartupBlankNavigation(event.url)) {
+              return;
+            }
             /*
              * 【版本锚点（2026-11-07）】云测只能从日志侧取证：多轮并行出包后靠时间戳
              * 人工对版本不可靠。每次页面结束（含失败轮）都打一行 versionCode/versionName，
              * 任何日志窗口即可对版。走 CLOUD_DOMAIN（0xD5D5 在云测抓取里不可见）。
              */
-            try {
-              const bi: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
-                bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
-              hilog.info(CLOUD_DOMAIN, TAG, '[dshm-web] version=%{public}s (%{public}d)',
-                bi.versionName, bi.versionCode);
-            } catch (e) {
-              const err = e as Error;
-              hilog.warn(CLOUD_DOMAIN, TAG, '[dshm-web] version 读不到：%{public}s', err.message);
-            }
+            this.logWebBundleVersion();
             /*
              * 【必须判 loadFailed，不能无条件置 READY】
              * 真机日志显示两者**只差 10ms**、且顺序是"先 404 后 onPageEnd"：
@@ -8032,10 +8479,18 @@ struct WebApp {
                 this.errorText);
               return;
             }
+            if (this.startupWebPrepared && !this.everReady) {
+              try {
+                this.controller.clearHistory();
+              } catch (e) {
+                hilog.warn(DOMAIN, TAG, 'DSHM-TRACE ArkWeb 启动历史清理失败');
+              }
+            }
             this.phase = WebPhase.READY;
-            // S7：首屏就绪（S0→S7 即用户感知的完整启动时长），并落一次汇总
+            // S7 记录正式页面加载结束，实际可见帧另行记录。
             startupMarks.mark('S7', StartupPhase.READY, 'first_paint_ready');
             startupMarks.finish('ready');
+            this.reportWebVisibleFrame();
             /*
              * 页面就绪：补发挂起的快捷方式动作（docs/172 §5.2）。
              * 「新建会话」按钮属于侧栏常驻 DOM，页面加载完成即可点；SPA 内部路由不影响它。
@@ -8064,7 +8519,12 @@ struct WebApp {
              * 与"突然冲一下"是同一个观感问题。
              * 改成让 ticker 自己用一段短动画补到 100%，再停表 —— 见 finishProgress()。
              */
-            this.finishProgress();
+            if (this.usesDesktopStartup()) {
+              this.finishDesktopStartupLoad();
+              this.requestDesktopWorkbenchPaint(event.url);
+            } else {
+              this.finishProgress();
+            }
             /* 清掉重试计时器并复位计数，下次失败重新有完整预算 */
             this.clearAutoRetry();
             this.autoRetryCount = 0;
@@ -8106,6 +8566,9 @@ struct WebApp {
               return false;
             }
             const msg: ConsoleMessage = event.message;
+            if (this.acceptDesktopWorkbenchPaint(msg.getMessage())) {
+              return true;
+            }
             /*
              * 【为什么先写这一笔，且不碰 msg 任何属性】2026-10-03 真机实测：
              * 加了 sink 之后 `files/diag-web-console` 与 `diag-web-console-cb`
@@ -8129,13 +8592,15 @@ struct WebApp {
             return false;
           })
           .onErrorReceive((event?: OnErrorReceiveEvent) => {
-            if (event === undefined || !event.request.isMainFrame()) {
+            if (event === undefined || !event.request.isMainFrame() ||
+              this.isStartupBlankNavigation(event.request.getRequestUrl())) {
               return;
             }
             this.fail(`主资源加载失败：${event.error.getErrorInfo()}`);
           })
           .onHttpErrorReceive((event?: OnHttpErrorReceiveEvent) => {
-            if (event === undefined || !event.request.isMainFrame()) {
+            if (event === undefined || !event.request.isMainFrame() ||
+              this.isStartupBlankNavigation(event.request.getRequestUrl())) {
               return;
             }
             const code: number = event.response.getResponseCode();
@@ -8189,8 +8654,10 @@ struct WebApp {
       //     之后 enterLoading() → LOADING ⇒ **白屏窗口** ⇒ 200
       // 修法：把启动页挂在 `BOOTING || LOADING` 上 —— 它本来就该覆盖"还没就绪"的全程。
       // 顺带把首屏体验统一：用户从启动到可用只看到同一个品牌页，不再有白屏跳变。
-      if (this.phase === WebPhase.BOOTING
-        || (this.phase === WebPhase.LOADING && !this.everReady)) {
+      if (!this.tabletStartupBrandReleased && (this.phase === WebPhase.BOOTING ||
+        (this.phase === WebPhase.LOADING && !this.everReady) ||
+        (this.usesDesktopStartup() && (!this.desktopStartupComplete || this.desktopStartupFinishing) &&
+          this.phase !== WebPhase.ERROR))) {
         Column() {
           Image($r('app.media.logo_dark'))
             .width(92)
@@ -8198,32 +8665,32 @@ struct WebApp {
             .objectFit(ImageFit.Contain)
             .scale(this.markScale(true))
             .opacity(this.markOpacity(true))
-          Progress({ value: this.progressValue, total: 100, type: ProgressType.Linear })
-            .width(200)
-            .height(6)
-            .color(this.splashDark ? '#FFFFFF' : '#1c2430')
-            .backgroundColor(this.splashDark ? '#2A2A2E' : '#e4e7ec') // 启动页进度条：随手启动页深浅色
-            .margin({ top: 40 })
-          /*
-           * 【2026-11-25 撤回首页骨架暗示（用户真机裁决）】
-           *
-           * 曾在此处加过「标题块 + 三个场景 pill + 输入框」的内容区占位（A2 的骨架暗示，
-           * 见 docs/201 §11.1）。PC 端真机截图反馈：进度条下方这块灰色结构是**多余**的，
-           * 启动环节不要它。
-           *
-           * 结论与边界：
-           *   · 启动页恢复为「品牌标 + 线性进度条」两项，不加任何结构占位；
-           *   · A2 的"窗口先带结构出现"在 DSHM 上**不成立**——启动页是纯 ArkUI 覆盖层，
-           *     它下面此刻没有可对齐的真实布局，占位块只会被读成"多余的东西"；
-           *   · 若以后再做，前提是 Web 组件已经带着真实首屏骨架（WorkBuddy 那条路），
-           *     而不是在 ArkUI 启动页里画假结构。
-           */
+          if (this.usesDesktopStartup()) {
+            DesktopStartupProgress({
+              confirmed: this.phase === WebPhase.BOOTING ? this.startupHostStage : this.startupWebProgress,
+              scan: this.phase === WebPhase.BOOTING,
+              fasterWebProgress: this.rawDeviceType === 'tablet',
+              dark: this.splashDark,
+              onFullPaint: (): void => {
+                this.desktopStartupFinishing = false;
+              }
+            })
+              .margin({ top: 40 })
+          } else {
+            Progress({ value: this.progressValue, total: 100, type: ProgressType.Linear })
+              .width(200)
+              .height(6)
+              .color(this.splashDark ? '#FFFFFF' : '#1c2430')
+              .backgroundColor(this.splashDark ? '#2A2A2E' : '#e4e7ec')
+              .margin({ top: 40 })
+          }
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor($r('app.color.start_window_background')) // 启动页底色：随系统深浅色（与 module.json5 的 startWindowBackground 同源）
+        .backgroundColor(this.desktopStartupBackdrop === SPLASH_BG ?
+          $r('app.color.start_window_background') : this.desktopStartupBackdrop)
         /*
          * 【启动页要真正"沉浸"进状态栏那一条】（2026-10-16 用户报"启动的时候 APP 区跟状态栏就不是一个色"）
          *
@@ -8238,8 +8705,30 @@ struct WebApp {
         .expandSafeArea(
           this.handheld ? [SafeAreaType.SYSTEM] : this.bottomSafeAreaTypes(),
           this.handheld ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : this.bottomSafeAreaEdges())
+        .transition(this.usesDesktopStartup() ? TransitionEffect.asymmetric(
+          TransitionEffect.IDENTITY,
+          TransitionEffect.opacity(0).animation({
+            duration: this.desktopStartupBackdrop === SPLASH_BG ? DESKTOP_STARTUP_FADE_MS : TABLET_STARTUP_PROGRESS_FADE_MS,
+            curve: Curve.EaseOut
+          })
+        ) : TransitionEffect.IDENTITY, (entering: boolean): void => {
+          if (!entering && this.tabletStartupBrandReleased) {
+            hilog.info(DOMAIN, TAG, 'DSHM-TRACE 平板品牌动画完成');
+          }
+        })
+        .hitTestBehavior(this.desktopStartupComplete ? HitTestMode.None : HitTestMode.Default)
+        .id('dshm-startup-progress')
         .onAppear(() => {
           this.startBrandAnimation();
+        })
+        .onVisibleAreaChange([0.0, 0.5], (visible: boolean, ratio: number) => {
+          if (DESKTOP_PROGRESSIVE_STARTUP && this.desktopForced && this.startupMainWindow &&
+            visible && ratio >= 0.5 && !this.startupProgressVisible) {
+            this.startupProgressVisible = true;
+            hilog.info(DOMAIN, TAG, 'DSHM-TRACE 启动进度条可见');
+            this.prepareDesktopWebAfterFrame();
+            this.scheduleTabletStartupBrandRelease();
+          }
         })
       }
 

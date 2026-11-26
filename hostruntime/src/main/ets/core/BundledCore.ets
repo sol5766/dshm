@@ -15,18 +15,104 @@
  * 分层：本文件只依赖 core/ 与系统文件 API，不认识 UI、不认识 Context 的具体类型
  * （调用方把 resourceDir / workDir 传进来），便于在没有 UI 的环境里复用与测试。
  */
-import { fileIo as fs } from '@kit.CoreFileKit';
+import { fileIo as fs, hash } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { process } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { CoreStore, OpResult } from './CoreStore';
-import { parseArchiveName } from './Naming';
+import { isSafeVersion, parseArchiveName } from './Naming';
 import { sha256OfFile } from 'platform';
 
 const TAG: string = 'DSHM-BundledCore';
 const DOMAIN: number = 0x0000;
+const RETIRED_CORE_CLEANUP_DELAY_MS: number = 8000;
 
 export function matchesBundledIdentity(stamp: string, identity: string): boolean {
   return identity.startsWith('sha256:') && identity.length === 71 && stamp === identity;
+}
+
+function sameArchive(a: fs.Stat, b: fs.Stat): boolean {
+  return a.ino === b.ino && a.size === b.size && a.mtime === b.mtime && a.ctime === b.ctime &&
+    a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+}
+
+export interface BundledCoreVerification {
+  path: string;
+  stat: fs.Stat;
+  identity: string;
+}
+
+function archiveCacheKey(path: string, stat: fs.Stat, installation: string): string {
+  if (installation.length === 0 || !path.startsWith('/data/storage/el1/bundle/') || path.includes('/../') ||
+    stat.mtimeNs === undefined || stat.ctimeNs === undefined) {
+    return '';
+  }
+  try {
+    const entry: fs.Stat = fs.lstatSync(path);
+    if (!entry.isFile() || !sameArchive(stat, entry)) return '';
+    return JSON.stringify([installation, path, String(stat.ino), stat.size, String(stat.mtimeNs), String(stat.ctimeNs)]);
+  } catch (e) {
+    return '';
+  }
+}
+
+function readArchiveCache(file: string, key: string): string {
+  try {
+    const entry: fs.Stat = fs.lstatSync(file);
+    if (!entry.isFile() || entry.size > 2048) return '';
+    const fields: string[] = fs.readTextSync(file).split('\n');
+    return fields.length === 2 && fields[0] === key && /^sha256:[a-f0-9]{64}$/.test(fields[1]) ? fields[1] : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+let archiveCacheWrite: number = 0;
+
+function writeArchiveCache(file: string, key: string, identity: string): void {
+  const temp: string = `${file}.${process.pid}.${++archiveCacheWrite}.tmp`;
+  try {
+    const handle: fs.File = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(handle.fd, key + '\n' + identity);
+    } finally {
+      fs.closeSync(handle);
+    }
+    fs.renameSync(temp, file);
+  } catch (e) {
+    try { fs.unlinkSync(temp); } catch (error) {}
+  }
+}
+
+/** 在窗口准备期间读取随签名 HSP 安装的只读资源。安装时再确认文件身份。 */
+export async function preverifyBundledCore(resourceDir: string, cacheFile: string = '',
+  installation: string = ''): Promise<BundledCoreVerification | undefined> {
+  try {
+    const names: string[] = fs.listFileSync(resourceDir).filter((name: string): boolean => {
+      return parseArchiveName(name).length > 0;
+    });
+    if (names.length !== 1) {
+      return undefined;
+    }
+    const path: string = `${normalizeBundledPath(resourceDir)}/${names[0]}`;
+    const before: fs.Stat = fs.statSync(path);
+    // 安装批次和签名资源的文件身份匹配后，才能复用之前计算的完整摘要。
+    const key: string = cacheFile.length > 0 ? archiveCacheKey(path, before, installation) : '';
+    const cached: string = key.length > 0 ? readArchiveCache(cacheFile, key) : '';
+    if (cached.length > 0 && sameArchive(before, fs.statSync(path))) {
+      hilog.info(DOMAIN, TAG, 'DSHM-TRACE 复用安装期核心摘要');
+      return { path: path, stat: before, identity: cached };
+    }
+    const identity: string = 'sha256:' + (await hash.hash(path, 'sha256')).toLowerCase();
+    const after: fs.Stat = fs.statSync(path);
+    if (!sameArchive(before, after) || !/^sha256:[a-f0-9]{64}$/.test(identity)) {
+      return undefined;
+    }
+    if (key.length > 0) writeArchiveCache(cacheFile, key, identity);
+    return { path: path, stat: after, identity: identity };
+  } catch (e) {
+    return undefined;
+  }
 }
 
 /**
@@ -93,7 +179,8 @@ function emptyResult(note: string): BundledInstallResult {
  * 失败隔离：某一个版本失败不影响其他版本（每个版本独立收集失败原因）。
  */
 export async function installBundledCores(resourceDir: string, workDir: string,
-  store: CoreStore): Promise<BundledInstallResult> {
+  store: CoreStore, verification?: Promise<BundledCoreVerification | undefined>,
+  deferEviction: boolean = false): Promise<BundledInstallResult> {
   const key: string = JSON.stringify([normalizeBundledPath(resourceDir), normalizeBundledPath(workDir),
     normalizeBundledPath(store.baseDir())]);
   const existing: Promise<BundledInstallResult> | undefined = BundledInstallState.inflight.get(key);
@@ -101,7 +188,7 @@ export async function installBundledCores(resourceDir: string, workDir: string,
     return existing;
   }
   const task: Promise<BundledInstallResult> = BundledInstallState.queue.then((): Promise<BundledInstallResult> => {
-    return runBundledInstall(resourceDir, workDir, store);
+    return runBundledInstall(resourceDir, workDir, store, verification, deferEviction);
   }).finally((): void => {
     BundledInstallState.inflight.delete(key);
   });
@@ -114,6 +201,7 @@ class BundledInstallState {
   static queue: Promise<void> = Promise.resolve();
   static readonly inflight: Map<string, Promise<BundledInstallResult>> =
     new Map<string, Promise<BundledInstallResult>>();
+  static readonly scheduledCleanup: Set<string> = new Set<string>();
 }
 
 function normalizeBundledPath(path: string): string {
@@ -124,8 +212,50 @@ function normalizeBundledPath(path: string): string {
   return path.slice(0, end);
 }
 
+async function cleanRetiredCores(coresDir: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await fs.listFile(coresDir);
+  } catch (e) {
+    hilog.warn(DOMAIN, TAG, '无法列出待清理的旧核心树');
+    return;
+  }
+  for (const name of names) {
+    const match: RegExpExecArray | null = /^(.+)\.retired-\d+\.tmp$/.exec(name);
+    if (match === null || !isSafeVersion(match[1])) {
+      continue;
+    }
+    const path: string = `${coresDir}/${name}`;
+    try {
+      if (fs.lstatSync(path).isDirectory()) {
+        await fs.rmdir(path);
+        hilog.info(DOMAIN, TAG, '已清理换下的核心树：%{public}s', name);
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, '旧核心树清理待重试：%{public}s', name);
+    }
+  }
+}
+
+export function scheduleRetiredCoreCleanup(store: CoreStore): void {
+  const coresDir: string = normalizeBundledPath(store.coresDir());
+  if (BundledInstallState.scheduledCleanup.has(coresDir)) {
+    return;
+  }
+  BundledInstallState.scheduledCleanup.add(coresDir);
+  setTimeout((): void => {
+    // Keep cleanup ordered with installation, but off the startup path.
+    BundledInstallState.queue = BundledInstallState.queue.then((): Promise<void> => {
+      return cleanRetiredCores(coresDir);
+    }).finally((): void => {
+      BundledInstallState.scheduledCleanup.delete(coresDir);
+    });
+  }, RETIRED_CORE_CLEANUP_DELAY_MS);
+}
+
 async function runBundledInstall(resourceDir: string, workDir: string,
-  store: CoreStore): Promise<BundledInstallResult> {
+  store: CoreStore, verification?: Promise<BundledCoreVerification | undefined>,
+  deferEviction: boolean = false): Promise<BundledInstallResult> {
   const result: BundledInstallResult = emptyResult('');
 
   try {
@@ -154,6 +284,7 @@ async function runBundledInstall(resourceDir: string, workDir: string,
   }
 
   const installed: string[] = store.listInstalled();
+  const verified: BundledCoreVerification | undefined = verification === undefined ? undefined : await verification;
   /*
    * 【2026-10-29 修复：先成功、后挪走，失败必须回滚】
    *
@@ -168,7 +299,7 @@ async function runBundledInstall(resourceDir: string, workDir: string,
    *   ① 拷到可写目录 → ② `store.stage()` 解包 + 四道校验，**不碰 cores/<version>**
    *   → ③ 新树已证明完整，才把旧树改名成 `.stale-*.tmp`
    *   → ④ `store.commitStaged()` 落位 → ⑤ 落位/异常失败一律把旧树**改名回去**。
-   * 成功的旧树延后到循环外统一**异步**删（E47：同步删 25k 文件会把主线程锁死）。
+   * 落位成功的旧树标为 `.retired-*.tmp`，稍后异步删除。标记失败时仍在循环外异步删除。
    * 回滚失败也绝不删（宁可留一棵 `.tmp`，也不能让用户失去能跑的那棵树）。
    */
   const staleDirs: string[] = [];
@@ -177,16 +308,27 @@ async function runBundledInstall(resourceDir: string, workDir: string,
     if (version.length === 0) {
       continue; // 不是本项目的核心容器，忽略（不猜）
     }
-    const src: string = `${resourceDir}/${name}`;
+    const src: string = `${normalizeBundledPath(resourceDir)}/${name}`;
     // 【为什么不能只看"版本已安装"就跳过】实测踩过：改了核心包（补平台别名）并重装应用后，
     // 端侧仍报 `内置核心已全部安装过，无需重复解包` ⇒ 设备上一直跑**旧核心树**，新改动根本没进去。
     // 换包必须能生效，否则"核心版本安装/切换/回滚"这条功能形同虚设。
-    // 判据用**资源包大小**这个廉价指纹：与上次安装时记下的一致才跳过。
+    // 仅复用当前签名安装中同一容器的完整 SHA-256，摘要不同时重新安装。
     let srcSize: number = 0;
     let identity: string = '';
     try {
-      srcSize = fs.statSync(src).size;
-      identity = 'sha256:' + await sha256OfFile(src);
+      const stat: fs.Stat = fs.statSync(src);
+      srcSize = stat.size;
+      if (verified !== undefined && verified.path === src && sameArchive(verified.stat, stat)) {
+        identity = verified.identity;
+        hilog.info(DOMAIN, TAG, 'DSHM-TRACE 复用本次启动提前完成的核心校验');
+      } else {
+        try {
+          identity = 'sha256:' + (await hash.hash(src, 'sha256')).toLowerCase();
+        } catch (error) {
+          // 文件服务无法打开 HSP 资源路径时，沿用应用进程内的完整校验。
+          identity = 'sha256:' + await sha256OfFile(src);
+        }
+      }
     } catch (e) {
       srcSize = 0; // 拿不到大小 ⇒ 当作"需要装"（保守）
     }
@@ -276,10 +418,8 @@ async function runBundledInstall(resourceDir: string, workDir: string,
   }
 
   /*
-   * 异步清理被换下来的旧树。放在这里而不是拦在安装前：安装路径上不能出现
-   * 任何"删几万个文件"的**同步**调用（E47）。`fs.rmdir` 走异步接口，
-   * 主线程在删除期间保持可响应；失败也只是留下一个 `.tmp` 目录，
-   * 不会被 `listInstalled()` 当成已安装版本。
+   * 若已成功落位但无法标记旧树，沿用本次安装内的异步清理。其余已标记的旧树
+   * 在启动路径之外回收；进程中途退出时，下次启动会重新扫描。
    */
   for (const stale of staleDirs) {
     try {
@@ -289,30 +429,21 @@ async function runBundledInstall(resourceDir: string, workDir: string,
     }
   }
 
-  /*
-   * 清掉"已经不会再被启动"的旧树。
-   *
-   * 【为什么必须在这里做】核心树是**每版一份**解包落地的（`cores/<version>/`，实测 ~350 MB/棵），
-   * 而安装器只在"同一版本换了容器"时替换**同一棵** ⇒ 跨版本升级**只增不减**：
-   * 2026-10-08 真机清点出 **15 棵并存 ≈ 5 GB**（最老的是 0.1.7-rc.2）。
-   * `CoreStore.evict()` 与它的判据（`Types.evictionCandidates`）早就写好了，
-   * 但**一个调用点都没有** —— 这就是那 5 GB 的成因。
-   *
-   * 【为什么放在安装之后算】判据里保护"会真正启动的那棵树"（current 缺失时 = 最新那棵），
-   * 安装之后再算，刚落地的新树才是被保护的那棵。
-   * 【为什么把 result.installed 点名叫 keepExtra】万一装进来的容器**比设备上已有的还旧**
-   * （回退到旧侧载包的场景），被保护的就是旧树、刚装的这棵反而落进"可删" ⇒
-   * 会出现"刚装完就被删掉"，所以刚装进来的版本一律点名保护。
-   * 【为什么整段吞异常】清理是顺手的卫生，不能把"装成功"这件事拖下水。
-   * 【为什么**不**只在"本次真装了东西"时清】用户升级一次之后，之后每次启动
-   * `installBundledCores` 都只会走"已安装过 ⇒ 跳过"（判据是容器大小指纹）——
-   * 若清理只在"真装了"时跑，那么"这一轮之前攒下来的旧树"要等到**下一次换容器**才可能被清，
-   * 而设备上恰恰就是这种状态（实测 15 棵）。所以这里**每次走完都清一次**：
-   * 没东西可清时它只是一次 `readState + listInstalled + 逐棵 readdir`，代价可忽略。
-   */
+  // 计算清理名单时，保护将启动的版本、回滚目标及本次落位的版本。
+  // 桌面平板主窗先原子移出可清理的版本目录，真正删除由首绘后的回调驱动。
   let evicted: string[] = [];
   try {
-    evicted = await store.evict(0, result.installed);
+    if (deferEviction) {
+      if (result.failed.length === 0) {
+        const retired: string[] = store.retireUnused(0, result.installed);
+        if (retired.length > 0) {
+          hilog.info(DOMAIN, TAG, '旧核心版本等待工作区绘制后清理：%{public}s', retired.join('、'));
+        }
+      }
+    } else {
+      scheduleRetiredCoreCleanup(store);
+      evicted = await store.evict(0, result.installed);
+    }
     if (evicted.length > 0) {
       hilog.info(DOMAIN, TAG, '已清理旧核心树 %{public}s 棵：%{public}s',
         String(evicted.length), evicted.join('、'));
@@ -348,7 +479,7 @@ interface InstallOutcome {
   installed: boolean;
   /** 失败原因（installed 为 true 时为空串） */
   failed: string;
-  /** 落位成功后待异步删除的旧树路径（否则为空串） */
+  /** 落位成功但退役重命名失败时，仍由本次安装清理的旧树路径。 */
   stale: string;
 }
 
@@ -419,7 +550,13 @@ async function installOneVersion(store: CoreStore, workDir: string, src: string,
     writeStamp(store, version, identity);
 
     if (stale.length > 0) {
-      outcome.stale = stale;
+      // Only a committed replacement may move its backup out of the rollback namespace.
+      const retired: string = stale.replace(/\.stale-(\d+)\.tmp$/, '.retired-$1.tmp');
+      try {
+        fs.renameSync(stale, retired);
+      } catch (e) {
+        outcome.stale = stale;
+      }
       stale = '';
     }
     return outcome;

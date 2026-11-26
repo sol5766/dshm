@@ -130,6 +130,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/check-native-capture-lifecycle.mjs --self-test
 
+      - name: 门禁 · check-desktop-startup-progress
+        if: ${{ !cancelled() }}
+        run: node tools/check-desktop-startup-progress.mjs --self-test
+
       # 2026-11-12（docs/410）：bin/dsh 按 cores/.current 选核心（含真跑两个核心目录）。
       - name: 门禁 · check-dsh-cli-current-core
         if: ${{ !cancelled() }}
@@ -660,6 +664,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/check-knock-share-wiring.mjs
 
-      - name: 自检 · check-knock-share-wiring（7 个变异体：去掉档位闸 / phone 注册 / 漏 OBJECT / 关页注销 / 窗口不 release / 垫片不注入 / 固定 -1，逐条必须判红）
+      - name: 自检 · check-knock-share-wiring（8 个变异体覆盖档位、能力、销毁和垫片接线）
         if: ${{ !cancelled() }}
         run: node tools/check-knock-share-wiring.mjs --self-test

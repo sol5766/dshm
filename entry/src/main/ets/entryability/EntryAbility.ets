@@ -31,7 +31,7 @@
  *   4. 窗口生命周期里**只清理本实例自己的东西**——关任一窗口不得影响其他窗口。
  */
 
-import { AbilityConstant, common, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, bundleManager, common, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { webview } from '@kit.ArkWeb';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -42,12 +42,15 @@ import { http } from '@kit.NetworkKit';
 import fs from '@ohos.file.fs';
 
 import { DshHost, NodeRuntime, probeNativeBindings, resolveHostDataDir, resolveHostModulePaths } from 'hostruntime';
-import type { HostModulePaths, HostStartResult, OpResult } from 'hostruntime';
+import { preverifyBundledCore } from 'hostruntime';
+import type { BundledCoreVerification, HostModulePaths, HostStartResult, OpResult } from 'hostruntime';
 // HMS 语音识别桥（ArkTS 侧）：轮询 Host 写的请求文件并调 speechRecognizer
 import { startHmsSpeechBridge, requestSpeechProbe } from '../speech/HmsSpeechBridge';
 // 外开桥（ArkTS 侧）：轮询 Host 写的请求文件并调 openLink —— browser 工具在浏览器未启动时
 // 经它拉起浏览器（与登录"外开授权页"同一条系统路径，见 ../system/OpenLinkBridge.ets 头注）
 import { startOpenLinkBridge } from '../system/OpenLinkBridge';
+import { DESKTOP_PROGRESSIVE_STARTUP, DesktopHostStartupStage, KEY_DESKTOP_HOST_STARTUP,
+  DESKTOP_WORKBENCH_PAINTED_EVENT, StartupFrameCallback } from '../common/DesktopStartup';
 // 桌面卡片推送器（docs/178）：轮询宿主写出的 card-state.json → formProvider.updateForm
 import { startCardStateWatcher } from '../system/CardStateWatcher';
 // 系统托盘（PC 顶栏 / 托盘区状态图标）：运行时挂图标 + 左键唤回主窗（退出用系统自带菜单项）
@@ -615,6 +618,7 @@ export default class EntryAbility extends UIAbility {
   private screenOffed: boolean = false;
   /** 宿主启动链是否已经排过（多窗口 / 多 stage 只会走到一次，见 `scheduleHostStartAfterFirstFrame()`）。 */
   private hostStartScheduled: boolean = false;
+  private bundledCoreVerification: Promise<BundledCoreVerification | undefined> | undefined = undefined;
   /**
    * 目录授权恢复的完成信号。
    *
@@ -661,6 +665,8 @@ export default class EntryAbility extends UIAbility {
   /** 通知授权是否已查过（只查/只弹一次） */
   private notifyChecked: boolean = false;
   private notifyReady: boolean = false;
+  private shareDesktopNotifyPreparation: boolean = false;
+  private desktopNotifyPreflight?: Promise<boolean>;
   /** 窗口记忆就绪信号。几何恢复必须等它，否则会在 store 尚未打开时静默跳过。 */
   private memoryReady: Promise<void> = Promise.resolve();
   /** 节流定时器 id；-1 表示当前无待执行的落盘任务 */
@@ -751,6 +757,16 @@ export default class EntryAbility extends UIAbility {
     return this.handleWindowWillClose('windowWillClose');
   };
 
+  private deferBundledEviction: boolean = false;
+
+  private readonly onDesktopWorkbenchPainted: () => void = (): void => {
+    const host: DshHost | undefined = this.host;
+    if (this.deferBundledEviction && host !== undefined) {
+      this.deferBundledEviction = false;
+      host.scheduleRetiredCoreCleanup();
+    }
+  };
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     /*
      * 启动分段标记 S0（docs/201 §3-P2 / §6-A1）。
@@ -760,6 +776,7 @@ export default class EntryAbility extends UIAbility {
     startupMarks.init(this.context.filesDir);
     startupMarks.mark('S0', StartupPhase.PROCESS, 'onCreate_enter',
       `kind=${launchParam.launchReason}`);
+    this.context.eventHub.on(DESKTOP_WORKBENCH_PAINTED_EVENT, this.onDesktopWorkbenchPainted);
     if (typeof want.uri === 'string' && want.uri.trim().toLowerCase() === AUTH_RETURN_URI) {
       this.pendingAuthReturnWant = want;
     }
@@ -880,6 +897,24 @@ export default class EntryAbility extends UIAbility {
     // 先于 onWindowStageCreate 发布：窗口标签与「是否主窗」的判断都依赖它
     this.applyLaunchParams(want);
     if (this.launchParams.kind === WindowKind.MAIN) {
+      if (DESKTOP_PROGRESSIVE_STARTUP && readDeviceFacts().desktopForced && !this.launchHostProvided) {
+        this.bundledCoreVerification = resolveHostModulePaths(this.context)
+          .then((paths: HostModulePaths) => {
+            let installation: string = '';
+            try {
+              const bundle: bundleManager.BundleInfo =
+                bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+              if (bundle.installTime > 0 && bundle.updateTime > 0) {
+                installation = JSON.stringify([bundle.name, bundle.installTime, bundle.updateTime]);
+              }
+            } catch (e) {
+              // 取不到安装信息时，由核心校验走完整 SHA-256。
+            }
+            return preverifyBundledCore(paths.resourceDir,
+              this.context.cacheDir + '/dshm-bundled-core-identity-v1.txt', installation);
+          })
+          .catch((): undefined => undefined);
+      }
       // 部分 PC/2in1 形态没有把 onForeground 排在本回调之后；这里先落一次，
       // 保证 host 延迟启动时 vm.js 一定能读到同 pid 的前台状态。
       writeAppLifecycle(this.context.filesDir, true, 'onCreate');
@@ -1062,8 +1097,17 @@ export default class EntryAbility extends UIAbility {
  * （终端 node-pty 的 pty.node 就是这么失败的）。详见 hostruntime 的 resolveHostDataDir()。
  */
 const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
-    const runtime = new NodeRuntime('', dataDir,
-      this.context as common.UIAbilityContext);
+    const runtime = new NodeRuntime('', dataDir, this.context as common.UIAbilityContext);
+    const facts = readDeviceFacts();
+    const reportDesktopStartup: boolean = DESKTOP_PROGRESSIVE_STARTUP && facts.desktopForced &&
+      this.launchParams.kind === WindowKind.MAIN && !this.launchHostProvided;
+    this.deferBundledEviction = reportDesktopStartup && facts.rawType === 'tablet' && !runtime.isRunning();
+    if (reportDesktopStartup) {
+      AppStorage.setOrCreate<number>(KEY_DESKTOP_HOST_STARTUP, DesktopHostStartupStage.CheckingCore);
+      runtime.setStartupListeningCallback((): void => {
+        AppStorage.setOrCreate<number>(KEY_DESKTOP_HOST_STARTUP, DesktopHostStartupStage.PortListening);
+      });
+    }
     const host = new DshHost(dataDir, runtime);
     // 存成字段：退出流程要调 `host.stop()` 干净地停掉宿主（见 host 字段的说明）
     this.host = host;
@@ -1079,11 +1123,18 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
         throw new Error(`核心运行时不可用：${p.note}`);
       }
       return resolveHostModulePaths(this.context)
-        .then((paths: HostModulePaths) => host.installBundled(paths.resourceDir, ctx.cacheDir));
+        .then((paths: HostModulePaths) => {
+          const verification = this.bundledCoreVerification;
+          this.bundledCoreVerification = undefined;
+          return host.installBundled(paths.resourceDir, ctx.cacheDir, verification, this.deferBundledEviction);
+        });
     }).then((r) => {
       AppStorage.setOrCreate<boolean>(KEY_CORE_INSTALLING, false);
       hilog.warn(DOMAIN, TAG, 'DSHM-AUTO 安装内置核心：installed=%{public}s failed=%{public}d note=%{public}s',
         JSON.stringify(r.installed), r.failed.length, r.note);
+      if (reportDesktopStartup && r.failed.length === 0) {
+        AppStorage.setOrCreate<number>(KEY_DESKTOP_HOST_STARTUP, DesktopHostStartupStage.StartingHost);
+      }
       return this.startHostWithRecovery(host, runtime);
     }).then((s: HostStartResult) => {
       hilog.warn(DOMAIN, TAG, 'DSHM-AUTO 启动 Host：ok=%{public}s url=%{public}s note=%{public}s',
@@ -1282,6 +1333,7 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
   }
 
   onDestroy(): void {
+    this.context.eventHub.off(DESKTOP_WORKBENCH_PAINTED_EVENT, this.onDesktopWorkbenchPainted);
     this.stopTaskWatch();
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
     /*
@@ -1452,14 +1504,23 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
     // 主窗做完之后其它窗口直接复用即可。
     /* 碰一碰接收：每个窗口建窗即注册（docs/421 WP2：会话窗是独立实例，
        原写法只在 MAIN 分支调用 ⇒ 会话窗完全没注册）。PC 档门控在函数内部。 */
-    this.bootstrapKnockReceiver(windowStage);
+    const desktopForced: boolean = readDeviceFacts().desktopForced;
+    this.bootstrapKnockReceiver(windowStage, desktopForced);
+    const deferNotify: boolean = DESKTOP_PROGRESSIVE_STARTUP && desktopForced &&
+      this.launchParams.kind === WindowKind.MAIN;
+    let logTaskWatchStart: boolean = false;
     if (this.launchParams.kind === WindowKind.MAIN) {
       // 主窗 stage 已就绪：`dsh/home` 此时必已可写，再写一次作为 onForeground 的兜底。
       writeAppLifecycle(this.context.filesDir, true, 'onWindowStageCreate');
       this.publishRememberedHost();
       // 通知也只在主窗注册：`SessionHub` 的钩子只有一个槽位，
       // 若每个窗口都注册，多窗口下会出现"发 N 条同样的通知"。
+      this.shareDesktopNotifyPreparation = deferNotify;
       this.setupNotifications();
+      logTaskWatchStart = this.startTaskWatch(deferNotify);
+      if (!deferNotify) {
+        this.preflightNotifications();
+      }
       /* 【2026-11-07 时序修正】沉浸链必须等 mainWindow 落定后再跑：
          原先在这里调用时 `this.mainWindow` 还是 undefined ⇒ enterTabletImmersive 直接 return，
          真机日志里从来没有「平板沉浸」那一行 ⇒ 状态栏一直不沉浸。改到 afterWindowStageReady。 */
@@ -1537,7 +1598,10 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
     this.revokeDecorStyle();
     this.decorStage = windowStage;
     this.decorContentReady = false;
-    windowStage.loadContent('pages/WebApp', (err) => {
+    // 每个 WindowStage 各有一份，后开的会话窗不会覆盖主窗的启动角色。
+    const pageStorage: LocalStorage = new LocalStorage();
+    pageStorage.setOrCreate<boolean>('dshStartupMainWindow', this.launchParams.kind === WindowKind.MAIN);
+    windowStage.loadContent('pages/WebApp', pageStorage, (err) => {
       if (this.decorStage !== windowStage) {
         return;
       }
@@ -1558,6 +1622,9 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
         err.code ? 'load-failed' : 'ok');
       // 首帧之后再拉宿主（见 HOST_START_DELAY_AFTER_FIRST_FRAME_MS 与 onCreate 里的注释）
       this.scheduleHostStartAfterFirstFrame(err.code ? 0 : HOST_START_DELAY_AFTER_FIRST_FRAME_MS);
+      if (deferNotify) {
+        this.scheduleDesktopNotifyPreflight(windowStage, !err.code, logTaskWatchStart);
+      }
     });
   }
 
@@ -1697,20 +1764,13 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
         clearInterval(ticker);
       }
       this.autoStartHostForDiagnosis();
-      /*
-       * 【2026-11-25 启动优化（docs/201 §6-B3）】预热从"紧邻宿主启动"改为"下一个宏任务"。
-       *
-       * `initializeWebEngine()` 是 UI 线程**同步**调用。它紧跟在 `autoStartHostForDiagnosis()`
-       * 之后时，宿主链已经排队的 Promise 回调（probe / installBundled / start 的 `.then`）
-       * 会被这一次同步调用整体压后 —— 那段时间直接计入「S4 → S5 宿主就绪」。
-       * 让出一个宏任务后，宿主链先跑自己的回调，预热在同一个空闲窗口内完成。
-       *
-       * 前提不变（SDK 明文）：UI 线程同步调用、全局一次、早于任何 Web 组件初始化 ——
-       * 此刻 `Web` 仍未创建（`phase === BOOTING`），三点都满足。失败只降级。
-       */
-      setTimeout((): void => {
-        this.warmWebEngineOnce();
-      }, 0);
+      // 桌面主窗由预挂 Web 初始化引擎。其他窗口先让宿主启动链继续，再同步预热。
+      if (!DESKTOP_PROGRESSIVE_STARTUP || !readDeviceFacts().desktopForced ||
+        this.launchParams.kind !== WindowKind.MAIN) {
+        setTimeout((): void => {
+          this.warmWebEngineOnce();
+        }, 0);
+      }
       /*
        * ── superagent 的**手动**起停（2026-11-02，docs/346 §4 方案 A）────────────
        * 官方要求它跑在独立 profile / 独立端口 / 能独立重启；端侧只有"第二进程"能做到，
@@ -1734,9 +1794,9 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
    *
    * 【失败兜底】注册异常只留痕不抛：接收器内部按 1/2/4/8s 退避重试，且不影响任何既有功能。
    */
-  private bootstrapKnockReceiver(windowStage: window.WindowStage): void {
+  private bootstrapKnockReceiver(windowStage: window.WindowStage, desktopForced: boolean): void {
     try {
-      if (!readDeviceFacts().desktopForced) {
+      if (!desktopForced) {
         return;
       }
       const mainWindow: window.Window = windowStage.getMainWindowSync();
@@ -1879,6 +1939,7 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
      * 就是在"发现没通知"之后才去设置里打开的。不重置的话，本次进程内永远认为"没授权"。
      */
     this.notifyChecked = false;
+    this.desktopNotifyPreflight = undefined;
     this.releaseHandheldKeepAlive();
     /* 回前台重置"熄屏补申请只试一次"的标志：下一个前台周期允许再补一次。 */
     this.desktopKeepAliveRetried = false;
@@ -1918,15 +1979,18 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
    *   · `seq` 变新（一次新的结束）⇒ 撤进度 → 发"任务完成"（新 ID + 带声音渠道）
    *     → 发布失败才播随包提示音兜底
    */
-  private startTaskWatch(): void {
+  private startTaskWatch(deferDiagnostic: boolean): boolean {
     if (this.taskWatchTimer !== -1) {
-      return;
+      return false;
     }
     this.taskWatchTimer = setInterval((): void => {
       this.pollTaskState();
     }, 5000);
-    this.diagTaskWatch(`watch started filesDir=${this.context.filesDir}`);
+    if (!deferDiagnostic) {
+      this.diagTaskWatch(`watch started filesDir=${this.context.filesDir}`);
+    }
     hilog.info(DOMAIN, TAG, '任务状态轮询已启动（5 s；源 task-state.json）');
+    return deferDiagnostic;
   }
 
   private stopTaskWatch(): void {
@@ -3080,8 +3144,42 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
       }
     };
     SessionHub.shared().setNotifyHooks(hooks);
-    /* 任务生命周期轮询（前后台都生效，见 startTaskWatch 注释）。 */
-    this.startTaskWatch();
+  }
+
+  private scheduleDesktopNotifyPreflight(stage: window.WindowStage, contentLoaded: boolean,
+    logTaskWatchStart: boolean): void {
+    let completed: boolean = false;
+    let timeout: number = -1;
+    const run = (): void => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      if (timeout !== -1) {
+        clearTimeout(timeout);
+      }
+      if (this.decorStage !== stage || this.exiting || this.taskWatchTimer === -1) {
+        return;
+      }
+      if (logTaskWatchStart) {
+        this.diagTaskWatch(`watch started filesDir=${this.context.filesDir}`);
+      }
+      this.preflightNotifications();
+    };
+    if (!contentLoaded) {
+      run();
+      return;
+    }
+    // 窗口隐藏或没有空闲帧时，仍须完成本次启动的授权预检。
+    timeout = setTimeout(run, 250);
+    try {
+      stage.getMainWindowSync().getUIContext().postFrameCallback(new StartupFrameCallback(run));
+    } catch (err) {
+      run();
+    }
+  }
+
+  private preflightNotifications(): void {
     /*
      * 【启动就申请一次通知授权（2026-11-04 复测）】此前授权是"真要发通知时才申请"（惰性），
      * 而通知链路一断就永远走不到那一步 ⇒ 用户**从没见过授权弹窗**，应用也就不出现在
@@ -3137,7 +3235,18 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
   }
 
   /** 惰性申请授权（只查/只弹一次） */
-  private async prepareNotify(): Promise<boolean> {
+  private prepareNotify(): Promise<boolean> {
+    if (!this.shareDesktopNotifyPreparation) {
+      return this.readNotifyReadiness();
+    }
+    // 授权预检和真实事件谁先到都共享完整的授权、渠道准备结果。回前台后重新查。
+    if (this.desktopNotifyPreflight === undefined) {
+      this.desktopNotifyPreflight = this.readNotifyReadiness();
+    }
+    return this.desktopNotifyPreflight;
+  }
+
+  private async readNotifyReadiness(): Promise<boolean> {
     if (this.notifyChecked) {
       return this.notifyReady;
     }

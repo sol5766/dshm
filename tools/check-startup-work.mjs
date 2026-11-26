@@ -66,7 +66,7 @@ export async function verifyStartupWork(text = main, implementation = production
   assert.match(text, /const ready = await bridge.status\(\);\s*if \(startupWork.stopped \|\| !pyBridgeSelftestActive\) return;/);
   assert.match(text, /res\.once\('finish',/);
   assert.match(text, /includes\('remote.mux'\)\) startupWork\.activity\(\)/);
-  assert.match(text, /runtimeFacts\(\);\s*globalThis\.__dshmUpdateTransaction/);
+  assert.match(text, /runtimeFacts\(\);\s*stage\('BOOT_42_NATIVE_READY'\);\s*globalThis\.__dshmUpdateTransaction/);
   vm.runInContext(requests.join('\n'), context);
   await flush();
   assert.deepEqual(calls, []);

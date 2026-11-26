@@ -1,16 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
 
-const require = createRequire(import.meta.url);
-let ts;
-try { ts = require('typescript'); } catch {
-  ts = require('/data/service/hnp/hmos-clt.org/hmos-clt_1.0.0/codelinter/node_modules/typescript/lib/typescript.js');
-}
 const sources = ['entry', 'phone'].map(name => [name,
   readFileSync(new URL(`../${name}/src/main/ets/pages/WebApp.ets`, import.meta.url), 'utf8')]);
 const pack = readFileSync(new URL('./pack-core.mjs', import.meta.url), 'utf8');
+const pageBeginCancellation = /(\.onPageBegin\(\(\s*(?:[\w$]+\s*:\s*OnPageBeginEvent\s*)?\)\s*=>\s*\{\s*)this\.cancelNativeCapture\(\);/;
 const flush = async () => { for (let i = 0; i < 80; i++) await Promise.resolve(); };
 function deferred() {
   let resolve, reject;
@@ -19,7 +15,7 @@ function deferred() {
 }
 function fixture(text) {
   assert.match(text, /aboutToDisappear\(\): void \{\s*this.nativeCaptureDisposed = true;\s*this.cancelNativeCapture\(\);/);
-  assert.match(text, /\.onPageBegin\(\(\) => \{\s*this.cancelNativeCapture\(\);/);
+  assert.match(text, pageBeginCancellation, 'a new document must cancel native capture before handling navigation');
   assert.match(text, /,'cancelNativeCapture':/);
   assert.match(text, /methodList: \[[^\n]*'cancelNativeCapture'/);
   const methods = text.slice(text.indexOf('  private nativeCaptureGeneration:'),
@@ -31,9 +27,8 @@ function fixture(text) {
   const globals = text.slice(text.indexOf('let natCap:'), text.indexOf('/** 把裸 PCM'));
   const permissions = [], creations = [];
   let encodes = 0;
-  const code = ts.transpileModule(globals + '\nclass Page {\n' + methods + '\n}\n'
-    + '({ Page, state: () => ({ natCap, natChunks, natBytes, natPhase, natGeneration }) });',
-  { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const code = stripTypeScriptTypes(globals + '\nclass Page {\n' + methods + '\n}\n'
+    + '({ Page, state: () => ({ natCap, natChunks, natBytes, natPhase, natGeneration }) });');
   const api = runInNewContext(code, {
     audio: { AudioSamplingRate: {}, AudioChannel: {}, AudioSampleFormat: {}, AudioEncodingType: {}, SourceType: {},
       createAudioCapturer() { const d = deferred(); creations.push(d); return d.promise; } },
@@ -250,7 +245,8 @@ if (process.argv.includes('--self-test')) {
     text => text.replace('if (generation !== natGeneration || natCap !== c)', 'if (false)'),
     text => text.replace('++natGeneration;\n    const cap:', 'natGeneration;\n    const cap:'),
     text => text.replace('await cap.release();', 'await Promise.resolve();'),
-    text => text.replace('this.cancelNativeCapture();\n            //', 'void 0;\n            //'),
+    text => text.replace(pageBeginCancellation, '$1void 0;'),
+    text => text.replace(pageBeginCancellation, '$1if (this.nativeCaptureDisposed) return;\n            this.cancelNativeCapture();'),
   ];
   for (const [name, text] of sources) {
     for (const [i, mutate] of mutants.entries()) {
@@ -271,5 +267,5 @@ if (process.argv.includes('--self-test')) {
     assert.notEqual(changed, pack);
     await assert.rejects(verifyBridge(changed), undefined, `bridge mutant ${i} escaped`);
   }
-  console.log('PASS self-test: 15 negative controls rejected');
+  console.log(`PASS self-test: ${sources.length * mutants.length + 1 + bridgeMutants.length} negative controls rejected`);
 }
