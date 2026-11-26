@@ -7,11 +7,15 @@
  * 手机和PC不要动」。绕一圈回到第一版 §F 的诉求。前几轮叠加的补丁全部作废。
  *
  * 本门禁守**配置层 / 形态判定层**（CSS 结构由 check-sidebar-shim-css.mjs 守）：
- *   ① 回退到工程基线：entry / phone 的 module.json5 都**不含** supportWindowMode。
+ *   ① 回退到工程基线：entry / phone 的**主壳 EntryAbility** 不声明 supportWindowMode。
  *      上一轮把它声明在 ability 上是全局改动，会动到 2in1/PC 与手机 —— 用户明确
  *      「手机和PC不要动」「忽略之前做的改动」。系统对平板应用的默认窗口能力由
  *      deviceTypes 决定，不需要显式声明 floating（那反而让系统在最近任务里按
  *      桌面/PC 应用登记）。
+ *      【豁免（2026-11-23 PetAbility 之后收窄）】非主壳的附属 ability（如桌宠
+ *      PetAbility 纯浮层，excludeFromMissions）允许在自己的 ability 块里声明
+ *      supportWindowMode —— 判据按「该声明归属哪个 ability」定责：每次出现都
+ *      回溯最近的 "name"，只有落在主壳 EntryAbility 块内才算违规。
  *   ② platformForm 桥恒答 'tablet'：平板不因 pcMode（自由窗口）改答 desktop，
  *      即不切 PC 桌面档。真 PC/2in1（!handheld）仍答 desktop，逐字不动。
  *   ③ 平板独立档：form=tablet 挂 dshm-tablet（既不挂 dshm-phone 也不挂 dshm-desktop）。
@@ -39,12 +43,41 @@ function run(sources) {
   const ok = (cond, msg) => { if (cond) { pass++; notes.push('  PASS  ' + msg); } else { fail++; notes.push('  FAIL  ' + msg); } };
   const web = sources[WEB] ?? '';
 
-  // ① 回退基线：所有交付模块都不声明 supportWindowMode（手机和PC不动）
+  // ① 回退基线：主壳 EntryAbility 不声明 supportWindowMode（手机和PC不动）。
+  //    非主壳附属 ability（PetAbility 浮层等）在自己的块内声明不算违规（见头注豁免）。
+  //    【归属法】只审「对象形 abilities 数组」段（锚点 `"abilities": [` 后紧跟 `{`，
+  //    串形数组——如 shortcuts 引用——不匹配）：段内每次出现按段内最近前置 "name"
+  //    定责；段内无前置 name ⇒ 属第一个 ability，即主壳 EntryAbility ⇒ 违规。
+  //    段外声明（元数据 / extensionAbilities）无主壳窗口语义，豁免；找不到对象形
+  //    abilities 段却出现 supportWindowMode 时按违规计（归属不可考，逼人工看）。
+  const abilitySegment = (text) => {
+    const start = text.search(/"abilities"\s*:\s*\[\s*\n\s*\{/);
+    if (start === -1) { return null; }
+    const ext = text.indexOf('"extensionAbilities"');
+    const end = ext > start ? ext : text.length;
+    return { start, end };
+  };
+  const mainAbilityDeclaresWindowMode = (text) => {
+    const seg = abilitySegment(text);
+    let idx = 0;
+    while ((idx = text.indexOf('supportWindowMode', idx)) !== -1) {
+      if (seg === null) { return true; }
+      const inAbilities = idx >= seg.start && idx < seg.end;
+      if (!inAbilities) { idx += 'supportWindowMode'.length; continue; }
+      const head = text.slice(seg.start, idx);
+      const names = [...head.matchAll(/"name"\s*:\s*"([^"]+)"/g)];
+      // 段内无前置 name ⇒ 第一个 ability（主壳）
+      const owner = names.length > 0 ? names[names.length - 1][1] : 'EntryAbility';
+      if (owner === 'EntryAbility') { return true; }
+      idx += 'supportWindowMode'.length;
+    }
+    return false;
+  };
   for (const mod of MODULES) {
     const text = sources[mod];
     if (text === undefined) { continue; } // 该工作区没有这个模块（1.1.4 基线无 phone）
-    ok(!text.includes('supportWindowMode'),
-      `${mod.split('/')[0]} 的 module.json5 回到基线（不含 supportWindowMode）`);
+    ok(!mainAbilityDeclaresWindowMode(text),
+      `${mod.split('/')[0]} 主壳 EntryAbility 回到基线（不声明 supportWindowMode；附属浮层 ability 豁免）`);
   }
 
   // ② platformForm 桥：恒答 tablet，不切 PC 桌面档
@@ -106,6 +139,8 @@ const selfTest = process.argv.includes('--self-test');
 const MUTATIONS = [
   { name: 'M1 又给 entry 声明了 supportWindowMode（动了 PC/手机）',
     apply: (s) => ({ ...s, 'entry/src/main/module.json5': (s['entry/src/main/module.json5'] ?? '').replace('"launchType": "specified",', '"launchType": "specified",\n        "supportWindowMode": ["fullscreen", "split", "floating"],') }) },
+  { name: 'M1b 把 supportWindowMode 塞进主壳块头部（name 键之前，绕过回溯）',
+    apply: (s) => ({ ...s, 'entry/src/main/module.json5': (s['entry/src/main/module.json5'] ?? '').replace('"abilities": [\n      {\n        "name": "EntryAbility",', '"abilities": [\n      {\n        "supportWindowMode": ["floating"],\n        "name": "EntryAbility",') }) },
   { name: 'M2 platformForm 改回 pcMode→desktop（平板又变 PC 桌面档）',
     apply: (s) => ({ ...s, [WEB]: s[WEB].replace(/,'platformForm': \(\): string => /, ",'platformForm': (): string => this.pcMode ? 'desktop' : (") }) },
   { name: 'M3 platformForm 丢掉 tablet 档',

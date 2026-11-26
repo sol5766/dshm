@@ -14,7 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,77 @@ const PROD_LABEL = 'DSHM';
 const BETA_LABEL = 'DSHM beta';
 const BETA_PROFILE = join(ROOT,
   'signing/debug/default_desktop.ohos.arm64_H6ERYybQIgIZaVstkvwvtC9vr-nLxAUfZBhCBJKkRhw=.p7b');
+/*
+ * 【beta 签名必须整套用 signing/debug（2026-11-26）】
+ * BETA_PROFILE 里的 development-certificate 指纹是 signing/debug 的 debugKey 证书
+ * （SHA-256 D9:A6:…:E6），而 build-profile 默认的 `.certs/debug-local/xiaobai` 是
+ * **另一对密钥**（subject 同为王志豪，但指纹 8A:76:…:F8）。混用会被设备判
+ * `9568322 signature verification failed due to not trusted app source`——
+ * 也就是"包能编出来但装不上"。所以构建期把 p12/cer/alias/密码一并换成
+ * signing/debug 那一套（密码从 signing/debug-p12-password.txt 读，不写进源码）。
+ */
+const BETA_SIGN_P12 = './signing/debug/default_desktop.ohos.arm64_H6ERYybQIgIZaVstkvwvtC9vr-nLxAUfZBhCBJKkRhw=.p12';
+const BETA_SIGN_CER = './signing/debug/default_desktop.ohos.arm64_H6ERYybQIgIZaVstkvwvtC9vr-nLxAUfZBhCBJKkRhw=.cer';
+const BETA_SIGN_ALIAS = 'debugKey';
+const BETA_SIGN_PASSWORD_FILE = join(ROOT, 'signing/debug-p12-password.txt');
+
+/** 读取 signing/debug P12 的明文密码（仅构建期注入 build-profile，finally 逐字恢复）。 */
+function betaSigningPassword() {
+  let text;
+  try {
+    text = readFileSync(BETA_SIGN_PASSWORD_FILE, 'utf8');
+  } catch (e) {
+    throw new Error(`找不到 ${BETA_SIGN_PASSWORD_FILE}（beta 构建需要 signing/debug 的 P12 密码）`);
+  }
+  const match = /^passwd=(.+)$/m.exec(text);
+  if (!match || match[1].trim().length === 0) {
+    throw new Error(`${BETA_SIGN_PASSWORD_FILE} 缺少 passwd= 行`);
+  }
+  return match[1].trim();
+}
+
+/*
+ * beta 侧载件的最终签名（2026-11-26）。
+ *
+ * 【为什么不在 build-profile 里换】hvigor 只接受 ≥32 字符的 DevEco 加密口令，
+ * signing/debug 的明文口令（11 字符）会被 `00303116` 直接拒；而把 p12 换成
+ * signing/debug 却仍用 `.certs/debug-local/xiaobai` 的加密口令又解不开。
+ *
+ * 【为什么不重新生成加密口令】DevEco 的 material 加密组件可以做到，但要复刻
+ * 它的 PBKDF2/AES-GCM 流程，风险大于收益。侧载只需要 HAP + HSP，重签是确定性的：
+ *   · hvigor 照常出包（xiaobai 签名，能过编译期的身份/权限断言）；
+ *   · 拷贝到侧载目录后，用 hap-sign-tool + signing/debug 的 p12/cer/p7b 重签；
+ *   · `.app` 保持 hvigor 签名（AGC/DevEco 用），侧载目录里的那份才是本机可装的。
+ *
+ * 【为什么必须重签】BETA_PROFILE 的 development-certificate 指纹是 debugKey
+ * （D9:A6:…），与 xiaobai（8A:76:…）不同；混用会在设备侧报
+ * `9568322 signature verification failed due to not trusted app source`。
+ */
+const BETA_COMPATIBLE_VERSION = '60100023'; // = build-profile compatibleSdkVersion 6.1.0(23)
+
+function resignArtifact(file) {
+  const tool = join(devecoRoot, 'sdk/default/openharmony/toolchains/lib/hap-sign-tool');
+  if (!existsSync(tool)) {
+    throw new Error(`找不到 hap-sign-tool：${tool}`);
+  }
+  const password = betaSigningPassword();
+  const temp = file + '.resign';
+  run(tool, [
+    'sign-app', '-mode', 'localSign',
+    '-keyAlias', BETA_SIGN_ALIAS,
+    '-signAlg', 'SHA256withECDSA',
+    '-appCertFile', BETA_SIGN_CER,
+    '-profileFile', BETA_PROFILE,
+    '-inFile', file,
+    '-outFile', temp,
+    '-keystoreFile', BETA_SIGN_P12,
+    '-keystorePwd', password,
+    '-keyPwd', password,
+    '-profileSigned', '1',
+    '-compatibleVersion', BETA_COMPATIBLE_VERSION,
+  ]);
+  renameSync(temp, file);
+}
 const BETA_ACLS = [
   'ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE',
   'ohos.permission.FILE_ACCESS_PERSIST',
@@ -335,6 +406,10 @@ try {
       text = text.replaceAll(
         './.certs/multihap-20261024/DSHM-multihap-debug-pc-phone-20261024.p7b',
         './signing/debug/default_desktop.ohos.arm64_H6ERYybQIgIZaVstkvwvtC9vr-nLxAUfZBhCBJKkRhw=.p7b');
+      // 注意：这里**只换 profile**，让 hvigor 正常出包；p7b 与 build-profile 默认的
+      // `.certs/debug-local/xiaobai` 不是同一对密钥，直接装会被设备判 9568322。
+      // 真正的可安装签名在拷贝到侧载目录后用 hap-sign-tool + signing/debug 重签
+      // （见 resignArtifact()；hvigor 不允许 <32 字符的明文口令，不能在这里换 P12）。
     }
     if (rel.endsWith('/element/string.json')) {
       text = text.replaceAll(`"value": "${PROD_LABEL}"`, `"value": "${BETA_LABEL}"`);
@@ -500,6 +575,10 @@ try {
     const hspDst = join(outDir, target.dir, `DSHM-${APP_VERSION}-beta-hostruntime-debug.hsp`);
     copyFileSync(target.hap, hapDst);
     copyFileSync(target.hsp, hspDst);
+    // hvigor 用 build-profile 默认的 xiaobai 密钥出包；侧载件必须用 BETA_PROFILE
+    // 绑定的 signing/debug 密钥重签，否则设备报 9568322（见 resignArtifact 注释）。
+    resignArtifact(hapDst);
+    resignArtifact(hspDst);
     staged.push(hapDst, hspDst);
   }
   const sums = staged.map((file) => {

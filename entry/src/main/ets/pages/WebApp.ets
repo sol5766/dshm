@@ -6509,11 +6509,40 @@ struct WebApp {
     }));
   }
 
+  /*
+   * 【应用帧守卫（2026-11-26 修侧栏浏览器）】onLoadIntercept 放行子帧外链后，
+   * 侧栏浏览器用 <iframe> 嵌外部页面；ArkWeb 的 scriptRules 只按 URL 匹配、
+   * 不分主帧/子帧 ⇒ scriptRules:'*' 的垫片会跟着注入被浏览的网页（WS/fetch
+   * 包装器、链接点击劫持、CSS/DOM 注入全是污染）。每条垫片先包这层守卫：
+   * 回环域名（应用自身页面，与 isExternalNavigation 同一判据族）才执行，
+   * 其余（外部 iframe、about:blank —— 预挂期本就不跑垫片）整段早退。
+   * 垫片间通信全走显式 globalThis/window 键（见 pickerShimScripts 头注），
+   * 包进 IIFE 不改变跨脚本可见性；runJavaScript 的一次性片段不经此路。
+   */
+  private appFrameGuard(script: string): string {
+    return '(function () {\n' +
+      '  var hn = \'\';\n' +
+      '  try {\n' +
+      '    hn = globalThis.location && globalThis.location.hostname\n' +
+      '      ? String(globalThis.location.hostname) : \'\';\n' +
+      '  } catch (e) { hn = \'\'; }\n' +
+      '  if (hn !== \'127.0.0.1\' && hn !== \'localhost\' && hn !== \'[::1]\') { return; }\n' +
+      script + '\n' +
+      '})();';
+  }
+
   private webDocumentStartScripts(): Array<ScriptItem> {
-    if (this.startupWebPrepared) return this.startupDocumentScripts;
-    if (!this.usesDesktopStartup() || this.rawDeviceType !== 'tablet') return this.pickerShimScripts;
+    /* 【应用帧守卫】所有注入路径统一在此包一层（见 appFrameGuard 头注）：预挂
+       清单 / 原清单 / 平板 handoff 都从这里进 javaScriptOnDocumentStart。 */
+    const wrap = (items: Array<ScriptItem>): Array<ScriptItem> => {
+      return items.map((item: ScriptItem): ScriptItem => {
+        return { script: this.appFrameGuard(item.script), scriptRules: item.scriptRules };
+      });
+    };
+    if (this.startupWebPrepared) return wrap(this.startupDocumentScripts);
+    if (!this.usesDesktopStartup() || this.rawDeviceType !== 'tablet') return wrap(this.pickerShimScripts);
     const handoff: ScriptItem = { script: TABLET_STARTUP_WEB_HANDOFF, scriptRules: ['*'] };
-    return this.pickerShimScripts.concat(handoff);
+    return wrap(this.pickerShimScripts.concat(handoff));
   }
 
   private isStartupBlankNavigation(url: string): boolean {
@@ -8429,17 +8458,20 @@ struct WebApp {
                 return false;
               }
               /*
-               * 【必须区分主帧与子帧（2026-10-29 复审修）】`onLoadIntercept` 对**所有导航**
-               * 触发，包括 iframe 的 src 加载 —— SDK 专门在 WebResourceRequest 上提供
-               * isMainFrame() 就是为此。若不判，聊天内容里一个指向外部站点的 iframe 会让
-               * 浏览器在**没有用户交互**的情况下自己弹出来。
+               * 【必须区分主帧与子帧（2026-10-29 复审修；2026-11-26 子帧改放行）】
+               * `onLoadIntercept` 对**所有导航**触发，包括 iframe 的 src 加载 —— SDK 专门在
+               * WebResourceRequest 上提供 isMainFrame() 就是为此。
                *   · 主帧外链 ⇒ 拦下并交系统浏览器（用户意图，如 location 赋值 / 未接住的点击）；
-               *   · 子帧外链 ⇒ 同样**拦下**（外部页面不该被嵌进应用 WebView），但**不外开**
-               *     ——没有人点它，弹浏览器只会吓到用户。
+               *   · 子帧外链 ⇒ **放行**：侧栏浏览器 tab 就是用 <iframe src=远端> 内嵌网页
+               *     （dsh-client-ui-sidebar-browser），原先整类拦下 ⇒ 三端侧栏浏览器永远
+               *     空白。放行依据：全应用只有它会创建外部 iframe —— 聊天渲染器不产
+               *     HTML iframe（前端 bundle 无 rehype-raw / dangerouslySetInnerHTML），
+               *     插件 UI 都渲染进主 DOM。放行**不触发外开**：浏览器只由主帧分支 /
+               *     垫片 / 显式海泰链路拉起。
                */
               if (!event.data.isMainFrame()) {
-                hilog.info(DOMAIN, TAG, '拦下子帧外链导航（不外开）：%{public}s', target);
-                return true;
+                hilog.info(DOMAIN, TAG, '放行子帧外链导航（侧栏浏览器 iframe）：%{public}s', target);
+                return false;
               }
               hilog.info(DOMAIN, TAG, '拦下页内导航并交系统浏览器：%{public}s', target);
               this.dirPickerBridge.writeDiagMarkerPublic('diag-openlink', `nav ${target}`);

@@ -849,3 +849,36 @@
   config:
     fontDirectories:
       - /system/fonts
+
+# ⑭ 启动编排（2026-11-26）：延迟挂载非首屏插件
+#
+# 背景：端侧冷启动 p50 9.27s / p90 15.06s，其中一次同步停顿占 75%–96%；
+# 缓存已热（编译 143 MB / 解析 17,025 条），继续加缓存收益见顶 ⇒ 改为「少加载、晚加载」。
+#
+# 上游 0.2.3 的 profile **没有** deferredBundles 字段（只有 bundles/removeBundles/patchReload），
+# 所以编排放在插件里，走真实的运行时 API：ctx.loader.create({ id, name, config })。
+#
+# 【自动模式（2026-11-26 第二轮）】`autoDeferUserBundles: true`（默认开）：
+#   · 宿主 main.js 在 runProfile **之前**用 dsh-app-boot 自己的解析器读出用户
+#     从插件市场装的 bundle（当前是 dshmarket）的 cordis.patch.yml；
+#   · 只处理"整份 patch 只有 insert"的 bundle（有 id 覆盖的保持同步加载，不改语义）；
+#   · 把它从 `dsh.profile.bundles` 移出、写 `.dshm-deferred-bundles.json`；
+#   · 本插件在壳启动后按清单逐行 mount，行 id/name/config/disabled 原样沿用。
+#   实测（HUAWEI Mate 80 / beta 1.1.8-1010020）：手机端 profile boot 的大头就是
+#   用户 bundle 与核心 bundle 一起同步 import；移出后首屏不再等它们。
+#
+# `deferredBundles` 是**显式补充清单**（拿到 SYNC-COUNT / REQUIRE-COUNT 榜后可追加，
+# 同名 id 覆盖自动清单）。空数组 + autoDeferUserBundles=true 时仍会延迟用户 bundle；
+# 两者都为空才输出 BOOT-DEFER-IDLE（零行为变更）。
+#
+# 填法（示例，核心自带的非首屏插件）：
+#   deferredBundles:
+#     - { id: deferred-pet, name: '@deepseek-ai/dsh-pet' }
+# 然后重启验证：功能入口首次打开会多一次动态加载，属预期。
+- insert:
+    - id: dshm-boot-extras
+      name: '@deepseek-ai/dshm-boot-extras'
+      config:
+        autoDeferUserBundles: true
+        deferredBundles: []
+        delayMs: 3000

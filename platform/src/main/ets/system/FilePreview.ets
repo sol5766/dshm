@@ -35,7 +35,7 @@
  *   ⇒ 手机/平板上调用会失败，调用方须按返回的 false 走自己的回退（不要崩）。
  */
 
-import { common } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import { fileUri, picker } from '@kit.CoreFileKit';
 import { filePreview } from '@kit.PreviewKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -231,8 +231,75 @@ export async function closeSystemPreview(context: common.UIAbilityContext): Prom
 }
 
 /**
- * 打开系统文件选择器并定位到指定文件所在位置。
- * 返回值供同步 JavaScriptProxy 桥使用：ok / empty / nouri / context / threw。
+ * 系统「文件」App 的包名 / Ability。
+ *
+ * 【为什么不是 com.huawei.hmos.filemanager】那是 PC / 2in1 的「文件管理」；
+ * 手机 / 平板上的文件浏览器是 `com.huawei.hmos.files`（HmFiles），它的 EntryAbility
+ * 支持 `fileUri` 参数：传入**文件**的 `file://docs/...` URI，会打开该文件所在的
+ * 文件夹并把文件列出来。`com.huawei.hmos.filemanager` 的 DesktopPathPickerAbility
+ * 对我们不可见（真机 `aa start` 报 10103001），不能作为兜底。
+ */
+const FILE_MANAGER_BUNDLE: string = 'com.huawei.hmos.files';
+const FILE_MANAGER_ABILITY: string = 'EntryAbility';
+
+/**
+ * 用系统「文件」App 打开文件所在文件夹（真实的文件管理器视图）。
+ *
+ * `DocumentViewPicker` 是**选择器**（只能选、不能看），这就是上一版"点了只进
+ * 选择器"的根因。`fileUri` 参数是 Files App 的入口：传文件 URI，它打开父目录
+ * 并选中该文件；传目录 URI，它只打开父目录。所以这里传**文件**的 URI。
+ *
+ * @returns 是否受理（拒绝时由调用方回退到 picker）
+ */
+function openWithFileManager(context: common.UIAbilityContext, uri: string): Promise<boolean> {
+  const want: Want = {
+    bundleName: FILE_MANAGER_BUNDLE,
+    abilityName: FILE_MANAGER_ABILITY,
+    parameters: { fileUri: uri }
+  };
+  return context.startAbility(want).then((): boolean => {
+    hilog.info(DOMAIN, TAG, '系统文件管理器已受理：%{public}s', uri);
+    return true;
+  }).catch((err: BusinessError): boolean => {
+    hilog.warn(DOMAIN, TAG, '系统文件管理器未受理（回退选择器）：code=%{public}d msg=%{public}s',
+      err.code, err.message);
+    return false;
+  });
+}
+
+/** 旧方案：文件选择器定位（Files App 不可用时的兜底）。 */
+function openWithPicker(context: common.UIAbilityContext | common.Context, uri: string): string {
+  try {
+    const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
+    options.defaultFilePathUri = uri;
+    options.maxSelectNumber = 1;
+    options.selectMode = picker.DocumentSelectMode.FILE;
+    const view: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
+    view.select(options).then((): void => {
+      hilog.info(DOMAIN, TAG, '文件选择器定位已返回：%{public}s', uri);
+    }).catch((err: BusinessError): void => {
+      hilog.warn(DOMAIN, TAG, '文件选择器定位结束：code=%{public}d msg=%{public}s',
+        err.code, err.message);
+    });
+    return 'ok';
+  } catch (err) {
+    const e = err as BusinessError;
+    hilog.warn(DOMAIN, TAG, '打开文件选择器定位失败：code=%{public}d msg=%{public}s',
+      e.code, e.message);
+    return 'threw';
+  }
+}
+
+/**
+ * 打开系统文件管理器并定位到指定文件所在位置。
+ *
+ * 优先走系统「文件」App（`com.huawei.hmos.files` + `fileUri` 参数）——它会打开
+ * 文件所在**文件夹并选中文件**；只有 startAbility 被拒（旧系统/无 Files App）
+ * 才回退到 `DocumentViewPicker`（选择器，只能选不能看）。
+ *
+ * 返回值供同步 JavaScriptProxy 桥使用：ok / empty / nouri / context。
+ * 注意：startAbility 是异步的，返回 'ok' 只表示"已发起"；失败会在后台回退
+ * 到 picker，并写 hilog（不把异步失败伪装成同步错误）。
  */
 export function openFileLocation(context: common.UIAbilityContext | common.Context,
   path: string): string {
@@ -247,23 +314,17 @@ export function openFileLocation(context: common.UIAbilityContext | common.Conte
   if (context === undefined || context === null) {
     return 'context';
   }
-  try {
-    const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
-    options.defaultFilePathUri = uri;
-    options.maxSelectNumber = 1;
-    options.selectMode = picker.DocumentSelectMode.FILE;
-    const view: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
-    view.select(options).then((): void => {
-      hilog.info(DOMAIN, TAG, '文件管理器定位选择器已返回：%{public}s', uri);
-    }).catch((err: BusinessError): void => {
-      hilog.warn(DOMAIN, TAG, '文件管理器定位选择器结束：code=%{public}d msg=%{public}s',
-        err.code, err.message);
-    });
-    return 'ok';
-  } catch (err) {
-    const e = err as BusinessError;
-    hilog.warn(DOMAIN, TAG, '打开文件管理器定位失败：code=%{public}d msg=%{public}s',
-      e.code, e.message);
-    return 'threw';
-  }
+  const abilityCtx: common.UIAbilityContext = context as common.UIAbilityContext;
+  openWithFileManager(abilityCtx, uri).then((accepted: boolean): void => {
+    if (accepted) {
+      return;
+    }
+    const status: string = openWithPicker(abilityCtx, uri);
+    if (status !== 'ok') {
+      hilog.warn(DOMAIN, TAG, '文件管理器定位失败且选择器兜底未成功：%{public}s', status);
+    }
+  }).catch((err: BusinessError): void => {
+    hilog.warn(DOMAIN, TAG, '文件管理器定位异步失败：%{public}s', err.message);
+  });
+  return 'ok';
 }

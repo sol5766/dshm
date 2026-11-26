@@ -144,6 +144,20 @@ function buildRuntime(opts) {
       for (const l of listeners) l();
       return () => { const i = entries.indexOf(entry); if (i >= 0) entries.splice(i, 1); version += 1; };
     },
+    /*
+     * 【2026-11-26】核心 0.2.3-rc.5 的官方设置骨架新增 `ctx.slots.registerFactory(...)`
+     * （settings.section.view 的工厂槽位）。旧测试台没有这个方法 ⇒
+     * `ctx.slots.registerFactory is not a function`，五个分支全挂。
+     * 按 register 同语义入册即可（工厂组件同样参与 entries/版本/订阅通知），
+     * 这是**测试脚手架对齐**，不改产品代码（先例：下方 remoteAccess 补齐）。
+     */
+    registerFactory: (options, Component) => {
+      const entry = { ...options, Component };
+      entries.push(entry);
+      version += 1;
+      for (const l of listeners) l();
+      return () => { const i = entries.indexOf(entry); if (i >= 0) entries.splice(i, 1); version += 1; };
+    },
     inject: (name, fn) => {
       if (name === 'settings.section' || entries.some((e) => e.name === name)) {
         try {

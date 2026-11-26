@@ -115,12 +115,23 @@ function inspect(files) {
     && webapp.includes('event.data.getRequestUrl()'),
     'G4 Web 组件挂了 onLoadIntercept，并取真实请求 URL');
   /*
-   * G8 必须区分主帧/子帧（2026-10-29 复审）：onLoadIntercept 对**所有导航**触发（含
-   * iframe src）。不判 isMainFrame ⇒ 聊天内容里的外部 iframe 会在**无用户交互**时
-   * 自动弹系统浏览器。子帧外链同样要拦（不许嵌进应用 WebView），但**不外开**。
+   * G8 必须区分主帧/子帧（2026-10-29 复审；2026-11-26 子帧改**放行**）：onLoadIntercept
+   * 对**所有导航**触发（含 iframe src）。主帧外链 ⇒ 拦下交系统浏览器；子帧外链 ⇒ 放行
+   * （侧栏浏览器 tab = <iframe src=远端>，原先整类拦下 ⇒ 三端侧栏浏览器永远空白），
+   * 但分支内**不外开** —— 浏览器只由主帧分支 / 垫片 / 显式海泰链路拉起。
    */
   ok(webapp.includes('event.data.isMainFrame()'),
-    'G8 onLoadIntercept 判断了 isMainFrame（子帧导航不自动外开浏览器）');
+    'G8 onLoadIntercept 判断了 isMainFrame（主帧/子帧分流）');
+  {
+    const subSlice = (src) => src.match(
+      /if \(!event\.data\.isMainFrame\(\)\) \{[\s\S]{0,1200}?\n              \}/)?.[0] ?? '';
+    const websub = subSlice(webapp);
+    ok(websub.length > 0 && websub.includes('return false;') && !websub.includes('openExternalUrl'),
+      'G8 子帧外链放行（侧栏浏览器 iframe），且不外开');
+    const phonesub = subSlice(phone);
+    ok(phonesub.length > 0 && phonesub.includes('return false;') && !phonesub.includes('openExternalUrl'),
+      'H4 phone 子帧外链放行（侧栏浏览器 iframe），且不外开');
+  }
   ok(webapp.includes('              return true;\n            } catch (e) {'),
     'G5 外链导航被拦下（返回 true ⇒ 不在应用内打开外部页）');
   ok(webapp.includes('openExternalUrl(target)'),
@@ -220,8 +231,16 @@ arms.push(
       '              return false;\n            } catch (e) {') },
   },
   {
-    name: 'L：去掉 isMainFrame 判断（外部 iframe 会无交互自动弹浏览器）',
-    files: { ...files, webapp: files.webapp.replace('              if (!event.data.isMainFrame()) {\n                hilog.info(DOMAIN, TAG, \'拦下子帧外链导航（不外开）：%{public}s\', target);\n                return true;\n              }\n', '') },
+    name: 'L：子帧放行退回拦截（三端侧栏浏览器又永远空白）',
+    files: { ...files, webapp: files.webapp.replace(
+      "hilog.info(DOMAIN, TAG, '放行子帧外链导航（侧栏浏览器 iframe）：%{public}s', target);\n                return false;",
+      "hilog.info(DOMAIN, TAG, '拦下子帧外链导航（不外开）：%{public}s', target);\n                return true;") },
+  },
+  {
+    name: 'M：phone 子帧放行退回拦截（手机侧栏浏览器又空白）',
+    files: { ...files, phone: files.phone.replace(
+      "hilog.info(DOMAIN, TAG, '放行子帧外链导航（侧栏浏览器 iframe）：%{public}s', target);\n                return false;",
+      "hilog.info(DOMAIN, TAG, '拦下子帧外链导航（不外开）：%{public}s', target);\n                return true;") },
   },
   {
     name: 'K：主机名退回前缀匹配（127.0.0.1.evil.com 会被当成应用自身放行）',

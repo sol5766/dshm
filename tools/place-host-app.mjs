@@ -100,7 +100,7 @@ const DEST = join(ROOT, 'hostruntime', 'src', 'main', 'resources', 'resfile', 'r
 //       resfile/boot-seed/ 里的解析表 JSON + V8 code cache blob 拷进可写目录。
 //       漏掉它**不会崩**（安装点自带 try/catch），但全新安装后的第一次启动
 //       全冷（解析空表 + 冷编译），种子整段不生效 —— 又一处"静默白修"，必须进清单。
-const FILES = ['main.js', 'tar-gz.cjs', 'jitless-env.cjs', 'worker-bootstrap.cjs', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'internal-undici-shim.cjs', 'dshm-installer.js', 'dshm-install-command.js', 'dshm-market-patch.cjs', 'dshm-user-rows.js', 'dshm-skills.js', 'dshm-compat.js', 'fs-probe-cache.cjs', 'module-path-guard.cjs', 'python-worker.cjs', 'python-bridge-async.cjs', 'node-runtime-provision.cjs', 'ffmpeg-runtime-provision.cjs', 'resolve-cache.cjs', 'boot-seed.cjs'];
+const FILES = ['main.js', 'tar-gz.cjs', 'jitless-env.cjs', 'worker-bootstrap.cjs', 'fetch-shim.js', 'undici-shim.mjs', 'undici-loader.mjs', 'require-builtin-shim.cjs', 'internal-undici-shim.cjs', 'dshm-installer.js', 'dshm-install-command.js', 'dshm-market-patch.cjs', 'dshm-user-rows.js', 'dshm-deferred-bundles.js', 'dshm-skills.js', 'dshm-compat.js', 'fs-probe-cache.cjs', 'module-path-guard.cjs', 'python-worker.cjs', 'python-bridge-async.cjs', 'node-runtime-provision.cjs', 'ffmpeg-runtime-provision.cjs', 'resolve-cache.cjs', 'boot-seed.cjs'];
 
 /*
  * 【2026-11-16 工具纪律】默认行为不变；新增两个可选开关：

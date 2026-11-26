@@ -40,7 +40,7 @@ import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { abilityAccessCtrl } from '@kit.AbilityKit';
 import type { PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
-import { curves, window } from '@kit.ArkUI';
+import { curves, window, FrameCallback } from '@kit.ArkUI';
 import { Fs, HarmonySpacing, Radius, Sp, parseNotifyRoute } from 'appstate';
 import { BRAND_SHIM_JS } from 'dshcompat';
 // Web 权限裁决的纯逻辑（真机 bug 修复：getOrigin() 带结尾斜杠）
@@ -3591,6 +3591,8 @@ class DshDirectoryPickerBridge {
 /** EntryAbility 发布的完整启动 URL（含 token）：本端自起或启动参数，见文件头 */
 const KEY_HOST_LAUNCH_URL: string = 'dshHostLaunchUrl';
 const KEY_HOST_BOOT_ERROR: string = 'dshHostBootError';
+/** 【与 PC 壳对齐（2026-11-26）：Web 预挂】预挂期 ArkWeb 承载的空页（entry 壳同名常量） */
+const STARTUP_BLANK_URL: string = 'about:blank';
 
 /** EntryAbility 发布的三键可见性（自由窗口 ⟺ 三键在）：与能力层**同名同值**的约定键 */
 const KEY_DECOR_KEYS_VISIBLE: string = 'dshDecorKeysVisible';
@@ -3775,6 +3777,25 @@ const SCAN_SHIM_JS: string = `
 })();
 `;
 
+/*
+ * 【与 PC 壳对齐（2026-11-26）：Web 预挂】预挂 ArkWeb 的时点选择器：等一帧再挂，
+ * 保证品牌动画首帧先提交（首帧保持轻量），Web 冷建排在其后。
+ * entry 壳的同名类在 common/DesktopStartup.ets（StartupFrameCallback）；
+ * 手机壳没有该模块，这里放一个等价的最小实现。
+ */
+class StartupWebFrameCallback extends FrameCallback {
+  private readonly afterFrame: () => void;
+
+  constructor(afterFrame: () => void) {
+    super();
+    this.afterFrame = afterFrame;
+  }
+
+  onIdle(_timeLeftInNano: number): void {
+    this.afterFrame();
+  }
+}
+
 @Entry
 @Component
 struct WebApp {
@@ -3783,6 +3804,18 @@ struct WebApp {
   @State @Watch('onPhaseChanged') phase: WebPhase = WebPhase.BOOTING;
   /** 启动页是否用深色：按系统当前深浅色，在 aboutToAppear 里定（web 主题上报前）。 */
   @State splashDark: boolean = false;
+  /*
+   * 【与 PC 壳对齐（2026-11-26）：Web 预挂】BOOTING 期就把 ArkWeb 以 about:blank
+   * 预先挂载（document-start 垫片全部照常注册），宿主发布 launchUrl 后经
+   * loadPreparedHostPage 用已附着的控制器直接导航 —— 把「ArkWeb 冷建 + 渲染
+   * 进程孵化」从 URL 到达的关键路径挪进品牌动画的等待期。字段语义与 entry 壳
+   * 同名字段一一对应。
+   */
+  @State private startupWebPrepared: boolean = false;
+  private startupPageActive: boolean = false;
+  private startupDocumentScripts: Array<ScriptItem> = [];
+  private startupControllerAttached: boolean = false;
+  private preparedLaunchUrl: string = '';
   /** ERROR 覆盖层展示的原因（不含任何凭据） */
   /**
    * 云同步面板是否显示（docs/320）。
@@ -5115,6 +5148,7 @@ struct WebApp {
   private glassCapabilityDeclared: boolean = false;
 
   aboutToAppear(): void {
+    this.startupPageActive = true;
     this.nativeCaptureDisposed = false;
     // 启动页首帧就要定深浅：web 主题还没上报，只能读系统 colorMode（见 systemAppearance）。
     this.splashDark = this.systemAppearance() === 'dark';
@@ -5297,6 +5331,7 @@ struct WebApp {
   aboutToDisappear(): void {
     this.nativeCaptureDisposed = true;
     this.cancelNativeCapture();
+    this.startupPageActive = false;
     this.readAloud.release();
     this.stopLoadTicker();
     this.clearAutoRetry();
@@ -5700,6 +5735,9 @@ struct WebApp {
   private onLaunchUrlChanged(): void {
     if (this.launchUrl.length > 0) {
       this.enterLoading();
+      this.loadPreparedHostPage();
+    } else {
+      this.preparedLaunchUrl = '';
     }
   }
 
@@ -5745,6 +5783,91 @@ struct WebApp {
   private baseOfLaunchUrl(): string {
     const cut: number = this.launchUrl.indexOf('?');
     return cut > 0 ? this.launchUrl.substring(0, cut) : this.launchUrl;
+  }
+
+  /*
+   * 【与 PC 壳对齐（2026-11-26）：Web 预挂】时序：品牌动画覆盖层出现（onAppear）
+   * → 等一帧（StartupWebFrameCallback）→ 仍处 BOOTING 且宿主未发布 URL ⇒
+   * 置 startupWebPrepared，build() 随即把 about:blank 的 Web 挂上。垫片脚本逐条
+   * 包一层 `location.href 以 about:blank 开头则不执行` 的护栏：空页不跑垫片
+   * （白白污染 about:blank 的 DOM），loadUrl 导航到真实页面时照常生效。
+   */
+  private preparePhoneWebAfterFrame(): void {
+    const prepare = (): void => {
+      if (!this.startupPageActive || this.phase !== WebPhase.BOOTING || this.launchUrl.length > 0) {
+        return;
+      }
+      this.startupDocumentScripts = this.pickerShimScripts.map((item: ScriptItem): ScriptItem => {
+        return {
+          script: "if (location.href.indexOf('about:blank') !== 0) {\n" + item.script + "\n}",
+          scriptRules: item.scriptRules
+        };
+      });
+      this.startupWebPrepared = true;
+      hilog.info(DOMAIN, TAG, 'DSHM-TRACE 预挂 ArkWeb（about:blank）就绪');
+    };
+    this.getUIContext().postFrameCallback(new StartupWebFrameCallback((): void => {
+      if (this.startupPageActive) {
+        prepare();
+      }
+    }));
+  }
+
+  /*
+   * 【应用帧守卫（2026-11-26 修侧栏浏览器）】onLoadIntercept 放行子帧外链后，
+   * 侧栏浏览器用 <iframe> 嵌外部页面；ArkWeb 的 scriptRules 只按 URL 匹配、
+   * 不分主帧/子帧 ⇒ scriptRules:'*' 的垫片会跟着注入被浏览的网页（WS/fetch
+   * 包装器、链接点击劫持、CSS/DOM 注入全是污染）。每条垫片先包这层守卫：
+   * 回环域名（应用自身页面，与 isExternalNavigation 同一判据族）才执行，
+   * 其余（外部 iframe、about:blank —— 预挂期本就不跑垫片）整段早退。
+   * 垫片间通信全走显式 globalThis/window 键（见 pickerShimScripts 头注），
+   * 包进 IIFE 不改变跨脚本可见性；runJavaScript 的一次性片段不经此路。
+   */
+  private appFrameGuard(script: string): string {
+    return '(function () {\n' +
+      '  var hn = \'\';\n' +
+      '  try {\n' +
+      '    hn = globalThis.location && globalThis.location.hostname\n' +
+      '      ? String(globalThis.location.hostname) : \'\';\n' +
+      '  } catch (e) { hn = \'\'; }\n' +
+      '  if (hn !== \'127.0.0.1\' && hn !== \'localhost\' && hn !== \'[::1]\') { return; }\n' +
+      script + '\n' +
+      '})();';
+  }
+
+  /** 预挂后 document-start 走包裹版清单；未预挂（宿主先于页面就绪等）走原清单。 */
+  private webDocumentStartScripts(): Array<ScriptItem> {
+    /* 【应用帧守卫】所有注入路径统一在此包一层（见 appFrameGuard 头注）。 */
+    const wrap = (items: Array<ScriptItem>): Array<ScriptItem> => {
+      return items.map((item: ScriptItem): ScriptItem => {
+        return { script: this.appFrameGuard(item.script), scriptRules: item.scriptRules };
+      });
+    };
+    if (this.startupWebPrepared) {
+      return wrap(this.startupDocumentScripts);
+    }
+    return wrap(this.pickerShimScripts);
+  }
+
+  /** 预挂期的 about:blank 导航不算「整页加载」：阶段机/就绪标记全程绕过。 */
+  private isStartupBlankNavigation(url: string): boolean {
+    return this.startupWebPrepared && (this.launchUrl.length === 0 || url === STARTUP_BLANK_URL);
+  }
+
+  /** 预挂版导航：URL 与控制器都就位时直接 loadUrl，绕过 Web 组件冷建。 */
+  private loadPreparedHostPage(): boolean {
+    if (!this.startupPageActive || !this.startupWebPrepared || !this.startupControllerAttached ||
+      this.launchUrl.length === 0 || this.launchUrl === this.preparedLaunchUrl) {
+      return false;
+    }
+    const url: string = this.launchUrl;
+    try {
+      this.controller.loadUrl(url);
+      this.preparedLaunchUrl = url;
+    } catch (e) {
+      this.fail('未能打开本地核心页面');
+    }
+    return true;
   }
 
   /**
@@ -6035,6 +6158,9 @@ struct WebApp {
     }
     this.phase = WebPhase.LOADING;
     this.errorText = '';
+    if (this.loadPreparedHostPage()) {
+      return;
+    }
     try {
       this.controller.refresh();
     } catch (e) {
@@ -6788,8 +6914,13 @@ struct WebApp {
     Column() {
       Stack() {
       // Web 放最底层：ERROR 时也不卸载（保持 controller 可用，重试走 refresh）
-      if (this.phase !== WebPhase.BOOTING) {
-        Web({ src: this.launchUrl, controller: this.controller })
+      if (this.phase !== WebPhase.BOOTING || this.startupWebPrepared) {
+        Web({
+          // 【Web 预挂（2026-11-26，与 PC 壳对齐）】预挂后 src 冻结在 about:blank，
+          // 之后一切导航都走已附着控制器的 loadUrl —— Web 组件不再因 src 变化重建。
+          src: this.startupWebPrepared ? STARTUP_BLANK_URL : this.launchUrl,
+          controller: this.controller
+        })
           .javaScriptAccess(true)
           .domStorageAccess(true)
           .fileAccess(false)
@@ -6798,7 +6929,9 @@ struct WebApp {
           // JS 执行（官方文档原文），即先于官方 wire bootstrap → 官方前端
           // native 面的 apply() 读 __DSH_DIRECTORY_PICKER__ 时垫片已就位。
           // ⚠ 验收信号：DOM 探针的 p/c/r 字段应为 "object"/"object"/"function"。
-          .javaScriptOnDocumentStart(this.pickerShimScripts)
+          // 【Web 预挂（2026-11-26）】预挂期走包裹版清单（about:blank 不跑垫片），
+          // 未预挂走原清单 —— 判据见 webDocumentStartScripts()。
+          .javaScriptOnDocumentStart(this.webDocumentStartScripts())
           // 第 1 段之同步桥：javaScriptProxy 只暴露**同步**方法 startPick
           //（官方 FAQ 定论：javaScriptProxy 仅支持同步调用，异步方法无法把
           // 结果回传 H5——asyncMethodList 路线实测死路，diag-pick-called
@@ -6835,8 +6968,18 @@ struct WebApp {
           // 官方 web UI 自己按 prefers-color-scheme 适配暗色：跟随系统、不强制反色
           .darkMode(WebDarkMode.Auto)
           .forceDarkAccess(false)
-          .onPageBegin(() => {
+          // 【Web 预挂（2026-11-26）】控制器附着即记位并尝试导航：覆盖「URL 先到、
+          // 控制器后附」的竞态（另一头在 onLaunchUrlChanged，两处都调 loadPreparedHostPage）。
+          .onControllerAttached(() => {
+            this.startupControllerAttached = true;
+            this.loadPreparedHostPage();
+          })
+          .onPageBegin((event: OnPageBeginEvent) => {
             this.cancelNativeCapture();
+            // 【Web 预挂】about:blank 的导航不进阶段机（不算加载开始）
+            if (this.isStartupBlankNavigation(event.url)) {
+              return;
+            }
             // 整页导航（含 303 后的落地）重新进入加载期；SPA 内部路由不受影响
             if (this.phase === WebPhase.READY) {
               this.phase = WebPhase.LOADING;
@@ -6846,9 +6989,11 @@ struct WebApp {
             this.clearPostLoadSettle();
           })
           /*
-           * 【2026-11-16 与 entry 对齐：主帧外链交系统浏览器，子帧外链直接拦下】
-           * 不加这一条时，手机端普通锚点 / `location` 赋值会在应用内打开外部站点
-           * （垫片只接住了 target=_blank 与 window.open）。判据与 entry 完全相同。
+           * 【2026-11-16 与 entry 对齐：主帧外链交系统浏览器】
+           * 【2026-11-26 与 entry 同步：子帧外链放行】侧栏浏览器 tab 用
+           * <iframe src=远端> 内嵌网页（dsh-client-ui-sidebar-browser），
+           * 原先子帧整类拦下 ⇒ 手机侧栏浏览器永远空白。放行不触发外开。
+           * 判据与 entry 完全相同（见其 onLoadIntercept 块注释）。
            */
           .onLoadIntercept((event: OnLoadInterceptEvent): boolean => {
             try {
@@ -6857,8 +7002,8 @@ struct WebApp {
                 return false;
               }
               if (!event.data.isMainFrame()) {
-                hilog.info(DOMAIN, TAG, '拦下子帧外链导航（不外开）：%{public}s', target);
-                return true;
+                hilog.info(DOMAIN, TAG, '放行子帧外链导航（侧栏浏览器 iframe）：%{public}s', target);
+                return false;
               }
               hilog.info(DOMAIN, TAG, '拦下页内导航并交系统浏览器：%{public}s', target);
               this.dirPickerBridge.writeDiagMarkerPublic('diag-openlink', `nav ${target}`);
@@ -6873,7 +7018,11 @@ struct WebApp {
               return false;
             }
           })
-          .onPageEnd(() => {
+          .onPageEnd((event: OnPageEndEvent) => {
+            // 【Web 预挂】about:blank 的加载结束不进阶段机（不算就绪）
+            if (this.isStartupBlankNavigation(event.url)) {
+              return;
+            }
             /*
              * 【必须判 loadFailed，不能无条件置 READY】
              * 真机日志显示两者**只差 10ms**、且顺序是"先 404 后 onPageEnd"：
@@ -6887,6 +7036,17 @@ struct WebApp {
               hilog.warn(DOMAIN, TAG, '页面结束但本轮已判失败（%{public}s），保持 ERROR 并等自动重试',
                 this.errorText);
               return;
+            }
+            /*
+             * 【Web 预挂】首次就绪时把 about:blank 从后退栈里清掉：
+             * 否则手持档返回手势（accessBackward）会退回空白页。
+             */
+            if (this.startupWebPrepared && !this.everReady) {
+              try {
+                this.controller.clearHistory();
+              } catch (e) {
+                hilog.warn(DOMAIN, TAG, 'DSHM-TRACE ArkWeb 启动历史清理失败');
+              }
             }
             this.phase = WebPhase.READY;
             /*
@@ -7087,6 +7247,9 @@ struct WebApp {
           this.handheld ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : this.bottomSafeAreaEdges())
         .onAppear(() => {
           this.startBrandAnimation();
+          // 【Web 预挂（2026-11-26，与 PC 壳对齐）】品牌动画出现即排预挂：
+          // 等一帧（首帧保持轻量）后在 BOOTING 期把 about:blank 的 Web 挂上。
+          this.preparePhoneWebAfterFrame();
         })
       }
 

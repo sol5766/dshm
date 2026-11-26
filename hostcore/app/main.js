@@ -25,6 +25,9 @@ const { pathToFileURL } = require('node:url');
 
 // 用户插件行守卫（D27 死锁修复，2026-09-23）：预检 + 启动失败自愈。见 dshm-user-rows.js 头注释。
 const userRows = require('./dshm-user-rows.js');
+// 用户安装 bundle 的延迟挂载清单（2026-11-26，启动提速）：把非首屏 bundle 移出
+// profile boot 的同步装载，交给 dshm-boot-extras 在壳就绪后挂载。见模块头注释。
+const deferredBundles = require('./dshm-deferred-bundles.js');
 // 内置技能同步（P0-1 修复，2026-09-28）：内容 sha256 判等，避免等长改动推不下去。
 // 单列文件是为了让 tools/check-skill-sync.cjs 能直接 require（main.js 不可 require）。
 const skillsSync = require('./dshm-skills.js');
@@ -1314,8 +1317,19 @@ const dshmSyncSlowLog = [];
  * 那是稳态开销，正是我们要避免的东西。
  * ⇒ 保留代码（将来排查启动时用 `DSHM_BOOT_RING=1` 打开），默认不参与生产路径。
  */
-const DSHM_BOOT_RING_ON = process.env.DSHM_BOOT_RING === '1';
+/*
+ * 【2026-11-26 改口径：默认开启】
+ * 原先是 opt-in（`DSHM_BOOT_RING=1` 才装），理由写在下面那段长注释里：
+ * "发布包不携带没被验证过会执行的东西"。但由此产生的结果是**默认构建测不出停顿归因**，
+ * 而这正是当前最缺的数据（实测 p50 9.27s，其中 LOOP-GAP 占 75%–96%）。
+ * 改为默认开启（`DSHM_BOOT_RING=0` 可关），并补两道保险：
+ *   ① `dshmRingStop()` 在 runProfile 返回、端口绑定后调用（原有）；
+ *   ② 30s 兜底定时器：万一上面的收尾走不到，也强制还原全部包装，避免稳态开销。
+ */
+const DSHM_BOOT_RING_ON = process.env.DSHM_BOOT_RING !== '0';
 const dshmRingRestore = [];
+/** 兜底卸载定时器：只在启动期存活，停环时清掉（见 DSHM_BOOT_RING_ON 注释）。 */
+let dshmRingGuard = null;
 let dshmRingActive = false;
 /*
  * 【启动期 require 账本】按"被 require 的模块名"累计次数与耗时。
@@ -1371,6 +1385,10 @@ function dshmRingPush(entry) {
  */
 function dshmRingStop(reason) {
   if (!dshmRingActive) { return; }
+  if (dshmRingGuard !== null) {
+    try { clearTimeout(dshmRingGuard); } catch (e) { /* ignore */ }
+    dshmRingGuard = null;
+  }
   /*
    * 【`DSHM_RUNTIME_DIAG=1` 时**只打榜、不卸载**】
    * 那个开关的语义是"诊断常驻"，环必须留到进程结束。若在这里也卸掉，
@@ -1427,6 +1445,17 @@ function dshmRingDump(tag) {
 if (RUNTIME_DIAG_ENABLED || DSHM_BOOT_RING_ON) {
 try {
   dshmRingActive = true;
+  /*
+   * 兜底卸载：装环之后**必须有**一条"一定会走到"的还原路径。
+   * 否则一旦 runProfile 抛错/提前 return，fs 会被包装到进程结束（稳态开销）。
+   * 30s 足够覆盖当前 p90 15s 的冷启动，且不会与正常收尾冲突（正常收尾会 clear）。
+   */
+  dshmRingGuard = setTimeout(() => {
+    if (dshmRingActive) {
+      try { dshmRingStop('watchdog-30s'); } catch (e) { /* ignore */ }
+    }
+  }, 30000);
+  if (dshmRingGuard && typeof dshmRingGuard.unref === 'function') { dshmRingGuard.unref(); }
   const dshmRingShort = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
   const dshmTrack = (name, fn) => function (...args) {
     const t0 = Date.now();
@@ -2229,6 +2258,18 @@ function writeHostReady(authUrl) {
 
   } catch (e) {
     console.error('[dshm-host] 写 host-ready.json 失败：' + (e && e.message));
+  }
+  /*
+   * 【启动期停顿收口】host-ready.json 已落盘 ⇒ 启动路径不再需要等完整巡检。
+   * 启动时只做了 4000 项快扫；这里在 3s 后补到 20000（幂等：已清掉的不重复处理，
+   * 活跃锁按 pid 判据保留）。只调度一次，unref 保证不阻止进程退出。
+   */
+  if (!dshmLockSweepScheduled) {
+    dshmLockSweepScheduled = true;
+    const sweep = setTimeout(() => {
+      try { recoverOrphanLocks(HOME_DIR, 20000); } catch (err) { /* ignore */ }
+    }, 3000);
+    if (sweep && typeof sweep.unref === 'function') { sweep.unref(); }
   }
 }
 
@@ -8535,14 +8576,26 @@ function ensureDir(p) {
  *   3. pid 仍存活（含 EPERM：进程在但不属于我们）→ 不动。
  * 只有"pid 明确已不存在"才删。误判方向永远是"少删"，代价只是回到上游行为。
  */
-function recoverOrphanLocks(homeDir) {
+/**
+ * 清理孤儿写锁（`<file>.lock`）。
+ *
+ * 【2026-11-26 改成"启动快扫 + 就绪后补齐"】原实现在 runProfile **之前**同步走完，
+ * 上限 2 万次 `readdirSync`（跳过 node_modules、深度 3）。慢存储上这段是纯同步阻塞，
+ * 属于"启动期无意义停顿"之一。
+ * 现在：启动路径只给 `budget` 较小的快扫（覆盖绝大多数孤儿锁），
+ * 完整巡检推迟到 host-ready 之后执行（幂等：已清理的不会重复删，活跃锁仍按 pid 判据保留）。
+ *
+ * @param homeDir 扫描根
+ * @param budget 本次最多访问的目录项数（默认 20000）
+ */
+function recoverOrphanLocks(homeDir, budget = 20000) {
   if (homeDir.length === 0) {
     return;
   }
   const locks = [];
   let visited = 0;
   const walk = (dir, depth) => {
-    if (depth > 3 || locks.length >= 200 || visited >= 20000) {
+    if (depth > 3 || locks.length >= 200 || visited >= budget) {
       return;
     }
     let entries;
@@ -8643,6 +8696,9 @@ function recoverOrphanLocks(homeDir) {
     diag(`写锁保留明细：${byWhy}；样例 ${keptSample.join(' | ')}`);
   }
 }
+
+/** 完整孤儿锁巡检是否已排过后台补齐（只排一次，见 recoverOrphanLocks 注释）。 */
+let dshmLockSweepScheduled = false;
 
 /**
  * 找到 dsh CLI 的 profile-boot 薄入口（re-export runProfile）。
@@ -8856,6 +8912,9 @@ function ensureProfile() {
   //（.dshm-broken-* / .quarantine-*）：只删过期的，近期保留供取证。
   userRows.cleanupQuarantineResidue(dest, HOME_DIR, { log, diag });
   log('profile 已就位：' + dest);
+  // seedBundles 供 start() 在 profile boot 前生成"用户 bundle 延迟清单"用
+  // （判断哪些 bundle 是用户装的、哪些是核心自带的）。
+  return { dir: dest, seedBundles };
 }
 
 /**
@@ -9045,7 +9104,7 @@ async function start() {
 
   stage('BOOT_20_CORE_FOUND', `entry=${path.basename(entry)}`);
   ensureDir(HOME_DIR);
-  ensureProfile();
+  const profileInfo = ensureProfile();
   stage('BOOT_30_PROFILE_READY', `home=${HOME_DIR} profile=${PROFILE}`);
 
   /*
@@ -9075,6 +9134,31 @@ async function start() {
   log('导入 ' + entry);
   const profileBoot = await import(pathToFileURL(entry).href);
   const appBootMod = await import(pathToFileURL(appBoot).href);
+
+  /*
+   * 【用户 bundle 延迟挂载（2026-11-26）】必须在 runProfile **之前**执行：
+   * 它把用户从插件市场装的 bundle（当前是 dshmarket）移出 `dsh.profile.bundles`，
+   * 并生成 `.dshm-deferred-bundles.json`；随后 `dshm-boot-extras` 在壳就绪后按
+   * 清单用 `ctx.loader.create()` 挂载。这样 profile boot 只同步加载首屏必需的核心
+   * bundle，手机端实测那段（BOOT_45 → SERVER-LISTENING）才是启动的绝对大头。
+   *
+   * 只用上游 dsh-app-boot 自己的解析器（resolveBundleDir / readProfileManifest /
+   * bundlePatchPaths / loadOverlayPatches），不自己猜 YAML；解析失败/非 pure-insert
+   * 的 bundle 一律保持原样（宁可少延迟，不能改语义）。失败不阻断启动。
+   */
+  try {
+    deferredBundles.deferUserBundles(profileInfo.dir, {
+      appBoot: appBootMod,
+      // resolveBundleDir 的 installAnchor = dsh 应用包里的 package.json 路径
+      installAnchor: path.join(CORE_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+      seedBundles: profileInfo.seedBundles,
+      log,
+      diag,
+    });
+  } catch (e) {
+    diag('用户插件延迟挂载：生成清单失败（不影响启动，保持同步加载）：'
+      + String((e && e.message) || e));
+  }
 
   /*
    * 【参数表以 dsh-web-app 的 startup.js 为准】
@@ -9108,7 +9192,11 @@ async function start() {
   // 只装不卸：匹配成功后它只是把 write 原样透传，开销可以忽略；而"URL 恰好晚一拍打印"
   // 这种情况比"卸载时机"更容易出错。
   watchdogAuthUrl();
-  recoverOrphanLocks(HOME_DIR);
+  /*
+   * 启动路径只做快扫（4000 项）：孤儿锁绝大多数就在 $DSHM_HOME 浅层。
+   * 完整巡检由 host-ready 之后的后台任务补齐（见 recoverOrphanLocks 注释）。
+   */
+  recoverOrphanLocks(HOME_DIR, 4000);
   stage('BOOT_41_LOCKS_READY');
   // 在认证 URL 落盘前准备事实缓存。端侧可以保留 koffi 预热，将仅用于
   // 诊断的图片和 PTY 探测交给工作区加载之后的空闲队列。

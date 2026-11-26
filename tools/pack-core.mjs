@@ -36,8 +36,10 @@ import { patchHmrStartupSnapshot } from './lib/hmr-startup-snapshot.mjs';
 import { patchWorkbenchStartupMode } from './lib/workbench-startup-mode.mjs';
 import { patchWorkbenchStartup } from './lib/workbench-startup.mjs';
 import { patchSettingsStartup } from './lib/settings-startup.mjs';
+import { patchSettingsController } from './lib/settings-controller.mjs';
 import { patchCordisStartup } from './lib/cordis-startup.mjs';
 import { patchPostStartupImports } from './lib/post-startup-imports.mjs';
+import { patchOpenInAppReveal } from './lib/open-in-app-reveal.mjs';
 /*
  * 【语法检查子进程的启动标志（2026-10-31）】检测用的 `node --check` 是**子进程**，
  * 不继承父进程的 `--jitless`。而本机（HarmonyOS 端侧）内核拒绝 JIT 所需的
@@ -1180,6 +1182,10 @@ const DSHM_PLUGIN_PACKAGES = [
   // `conversation.chat.assistant-actions`；能力在 ArkTS 桥（ReadAloud/ShareBoard）。
   // 见 hostcore/profile/ondevice/cordis.patch.yml ⑬d 与插件头注。
   { name: '@deepseek-ai/dshm-read-aloud', dir: 'dshm-read-aloud' },
+  // 启动编排（2026-11-26）：把「非首屏必需」的插件行推迟到壳就绪之后挂载。
+  // 默认 deferredBundles 为空 ⇒ 加载后立即返回，行为与未挂载等价；
+  // 填清单才生效（清单在 profile 的 cordis.patch.yml，不改插件代码）。
+  { name: '@deepseek-ai/dshm-boot-extras', dir: 'dshm-boot-extras' },
   // PTC 运行时（同进程纯 JS 实现，2026-10-05）：
   //
   // 【为什么必须换掉官方实现】`@deepseek-ai/dsh-ptc-runtime-node` 有两条**结构性死路**：
@@ -5643,8 +5649,12 @@ await useScheduleOutputPrecompile(STAGE);
 patchWorkbenchStartupMode(STAGE);
 patchWorkbenchStartup(STAGE);
 patchSettingsStartup(STAGE);
+patchSettingsController(STAGE);
 patchCordisStartup(STAGE);
 patchPostStartupImports(STAGE);
+// 「在文件夹显示」移动端可用性（2026-11-26）：客户端菜单在 desktop=false 时
+// 改走壳层 __DSHM_BRIDGES__.openFileLocation；纯客户端补丁，不进启动路径。
+patchOpenInAppReveal(STAGE);
 /*
  * 【报告 3 ③】构建期自签名**必须放在最后、pack() 之前**。
  * 踩过的坑：最初放在 replaceKoffiJs() 之后，结果签名被后续的

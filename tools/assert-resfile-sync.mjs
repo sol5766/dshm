@@ -32,6 +32,10 @@ const FILES = [
   'dshm-install-command.js',
   'dshm-market-patch.cjs',
   'dshm-user-rows.js',
+  // 用户 bundle 延迟挂载清单（2026-11-26）：main.js 在 runProfile 之前
+  // require('./dshm-deferred-bundles.js')。漏掉它不会崩（调用点自带 try/catch），
+  // 但用户从市场装的 bundle 会重新走同步加载 ⇒ 启动提速整段白修，必须一起进清单。
+  'dshm-deferred-bundles.js',
   'dshm-skills.js',
   'dshm-compat.js',
   // LOOP-GAP 治理（2026-10-19）：main.js 在核心树 require 之前 `require('./fs-probe-cache.cjs')`。

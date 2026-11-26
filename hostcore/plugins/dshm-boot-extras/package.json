@@ -1,0 +1,21 @@
+{
+  "name": "@deepseek-ai/dshm-boot-extras",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DSHM 启动编排插件：把「非首屏必需」的插件行推迟到壳就绪之后，按配置逐个挂载（每个之间让出事件循环）。默认清单为空 ⇒ 零行为变更；清单由 profile 的 cordis.patch.yml 提供。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.1.0"
+  }
+}
