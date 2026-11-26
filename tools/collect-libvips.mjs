@@ -1,5 +1,5 @@
 /**
- * 把 libvips 全套依赖搬进 HAP 的 `entry/libs/<abi>/`（E93）。
+ * 把 libvips 全套依赖搬进 HSP 的 `hostruntime/libs/<abi>/`（E93）。
  *
  * ---------------------------------------------------------------------------
  * WHY THIS EXISTS
@@ -27,7 +27,7 @@
  * `tools/check-native-closure.mjs`（静态依赖闭包检查，可在开发机上跑）。
  *
  * 用法：
- *   node tools/collect-libvips.mjs                 # 收集到 entry/libs/arm64-v8a
+ *   node tools/collect-libvips.mjs                 # 收集到 hostruntime/libs/arm64-v8a
  *   node tools/collect-libvips.mjs --abi arm64-v8a --src <libvips lib 目录>
  */
 import { execFileSync } from 'node:child_process';
@@ -52,25 +52,25 @@ const STAGE_NAME = `dsh-core-${RECIPE.coreVersion}`;
 const SRC = resolve(arg('--src',
   join(ROOT, 'dist', 'core', 'work', STAGE_NAME, 'node_modules', '@ohos-ports',
     'img-sharp-libvips-openharmony-arm64', 'lib')));
-const DEST = resolve(join(ROOT, 'entry', 'libs', ABI));
+const DEST = resolve(join(ROOT, 'hostruntime', 'libs', ABI));
 const MANIFEST = join(ROOT, 'dist', 'core', 'libvips-libs.json');
 /** 随包一起改写的消费者（它们 DT_NEEDED 里点名了 vips）。 */
 const EXTRA_CONSUMERS = ['libsharp-openharmony-arm64.so'];
 /** 这些是系统提供的，我们既不打包也不改写。 */
 const SYSTEM_LIBS = new Set([
   'libc.so', 'libc++_shared.so', 'libdl.so', 'libm.so', 'libz.so', 'liblog.so',
-  'libhilog.so', 'libhilog_ndk.z.so', 'libace_napi.z.so', 'libuv.so', 'libnode.so.127',
+  'libhilog.so', 'libhilog_ndk.z.so', 'libace_napi.z.so', 'libuv.so', 'libnode.so.147',
   'ld-musl-aarch64.so.1', 'libpthread.so', 'librt.so', 'libatomic.so',
 ]);
 
 /*
- * 本 ABI 下实际存在的 libnode（soname 随 Node 版本走：26.x=.137、24.x=.127）。
- * 【为什么不写死】E44/E93 时代闭包改写的目标是 libnode.so.127；换 26.x 运行时后
- * 它变成 libnode.so.137——写死会让"把 libnode 拉进依赖闭包"改写到一个**不存在**
- * 的名字上，设备上表现为 dlopen 直接失败（cannot open shared object）。
+ * 本 ABI 下实际存在的 libnode（soname 随 Node 版本走：22.x=.127、24.x=.137、26.x=.147）。
+ * 【为什么不写死】E44/E93 时代闭包改写的目标是 libnode.so.127；换 24.x 后它变成
+ * libnode.so.137，再换 26.x 又变成 libnode.so.147——写死会让"把 libnode 拉进依赖闭包"
+ * 改写到一个**不存在**的名字上，设备上表现为 dlopen 直接失败（cannot open shared object）。
  * 与 entry/src/main/cpp/CMakeLists.txt:108 的候选探测同一套做法。
  */
-const LIBS_DIR = join(ROOT, 'entry', 'libs', ABI);
+const LIBS_DIR = join(ROOT, 'hostruntime', 'libs', ABI);
 const LIBNODE_NAME = (() => {
   if (!existsSync(LIBS_DIR)) return '';
   const candidates = readdirSync(LIBS_DIR).filter((n) => /^libnode\.so(\.|$)/.test(n)).sort();
@@ -97,9 +97,10 @@ if (!existsSync(PATCH_TOOL)) die(`缺少 ${PATCH_TOOL}`);
 mkdirSync(DEST, { recursive: true });
 
 /*
- * 播种 sharp 原生件（全新克隆时 `entry/libs` 是空的）。
+ * 播种 sharp 原生件（全新克隆时 `hostruntime/libs` 是空的）。
  *
- * `entry/libs/` 在 .gitignore 里（体积与签名考虑），所以这些库必须**能从核心树重建**。
+ * `hostruntime/libs/` 在 .gitignore 里（体积与签名考虑，2026-11-19 起），所以这些库必须
+ * **能从核心树重建**。
  * sharp 的 `.node` 由我们的原生重定向按 `lib<stem>.so` 规则加载（见 hostcore/app/main.js），
  * 所以这里按那个约定落位；已存在时不覆盖（避免把手工调过的版本冲掉）。
  */
@@ -133,7 +134,7 @@ const PTY_DEST = join(DEST, 'libpty.so');
     die(`缺少 pty.node 源：${PTY_SRC}（先跑 tools/pack-core.mjs）`);
   }
   if (LIBNODE_NAME.length === 0) {
-    die(`entry/libs/${ABI} 里没有 libnode.so*——闭包改写（E44）没有目标，拒绝产出必挂的 libpty.so`);
+    die(`hostruntime/libs/${ABI} 里没有 libnode.so*——闭包改写（E44）没有目标，拒绝产出必挂的 libpty.so`);
   }
   // 无条件重做（不做 existsSync 幂等）：上次运行若在 copy 之后、patch 之前中断，
   // 残留的 libpty.so 会让幂等守卫整段跳过，NEEDED 改写就永远落不上（真机实测：
@@ -270,7 +271,7 @@ for (const consumer of consumers) {
 // 【为什么必须写在这里而不是靠"反正是 dlopen"】这一步不做，sharp 在设备上永远加载不了，
 // 而症状只有一行 MUSL-LDSO 警告 + 图片附件静默降级——正是最难查的那种。
 if (LIBNODE_NAME.length === 0) {
-  die(`entry/libs/${ABI} 里没有 libnode.so*——sharp 的 napi 闭包改写（E44/E93）没有目标，拒绝产出必挂的真件`);
+  die(`hostruntime/libs/${ABI} 里没有 libnode.so*——sharp 的 napi 闭包改写（E44/E93）没有目标，拒绝产出必挂的真件`);
 }
 for (const consumer of consumers) {
   if (!consumer.endsWith('libsharp-openharmony-arm64.so')) continue;
@@ -285,6 +286,29 @@ for (const consumer of consumers) {
     neededRewrites += 1;
   } catch (e) {
     die(`把 libnode 拉进 sharp 依赖闭包失败：${String(e.stderr ?? e.message)}`);
+  }
+}
+
+// ── 3.6 遗留 `libnode.so.<旧 ABI>` 的 NEEDED 统一改到当前 soname ────────────
+//
+// 2026-11-24 Node 26 升级实测：核心树里的 pty.node / sharp 原生件按旧 ABI 编译，
+// DT_NEEDED 直接写着 `libnode.so.137`。3.x 只把 `libc++_shared.so` 改成当前 soname，
+// **不会动已有的 libnode.so.137** ⇒ 147 上线后 libpty.so 仍去要 137，终端报
+// "Error loading shared library libnode.so.137: (needed by .../libpty.so)"。
+// 这里把任意 `libnode.so.<数字>` 的 NEEDED 统一改到 LIBNODE_NAME（等长原地改写）。
+let libnodeNeededFixes = 0;
+for (const consumer of consumers) {
+  const info = elfInfo(consumer);
+  for (const need of info.needed) {
+    if (!/^libnode\.so\.\d+$/.test(need) || need === LIBNODE_NAME) continue;
+    try {
+      execFileSync(process.execPath, [PATCH_TOOL, consumer, need, LIBNODE_NAME],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      libnodeNeededFixes += 1;
+      console.log(`collect-libvips: ${consumer.split('/').pop()} NEEDED ${need} → ${LIBNODE_NAME}`);
+    } catch (e) {
+      die(`改写 ${consumer} 的 ${need} 失败：${String(e.stderr ?? e.message)}`);
+    }
   }
 }
 

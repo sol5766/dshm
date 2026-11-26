@@ -45,14 +45,30 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { inspect, SITES, SHIPPED, ANCHORS, NEUTRALISED_WORD } from './patch-libnode-io-uring.mjs';
+import { inspect, NEUTRALISED_WORD, LAYOUTS, originalWordOf } from './patch-libnode-io-uring.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SO = join(ROOT, 'hostruntime/libs/arm64-v8a/libnode.so.137');
-const ORIG = join(ROOT, 'dist/node/libnode.so.137.orig');
+/* 随包件按"谁在 libs 里"选：147（Node 26）优先，137 仅作回滚基线。 */
+const SO_147 = join(ROOT, 'hostruntime/libs/arm64-v8a/libnode.so.147');
+const SO_137 = join(ROOT, 'hostruntime/libs/arm64-v8a/libnode.so.137');
+const VER = existsSync(SO_147) ? '147' : '137';
+const SO = VER === '147' ? SO_147 : SO_137;
+const ORIG = join(ROOT, `dist/node/libnode.so.${VER}.orig`);
+const LAYOUT = LAYOUTS[VER];
+const SITES = LAYOUT.sites;
+const SHIPPED = LAYOUT.shipped;
+const ANCHORS = LAYOUT.anchors;
 const TOOL = join(ROOT, 'tools/patch-libnode-io-uring.mjs');
 const GATES_YML = join(ROOT, '.github/workflows/gates.yml');
 const UV_SOURCE_PATCH = join(ROOT, 'tools/node-runtime/fix-uv-io-uring.sh');
+
+/*
+ * 【2026-11-24 重写：147 不再跳过】
+ * 换 147 时本门禁曾"按设计跳过"，理由是"字节补丁偏移不适用 + UV_USE_IO_URING=0 兜底"。
+ * 手机真机实测推翻了这个前提：`UV_USE_IO_URING=0` 拦不住普通 flags=0 路径，手机 seccomp 在
+ * `node-MainThread` 上直接 SIGSYS 杀进程（`DfxSignalHandler :: signo(31), si_code(1)`）。
+ * 现在 147 有了自己的布局（`LAYOUTS['147']`）与 17 个槽，判红/对照臂逐项同 137。
+ */
 
 let pass = 0;
 let fail = 0;
@@ -171,8 +187,10 @@ function main() {
     if (!existsSync(ORIG)) bad('备份存在', `缺 ${ORIG}`);
     else {
       const o = sha256(ORIG);
-      if (o === before) ok('备份 == 随包件', o);
-      else bad('备份 == 随包件', `备份 ${o} ≠ 随包 ${before}`);
+      /* 147：备份是"换入时的原样（含活体 io_uring）"；137：备份与随包件逐字节相同。 */
+      const expect = LAYOUT.pristine && LAYOUT.pristine.sha256 ? LAYOUT.pristine.sha256 : before;
+      if (o === expect) ok(LAYOUT.pristine && LAYOUT.pristine.sha256 ? '备份 == 换入原样（未中性化件）' : '备份 == 随包件', o);
+      else bad('备份内容', `备份 ${o} ≠ 期望 ${expect}`);
     }
 
     // ---------------- G CI 接线
@@ -195,8 +213,9 @@ function main() {
   console.log('\n## D/E 对照臂（临时副本，绝不碰真文件）');
   const tmp = mkdtempSync(join(tmpdir(), 'dshm-libnode-gate-'));
   try {
+    const orig = (s) => originalWordOf(s, LAYOUT.syscallStub);
     const one = makeCopy(tmp, 'one-reverted.so', (buf, off) => {
-      buf.writeUInt32LE(SITES[0].orig, off(SITES[0].slot));
+      buf.writeUInt32LE(orig(SITES[0]), off(SITES[0].slot));
     });
     const oneReport = inspect(one);
     const oneCli = runTool(['--check', `--file=${one}`]);
@@ -209,7 +228,7 @@ function main() {
     else bad('对照臂① 工具也判红', `exit ${oneCli.code}（应 1）`);
 
     const all = makeCopy(tmp, 'all-reverted.so', (buf, off) => {
-      for (const s of SITES) buf.writeUInt32LE(s.orig, off(s.slot));
+      for (const s of SITES) buf.writeUInt32LE(orig(s), off(s.slot));
     });
     const allReport = inspect(all);
     const unpatchedCount = allReport.sites.filter((s) => s.state === 'UNPATCHED').length;

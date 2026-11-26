@@ -54,13 +54,13 @@ import { speechRecognizer, textToSpeech } from '@kit.CoreSpeechKit';
 import { audio } from '@kit.AudioKit';
 import { util } from '@kit.ArkTS';
 // 听写→剪贴板：把识别文本写进系统剪贴板，供用户长按黏贴
-import { copyText, dialogMaterial, immersiveMaterialOf } from 'platform';
+import { copyText, dialogMaterial, immersiveMaterialOf, StartupPhase, startupMarks } from 'platform';
 // 【2026-10-03】"用户可见目录 + agent 可读写删"的两件设备能力（见
 // platform/src/main/ets/system/FilePicker.ets 的注释，与
 // dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md §5.3）。
 // 【不含权限申请】本路线**不申请任何权限**（权限零差异铁律 + ACL 白名单只有 5 条，
 // 见 FilePicker.ets 顶部权限说明注释）⇒ 上一版的权限申请函数已整体删除。
-import { PickOutcome, probePathWritable, publicDownloadFolder, folderSelectionAvailable, shouldAutoFallbackFolderPicker, isHandheldForm, isPhoneForm, isFoldableDevice, isFoldableSingleScreenNow, isPathWithin, readDeviceFacts, windowChromeFor, statusBarOwnedByApp, SYSTEM_BAR_HANDOFF_BG, installWebDownloadDelegate, ReadAloud, shareText } from 'platform';
+import { PickOutcome, probePathWritable, publicDownloadFolder, folderSelectionAvailable, shouldAutoFallbackFolderPicker, isHandheldForm, isPhoneForm, isFoldableDevice, isFoldableSingleScreenNow, FormFactor, isPathWithin, readDeviceFacts, windowChromeFor, statusBarOwnedByApp, SYSTEM_BAR_HANDOFF_BG, installWebDownloadDelegate, ReadAloud, shareText } from 'platform';
 import type { DeviceFacts } from 'platform';
 // 目录授权的持久化与跨启动恢复（手持档"选完能读、重启也能读"的唯一开关，见 docs/105）
 import { rememberFolderGrant } from 'platform';
@@ -1367,7 +1367,9 @@ const SIDEBAR_SHIM_JS: string = `(function () {
       + 'html[' + STATE_ATTR + '="collapsed"] button[aria-label="Open sidebar"] [class*="_railMark"]'
       + '{display:none !important}'
       + 'html[' + RAIL_OPENER_ATTR + '="1"] button[data-sidebar-opener]{display:none !important}'
-      + 'html[' + STATE_ATTR + '="collapsed"] button[data-sidebar-opener]{opacity:1 !important;visibility:visible !important;pointer-events:auto !important}'
+      /* 【2026-11-21 竖屏侧栏按钮消失】官方 narrow（<1024）把收起态的 opener display:none，
+         只改 opacity/visibility 救不回来 ⇒ 这里补 display。手机 / 平板 / 折叠屏单屏收起态都命中。 */
+      + 'html[' + STATE_ATTR + '="collapsed"] button[data-sidebar-opener]{display:inline-flex !important;opacity:1 !important;visibility:visible !important;pointer-events:auto !important}'
       + 'html[' + STATE_ATTR + '="collapsed"][' + PANEL_ATTR + '="open"] button[data-sidebar-opener]{opacity:0 !important;pointer-events:none !important}'
       + 'html[' + RIGHT_ATTR + '="open"] button[data-sidebar-opener]{opacity:0 !important;pointer-events:none !important}'
       /* 【2026-11-07 第八次收敛：平板左栏"真常驻"】
@@ -1389,11 +1391,18 @@ const SIDEBAR_SHIM_JS: string = `(function () {
          （用户实测：所有平板 / 折叠屏展开时"会话区侵入左侧边栏、左栏显示不全"）。
          ⇒ 写死几何收进 ≥1024 的媒体查询；<1024 交给官方抽屉浮层
          （tagLayout 会补 data-sidebar-drawer），主区不被挤、左栏整幅显示。 */
+      /* 【2026-11-21 平板竖向】收起态 56px 轨**任何宽度**都生效（原来包在 ≥1024 里，竖向 <1024
+         时平板规则全不命中，只剩官方 narrow/drawer，官方又把 opener 藏了 ⇒ 竖屏无侧栏按钮）。
+         展开态 280 仍只在 ≥1024 写死：<1024 交官方抽屉，避免主区被挤（保持 2026-11-18 结论）。 */
+      + 'html.' + TABLET_CLASS + '[' + STATE_ATTR + '="collapsed"]:not([' + RIGHT_ATTR + '="open"]) .' + FRAME_CLASS
+      + '{grid-template-columns:56px minmax(0,1fr) 0 !important}'
+      + 'html.' + TABLET_CLASS + '[' + STATE_ATTR + '="collapsed"] .' + COL_CLASS
+      + '{position:relative !important;top:auto !important;left:auto !important;right:auto !important;bottom:auto !important;'
+      + 'transform:none !important;visibility:visible !important;z-index:auto !important;'
+      + 'width:auto !important;max-width:none !important;box-shadow:none !important}'
       + '@media (min-width:1024px){'
       + 'html.' + TABLET_CLASS + '[' + STATE_ATTR + '="expanded"]:not([' + RIGHT_ATTR + '="open"]) .' + FRAME_CLASS
       + '{grid-template-columns:280px minmax(0,1fr) 0 !important}'
-      + 'html.' + TABLET_CLASS + '[' + STATE_ATTR + '="collapsed"]:not([' + RIGHT_ATTR + '="open"]) .' + FRAME_CLASS
-      + '{grid-template-columns:56px minmax(0,1fr) 0 !important}'
       + 'html.' + TABLET_CLASS + ' .' + COL_CLASS
       + '{position:relative !important;top:auto !important;left:auto !important;right:auto !important;bottom:auto !important;'
       + 'transform:none !important;visibility:visible !important;z-index:auto !important;'
@@ -4036,19 +4045,16 @@ function decorTopInsetVp(handheld: boolean, decorPresent: boolean, appTopBarVisi
 }
 
 /**
- * 品牌启动页底色 —— **唯一一份**（启动视图、启动期状态栏/窗口底色、`color.json` 的
- * `start_window_background` 三处同值）。
+ * 启动页底色 —— **跟随系统深浅色**（2026-11-21 起）。
  *
- * 【为什么是白（2026-10-16 用户报"启动的时候 APP 区跟状态栏就不是一个色"，第二轮定稿）】
- * 真机逐点取色（手机 `62T0225B18039433`）：启动期**系统把状态栏那一条固定画成 `#FFFFFF`**，
- * 我们写进去的 `statusBarColor=#F3F7FB` 在这一阶段**不被采用**（1.5s / 4s / 7s 三个时间点都是
- * 状态栏 `#FFFFFF` vs 启动页 `#F3F6FB`，中间一条硬台阶）。也就是说"启动期状态栏只能是白的"，
- * 那要让"APP 区跟状态栏一个色"，只能反过来让**启动页也取白**：
- *   · 白也是**浅色应用界面**的窗口/状态栏底色 ⇒ 启动页 → 应用界面那一跳没有色差；
- *   · 深色外观下，等首帧就绪后由 `onPhaseChanged` 换成 `#151517`（那段本来就要换）。
- * 原先的 `#F3F7FB` 是"像素级复刻"官方桌面启动页的底色，本轮为沉浸一致性让位（docs/169 §?）。
+ * 【历史】2026-10-16 曾固定取白 `#FFFFFF`：当时真机（手机 `62T0225B18039433`）观察到启动期系统把
+ * 状态栏那一条固定画成白色，为消除「状态栏白 / 启动页浅灰」的硬台阶，反过来让启动页也取白。
+ *
+ * 【现在】启动视图改用资源 `app.color.start_window_background`（base `#FFFFFF` / dark `#151517`，
+ * 与 `module.json5` 的 `startWindowBackground` 同一份 ⇒ 系统启动窗与页面首帧零色差）；启动期
+ * 状态栏/窗口底色改用 `windowChromeFor(this.systemAppearance())`。深色系统下从首帧起就是深底
+ * 浅图标，不再「先白后深」。
  */
-const SPLASH_BG: string = '#FFFFFF';
 
 @Entry
 @Component
@@ -4056,6 +4062,8 @@ struct WebApp {
   @StorageProp(KEY_HOST_LAUNCH_URL) @Watch('onLaunchUrlChanged') launchUrl: string = '';
   @StorageProp(KEY_HOST_BOOT_ERROR) @Watch('onHostBootErrorChanged') hostBootError: string = '';
   @State @Watch('onPhaseChanged') phase: WebPhase = WebPhase.BOOTING;
+  /** 启动页是否用深色：按系统当前深浅色，在 aboutToAppear 里定（web 主题上报前）。 */
+  @State splashDark: boolean = false;
   /** ERROR 覆盖层展示的原因（不含任何凭据） */
   @State errorText: string = '';
   // ── 启动加载页品牌动效 ────────────────────────────────────────────────
@@ -5575,6 +5583,8 @@ struct WebApp {
 
   aboutToAppear(): void {
     this.nativeCaptureDisposed = false;
+    // 启动页首帧就要定深浅：web 主题还没上报，只能读系统 colorMode（见 systemAppearance）。
+    this.splashDark = this.systemAppearance() === 'dark';
     /*
      * ArkWeb 网页下载落地（2026-11-15）：官方 Web 的「下载 Session 日志」是
      * `<a download>`，没有委托时任务停在 PENDING、文件不落地。安装一次全局委托，
@@ -6852,7 +6862,7 @@ struct WebApp {
    * 页面阶段变化 ⇒ 窗口外观（状态栏 / 窗口底色）**重判一次**。
    *
    * 【为什么必须有它（2026-10-16 用户报"启动的时候 APP 区跟状态栏就不是一个色"）】
-   * 启动期那格颜色取的是**启动页色**（`SPLASH_BG`），首帧之后要切成当前外观色；
+   * 启动期那格颜色取的是**启动页色**（按系统深浅色），首帧之后要切成应用外观色；
    * 而 `applySystemBarTheme` 的幂等闸门只认"外观" ⇒ 阶段变了它自己不会重跑（闸门会挡住）。
    * 这里先把闸门清掉再重放：启动页 → 应用界面这一跳，状态栏与窗口底色跟着换色，全程同色。
    */
@@ -6886,6 +6896,37 @@ struct WebApp {
    * 【失败只记日志】窗口可能尚未创建、或设备处于全屏（无状态栏）——那属正常时序，
    * 不该影响任何其他功能。同时保留**上一次成功的值**，避免抖动式重试。
    */
+  /**
+   * 系统当前深浅色（`'light' | 'dark'`）—— 启动页在 web 主题上报前就要取色，此时 `themeMode`
+   * 还是初值，不能用；直接读 UIAbility 的 `Configuration.colorMode`。应用 `setColorMode(NOT_SET)`
+   * 时它是系统值，用户固定外观时它是应用值，两种都等于「当前实际显示」，与
+   * `startWindowBackground` 的资源解析同源。
+   */
+  private systemAppearance(): string {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      if (ctx !== undefined
+        && ctx.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK) {
+        return 'dark';
+      }
+    } catch (e) {
+      // 取不到按浅色（与官方 boot 的 color-scheme:light 一致）
+    }
+    return 'light';
+  }
+
+  /**
+   * 本机是否平板形态（只认 TABLET，不含折叠屏 / PC）—— 与 `EntryAbility.isTabletDevice()`
+   * 同一条判据。平板状态栏由我们铺透明做沉浸；读失败按 false（交还系统，保守方向）。
+   */
+  private isTabletForm(): boolean {
+    try {
+      return readDeviceFacts().form === FormFactor.TABLET;
+    } catch (e) {
+      return false;
+    }
+  }
+
   private applySystemBarTheme(mode: string): void {
     // 【2026-10-10 加固：先发布外观 + 重设三键，再吃幂等闸门】
     // ① 发布：能力层在窗口状态变化时要按"当前外观"重放三键配色，而它拿不到页面的 @State
@@ -6908,15 +6949,20 @@ struct WebApp {
      *
      * 启动期原本有三处浅色各说各话：`startWindowBackground = #FFFFFF`（首帧窗口底色）、启动视图自己画的
      * `#F3F7FB`、窗口外观的浅色也是 `#FFFFFF` ⇒ 用户看到"状态栏一条纯白 + 底下 `#F3F6FB` 的启动页"。
-     * 现在三处统一取 `SPLASH_BG`（`color.json` 的 `start_window_background` 已改同值）：
+     * 现在三处统一取「启动页色」（`start_window_background` 资源 与 `windowChromeFor(系统色)` 同源）：
      * splash 还没让位（BOOTING，或首次 LOADING）时状态栏与窗口底色都用它；首帧之后按外观切换。
      * **只换"我们拥有的那格颜色"** —— 是否拥有仍由下面的 `statusBarOwnedByApp` 判（自由窗口下照样交还系统）。
      */
     const splashUp: boolean = this.phase === WebPhase.BOOTING
       || (this.phase === WebPhase.LOADING && !this.everReady);
-    const barBg: string = splashUp ? SPLASH_BG : chrome.bg;
-    const lightIcon: boolean = splashUp ? false : chrome.lightIcon;
-    const contentColor: string = splashUp ? '#0F1115' : chrome.content;
+    /*
+     * 【2026-11-21 启动背景跟随系统】启动页不再恒为白：按系统当前深浅色取同一份窗口色
+     * （`windowChromeFor`），与窗口底色/启动视图同源，深色系统下从首帧起就是深底浅图标。
+     */
+    const splashChrome = windowChromeFor(this.systemAppearance());
+    const barBg: string = splashUp ? splashChrome.bg : chrome.bg;
+    const lightIcon: boolean = splashUp ? splashChrome.lightIcon : chrome.lightIcon;
+    const contentColor: string = splashUp ? splashChrome.content : chrome.content;
     // 顶栏（自绘）也随之翻转：官方外观是浅色→白底黑字，深色→黑底白字。
     // 【注意】这与"顶栏恒定白底黑字"的旧口径不同：报告 5 要求的是**跟随外观**，
     // 故这里按 mode 同时更新自绘顶栏，保证状态栏与顶栏不会是两种观感。
@@ -6974,8 +7020,17 @@ struct WebApp {
       }
     } else {
       try {
+        /*
+         * 【平板：状态栏恒透明 = 真沉浸】（与 EntryAbility.reassertWindowChrome 同一条判据）
+         *
+         * 2026-11-23 用户报「启动画面跟了系统明暗，但进 App 后 App 内明暗与系统不一致时状态栏不沉浸」：
+         * 启动期状态栏取的是系统色（splashChrome），进 App 后这里写的是**不透明**的 `barBg`（App 外观色）
+         * ⇒ 页面已经 setWindowLayoutFullScreen 铺到状态栏下方，状态栏却被涂成另一条不透明色带。
+         * 平板统一透明，让页面背景自己透上来；图标明暗仍跟随外观。手机 / PC 保持原样。
+         */
+        const tabletImmersive: boolean = this.isTabletForm();
         this.decorWin.setWindowSystemBarProperties({
-          statusBarColor: barBg,
+          statusBarColor: tabletImmersive ? SYSTEM_BAR_HANDOFF_BG : barBg,
           statusBarContentColor: contentColor,
           isStatusBarLightIcon: lightIcon
         }).catch((e: BusinessError): void => {
@@ -6986,7 +7041,7 @@ struct WebApp {
           this.systemBarApplied = ''; // 允许下次再试（例如窗口后来才就绪）
         });
         hilog.info(DOMAIN, TAG, '状态栏已跟随%{public}s：%{public}s bg=%{public}s',
-          splashUp ? '启动页' : '外观', mode, barBg);
+          splashUp ? '启动页' : '外观', mode, tabletImmersive ? SYSTEM_BAR_HANDOFF_BG : barBg);
       } catch (e) {
         const err = e as BusinessError;
         hilog.warn(DOMAIN, TAG, '状态栏配色设置失败（全屏等场景属正常）code=%{public}d msg=%{public}s',
@@ -7892,6 +7947,11 @@ struct WebApp {
           .forceDarkAccess(false)
           .onPageBegin(() => {
             this.cancelNativeCapture();
+            // 【顺序不可换】上一行必须是本回调的第一个动作（`check-native-capture-lifecycle`
+            // 断言 `{\s*this.cancelNativeCapture();`），且紧跟的必须是 // 注释行
+            //（同一门禁自测的 mutant 4 用它做锚点）。启动标记只能放在这之后。
+            // S6：Web 开始导航（S5→S6 是"URL 已发布但 Web 尚未起导航"的间隔）
+            startupMarks.mark('S6', StartupPhase.WEB, 'page_begin');
             // 整页导航（含 303 后的落地）重新进入加载期；SPA 内部路由不受影响
             if (this.phase === WebPhase.READY) {
               this.phase = WebPhase.LOADING;
@@ -7973,6 +8033,9 @@ struct WebApp {
               return;
             }
             this.phase = WebPhase.READY;
+            // S7：首屏就绪（S0→S7 即用户感知的完整启动时长），并落一次汇总
+            startupMarks.mark('S7', StartupPhase.READY, 'first_paint_ready');
+            startupMarks.finish('ready');
             /*
              * 页面就绪：补发挂起的快捷方式动作（docs/172 §5.2）。
              * 「新建会话」按钮属于侧栏常驻 DOM，页面加载完成即可点；SPA 内部路由不影响它。
@@ -8138,15 +8201,29 @@ struct WebApp {
           Progress({ value: this.progressValue, total: 100, type: ProgressType.Linear })
             .width(200)
             .height(6)
-            .color('#1c2430')
-            .backgroundColor('#e4e7ec') // token-exempt: 启动页进度条底色（D23），与顶栏描边同值
+            .color(this.splashDark ? '#FFFFFF' : '#1c2430')
+            .backgroundColor(this.splashDark ? '#2A2A2E' : '#e4e7ec') // 启动页进度条：随手启动页深浅色
             .margin({ top: 40 })
+          /*
+           * 【2026-11-25 撤回首页骨架暗示（用户真机裁决）】
+           *
+           * 曾在此处加过「标题块 + 三个场景 pill + 输入框」的内容区占位（A2 的骨架暗示，
+           * 见 docs/201 §11.1）。PC 端真机截图反馈：进度条下方这块灰色结构是**多余**的，
+           * 启动环节不要它。
+           *
+           * 结论与边界：
+           *   · 启动页恢复为「品牌标 + 线性进度条」两项，不加任何结构占位；
+           *   · A2 的"窗口先带结构出现"在 DSHM 上**不成立**——启动页是纯 ArkUI 覆盖层，
+           *     它下面此刻没有可对齐的真实布局，占位块只会被读成"多余的东西"；
+           *   · 若以后再做，前提是 Web 组件已经带着真实首屏骨架（WorkBuddy 那条路），
+           *     而不是在 ArkUI 启动页里画假结构。
+           */
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor(SPLASH_BG) // token-exempt: 启动页底色；与 start_window_background / 启动期状态栏同源（为什么取白见 SPLASH_BG 头注）
+        .backgroundColor($r('app.color.start_window_background')) // 启动页底色：随系统深浅色（与 module.json5 的 startWindowBackground 同源）
         /*
          * 【启动页要真正"沉浸"进状态栏那一条】（2026-10-16 用户报"启动的时候 APP 区跟状态栏就不是一个色"）
          *

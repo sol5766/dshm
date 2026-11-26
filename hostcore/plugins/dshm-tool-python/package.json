@@ -16,6 +16,6 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.5"
+    "@deepseek-ai/dsh-tools": "0.2.3-alpha.2"
   }
 }

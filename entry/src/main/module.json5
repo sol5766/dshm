@@ -185,6 +185,14 @@
          * 【2026-11-19 AGC 驳回项①】审核意见要求：按最小化原则，reason 必须填写
          * 该权限实际使用的功能场景。本条 reason 已改为「用户选择本地任意文件夹作为
          * 项目工作区后直接读写」；usedScene.when 由 always 收紧为 inuse（仅功能使用时）。
+         *
+         * 【2026-11-21 二次驳回：仍判「应用内未见必须使用此权限的功能场景」】
+         * 补上**会话级授权的完全控制**这一强需求（评审工程师口径）：
+         *   用户选定工作区后，**整段会话**内的编辑/搜索/随包 Python 与构建工具都要持续
+         *   访问该目录**及其全部子目录**（含符号链接、新建/删除/重命名），并且会话恢复或
+         *   应用重启后仍要可用。系统的 picker 只给「单次 / 单文件」授权，覆盖不了目录树、
+         *   覆盖不了多次工具调用、也覆盖不了重启恢复 ⇒ 全盘权限是唯一可行实现。
+         * reason 文案已按此改写（base / en_US 同步）；供 AGC 上传的说明与截图口径见 docs/200。
          */
         "name": "ohos.permission.ACCESS_USER_FULL_DISK",
         "reason": "$string:perm_full_disk_reason",
@@ -224,7 +232,17 @@
           ],
           "when": "always"
         }
-      }
+      },
+      {
+        "name": "ohos.permission.WINDOW_TOPMOST",
+        "reason": "$string:pet_topmost_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
+      },
     ],
     "abilities": [
       {
@@ -367,7 +385,26 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "backgroundModes": ["taskKeeping"]
-      }
+      },
+      {
+        "name": "PetAbility",
+        "srcEntry": "./ets/entryability/PetAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:app_icon",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "launchType": "specified",
+        "exported": false,
+        /*
+         * 2026-11-23 Alt+Tab 修复：桌宠宿主是纯浮层，不应出现在最近任务/切换器里。
+         * 配合窗口侧 setWindowFocusable(false)，避免切换器出现一张没有画面的 PetAbility 卡片。
+         */
+        "excludeFromMissions": true,
+        "supportWindowMode": [
+          "floating"
+        ]
+      },
     ],
     "extensionAbilities": [
       {

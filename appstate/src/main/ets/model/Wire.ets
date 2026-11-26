@@ -119,7 +119,7 @@ export interface SessionListValue {
  * ── 权威样本（0.1.5-rc.1 真实 Host 实测，逐字保留） ──
  * ```json
  * {"sessionId":"session-07917d40-…","updatedAt":1789051283087,"running":false,"blank":true,
- *  "cwd":"D:\\dev\\deepseek-harness-desktop-HarmonyOS",
+ *  "cwd":"D:\\dev\\proj",
  *  "projections":{"asOfSeq":2,"values":{
  *    "title":null,"goal":null,"tokenUsage":{},"contextPressure":{},
  *    "contextBreakdown":{},"sessionStats":{},"turnOutline":[],

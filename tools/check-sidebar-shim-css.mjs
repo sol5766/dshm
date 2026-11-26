@@ -214,14 +214,14 @@ function run(src) {
   ok(blockCommentsBalanced(body), '垫片体内块注释成对（缺 `*/` 会静默吞掉后续规则）');
   ok(!css.includes('dshm-sidebar-fab') && !body.includes("'dshm-sidebar-fab'"),
     '垫片不再生成任何自绘侧栏按钮（收起态轨里只有 dsh 官方 opener）');
-  ok(/html\[data-dshm-sidebar="collapsed"\] button\[data-sidebar-opener\]\{opacity:1 !important;visibility:visible !important;pointer-events:auto !important\}/.test(css),
-    '收起态把官方 opener 强制成常显（官方默认只在鼠标移入时显形）');
+  ok(/html\[data-dshm-sidebar="collapsed"\] button\[data-sidebar-opener\]\{display:inline-flex !important;opacity:1 !important;visibility:visible !important;pointer-events:auto !important\}/.test(css),
+    '收起态把官方 opener 强制成常显（含 display:inline-flex，覆盖官方 narrow 的 display:none）');
   ok(/html\[data-dshm-sidebar="collapsed"\]\[data-dshm-panel="open"\] button\[data-sidebar-opener\]\{opacity:0 !important;pointer-events:none !important\}/.test(css),
     '设置面板打开时隐去 opener（避免压住面板标题与返回键）');
   ok(/html\[data-dshm-right="open"\] button\[data-sidebar-opener\]\{opacity:0 !important;pointer-events:none !important\}/.test(css),
     '右侧栏打开时隐去 opener（避免压住右栏标题）');
   ok(!/html\[data-dshm-sidebar="collapsed"\] button\[data-sidebar-opener\]\{[^}]*display:none/.test(css),
-    '收起态常显规则只调透明度 / 可见性，不动 display（避免撕坏官方盒子）');
+    '收起态 opener 不得 display:none（2026-11-21 竖屏修复改为显式 display:inline-flex）');
   /*
    * 【2026-11-11 收起态按钮"一直看得见"】读官方核心 CSS 得知：收起态轨首 toggle 显示
    * 品牌标（railMark），侧栏图标（panelIcon）被 display:none，只在 :hover 时交换。
@@ -296,13 +296,13 @@ const MUTATIONS = [
     apply: (t) => t.replace("       * 下面第三条把 leading 那颗收掉 —— 全页始终只有一颗官方按钮。\n       */",
       "       * 下面第三条把 leading 那颗收掉 —— 全页始终只有一颗官方按钮。") },
   { name: 'M13 收起态把 opener 推开（opacity:0）',
-    apply: (t) => t.replace('button[data-sidebar-opener]{opacity:1 !important;visibility:visible !important;pointer-events:auto !important}',
-      'button[data-sidebar-opener]{opacity:0 !important;visibility:visible !important;pointer-events:auto !important}') },
+    apply: (t) => t.replace('button[data-sidebar-opener]{display:inline-flex !important;opacity:1 !important;visibility:visible !important;pointer-events:auto !important}',
+      'button[data-sidebar-opener]{display:inline-flex !important;opacity:0 !important;visibility:visible !important;pointer-events:auto !important}') },
   { name: 'M14 删掉收起态常显规则（opener 又变回 hover 才显）',
-    apply: (t) => t.replace("      + 'html[' + STATE_ATTR + '=\"collapsed\"] button[data-sidebar-opener]{opacity:1 !important;visibility:visible !important;pointer-events:auto !important}'\n", '') },
-  { name: 'M15 用 display 强显 opener（撕坏官方盒子）',
-    apply: (t) => t.replace('button[data-sidebar-opener]{opacity:1 !important;visibility:visible !important;pointer-events:auto !important}',
-      'button[data-sidebar-opener]{display:inline-flex !important}') },
+    apply: (t) => t.replace("      + 'html[' + STATE_ATTR + '=\"collapsed\"] button[data-sidebar-opener]{display:inline-flex !important;opacity:1 !important;visibility:visible !important;pointer-events:auto !important}'\n", '') },
+  { name: 'M15 收起态 opener 缺 display:inline-flex（官方 narrow 仍 display:none）',
+    apply: (t) => t.replace('button[data-sidebar-opener]{display:inline-flex !important;opacity:1 !important;visibility:visible !important;pointer-events:auto !important}',
+      'button[data-sidebar-opener]{opacity:1 !important;visibility:visible !important;pointer-events:auto !important}') },
   { name: 'M16 收起态又只显示品牌标（侧栏图标回到 hover 才出现）',
     apply: (t) => t.replace("      + '{display:inline !important}'", "      + '{display:none !important}'") },
   { name: 'M17 品牌标不再隐藏（与侧栏图标同时出现）',

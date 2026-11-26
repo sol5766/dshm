@@ -115,6 +115,9 @@ const backupDir = wantBackup ? backupDirFor(ROOT, 'place-host-app') : '';
 if (!dryRun) mkdirSync(DEST, { recursive: true });
 
 FILES.push('dshm-update-transaction.cjs');
+// dsh-pet 桌面宿主伴生层（静态路由 + shim）。
+FILES.push('dshm-pet-host.cjs');
+FILES.push('dshm-pet-shim.js');
 FILES.push('dshm-profile-writer.cjs');
 FILES.push('startup-work.cjs');
 const missing = FILES.filter((name) => !existsSync(join(SRC_DIR, name)));

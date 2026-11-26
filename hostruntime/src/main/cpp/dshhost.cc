@@ -357,6 +357,15 @@ napi_value StartHost(napi_env env, napi_callback_info info) {
     }
   }
 
+  /*
+   * 【io_uring 兜底（Node 26 起）】libuv 会读 `UV_USE_IO_URING` 关闭 io_uring；
+   * OHOS 上 io_uring 曾出现挂起。24.x 时期靠给 libnode 打二进制补丁禁用，26.x 的
+   * libnode 是外部预编译件、补丁偏移不适用，改在 node::Start 之前用环境变量兜底
+   * （libnode 内确有该字符串，libuv 初始化时会读）。放在 ArkTS 传入的 env 之后，
+   * 保证不会被调用方覆盖成开启。
+   */
+  ::setenv("UV_USE_IO_URING", "0", 1);
+
   g_argv.clear();
   for (std::string& s : g_argStore) {
     g_argv.push_back(&s[0]);
@@ -577,8 +586,9 @@ extern "C" __attribute__((constructor)) void RegisterDshHostModule() {
    * 因此这里按候选顺序逐个 dlopen，命中即用，避免换 Node 版本时改代码。
    */
   static const char* kLibnodeCandidates[] = {
-      "libnode.so.137",  // Node 26.x（当前资产，真机已验证）
-      "libnode.so.127",  // Node 24.x（历史基线）
+      "libnode.so.147",  // Node 26.13.x（当前资产）
+      "libnode.so.137",  // Node 24.x（回滚基线）
+      "libnode.so.127",  // Node 22.x（历史基线）
   };
   std::string libsDir;
   Dl_info selfInfo;

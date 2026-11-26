@@ -600,8 +600,8 @@ const ORIGIN_MARKER_OLD = 'HDSH_ORIGIN_LIST';
 // pack-core.mjs:1605/1611/1634 —— wrapSharp() 的两个产物（树根相对）
 const SHARP_PKG = 'node_modules/sharp/package.json';
 const SHARP_INDEX = 'node_modules/sharp/index.js';
-// pack-core.mjs:1631 —— 调度器 manifest 全文（JSON.stringify 单行；**无时间戳 ⇒ 可逐字断言**）
-const SHARP_PKG_JSON = '{"name":"sharp","version":"0.0.0-dshm-dispatch","main":"index.js","private":true}';
+// pack-core.mjs 的 wrapSharp() —— 调度器 manifest 全文（JSON.stringify 单行；**无时间戳 ⇒ 可逐字断言**）
+const SHARP_PKG_JSON = '{"name":"sharp","version":"0.0.2-dshm-dispatch","main":"index.js","private":true}';
 // pack-core.mjs:1647 —— 真件（sibling 包）的加载点
 const SHARP_IMPL_REQUIRE = "require('sharp.impl')";
 // pack-core.mjs:1623-1627 —— renameSync 之后真件的落点：manifest / 入口体 / 上游 lib 目录
@@ -868,8 +868,17 @@ function nodePtyGuardStructural(text) {
  */
 function clientHmrPollStructural(text) {
   const fails = [];
-  if (!text.includes('\t}, "client-hmr: /plugins/events channel");')) {
-    fails.push('`/plugins/events` 那条 effect 不见了 —— 关轮询只该关 bundle 监视那一条；'
+  /*
+   * SSE 通道 effect 的挂载标签有两种已核实形态：rc.5 及更早是
+   * `"client-hmr: /plugins/events channel"`；0.2.3-alpha.2 起上游把它重写成
+   * Typert 服务（`super(ctx, "pluginEvents", …)`），标签改为
+   * `"client-hmr: plugin event followers"`。语义判据只关心「这条 effect 还在」，
+   * 两种标签命中其一即算在（pack-core 的锚点版本无关，同样两种树都打得上）。
+   */
+  const sseLabelPresent = text.includes('\t}, "client-hmr: /plugins/events channel");')
+    || text.includes('\t}, "client-hmr: plugin event followers");');
+  if (!sseLabelPresent) {
+    fails.push('`/plugins/events`（0.2.3 起为 plugin event followers）那条 effect 不见了 —— 关轮询只该关 bundle 监视那一条；'
       + 'SSE 通道（graph 首帧 + rebuilt 推送）端侧在真用，误删会让浏览器半边收不到模块表');
   }
   if (!text.includes('ctx.clientModules.onRebuilt(')) {
@@ -1211,11 +1220,14 @@ const INJECTED_PATCHES = [
       + '反向 4 条（逐字，含 tab 缩进）：stat 那条旧 v8 注、readFileAbortable 的三参函数头、两个三参调用点'
       + ' —— 少翻一处，真机就还会看到裸 EPERM（本组就是 docs/108→109 那次缺口的守卫）。'
       + '**不许**泛化成「树里不得出现 EPERM」：同一文件里 EPERM 到处都有（link 回退、chmod 分支）。',
-    sites: ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(RECIPE.coreVersion.split('+')[0]) ? [{
+    sites: ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(RECIPE.coreVersion.split('+')[0]) ? [{
       rel: FS_LOCAL_LIB,
       markers: [[FS_LOCAL_PERM_MARK, 0]],
       forward: [
-        ['import { FileSystem, FsError, FsTargetKey, FsVersion, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";', '原生 errno 归一化来自共享 fs 服务'],
+        [RECIPE.coreVersion.split('+')[0] === '0.2.3-alpha.2'
+          ? 'import { FileSystem, FsError, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";'
+          : 'import { FileSystem, FsError, FsTargetKey, FsVersion, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";',
+          '原生 errno 归一化来自共享 fs 服务（0.2.3-alpha.2 起上游裁掉未用的 FsTargetKey/FsVersion 导入，pack-core 同款双形态）'],
         ['\t\tinfo = await stat(target.targetKey);\n\t} catch (error) {\n\t\tthrow fsErrorFromErrno(verb, target.displayPath, error);', 'stat 权限错误由原生归一化处理'],
         ['async function readFileAbortable(absolutePath, displayPath, verb, signal) {', '原生 readFileAbortable 的 displayPath 参数'],
         ['\t\tif (isAbortError(error)) throw new FsError(`${verb} aborted`, "FS_ABORTED");\n\t\tthrow fsErrorFromErrno(verb, displayPath, error);', '先保留 abort，再归一化读取错误'],
@@ -1331,7 +1343,7 @@ const INJECTED_PATCHES = [
   {
     key: 'sharp 调度器',
     fn: 'wrapSharp()',
-    note: 'pack-core.mjs:1603-1665；标记 = manifest 版本号 `0.0.0-dshm-dispatch`。'
+    note: 'pack-core.mjs 的 wrapSharp()（SHARP_DISPATCH_VERSION 0.0.2-dshm-dispatch：E93 + 2026-11-24 ABI 预检形态）；标记 = manifest 版本号。'
       + '两个产物都由 pack-core 写出且**逐字节确定**（无时间戳/随机）⇒ manifest 可逐字断言、'
       + 'index.js 只断关键形态（否则等于把整份生成脚本抄进门禁）。'
       + '反向判据：上游真件的 `lib/` 只该出现在 sibling 包 `sharp.impl/` 下 —— '
@@ -1340,16 +1352,18 @@ const INJECTED_PATCHES = [
     sites: [
       {
         rel: SHARP_PKG,
-        markers: [['0.0.0-dshm-dispatch', 1]],
-        forward: [[SHARP_PKG_JSON, '调度器 manifest 全文（pack-core:1631 的 JSON.stringify，逐字）']],
+        markers: [['0.0.2-dshm-dispatch', 1]],
+        forward: [[SHARP_PKG_JSON, '调度器 manifest 全文（wrapSharp 的 JSON.stringify，逐字）']],
         reverse: [['"@ohos-ports/sharp"', '上游真件 manifest 的 name —— 它现在只该在 node_modules/sharp.impl/package.json 里']],
       },
       {
         rel: SHARP_INDEX,
-        markers: [['dshmSharpLoadError', 2]],
+        markers: [['dshmSharpLoadError', 3]],
         forward: [
           [SHARP_IMPL_REQUIRE, '真件（sibling 包）的加载点'],
+          ['function dshmProbeElfNeeded(file) {', 'E93 ABI 预检：读 ELF64-LE 的 DT_NEEDED 名单（147 运行时混入 137 闭包会 SIGSEGV，必须静态预检）'],
           ['impl = function dshmSharpUnavailable() {', '加载失败时"会报错但能挂载"的降级桩（不是静默的假可用）'],
+          ['err.dshmSharpLoadError = reason;', '桩抛出的错误也带失败原因（ABI 预检形态新增；dsh-attachment-local 据此抛稳定错误码）'],
           ['impl.dshmSharpLoadError = reason;', '真实失败原因挂载点（入口脚本的运行时事实读它 ⇒ 界面显示真实结论）'],
           ['module.exports.default = impl;', 'default 导出（CJS/ESM 两种取法都能拿到同一份）'],
         ],
@@ -1514,9 +1528,9 @@ const INJECTED_PATCHES = [
       ],
       forward: [
         ['- id: optional-terminal-registry', '该 group 的第一条子项（保留）'],
-        ...(['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(RECIPE.coreVersion.split('+')[0]) ? [
+        ...(['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(RECIPE.coreVersion.split('+')[0]) ? [
           ["- id: optional-terminal-panel\n          name: '@deepseek-ai/dsh-terminal-panel'\n          config:\n            preferredShells: !!js \"process.platform === 'win32' ? ['pwsh', 'powershell'] : []\"",
-            'rc.2 panel 行逐字保留，PowerShell 偏好仅限 Windows'],
+            'terminal-panel 行逐字保留，PowerShell 偏好仅限 Windows（0.2.3-alpha.2 实测与 rc.5 布局逐字一致，pack-core wantsPanel 同款白名单）'],
         ] : [
           ["- id: optional-terminal-bash\n          name: '@deepseek-ai/dsh-terminal-bash'\n          disabled: !!js process.platform === 'win32'",
             '真正的 bash 行逐字未动（仍按平台二选一）'],
@@ -1534,8 +1548,8 @@ const INJECTED_PATCHES = [
       reverse: [
         ["          name: '@deepseek-ai/dsh-terminal-bash'\n          disabled: !!js process.platform !== 'win32'\n          config:\n            shellDialect: pwsh",
           '被摘掉的 pwsh 占位行的 name/disabled/config/shellDialect 四行逐字（`- id:` 行由上面那条 ×0 标记管）'],
-        ...(['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(RECIPE.coreVersion.split('+')[0]) ? [
-          ['        - id: optional-terminal-bash\n', 'rc.2 不得复活旧 shell 后端行'],
+        ...(['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(RECIPE.coreVersion.split('+')[0]) ? [
+          ['        - id: optional-terminal-bash\n', '新布局不得复活旧 shell 后端行'],
         ] : []),
       ],
     }],

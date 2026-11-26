@@ -395,6 +395,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: node tools/check-host-port-isolation.mjs
 
+      # 2026-11-25（r51 P0 / PC v3 R1-R2）：核心 0.2.3 webserver 缺省授权改 required，
+      # 未声明 auth 的 /dshm-* 路由把 token 客户端全部挡成 401；11 条路由必须显式 anonymous。
+      - name: 门禁 · check-webserver-route-auth（宿主 webServer 11 条路由显式 auth=anonymous · 带 6 个变异体）
+        if: ${{ !cancelled() }}
+        run: node tools/check-webserver-route-auth.mjs && node tools/check-webserver-route-auth.mjs --self-test
+
       - name: 门禁 · check-picker-api23（API 23 工作区选择：能力预检 + 专属目录兜底）
         if: ${{ !cancelled() }}
         run: node tools/check-picker-api23.mjs

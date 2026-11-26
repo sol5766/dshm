@@ -414,8 +414,10 @@ try {
   if (!PC_ONLY) {
     const entryModule = JSON.parse(zipText(entrySrc, 'module.json'));
     const entryPerms = (entryModule.module?.requestPermissions ?? []).map((p) => p.name);
-    /* 2026-11-11：全盘权限已进正式声明（Profile DSHM1109Release 已批），因此恒为 18 条。 */
-    const wantEntryPerms = 18;
+    /* 2026-11-11：全盘权限已进正式声明（Profile DSHM1109Release 已批），因此恒为 19 条（2026-11-20 新增 WINDOW_TOPMOST）。
+     * 2026-11-23 22:40 用户裁决：SET_WINDOW_TOUCH_AREAS 暂不申请，已从 module.json5 移除（回到 19 条）；
+     * PetWeb.applyTouchableAreas() 保留，运行期 API 201 自动降级整窗可触。 */
+    const wantEntryPerms = 19;
     if (entryModule.app?.bundleName !== BETA_BUNDLE
         || String(entryModule.app?.versionCode) !== APP_VERSION_CODE
         || entryModule.app?.buildMode !== 'debug'
@@ -527,7 +529,7 @@ Side-load directories (local hdc / installer):
   phone:  手机（phone）
 
 Label: ${BETA_LABEL}
-Permissions: entry=18 (same declarations as formal, including ACCESS_USER_FULL_DISK), phone=9.
+Permissions: entry=19 (same declarations as formal, including ACCESS_USER_FULL_DISK + WINDOW_TOPMOST), phone=9.
 ${WITH_FULL_DISK ? `Full disk: declared in entry only. It is system_basic + manual_settings +
   deviceTypes=[2in1] => after install, enable it manually in
   Settings > Apps > ${BETA_LABEL} > full disk file access. Declaring it does not

@@ -127,3 +127,23 @@ Thumbs.db
 /hostruntime/src/main/resources/resfile/*.zip
 /hostruntime/src/main/resources/resfile/toolchain/
 /hostruntime/src/main/resources/resfile/vm/
+
+# ── 推送前整理（2026-11-26）：本地备份 / 证据快照 / POC 构建产物 ──────────
+# 【本地备份】`backup/<时间戳>-<主题>/` 是升级前的手工副本，可再生，不入库。
+/backup/
+# 【证据快照】`JD/**/*-evidence/` 是 hdc dump 与截图（读数为设备侧绝对路径），
+# 与 `/dist/` 同性质：结论写进同名 result.md，原始快照不入库。
+JD/**/*-evidence/
+# 【demo POC】demo/.gitignore 只覆盖 demo 根一层，各 POC 子工程的 oh_modules /
+# .hvigor / .cxx 需要单独忽略；交付压缩包由源码重现，不入库。
+/demo/*/oh_modules/
+/demo/*/node_modules/
+/demo/*/.hvigor/
+/demo/*/.cxx/
+/demo/*.zip
+# 【POC 本机签名】新建 POC 的根 build-profile.json5 由 DevEco 自动写入本机证书
+# 绝对路径与 storePassword/keyPassword，绝不入库；干净的交付样例显式放行。
+/demo/*/build-profile.json5
+!/demo/pc-app-label-repro/build-profile.json5
+/demo/build-profile.json5
+/demo/*/local.properties

@@ -33,7 +33,7 @@ const SELF_SIGN = join(ROOT, 'third_party', 'ohos-selfsign', 'selfsign.js');
 
 /** 随包库：与 `hostruntime/src/main/module.json5` 的 `libs` 分发口径一致。 */
 const TARGETS = [
-  join(ROOT, 'hostruntime', 'libs', 'arm64-v8a', 'libnode.so.137'),
+  join(ROOT, 'hostruntime', 'libs', 'arm64-v8a', 'libnode.so.147'),
   join(ROOT, 'hostruntime', 'libs', 'arm64-v8a', 'libc++_shared.so'),
 ];
 

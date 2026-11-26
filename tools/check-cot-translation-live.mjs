@@ -66,11 +66,11 @@ const PKG = '@deepseek-ai/dsh-experimental-translator';
 const OFFLINE = process.argv.includes('--offline');
 const SELF_TEST = process.argv.includes('--self-test');
 
-/** 舞台里要链过去的核心树包（translator 的 peer 闭包，按它的 package.json 取）。 */
+/** 舞台里要链过去的核心树包（translator 的 peer + 直接依赖闭包；0.2.3 起 dsh-brand/schemastery 是 dependencies）。 */
 const PEER_ALIAS = [
   'cordis', 'schemastery', 'dsh-timeout', 'dsh-util-values', 'dsh-session',
   'dsh-session-persistence', 'dsh-llm', 'dsh-credentials', 'dsh-launch-environment',
-  'cordis-plugin-loader',
+  'cordis-plugin-loader', 'dsh-brand',
 ];
 
 /**

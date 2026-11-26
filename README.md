@@ -12,7 +12,7 @@ DSHM 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（d
 
 **它不是 PC 上 dsh 的遥控器**，也不需要在电脑上常驻任何服务：装上即用，数据只在本机应用沙箱内。
 
-**当前版本**：`1.1.8 / 1010018`，端侧核心 `0.2.2-rc.5+dshm.1`（真源分别为 `AppScope/app.json5` 与 `hostcore/core-recipe.json`）。
+**当前版本**：`1.1.8 / 1010019`，端侧核心 `0.2.2-rc.5+dshm.1`（真源分别为 `AppScope/app.json5` 与 `hostcore/core-recipe.json`）。
 
 支持 HarmonyOS 手机 / 折叠屏 / 平板 / 2in1。交付面只有两个：**`entry` = 平板 + 2in1**（PC / Edge / Pro Max 共用）、**`phone` = 手机**；折叠屏按系统上报的形态进入对应档。
 

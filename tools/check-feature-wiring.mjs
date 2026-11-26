@@ -163,7 +163,7 @@ const FEATURES = [
     patterns: [
       ['SIDEBAR_STATE_ATTR', 2],
       ["STATE_ATTR \\+ '=\"collapsed\"\\]", 2],
-      ['button\\[data-sidebar-opener\\]\\{opacity:1 !important', 1],
+      ['button\\[data-sidebar-opener\\]\\{display:inline-flex !important;opacity:1 !important', 1],
       ['button\\[data-sidebar-opener\\]\\{opacity:0 !important', 2]
     ]
   },

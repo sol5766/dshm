@@ -20,9 +20,9 @@
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh-ptc-runtime": "0.2.2-rc.5",
-    "@deepseek-ai/dsh-timeout": "0.2.2-rc.5",
-    "@deepseek-ai/dsh-util-values": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-ptc-runtime": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-timeout": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-util-values": "0.2.3-alpha.2",
     "@deepseek-ai/schemastery": "~3.19.0"
   }
 }

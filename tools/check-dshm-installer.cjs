@@ -105,6 +105,54 @@ function tarHeader(name, size, type) {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 
+  // ── 2b. PAX 中文文件名 / size：长度必须按 UTF-8 字节解析（2026-11-23 dsh-pet 事故回归）──
+  {
+    const paxRec = (k, v) => {
+      const body = ` ${k}=${v}\n`;
+      let n = body.length;
+      for (;;) {
+        const s = String(n) + body;
+        const bytes = Buffer.byteLength(s, 'utf8');
+        if (bytes === n) return Buffer.from(s, 'utf8');
+        n = bytes;
+      }
+    };
+    const name = 'assets/webm/三球抛接.webm';
+    const data = Buffer.from('中文素材');
+    const pax = Buffer.concat([paxRec('path', name), paxRec('size', String(data.length))]);
+    const tan = Buffer.concat([
+      tarHeader('pax', pax.length, 'x'), pax, Buffer.alloc((512 - (pax.length % 512)) % 512),
+      tarHeader('placeholder', data.length, '0'), data, Buffer.alloc((512 - (data.length % 512)) % 512),
+      Buffer.alloc(1024),
+    ]);
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dshm-tar-'));
+    let err = null;
+    try {
+      installer.extractTar(tan, tmp);
+    } catch (e) {
+      err = e;
+    }
+    const target = path.join(tmp, 'assets', 'webm', '三球抛接.webm');
+    check('extractTar PAX 中文名可落盘', err === null && fs.existsSync(target), err ? err.message : '');
+    check('extractTar PAX 中文名 size 正确',
+      err === null && fs.existsSync(target) && fs.statSync(target).size === data.length);
+
+    // 坏名（含 \n）必须被拒绝，而不是写进插件目录
+    const badPax = Buffer.concat([paxRec('path', 'assets/bad\n19 mtime=x.txt'), paxRec('size', '3')]);
+    const bad = Buffer.concat([
+      tarHeader('pax', badPax.length, 'x'), badPax, Buffer.alloc((512 - (badPax.length % 512)) % 512),
+      tarHeader('placeholder', 3, '0'), Buffer.from('abc'), Buffer.alloc(509), Buffer.alloc(1024),
+    ]);
+    let badThrew = false;
+    try {
+      installer.extractTar(bad, tmp);
+    } catch (e) {
+      badThrew = true;
+    }
+    check('extractTar 拒绝控制字符条目名', badThrew);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
   // ── 3. resolveSpec：GitHub 三形态（不下载）──
   {
     const r1 = await installer.resolveSpec('https://github.com/foo/bar.git', installer.DEFAULT_REGISTRY).catch((e) => ({ err: e.message }));

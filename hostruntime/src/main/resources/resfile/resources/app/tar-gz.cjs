@@ -58,24 +58,35 @@ function readSize(header) {
 
 /**
  * 解析 pax 扩展头正文：一串 `<len> <key>=<value>\n` 记录（len 含自身）。
- * 返回 Map；畸形记录整条忽略（不抛错——pax 只是元数据，不该阻断解包）。
+ *
+ * 【必须按字节解析】`len` 是 UTF-8 字节数，而 JS 字符串按 UTF-16 码元计数：
+ * 记录值里只要有一个汉字，`len` 就比字符长度大 2，按字符串切会越过本条记录、
+ * 切进下一条（文件名尾部粘上 `\nmtime=...`，size 少一位）。2026-11-23 现场
+ * 的 dsh-pet 141 个中文文件名损坏 + 6 个文件被截成 1/10 就是这条导致的。
+ * 所有长度判断、`indexOf`、`subarray` 一律用 Buffer 字节。
  */
-function parsePax(text) {
+function parsePax(buf) {
+  if (!Buffer.isBuffer(buf)) {
+    buf = Buffer.from(buf || '', 'utf8');
+  }
   const out = new Map();
   let pos = 0;
-  while (pos < text.length) {
-    const sp = text.indexOf(' ', pos);
+  while (pos < buf.length) {
+    const sp = buf.indexOf(0x20, pos); // ' '
     if (sp < 0) {
       break;
     }
-    const len = parseInt(text.slice(pos, sp), 10);
-    if (!Number.isFinite(len) || len <= 0 || pos + len > text.length) {
+    const len = parseInt(buf.subarray(pos, sp).toString('latin1'), 10);
+    if (!Number.isSafeInteger(len) || len <= 0 || pos + len > buf.length) {
       break;
     }
-    const rec = text.slice(sp + 1, pos + len - 1); // 去掉结尾 \n
-    const eq = rec.indexOf('=');
+    let rec = buf.subarray(sp + 1, pos + len);
+    if (rec.length > 0 && rec[rec.length - 1] === 0x0a) { // 去掉结尾 \n
+      rec = rec.subarray(0, rec.length - 1);
+    }
+    const eq = rec.indexOf(0x3d); // '='
     if (eq > 0) {
-      out.set(rec.slice(0, eq), rec.slice(eq + 1));
+      out.set(rec.subarray(0, eq).toString('utf8'), rec.subarray(eq + 1).toString('utf8'));
     }
     pos += len;
   }
@@ -150,12 +161,12 @@ function* walkTar(tarBuf, opts) {
       continue;
     }
     if (type === 'x') { // pax：作用于下一个条目
-      nextPax = parsePax(readStr(tarBuf, off, size));
+      nextPax = parsePax(tarBuf.subarray(off, off + size));
       off += padded;
       continue;
     }
     if (type === 'g') { // pax：全局
-      for (const [k, v] of parsePax(readStr(tarBuf, off, size))) {
+      for (const [k, v] of parsePax(tarBuf.subarray(off, off + size))) {
         globalPax.set(k, v);
       }
       off += padded;
@@ -177,12 +188,26 @@ function* walkTar(tarBuf, opts) {
     }
     if (pax.has('size')) {
       const n = parseInt(pax.get('size'), 10);
-      if (Number.isFinite(n)) {
-        // 只影响本条目的数据长度（pax size 用于 >8GB 的巨型文件）
-        entrySize = n;
+      if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid pax size');
+      /*
+       * 【一致性校验】npm tarball 的 pax size 与 header size 相等（仅 >8GB 的巨型
+       * 文件 header size 可能是 0）。两者不等说明 PAX 解析已错位，继续写只会得到
+       * 「装上了但文件是坏的」——直接拒绝，让安装失败并报可读错误。
+       */
+      if (size !== 0 && n !== size) {
+        throw new Error('pax size ' + n + ' 与 header size ' + size + ' 不一致，拒绝解包');
       }
+      entrySize = n;
     }
     if (!Number.isSafeInteger(entrySize) || entrySize < 0 || entrySize > size) throw new Error('Invalid tar entry size');
+    /*
+     * 【条目名禁止控制字符】正常文件名不会有 \n / \0；出现就是解包错位的铁证
+     * （2026-11-23 的坏名样例正是 `xxx.webm\n19 mtim...`）。宁可安装失败，
+     * 也不要让坏名污染插件目录、等到运行时 404 才发现。
+     */
+    if (/[\u0000-\u001f\u007f]/.test(entryName)) {
+      throw new Error('tar 条目名含控制字符，疑似解包错误：' + JSON.stringify(entryName));
+    }
 
     const segs = normalizeEntryPath(entryName, stripPrefixes);
     off += padded;
@@ -221,6 +246,15 @@ function writeEntry(entry, destDir, stats) {
   if (entry.type === '0' || entry.type === '7') {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, entry.body.subarray(0, entry.size));
+    /*
+     * 【落盘字节校验】解析错位时 body 可能不足 entry.size；写完后按磁盘实际大小
+     * 复核一次，不等就抛错并删掉半成品，避免把截断文件留在插件目录里。
+     */
+    const written = fs.statSync(target).size;
+    if (written !== entry.size) {
+      try { fs.unlinkSync(target); } catch (_e) { /* 清理失败不掩盖根因 */ }
+      throw new Error('tar 条目写入不完整：' + entry.name + ' 期望 ' + entry.size + ' 实得 ' + written);
+    }
     stats.written += 1;
     return;
   }

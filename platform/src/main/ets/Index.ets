@@ -245,4 +245,9 @@ export { CloudSyncSettings } from './view/CloudSyncSettings';
 // 2026-10-30 从 appstate 搬到本层（docs/320）：platform 不能反向依赖 appstate，
 // 而云同步的共享面板在 platform 里要用这些令牌。appstate 侧仍以 `appstate/ui/Tokens.ets`
 // 再导出，既有调用点不受影响 —— 令牌只有这一份。
+// 文档扫描 / 表格提取结果落地（Vision Kit 临时 URI → 沙箱 URI，2026-11-25）
+export { ScanSaveKind, scanExtension, persistScanResults, scanUris } from './system/DocumentScan';
+export type { ScanPersistedFile } from './system/DocumentScan';
+// 启动分段标记（docs/201 §3-P2）：S0–S7 双时间戳 + JSONL，供启动耗时取证与回归对比。
+export { StartupPhase, startupMarks } from './diagnostics/StartupMarks';
 export { Border, Breakpoint, Dur, Fs, Lh, Radius, SemanticColor, Sp, Sz } from './ui/Tokens';

@@ -136,6 +136,17 @@ function installNativeRedirect(options = {}) {
       log(`原生库重定向未启用（NATIVE_LIBS=${libsDir}）`);
       return false;
     }
+    /*
+     * 【发布给核心树（2026-11-24，Node 26 影响面审计 §2.3）】sharp 调度器
+     * （pack-core 的 wrapSharp() 生成，位于核心树 node_modules/sharp/）在 require
+     * 真件前要做 ELF ABI 预检，读的正是本重定向的目标
+     * `${libsDir}/libsharp-openharmony-arm64.so`。核心树与宿主 app 不在同一棵
+     * 目录树上（el2/files/cores vs el1/bundle/…），自己推导必漂移，所以这里把
+     * 已验证存在的 libs 目录发布成环境事实。只写一次且值相同则不重复赋值。
+     */
+    if (process.env.DSHM_NATIVE_LIBS !== libsDir) {
+      process.env.DSHM_NATIVE_LIBS = libsDir;
+    }
     const realExists = fs.existsSync.bind(fs);
     const redirect = (p) => {
       try {

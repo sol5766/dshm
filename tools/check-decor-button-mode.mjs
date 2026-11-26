@@ -211,9 +211,11 @@ const CHROME_FILE = join(ROOT, 'platform/src/main/ets/system/WindowChrome.ets');
 const chromeSrc = readFileSync(CHROME_FILE, 'utf8');
 const COLOR_FILE = join(ROOT, 'entry/src/main/resources/base/element/color.json');
 const colorSrc = readFileSync(COLOR_FILE, 'utf8');
+const COLOR_DARK_FILE = join(ROOT, 'entry/src/main/resources/dark/element/color.json');
+const colorDarkSrc = readFileSync(COLOR_DARK_FILE, 'utf8');
 const publishDecorKeysHelper = /^  private publishDecorKeysVisible\(value: boolean\): void \{[\s\S]*?^  \}/m;
 
-function inspectTopInset(src, entry, chrome = chromeSrc, colorJson = colorSrc) {
+function inspectTopInset(src, entry, chrome = chromeSrc, colorJson = colorSrc, colorDarkJson = colorDarkSrc) {
   const notes = [];
   let pass = 0;
   let fail = 0;
@@ -351,8 +353,16 @@ function inspectTopInset(src, entry, chrome = chromeSrc, colorJson = colorSrc) {
     '【核心】free-window 事件值驱动刷新，避免必须等待旧状态事件');
   ok(/private freeWindowMode: boolean \| undefined = undefined;/.test(entry),
     '能力层保存真实自由窗口环境读数');
-  ok(/if \(isHandheldForm\(\)\) \{[^{}]*?this\.publishDecorKeysVisible\(false\);\s*\} else \{/.test(entry),
-    '移动启动显式发布无叠加让位，旧装饰启动链仅保留在 PC else 分支');
+  /*
+   * 2026-11-19 修复 A：撤销 11-12 的「手持档早分支」。
+   * 旧断言钉的正是那个半成品结构（手持只 publish(false)），导致平板整段装饰链被跳过、
+   * 探针恒为 decor=skip。现在要求：不再有早分支，且持有 `decorPresentOf` 的真实结论发布。
+   */
+  ok(!/if \(isHandheldForm\(\)\) \{[^{}]*?this\.publishDecorKeysVisible\(false\);\s*\} else \{/.test(entry),
+    '不再有"手持档只发布 false"的早分支（它会跳过整段装饰/三键链）');
+  ok(/const decorPresent: boolean = decorPresentOf\(/.test(entry)
+    && /this\.publishDecorKeysVisible\(decorPresent\);/.test(entry),
+    '手持档启动也按 decorPresentOf 的结论发布三键让位（与 PC 同一条链）');
   ok(!/decorPresentOf\(\s*this\.decorHiddenOk,\s*this\.decorButtonsHidden,\s*this\.decorHeightVp,\s*this\.decorFloating\)/.test(entry),
     '不再以旧刷新参数顺序判定自由窗口环境');
   ok(/private refreshDecorCaps\(win: window\.Window \| undefined/.test(entry),
@@ -461,19 +471,38 @@ function inspectTopInset(src, entry, chrome = chromeSrc, colorJson = colorSrc) {
     '【核心】页面"交还系统"分支真的写透明底色');
   ok(/statusBarColor: SYSTEM_BAR_HANDOFF_BG/.test(entry),
     '【核心】能力层"交还系统"分支同样写透明底色（两处口径不许各写一份）');
-  const splashConst = (src.match(/const SPLASH_BG: string = '([^']+)';/) || [])[1];
-  ok(splashConst !== undefined, '找到启动页底色常量 SPLASH_BG（' + splashConst + '）');
-  ok(/backgroundColor\(SPLASH_BG\)/.test(src), '启动视图用同一个常量画底色（不再各写一份字面量）');
-  ok(/const splashUp: boolean = this\.phase === WebPhase\.BOOTING[\s\S]{0,200}?WebPhase\.LOADING && !this\.everReady/.test(src),
-    '【核心】启动期判据 = 页面 phase（BOOTING / 首次 LOADING）');
-  ok(/const barBg: string = splashUp \? SPLASH_BG : chrome\.bg;/.test(src),
+  /*
+   * 2026-11-21：启动页不再固定取白，改为**跟随系统深浅色**。
+   *   启动视图 → `$r('app.color.start_window_background')`（与 module.json5 的
+   *   startWindowBackground 同一份 ⇒ 系统启动窗与页面首帧零色差）；
+   *   启动期状态栏/窗口底色 → `windowChromeFor(this.systemAppearance())`；
+   *   `systemAppearance()` 在 web 主题上报前读 UIAbility 的 `config.colorMode`。
+   */
+  ok(/\$r\('app\.color\.start_window_background'\)/.test(src),
+    '启动视图用 start_window_background 资源画底色（与系统启动窗同一份）');
+  ok(/private systemAppearance\(\): string \{[\s\S]{0,500}?config\.colorMode[\s\S]{0,140}?COLOR_MODE_DARK/.test(src),
+    '【核心】启动页按系统 colorMode 定深浅（web 主题上报前也能取到）');
+  ok(/const splashChrome = windowChromeFor\(this\.systemAppearance\(\)\);/.test(src),
+    '【核心】启动期窗口色与启动页同源（windowChromeFor + 系统色）');
+  ok(/const barBg: string = splashUp \? splashChrome\.bg : chrome\.bg;/.test(src),
     '【核心】启动期状态栏 / 窗口底色取启动页色（首帧后再切成外观色）');
+  ok(/const lightIcon: boolean = splashUp \? splashChrome\.lightIcon : chrome\.lightIcon;/.test(src),
+    '【核心】启动期状态栏图标明暗同步翻转（深色启动页配浅图标）');
+  ok(/const contentColor: string = splashUp \? splashChrome\.content : chrome\.content;/.test(src),
+    '【核心】启动期状态栏前景色同步翻转');
   ok(/@State @Watch\('onPhaseChanged'\) phase: WebPhase/.test(src),
     '【核心】phase 挂 @Watch（阶段切换要重量一遍，否则幂等闸门会把换色挡掉）');
-  const startWindowBg = (colorJson.match(/"name": "start_window_background",\s*"value": "([^"]+)"/) || [])[1];
-  ok(startWindowBg !== undefined && splashConst !== undefined
-    && startWindowBg.toUpperCase() === splashConst.toUpperCase(),
-    '【核心】start_window_background（' + startWindowBg + '）与 SPLASH_BG（' + splashConst + '）同值 —— 首帧窗口底色/启动视图/启动期状态栏必须一个色');
+  // 资源值必须与 windowChromeFor 的深浅色一致（base = light / dark 目录 = dark）
+  const chromeDarkBg = (chrome.match(/mode === 'dark'\) \{\s*return \{ bg: '([^']+)'/) || [])[1];
+  const chromeLightBg = (chrome.match(/return \{ bg: '([^']+)', content: '#0F1115'/) || [])[1];
+  const startWindowLight = (colorJson.match(/"name": "start_window_background",\s*"value": "([^"]+)"/) || [])[1];
+  const startWindowDark = (colorDarkJson.match(/"name": "start_window_background",\s*"value": "([^"]+)"/) || [])[1];
+  ok(startWindowLight !== undefined && chromeLightBg !== undefined
+    && startWindowLight.toUpperCase() === chromeLightBg.toUpperCase(),
+    '【核心】start_window_background 浅色（' + startWindowLight + '）= windowChromeFor(light).bg（' + chromeLightBg + '）');
+  ok(startWindowDark !== undefined && chromeDarkBg !== undefined
+    && startWindowDark.toUpperCase() === chromeDarkBg.toUpperCase(),
+    '【核心】start_window_background 深色（' + startWindowDark + '）= windowChromeFor(dark).bg（' + chromeDarkBg + '）—— 深色启动不再白闪');
 
   return { pass, fail, notes };
 }
@@ -538,7 +567,7 @@ let armsOk = true;
 // -- 对照臂 C：删掉能力层启动路径那次「结论发布」，计数判据必须变红 --
 armsOk = arm('C：删掉能力层启动路径的那次结论发布',
   entrySrc,
-  entrySrc.replace('this.publishDecorKeysVisible(false);', ''),
+  entrySrc.replace('this.publishDecorKeysVisible(decorPresent);', ''),
   true) && armsOk;
 
 // -- 对照臂 D：把 decorPresentOf 变异成「只看装饰高度」，丢掉"自由窗口"这条真判据 --
@@ -725,7 +754,22 @@ console.log('\n== 平板顶部避让生命周期 ==');
 console.log((avoidListenerOk ? '  PASS' : '  FAIL')
   + '  avoidAreaChange 首次取窗注册、页面销毁对称解绑');
 
-const bad = r.fail > 0 || t.fail > 0 || !armsOk || !avoidListenerOk || !themeProbeOk;
+/*
+ * 手机沉浸（2026-11-19，用户报「多任务/最近任务界面不沉浸」）。
+ * layout-fullscreen 与顶部让位必须**成对**存在：只开全屏不补让位 ⇒ 状态栏压住 Web 内容；
+ * 只补让位不开全屏 ⇒ 最近任务卡片顶部仍是一条与页面割裂的色带。
+ */
+const phoneAbilitySrc = readFileSync(join(ROOT, 'phone/src/main/ets/entryability/EntryAbility.ets'), 'utf8');
+const phoneImmersiveOk = phoneAbilitySrc.includes('this.enterHandheldImmersive();')
+  && phoneAbilitySrc.includes('setWindowLayoutFullScreen(true)')
+  && phoneSrc.includes('@State topInsetVp')
+  && phoneSrc.includes('this.decorTopInsetNow() + this.topInsetVp');
+console.log('\n== 手机沉浸（最近任务不沉浸回归） ==');
+console.log((phoneImmersiveOk ? '  PASS' : '  FAIL')
+  + '  layout-fullscreen + topInset 成对接线');
+
+const bad = r.fail > 0 || t.fail > 0 || !armsOk || !avoidListenerOk || !themeProbeOk
+  || !phoneImmersiveOk;
 console.log('\nRESULT: ' + (bad ? 'FAIL' : 'PASS')
   + ' —— 第一组 ' + r.pass + '/' + r.fail + '、第二组 ' + t.pass + '/' + t.fail
   + '，对照臂 A–X ' + (armsOk ? '有效' : '失败'));

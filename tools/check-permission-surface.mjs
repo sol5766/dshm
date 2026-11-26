@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 /**
- * 门禁：当前三端权限面固定为 **entry 18 条 / phone 9 条**。
+ * 门禁：当前三端权限面固定为 **entry 19 条 / phone 9 条**。
  *
  * 【为什么要有这条】权限面在本仓翻覆过好几轮：`docs/142` §7 撤过三条 `system_basic` 受限条目、
  * `docs/143`/`docs/144` 又各自加回一条（"撤哪条瘫哪块"），最后用户拍板 ——
- * **（历史口径已作废）**当时拍板「恒 8 条」；当前 **entry 18 / phone 9**（见 `AGENTS.md`）。
+ * **（历史口径已作废）**当时拍板「恒 8 条」；当前 **entry 19 / phone 9**（见 `AGENTS.md`）。
  * 屡次往复的代价不只是"多两行声明"：多一条没有审批的
  * `system_basic`/`system_core`，整包会在设备侧按 `PERMISSION_ACL_RULE` **拒装**（`docs/142` §1），
  * 而"撤一条"的代价是宿主域掉档、数据区里的 ELF 全 `EPERM`（`docs/143`/`docs/144`）。
  * 所以这条门禁的判据是**逐条、逐位**的：多一条红、少一条红、改一条红、换一句 reason 也红。
  *
  * 【判据（三条，全离线）】
- *   ① `entry/src/main/module.json5` 的 `requestPermissions` **恰好 18 条**，且与本文的
+ *   ① `entry/src/main/module.json5` 的 `requestPermissions` **恰好 19 条**，且与本文的
  *      `EXPECTED` **顺序逐条相等**（顺序变了说明有人动过数组 —— 值得人看一眼，不该静默过去）。
  *      每条还必须有 `reason: "$string:<key>"`，且该 key 在 `base/element/string.json` 里
  *      **真实存在且非空**（防"声明的 reason 指向不存在的字符串"这种装得上但解释不了的情况）。
- *   ② `base/element/string.json` 里 `perm_*` 键的集合 **必须恰好等于**上面 18 条引用到的那些 ——
+ *   ② `base/element/string.json` 里 `perm_*` 键的集合 **必须恰好等于**上面 19 条引用到的那些 ——
  *      **不留孤儿**（历史上撤条目时留下过三条孤儿 reason 字符串，是"以后要加回"的引线）。
  *   ③ 全仓文本不得回补未获批的全盘权限；历史申请文档保留原文作为审计记录。
  *
@@ -40,7 +40,7 @@ const REPO = join(HERE, '..')
 /**
  * 【2026-10-29 补齐 phone】此前本门禁**只读 entry** ⇒ phone 权限增删、乱序、改 reason、
  * reason 指向空资源，全部可以静默通过（CI 也只跑这一个脚本）。而 AGENTS.md 的口径是
- * "entry 恒 18 条 / phone 恒 9 条，逐条钉死"——两侧都必须各有自己的 EXPECTED。
+ * "entry 恒 19 条 / phone 恒 9 条，逐条钉死"——两侧都必须各有自己的 EXPECTED。
  */
 const MODULES = {
   entry: {
@@ -58,7 +58,7 @@ const MODULE_JSON5 = MODULES.entry.moduleJson5
 const STRING_JSON = MODULES.entry.stringJson
 
 /**
- * entry 固定 18 条，**顺序也钉住**。其中 8 条 ACL 与发布 Profile 的
+ * entry 固定 19 条，**顺序也钉住**。其中 8 条 ACL 与发布 Profile 的
  * `allowed-acls` 对齐；CUSTOM_SANDBOX 是原生 PTY / ELF / Python 进入动态
  * 沙箱执行域的前提，不能当成「多余条目」删除；按旧 8 条口径回退会直接删掉它。
  */
@@ -83,6 +83,8 @@ const EXPECTED = [
   /* 2026-11-02 第一批：两条 normal（安装即授，无需 ACL） */
   'ohos.permission.GET_NETWORK_INFO',
   'ohos.permission.RUNNING_LOCK',
+  /* 2026-11-20：dsh-pet 桌面宿主置顶（normal/system_grant，PC/2in1）。 */
+  'ohos.permission.WINDOW_TOPMOST',
 ]
 
 /**
@@ -290,6 +292,8 @@ function selfTest() {
     'perm_microphone_reason',
     'perm_get_network_info_reason',
     'perm_running_lock_reason',
+    /* 2026-11-20：第 19 条 WINDOW_TOPMOST 的 reason（自检样本必须同步，否则「真条数」用例自红） */
+    'perm_pet_topmost_reason',
   ]
   const strEntries = new Map(reasonKeys.map((key) => [key, 'x']))
   const reason = (i) => [...strEntries.keys()][i]
@@ -301,9 +305,9 @@ function selfTest() {
 
   const good = synth(EXPECTED)
   const cases = [
-    { name: '真·18 条（必须判绿）', text: good, want: 0 },
+    { name: '真·19 条（必须判绿）', text: good, want: 0 },
     { name: '少一条（删 MICROPHONE ⇒ 必须判红）', text: synth(EXPECTED.slice(0, EXPECTED.length - 1)), want: 1 },
-    { name: '多一条（加第 19 条 ⇒ 必须判红）', text: synth([...EXPECTED, 'ohos.permission.MANAGE_MISSIONS']), want: 1 },
+    { name: '多一条（加第 20 条 ⇒ 必须判红）', text: synth([...EXPECTED, 'ohos.permission.MANAGE_MISSIONS']), want: 1 },
     {
       name: '换一条（KEEP_BACKGROUND_RUNNING → 别的 ⇒ 必须判红）',
       text: synth(EXPECTED.map((n) => (n === 'ohos.permission.KEEP_BACKGROUND_RUNNING' ? 'ohos.permission.RUNNING_LOCK' : n))),
@@ -370,13 +374,13 @@ function selfTest() {
     console.error(`\n❌ 自检失败：${failed} 个变异体没判对。`)
     process.exit(1)
   }
-  console.log('\n✅ 自检通过：entry/phone 的少一条 / 加一条 / 换序 / 禁用条目 / 坏 reason / 禁用标识符 全部判红，真·18/9 条判绿。')
+  console.log('\n✅ 自检通过：entry/phone 的少一条 / 加一条 / 换序 / 禁用条目 / 坏 reason / 禁用标识符 全部判红，真·19/9 条判绿。')
   process.exit(0)
 }
 
 if (process.argv.includes('--self-test')) selfTest()
 
-console.log('# 门禁：entry 18 条 / phone 9 条\n')
+console.log('# 门禁：entry 19 条 / phone 9 条\n')
 
 /*
  * 两个模块各判各的：EXPECTED 条目不同、reason 字符串在不同 string.json 里，
@@ -442,5 +446,5 @@ if (problems.length === 0 && banned.length === 0) {
 }
 for (const p of problems) console.error(`❌ ${p}`)
 for (const b of banned) console.error(`❌ ${b.rel}：出现了已永久删除的受限条目 ${b.name}`)
-console.error('\n   当前权限面固定为 entry 18 / phone 9；不能声明未获批准的额外 ACL。')
+console.error('\n   当前权限面固定为 entry 19 / phone 9；不能声明未获批准的额外 ACL。')
 process.exit(1)

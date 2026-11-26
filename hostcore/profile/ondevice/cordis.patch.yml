@@ -838,3 +838,14 @@
 - insert:
     - id: dshm-boot-rescue-builtin
       name: '@deepseek-ai/dshm-boot-rescue'
+
+
+# ⑮ 文档渲染字体（2026-11-24 PC/guest 复测：No usable fonts）
+#   `libreoffice-kit` 的 systemFontDirectories() 只认 win32 / darwin / Linux 常规路径
+#   （/usr/share/fonts、~/.fonts 等），在 openharmony 上一个都不存在；本机字体实际在
+#   /system/fonts。wasm 后端因此拿不到任何字体面，office_render / office_convert 必失败。
+#   只覆盖 config，不动其它字段；改完需重启 Host（patchReload: startup）。
+- id: office-kit
+  config:
+    fontDirectories:
+      - /system/fonts

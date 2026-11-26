@@ -1108,7 +1108,14 @@ const DSHMARKET_CLIENT_TARGET = DSHMARKET_CLIENT_HEAD + DSHMARKET_THUMB_TARGET +
     check('M6a main.js 注册了 /dshm-shot 路由（预览图代理的宿主侧本体）',
       mainSrc.includes('function registerShotProxyEndpoint(') && mainSrc.includes("path: '/dshm-shot'"));
     check('M6b 启动台阶里真的调了它（不是定义了没人用）',
-      /registerShotProxyEndpoint\(ctx\);/.test(mainSrc) && mainSrc.includes("stage('BOOT_64_SHOT_PROXY'"));
+      /*
+       * 2026-11-21 启动提速：非首屏端点改由 deferRegister(...) 包一层，下一 tick 注册。
+       * 判据仍要求"启动路径里真的调用"，两种形态都接受：直接调用 / deferRegister 回调里调用。
+       * 定义处是 function registerShotProxyEndpoint(ctx) {，不带 `);`，不会被误判为调用。
+       */
+      (/registerShotProxyEndpoint\(ctx\);/.test(mainSrc)
+        || /deferRegister\([^)]*shot-proxy[^)]*\(\s*\)\s*=>\s*registerShotProxyEndpoint\(ctx\)\s*\)/.test(mainSrc))
+      && mainSrc.includes("stage('BOOT_64_SHOT_PROXY'"));
     check('M6c 目标形态里的路径与宿主路由逐字同源（`/dshm-shot?url=`）',
       DSHMARKET_THUMB_TARGET.includes('`/dshm-shot?url='));
     check('M6d 代理有主机白名单与字节上限（不是个开放转发口）',

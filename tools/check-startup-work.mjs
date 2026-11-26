@@ -32,10 +32,20 @@ export async function verifyStartupWork(text = main, implementation = production
     pythonReady: () => stdlib,
     writeToolchainSelfTest: () => calls.push('toolchain'),
     writeEnvProbe: () => calls.push('runtime'),
+    // 2026-11-25：工具链解包改为 startupWork.request('toolchain', …)（READY 后 3s 再跑，
+    // 与 WorkBuddy「窗口先行、重活后置」同构）。这里补桩，使门禁能验证它确实被排入队列
+    // （闭包引用了 resRoot/binDir，必须一并提供，否则会走 onError 变成第三个错误）。
+    scheduleToolchainExtraction: () => calls.push('toolchain-extract'),
+    resRoot: '/res',
+    binDir: '/bin',
   });
   const requests = text.split('\n').filter((line) => /^\s*startupWork\.request\(/.test(line));
-  assert.equal(requests.length, 6);
-  const boot = text.slice(text.indexOf('  scheduleToolchainExtraction(resRoot, binDir, true);'), text.indexOf('\n/**', text.indexOf('  scheduleToolchainExtraction(resRoot, binDir, true);')));
+  assert.equal(requests.length, 7);
+  // 2026-11-25：工具链解包从「BOOT_10 前直接调用」改为 `startupWork.request('toolchain', …)`
+  // 包裹（READY 后 3s 再跑）。锚点随之从裸调用改为这条 request，切片仍覆盖 boot 段内的
+  // exec / python 两条请求。
+  const bootStart = text.indexOf("startupWork.request('toolchain'");
+  const boot = text.slice(bootStart, text.indexOf('\n/**', bootStart));
   const finish = text.slice(text.indexOf('  finalizeToolchain();\n  const pyOk'), text.indexOf('\n{\n', text.indexOf('  finalizeToolchain();\n  const pyOk')));
   assert.match(boot, /startupWork\.request\('exec', ensureExecutables\)/);
   assert.match(boot, /startupWork\.request\('python', ensurePythonBridge, pythonReady\)/);
@@ -43,7 +53,9 @@ export async function verifyStartupWork(text = main, implementation = production
   assert.match(finish, /if \(pyOk\) \{\s*startupWork\.request\('python', ensurePythonBridge, pythonReady\)/);
   const code = text.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line)).join('\n');
   assert.equal((code.match(/\bensureExecutables\(/g) || []).length, 1);
-  assert.equal((code.match(/\bensurePythonBridge\(/g) || []).length, 1);
+  // 2026-11-25：两个挂载点 —— boot 顶层（经 startupWork.request）与「工具链解包收尾后补挂」
+  // （解包延后到 READY 后，首轮 python 任务可能因 pythonReady=false 被跳过，收尾必须补一次）。
+  assert.equal((code.match(/\bensurePythonBridge\(/g) || []).length, 2);
   assert.equal((code.match(/\bwriteToolchainSelfTest\(/g) || []).length, 1);
   assert.equal((code.match(/\bwriteEnvProbe\(/g) || []).length, 1);
   const ready = text.indexOf('  startupWork.markReady();');
@@ -70,11 +82,11 @@ export async function verifyStartupWork(text = main, implementation = production
   for (const timer of timers) timer.run();
   timers.clear();
   await flush();
-  assert.deepEqual([...calls].sort(), ['exec', 'python', 'runtime', 'toolchain']);
+  assert.deepEqual([...calls].sort(), ['exec', 'python', 'runtime', 'toolchain', 'toolchain-extract']);
   vm.runInContext(requests.join('\n'), context);
   work.markReady();
   await flush();
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
   assert.equal(timers.size, 0);
   work.request('failure', () => { throw new Error('expected'); });
   work.request('rejection', async () => { throw new Error('expected async'); });

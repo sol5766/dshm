@@ -215,12 +215,13 @@ section('QEMU argv 口径');
   // 还会被 QEMU 当场拒（真机逐字 `jit split-wx not supported`，随后原生退出 ⇒ 宿主整进程
   // 消失，串口 0 B、无 JS 异常）。JIT 档的 RWX/EINVAL 结论留在 `docs/154`；
   // 这里只钉"任何形态都不许复活"。2026-10-17 APMS 现场把 `tcg_region_init` 再次顶到
-  // 1.1.3 当前版本 TOP1；2026-11-19 起 guest 改为 **2 vCPU**，TCG region 随 vCPU 增长，
-  // 按 2× 预留（经济档 128 MiB / 性能档 512 MiB），仍远小于 JIT 档的 2048。
+  // 1.1.3 当前版本 TOP1；2026-11-24 起 guest 改为 **4 / 6 vCPU**（按内存档，`DSHM_VM_CPUS` 可覆盖），
+  // TCG region 随 vCPU 增长：经济档 128 MiB / 性能档 512 MiB，仍远小于 JIT 档的 2048。
   const memProfile = vm.vmTierProfile();
   ok(joined.includes(`-accel tcg,thread=multi,tb-size=${memProfile.tcgBufferMib}`),
     `TCG 走当前内存档 tb-size=${memProfile.tcgBufferMib}（TCI 档不接受 split-wx）`);
-  ok(joined.includes('-smp cpus=2'), '2 vCPU（cpus=2）');
+  const cpus = vm.vmCpus();
+  ok(joined.includes(`-smp cpus=${cpus},`), `vCPU 跟随内存档（cpus=${cpus}）`);
   ok(!joined.includes('tb-size=2048'),
     '对照臂：旧的大分配口径 tb-size=2048 不得复活');
   ok(!joined.includes('split-wx'),

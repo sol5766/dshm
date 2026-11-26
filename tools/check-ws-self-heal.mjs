@@ -100,6 +100,10 @@ function buildHarness(classText, { stripSelfHeal }) {
   return `
 const REMOTE_STREAM_MUX_PATH = "/api/remote.mux";
 class RemoteStreamCarrierError extends Error {}
+// 0.2.3 起 maintain() 用模块级 isRemoteStreamCarrierFailure() 判载体错误（真实实现查
+// error.code===REMOTE_STREAM_CARRIER_CODE）。harness 的 CarrierError 桩不带 code 字段，
+// 等价判据就是 instanceof —— 对"数重试次数"的判据面无差别。
+function isRemoteStreamCarrierFailure(error) { return error instanceof RemoteStreamCarrierError; }
 const UPLINK_DONE = { value: void 0, done: true };
 class Deque {
   constructor() { this.items = []; }

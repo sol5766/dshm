@@ -71,12 +71,12 @@ function productionContract(read) {
   }
   for (const [site, text] of Object.entries(renderSources)) console.log(`RENDER ${site} sha256=${createHash('sha256').update(text).digest('hex')}`)
   for (const [pkg, hash, tokens] of [
-    ['dsh-client-ui-chat', 'eef53e82b8cd584d2f0e543a4a93395f9d90df3bba1218891bd99d07d788de5c', ['data-turn-tail', 'data-actions-reveal', 'data-chat-node-key', 'data-chat-flow-kind', 'data-chat-turn', 'data-chat-flow']],
-    ['dsh-client-ui-conversation', '3d166eab312749bf8c528dd7d26d95340df75a27fec668b3510e4558fe9b343b', ['data-conversation-session', 'data-content-phase', 'data-conversation-scroll']],
+    ['dsh-client-ui-chat', '5ceff4bff4340f25646e087f9df017385c8f602ad05e7abd17d4c433d0a77fa5', ['data-turn-tail', 'data-actions-reveal', 'data-chat-node-key', 'data-chat-flow-kind', 'data-chat-turn', 'data-chat-flow']],
+    ['dsh-client-ui-conversation', '1cfde2ff0c0ab9e6be7f6194a39143466fa3ac29313d42886195f2818b63c8a1', ['data-conversation-session', 'data-content-phase', 'data-conversation-scroll']],
   ]) {
     const bundle = source(pkg, 'lib/client.js')
     for (const token of tokens) assert.ok(bundle.includes(token), `${pkg} production bundle missing ${token}`)
-    assert.equal(createHash('sha256').update(bundle).digest('hex'), hash, pkg + ': frozen rc3 bundle drift')
+    assert.equal(createHash('sha256').update(bundle).digest('hex'), hash, pkg + ': frozen 0.2.3-alpha.2 bundle drift')
     console.log(`CONTRACT ${pkg}/lib/client.js sha256=${hash}`)
   }
 }

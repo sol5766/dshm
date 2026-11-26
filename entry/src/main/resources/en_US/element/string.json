@@ -262,7 +262,7 @@
     },
     {
       "name": "perm_full_disk_reason",
-      "value": "PC / 2in1 only: reads and writes the local folder the user selects as the project workspace (including symlinks) and runs the bundled toolchain; no other directories are accessed."
+      "value": "User-picked session workspace: in-session editing, search, Python/build need continuous read/write on it and all subfolders (incl. symlinks, create/delete/rename) and after restart; per-use grants can't cover one session. Only that workspace; no upload."
     },
     {
       "name": "perm_get_network_info_reason",

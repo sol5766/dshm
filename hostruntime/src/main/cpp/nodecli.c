@@ -143,10 +143,18 @@ int main(int argc, char* argv[]) {
   const char* configured = getenv("DSHM_NODE_LIBNODE");
   void* handle = NULL;
   const char* relative[] = {
-    "libnode.so.137",
+    "libnode.so.147",
     /* 【设备上真实的随包库目录（2026-11-03，docs/358 §node）】手持档无 shell ⇒
      * 包装器里的 LD_LIBRARY_PATH 与 DSHM_NODE_LIBNODE 都来不及设置，
      * 只能在这里按绝对路径找。el1/bundle/libs/<abi> 是每个应用自己的随包库位。 */
+    "/data/storage/el1/bundle/libs/arm64/libnode.so.147",
+    "/data/storage/el1/bundle/libs/arm64-v8a/libnode.so.147",
+    "../../libs/arm64/libnode.so.147",
+    "../../libs/arm64-v8a/libnode.so.147",
+    "../../../libs/arm64/libnode.so.147",
+    "../../../libs/arm64-v8a/libnode.so.147",
+    /* 24.x 回滚基线 */
+    "libnode.so.137",
     "/data/storage/el1/bundle/libs/arm64/libnode.so.137",
     "/data/storage/el1/bundle/libs/arm64-v8a/libnode.so.137",
     "../../libs/arm64/libnode.so.137",
@@ -161,7 +169,7 @@ int main(int argc, char* argv[]) {
   }
   if (handle == NULL) {
     const char* error = dlerror();
-    (void)fprintf(stderr, "nodecli: 无法加载 libnode.so.137%s%s\n",
+    (void)fprintf(stderr, "nodecli: 无法加载 libnode（147/137）%s%s\n",
                   error != NULL ? ": " : "", error != NULL ? error : "");
     return 127;
   }

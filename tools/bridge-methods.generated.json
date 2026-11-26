@@ -64,6 +64,7 @@
       "shareText",
       "startNativeCapture",
       "startPick",
+      "startScan",
       "stopReadAloud",
       "takeNativeCapture"
     ],
@@ -85,6 +86,7 @@
       "shareText",
       "startNativeCapture",
       "startPick",
+      "startScan",
       "stopReadAloud",
       "takeNativeCapture"
     ]

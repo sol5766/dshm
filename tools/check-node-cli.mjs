@@ -20,11 +20,12 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,7 +106,7 @@ try {
   check('随包 nodecli 布置成功', prepared.ready && prepared.source === 'bundled-libnode', prepared.error);
   check('nodecli 字节复制', readFileSync(join(bin, 'node-cli')).equals(readFileSync(source)));
   const wrapper = readFileSync(join(bin, 'node'), 'utf8');
-  check('wrapper 注入 DSHM_NODE_LIBNODE', wrapper.includes('DSHM_NODE_LIBNODE="$LIBS/libnode.so.137"'));
+  check('wrapper 注入 DSHM_NODE_LIBNODE', wrapper.includes('DSHM_NODE_LIBNODE="$LIBS/libnode.so.147"'));
   check('wrapper 注入 LD_LIBRARY_PATH', wrapper.includes('LD_LIBRARY_PATH="$LIBS'));
   check('wrapper 关闭 io_uring', wrapper.includes('UV_USE_IO_URING=0'));
   check('子进程 Node 不强制 jitless', wrapper.includes('exec "$CLI" "$@"')
@@ -114,7 +115,7 @@ try {
   check('nodecli 绝对 libnode 候选不再拼接自身目录',
     /if \(suffix\[0\] == '\/'\)\s*\{\s*\(void\)snprintf\(candidate, sizeof\(candidate\), "%s", suffix\);\s*\}\s*else\s*\{\s*\(void\)snprintf\(candidate, sizeof\(candidate\), "%s\/%s", dir, suffix\);/s.test(nodecliSource));
   check('nodecli 包含设备实际 libs/arm64 libnode 路径',
-    nodecliSource.includes('"/data/storage/el1/bundle/libs/arm64/libnode.so.137"'));
+    nodecliSource.includes('"/data/storage/el1/bundle/libs/arm64/libnode.so.147"'));
 
   const before = [
     readFileSync(join(bin, 'node-cli')).toString('hex'),
@@ -208,15 +209,53 @@ try {
       join(CLI_SDK(), 'llvm', 'bin', 'llvm-readelf'), ['-d', CLI], { encoding: 'utf8' });
     const dynText = String(dynamic.stdout || '');
     check('nodecli 不带指向 el1 的 RUNPATH', !/RUNPATH.*el1\/bundle\/libs/.test(dynText));
-    const libnode = join(ROOT, 'hostruntime', 'libs', 'arm64-v8a', 'libnode.so.137');
+    const libnode = join(ROOT, 'hostruntime', 'libs', 'arm64-v8a', 'libnode.so.147');
     if (existsSync(libnode)) {
       check('随包 libnode 已自签名（.codesign）',
         readFileSync(libnode).includes(Buffer.from('.codesign\0')));
     } else {
-      skip('随包 libnode 自签名', '仓内没有 hostruntime/libs/arm64-v8a/libnode.so.137');
+      skip('随包 libnode 自签名', '仓内没有 hostruntime/libs/arm64-v8a/libnode.so.147');
     }
     check('build-beta 构建前签名随包库',
       readFileSync(join(ROOT, 'tools', 'build-beta.mjs'), 'utf8').includes('sign-bundled-libs.mjs'));
+
+    /*
+     * 【2026-11-24 Node 26 升级】随包原生库的 DT_NEEDED 必须指向当前 libnode soname。
+     * 核心树里的 pty.node / sharp 原生件按旧 ABI 编译，直接写着 `libnode.so.137`；
+     * 147 上线后 libpty.so 找不到 137，终端报
+     * `Error loading shared library libnode.so.137: (needed by .../libpty.so)`。
+     * 生成端已由 collect-libvips 统一改写，这里做发布前回归。
+     */
+    {
+      const libsDir = join(ROOT, 'hostruntime', 'libs', 'arm64-v8a');
+      const sonames = existsSync(libsDir)
+        ? readdirSync(libsDir).filter((n) => /^libnode\.so\.\d+$/.test(n)).sort()
+        : [];
+      const current = sonames.length > 0 ? sonames[sonames.length - 1] : '';
+      if (current === '') {
+        skip('随包原生库 libnode NEEDED', '仓内没有 libnode.so.<abi>');
+      } else {
+        const stray = [];
+        for (const name of readdirSync(libsDir)) {
+          if (!name.endsWith('.so') || name.startsWith('libnode.so')) continue;
+          let info = null;
+          try {
+            info = JSON.parse(execFileSync(process.execPath,
+              [join(ROOT, 'tools', 'patch-native-needed.mjs'), join(libsDir, name), '-', '-', '--list'],
+              { encoding: 'utf8' }));
+          } catch {
+            continue;
+          }
+          for (const need of info.needed || []) {
+            if (/^libnode\.so\.\d+$/.test(need) && need !== current) {
+              stray.push(`${name}: ${need}`);
+            }
+          }
+        }
+        check('随包原生库 libnode NEEDED 指向当前 ABI', stray.length === 0,
+          stray.length > 0 ? `${stray.join('; ')}（当前 ${current}）` : `当前 ${current}`);
+      }
+    }
   }
   if (!existsSync(join(FFMPEG_DIR, 'bin', 'ffmpeg')) || !existsSync(join(FFMPEG_DIR, 'dshm-ffmpeg.json'))) {
     skip('生成物 ffmpeg', '干净克隆尚未运行 tools/place-ffmpeg.mjs');

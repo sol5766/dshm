@@ -27,6 +27,9 @@ const PLUGIN_FILE = 'hostcore/plugins/dshm-tool-browser/lib/index.js';
 /* 2026-10-28 扩：网页侧那条链（垫片点击接管 + 原生 onLoadIntercept）也要钉住 ——
    "链接不跳浏览器"就是从这两处漏出来的。 */
 const WEBAPP_FILE = 'entry/src/main/ets/pages/WebApp.ets';
+/* 2026-11-19 扩：手机壳的同一份垫片此前**没有门禁**，两次落后于 entry
+   （target=_blank、rc.3 账号封套）⇒ 手机端点登录不跳浏览器。现在两侧一起钉。 */
+const PHONE_FILE = 'phone/src/main/ets/pages/WebApp.ets';
 
 /** 对一组源码文本跑全部判据；返回 {pass, fail, notes}。 */
 function inspect(files) {
@@ -41,6 +44,7 @@ function inspect(files) {
   const bridge = files.bridge;
   const plugin = files.plugin;
   const webapp = files.webapp;
+  const phone = files.phone;
   /* 反引号用 fromCharCode 取，免得本判据自己把源码搅乱 */
   const TICK = String.fromCharCode(96);
 
@@ -135,6 +139,16 @@ function inspect(files) {
   ok(webapp.includes("authority.split('@').pop()"),
     'G7 先剥掉 userinfo 再判主机（127.0.0.1@evil.com 的真主机是 evil.com）');
 
+  /* ── H. 手机壳同款判据（2026-11-19：两次"只在 entry 修"的事故）────────────
+   * 手机壳是同一份垫片的另一份拷贝，但长期没有门禁 ⇒ target=_blank 与 rc.3
+   * 账号封套两次都只修了 entry。这里把三条关键行为在 phone 文件上再钉一遍。 */
+  ok(phone.includes('view = view.state;'),
+    'H1 phone 垫片会剥 rc.3 账号封套（不剥 ⇒ waiting-browser 扫不到 ⇒ 点登录不跳浏览器）');
+  ok(!phone.includes("getAttribute('target') !== '_blank'"),
+    'H2 phone 垫片不再只认 target=_blank（普通锚点也必须接管）');
+  ok(phone.includes('function isSameOriginAsApp(') && phone.includes('isSameOriginAsApp(href)'),
+    'H3 phone 垫片有同源判据（应用自身页面的导航要放行给 WebView）');
+
   return { pass, fail, notes };
 }
 
@@ -144,6 +158,7 @@ const files = {
   bridge: readFileSync(BRIDGE_FILE, 'utf8'),
   plugin: readFileSync(PLUGIN_FILE, 'utf8'),
   webapp: readFileSync(WEBAPP_FILE, 'utf8'),
+  phone: readFileSync(PHONE_FILE, 'utf8'),
 };
 
 console.log('== 主体：外开桥三侧接线 ==');
@@ -219,6 +234,10 @@ arms.push(
     files: { ...files, webapp: files.webapp.replace('  function isSameOriginAsApp(url) {',
       '  function isSameOriginAsApp(url) { /* ' + String.fromCharCode(96) + 'x'
       + String.fromCharCode(96) + ' */') },
+  },
+  {
+    name: 'N：手机垫片去掉 rc.3 账号封套剥离（手机点登录又不跳浏览器）',
+    files: { ...files, phone: files.phone.replace('view = view.state;', '/* removed */') },
   },
 );
 

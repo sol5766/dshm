@@ -2,6 +2,8 @@
   "src": [
     "pages/WebApp",
     "pages/Index",
-    "pages/Poc1"
+    "pages/Poc1",
+    "pages/PetHost",
+    "pages/PetWeb"
   ]
 }

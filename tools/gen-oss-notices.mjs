@@ -113,7 +113,7 @@ const NATIVE_LIBS = {
   'libkoffi.so': { project: 'koffi（@ohos-ports 移植件）', license: 'MIT' },
   'liblcms2.so': { project: 'Little CMS 2', license: 'MIT' },
   'liblzma.so': { project: 'XZ Utils (liblzma)', license: '0BSD OR LGPL-2.1-or-later' },
-  'libnode.so.137': { project: 'Node.js', license: 'MIT' },
+  'libnode.so.147': { project: 'Node.js', license: 'MIT' },
   'libpango-1.0.so': { project: 'Pango', license: 'LGPL-2.1-or-later' },
   'libpangocairo-1.0.so': { project: 'Pango (cairo 后端)', license: 'LGPL-2.1-or-later' },
   'libpangoft2-1.0.so': { project: 'Pango (FreeType 后端)', license: 'LGPL-2.1-or-later' },

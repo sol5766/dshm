@@ -2165,8 +2165,22 @@ function allowOriginList() {
  *     `dshmSharpLoadError` 上——入口脚本的运行时事实（E88）会读它，于是界面显示的是
  *     真实结论，而不是假的"可用"，也不是含糊的"未探测"。
  *
- * 【幂等】以 package.json 的版本号 `0.0.0-dshm-dispatch` 为标记。
+ * ───────────────── ABI 预检（2026-11-24，Node 26 影响面审计 §2.3）─────────────
+ * require 真件**之前**先读重定向目标 ELF64-LE 的动态节，校验 DT_NEEDED 里的
+ * libnode soname 与**运行时 ABI**（process.versions.modules）一致；不一致/闭包缺失/
+ * 文件损坏 → 直接走 stub（带 dshmSharpBackendUnavailable 标记），**不进入 dlopen**。
+ * 【为什么必须有这一层】WorkBuddy 2026-11-23 独立测试实录：147 运行时加载钉着
+ * libnode.so.137 的 sharp 闭包会 **SIGSEGV**（进程级崩溃，不是 JS 异常）；静态门禁
+ * （check-node-cli）管的是构建期，覆盖不了"包内混入旧 ABI 件"的运行时现场。
+ * 【为什么只查 .so 不查核心树里的 .node】原生重定向（jitless-env 的
+ * installNativeRedirect）会把 .node 请求改写到 HSP libs 下的
+ * libsharp-openharmony-arm64.so，真正 dlopen 的只有它；树里那份 .node 的 NEEDED
+ * 从来不含 libnode（E44 的闭包改写发生在 collect-libvips 播种的 .so 上），查它必误报。
+ * libs 目录通过 DSHM_NATIVE_LIBS 环境变量获得（installNativeRedirect 已验证存在后发布）。
+ *
+ * 【幂等】以 package.json 的版本号（DISPATCH_VERSION）为标记；0.0.0 旧版只刷新调度器。
  */
+const SHARP_DISPATCH_VERSION = '0.0.2-dshm-dispatch';
 function wrapSharp() {
   const nm = join(STAGE, 'node_modules');
   const sharpDir = join(nm, 'sharp');
@@ -2176,49 +2190,139 @@ function wrapSharp() {
     return;
   }
   const pkgFile = join(sharpDir, 'package.json');
+  let priorVersion = '';
   if (existsSync(pkgFile)) {
     try {
       const pkg = JSON.parse(readFileSync(pkgFile, 'utf8'));
-      if (pkg.version === '0.0.0-dshm-dispatch') {
-        log('[pack-core]   sharp 调度器已存在（跳过）');
-        return;
-      }
+      priorVersion = String(pkg.version || '');
     } catch {
       die('sharp 调度器：现有 sharp/package.json 不可解析，拒绝盲目覆盖');
     }
   }
-  // 真件挪成 sibling 包：调度器用 require('sharp.impl') 引它，包内相对路径不受影响
-  if (existsSync(implDir)) {
-    rmSync(implDir, { recursive: true, force: true });
+  if (priorVersion === SHARP_DISPATCH_VERSION) {
+    log('[pack-core]   sharp 调度器已存在（跳过）');
+    return;
   }
-  renameSync(sharpDir, implDir);
-  mkdirSync(sharpDir, { recursive: true });
+  /*
+   * 【哪些情形要把 sharp 目录挪成 sharp.impl】只有"当前 sharp 不是我们的调度器"（上游
+   * sharp 原包 / 版本号非 *-dshm-dispatch）时才挪。**旧版调度器（0.0.0/0.0.1/…）绝不挪**：
+   * 挪了会把调度器目录 rename 成 sharp.impl，先 rmSync 的还是真 impl —— 一起把真件
+   * 毁掉。旧版只刷新调度器文件（真件已在 sharp.impl，不碰）。
+   */
+  if (!/-dshm-dispatch$/.test(priorVersion)) {
+    if (existsSync(implDir)) {
+      rmSync(implDir, { recursive: true, force: true });
+    }
+    renameSync(sharpDir, implDir);
+    mkdirSync(sharpDir, { recursive: true });
+  }
   writeFileSync(
     pkgFile,
-    JSON.stringify({ name: 'sharp', version: '0.0.0-dshm-dispatch', main: 'index.js', private: true }) + '\n',
+    JSON.stringify({ name: 'sharp', version: SHARP_DISPATCH_VERSION, main: 'index.js', private: true }) + '\n',
     'utf8',
   );
   writeFileSync(
     join(sharpDir, 'index.js'),
     [
-      '/* DSHM 端侧 sharp 调度器（E93）：真件优先；加载失败时退回"会报错但能挂载"的 stub。',
-      ' *',
-      ' * 为什么不是纯 stub：真件（libvips 全套，见 tools/collect-libvips.mjs）已随包发出，',
-      ' * 端侧的图片附件应当真的可用。',
-      ' * 为什么不是直接放真件：它是鸿蒙 arm64 原生件，开发机上必然加载失败，而开发机要跑同一棵树。',
-      ' * 失败原因挂在 dshmSharpLoadError 上，由入口脚本的运行时事实如实上报（不假装可用）。',
+      '/* DSHM 端侧 sharp 调度器（E93 + 2026-11-24 ABI 预检）：真件优先；真件不可用/ABI 不匹配',
+      ' * 时退回"会报错但能挂载"的 stub。失败原因挂在 dshmSharpLoadError 上，由入口脚本的',
+      ' * 运行时事实如实上报（不假装可用）。stub 抛出的错误带 dshmSharpBackendUnavailable 标记，',
+      ' * dsh-attachment-local 的端侧补丁据此抛稳定的 IMAGE_BACKEND_UNAVAILABLE。',
       ' * 本文件由 tools/pack-core.mjs 的 wrapSharp() 生成，不要手改。 */',
+      "'use strict';",
+      'const nodeFs = require("node:fs");',
+      'const nodePath = require("node:path");',
+      '/* 读 ELF64-LE 的 DT_NEEDED 名单；读不了/损坏返回 { broken: 原因 }，不抛。 */',
+      'function dshmProbeElfNeeded(file) {',
+      '  let buf;',
+      '  try { buf = nodeFs.readFileSync(file); } catch (e) { return { broken: "读取失败：" + (e && e.message) }; }',
+      '  if (!buf || buf.length < 64) return { broken: "文件小于 ELF 头" };',
+      '  if (buf[0] !== 0x7f || buf[1] !== 0x45 || buf[2] !== 0x4c || buf[3] !== 0x46) return { broken: "非 ELF 魔数" };',
+      '  if (buf[4] !== 2) return { broken: "非 ELF64" };',
+      '  if (buf[5] !== 1) return { broken: "非小端字节序" };',
+      '  const phoff = Number(buf.readBigUInt64LE(0x20));',
+      '  const phentsize = buf.readUInt16LE(0x36);',
+      '  const phnum = buf.readUInt16LE(0x38);',
+      '  if (phnum === 0 || phentsize < 56) return { broken: "program header 表为空或异常" };',
+      '  let dyn = null;',
+      '  const loads = [];',
+      '  for (let i = 0; i < phnum; i++) {',
+      '    const off = phoff + i * phentsize;',
+      '    if (off + 56 > buf.length) return { broken: "program header 越界" };',
+      '    const ptype = buf.readUInt32LE(off);',
+      '    if (ptype === 2) dyn = { offset: Number(buf.readBigUInt64LE(off + 8)), size: Number(buf.readBigUInt64LE(off + 32)) };',
+      '    else if (ptype === 1) loads.push({ vaddr: Number(buf.readBigUInt64LE(off + 16)), filesz: Number(buf.readBigUInt64LE(off + 32)), offset: Number(buf.readBigUInt64LE(off + 8)) });',
+      '  }',
+      '  if (dyn === null) return { broken: "缺 PT_DYNAMIC 段" };',
+      '  const v2o = (v) => {',
+      '    for (const l of loads) {',
+      '      if (v >= l.vaddr && v < l.vaddr + l.filesz) return v - l.vaddr + l.offset;',
+      '    }',
+      '    return -1;',
+      '  };',
+      '  let strtabFile = -1;',
+      '  const neededVals = [];',
+      '  for (let p = 0; p + 16 <= dyn.size; p += 16) {',
+      '    const at = dyn.offset + p;',
+      '    if (at + 16 > buf.length) break;',
+      '    const tag = Number(buf.readBigUInt64LE(at));',
+      '    const val = Number(buf.readBigUInt64LE(at + 8));',
+      '    if (tag === 0) break;',
+      '    if (tag === 5) strtabFile = v2o(val);',
+      '    else if (tag === 1) neededVals.push(val);',
+      '  }',
+      '  if (strtabFile < 0) return { broken: "缺 DT_STRTAB" };',
+      '  const names = [];',
+      '  for (const nv of neededVals) {',
+      '    const start = strtabFile + nv;',
+      '    if (start < 0 || start >= buf.length) continue;',
+      '    let end = start;',
+      '    while (end < buf.length && buf[end] !== 0) end++;',
+      '    names.push(buf.slice(start, end).toString("latin1"));',
+      '  }',
+      '  return { names };',
+      '}',
+      '/* ABI 预检：不一致抛带标记的错误（被下面的 catch 收进 stub 原因），阻止 dlopen。 */',
+      'function dshmGuardSharpAbi() {',
+      '  const libsDir = process.env.DSHM_NATIVE_LIBS;',
+      '  if (typeof libsDir !== "string" || libsDir.length === 0) return; /* 开发机/未装重定向：跳过预检 */',
+      '  const so = nodePath.join(libsDir, "libsharp-openharmony-arm64.so");',
+      '  if (!nodeFs.existsSync(so)) return; /* 重定向目标不存在：交给 require 报真实错误 */',
+      '  const expect = "libnode.so." + process.versions.modules;',
+      '  const probe = dshmProbeElfNeeded(so);',
+      '  if (probe.broken !== undefined) {',
+      '    throw new Error("sharp ABI 预检失败：libsharp-openharmony-arm64.so " + probe.broken + "（已阻止 dlopen 以避免崩溃）");',
+      '  }',
+      '  const found = [];',
+      '  let matched = false;',
+      '  for (const n of probe.names) {',
+      '    const m = /^libnode\\.so\\.(\\d+)$/.exec(n);',
+      '    if (m === null) continue;',
+      '    found.push(m[1]);',
+      '    if (n === expect) matched = true;',
+      '  }',
+      '  if (matched) return;',
+      '  if (found.length > 0) {',
+      '    throw new Error("sharp ABI 预检失败：DT_NEEDED libnode.so." + found.join("/") + " 与运行时 ABI " + process.versions.modules + " 不匹配（混装不同 ABI 的 libnode 会 SIGSEGV，已阻止 dlopen）");',
+      '  }',
+      '  throw new Error("sharp ABI 预检失败：DT_NEEDED 里没有 libnode.so.<数字> 条目（E44 闭包改写缺失），napi 符号将无法解析，已阻止 dlopen");',
+      '}',
       'let impl;',
       "let loadError = '';",
       'try {',
+      '  dshmGuardSharpAbi();',
       "  impl = require('sharp.impl');",
       '} catch (e) {',
+      '  impl = undefined;',
       "  loadError = e && e.message ? String(e.message) : String(e);",
       '}',
       'if (impl === undefined || impl === null) {',
       "  const reason = loadError.length > 0 ? loadError : '未知原因';",
       '  impl = function dshmSharpUnavailable() {',
-      "    throw new Error('sharp 不可用：真件加载失败（' + reason + '）——图片附件依赖随包提供的 libvips 全套库');",
+      "    const err = new Error('sharp 不可用：真件加载失败（' + reason + '）——图片附件依赖随包提供的 libvips 全套库');",
+      '    err.dshmSharpBackendUnavailable = true;',
+      '    err.dshmSharpLoadError = reason;',
+      '    throw err;',
       '  };',
       '  impl.dshmSharpLoadError = reason;',
       '}',
@@ -2228,7 +2332,7 @@ function wrapSharp() {
     ].join('\n'),
     'utf8',
   );
-  log('[pack-core]   sharp 调度器：真件在 node_modules/sharp.impl（加载失败时如实降级）');
+  log('[pack-core]   sharp 调度器：真件在 node_modules/sharp.impl（ABI 预检 + 加载失败如实降级）');
 }
 
 /**
@@ -2794,7 +2898,13 @@ function patchTerminalBundleRows() {
   if (raw.split(MARK).length - 1 > 1) die('终端 bundle 行补丁：迁移标记重复，拒绝掩盖重复注入');
   const clean = raw.split('\n').filter((line) => !line.trimStart().startsWith(`# ${MARK}:`)).join('\n').trimEnd();
   const hasPanel = clean.includes("name: '@deepseek-ai/dsh-terminal-panel'");
-  const wantsPanel = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0]);
+  /*
+   * 0.2.3-alpha.2 纳入"新布局"白名单的依据：实测其终端 bundle 布局与 rc.5 **逐字一致**
+   *（dsh-terminal + dsh-terminal-panel + dsh-tool-terminal，preferredShells 仅 win32）。
+   * 其余 5 处新/旧布局分支同样按此处理；若上游 0.2.3 的锚点与 rc.5 不符，
+   * 下面的严格核对会显式 die，不会静默跳过。
+   */
+  const wantsPanel = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(recipe.coreVersion.split('+')[0]);
   if (hasPanel !== wantsPanel) die('终端 bundle 行补丁：配方版本与新旧终端布局不符');
   // rc.2 把两个 shell 后端合并为 terminal-panel；只接受已确认的新布局，未知变更仍判死。
   if (hasPanel) {
@@ -3774,10 +3884,18 @@ function patchFsLocalPermissionHint() {
    * 模板串会在这里被就地求值（实测炸过），单引号串才是"逐字写进树里"。
    */
   const MARK = 'DSHM_FS_LOCAL_PERMISSION_HINT';
-  if (['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])) {
+  if (['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(recipe.coreVersion.split('+')[0])) {
     const text = readFileSync(target, 'utf8');
+    /*
+     * 0.2.3-alpha.2 upstream trimmed dsh-fs-local import (removed unused FsTargetKey /
+     * FsVersion). All other errno-normalization anchors are byte-identical. Accept exactly
+     * two verified import shapes; anything else still dies below.
+     */
+    const importAnchor = recipe.coreVersion.split('+')[0] === '0.2.3-alpha.2'
+      ? 'import { FileSystem, FsError, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";'
+      : 'import { FileSystem, FsError, FsTargetKey, FsVersion, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";';
     const nativeSites = [
-      'import { FileSystem, FsError, FsTargetKey, FsVersion, fsErrorFromErrno } from "@deepseek-ai/dsh-fs";',
+      importAnchor,
       '\t\tinfo = await stat(target.targetKey);\n\t} catch (error) {\n\t\tthrow fsErrorFromErrno(verb, target.displayPath, error);',
       'async function readFileAbortable(absolutePath, displayPath, verb, signal) {',
       '\t\tif (isAbortError(error)) throw new FsError(`${verb} aborted`, "FS_ABORTED");\n\t\tthrow fsErrorFromErrno(verb, displayPath, error);',
@@ -4043,6 +4161,113 @@ ${helperAnchor}`;
   log('[pack-core]   attachment-local cause 补丁：3 处 ATTACHMENT_WRITE_FAILED 带上 cause（新增 2026-10-06）');
 }
 
+/**
+ * 【Node 26 影响面审计 §2.3（2026-11-24）】IMAGE_BACKEND_UNAVAILABLE 错误码贯通。
+ *
+ * 【背景】sharp 调度器（wrapSharp）在真件加载失败 / ABI 预检不过时退回 stub，stub 抛出的
+ * 错误带 dshmSharpBackendUnavailable 标记；此前 dsh-attachment-local 的三个 sharp catch
+ * 把这类错误一律包成 INVALID_IMAGE / ATTACHMENT_WRITE_FAILED ——「图片后端没起来」被误报
+ * 成「图片数据坏了」，排障方向完全错（WorkBuddy 2026-11-23 独立测试：147 运行时混入钉
+ * 137 的 sharp 闭包会 SIGSEGV；包内 137 缺失时则是干净的 dlopen 失败，同样不是数据问题）。
+ *
+ * 【贯通面（四个文件，缺一不可）】
+ *   ① dsh-attachment/lib/index.js（bundle 码表）—— IMAGE_BACKEND_UNAVAILABLE 并入
+ *      ATTACHMENT_ERROR_CODES。**不进** IMAGE_ADMISSION_ERROR_CODES：后端不可用不是
+ *      "调用方可修正的准入失败"，isImageAdmissionError 必须继续为 false，ACP / MCP
+ *      的 invalid-content 分类不受污染；
+ *   ② dsh-attachment/lib/types/error.js（子路径码表）—— 同上（bundle 导入与子路径导入
+ *      各用一份码表，两份都要改）；
+ *   ③ dsh-attachment-local/lib/index.js —— 三个 sharp catch 识别标记改抛
+ *      IMAGE_BACKEND_UNAVAILABLE（probeImage / detectImage / encode 归一化三处）；
+ *   ④ dsh-tool-fs/lib/index.js —— saveFailureDetail 的穷举 switch 补 case：不补则
+ *      default 走 assertNever，新错误码会在运行时抛 "unreachable"。
+ * 【纪律】与其它 patch 一致：锚点缺失 / 数量不符即 die，不静默跳过。
+ */
+function patchImageBackendUnavailable() {
+  // ── ①② 码表（dsh-attachment 的 bundle 与子路径两份）──
+  const codeTables = [
+    {
+      file: join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-attachment', 'lib', 'index.js'),
+      before: '\t"ATTACHMENT_FILES_UNSUPPORTED"\n];',
+      after: '\t"ATTACHMENT_FILES_UNSUPPORTED",\n\t"IMAGE_BACKEND_UNAVAILABLE"\n];',
+      label: 'attachment 码表（bundle）',
+    },
+    {
+      file: join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-attachment', 'lib', 'types', 'error.js'),
+      before: "    'ATTACHMENT_FILES_UNSUPPORTED',\n];",
+      after: "    'ATTACHMENT_FILES_UNSUPPORTED',\n    'IMAGE_BACKEND_UNAVAILABLE',\n];",
+      label: 'attachment 码表（types/error）',
+    },
+  ];
+  for (const table of codeTables) {
+    if (!existsSync(table.file)) {
+      die(`IMAGE_BACKEND_UNAVAILABLE 补丁：找不到 ${table.file}`);
+    }
+    let text = readFileSync(table.file, 'utf8');
+    if (text.includes('IMAGE_BACKEND_UNAVAILABLE')) {
+      log(`[pack-core]   ${table.label}：IMAGE_BACKEND_UNAVAILABLE 已存在（跳过）`);
+      continue;
+    }
+    const hits = text.split(table.before).length - 1;
+    if (hits !== 1) {
+      die(`IMAGE_BACKEND_UNAVAILABLE 补丁：${table.label} 期望 1 处锚点，实到 ${hits} 处，拒绝静默跳过`);
+    }
+    text = text.replace(table.before, table.after);
+    writeFileSync(table.file, text, 'utf8');
+    log(`[pack-core]   ${table.label}：并入 IMAGE_BACKEND_UNAVAILABLE`);
+  }
+
+  // ── ③ dsh-attachment-local：三个 sharp catch 识别后端不可用 ──
+  const localFile = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-attachment-local', 'lib', 'index.js');
+  if (!existsSync(localFile)) {
+    die(`IMAGE_BACKEND_UNAVAILABLE 补丁：找不到 ${localFile}`);
+  }
+  let localText = readFileSync(localFile, 'utf8');
+  if (!localText.includes('dshmSharpBackendUnavailable')) {
+    const backendCheck = '\t\tif (error instanceof Error && error.dshmSharpBackendUnavailable === true) throw new AttachmentError("Image backend unavailable: the bundled sharp runtime did not load in this host (see dshmSharpLoadError).", "IMAGE_BACKEND_UNAVAILABLE", { cause: error });\n';
+    // ③-a probeImage / detectImage 两处（INVALID_IMAGE 包裹）
+    const invalidBefore = '\t\tthrow new AttachmentError("Unsupported or malformed image data.", "INVALID_IMAGE", { cause: error });';
+    const invalidHits = localText.split(invalidBefore).length - 1;
+    if (invalidHits !== 2) {
+      die(`IMAGE_BACKEND_UNAVAILABLE 补丁：attachment-local 期望 2 处 INVALID_IMAGE 包裹，实到 ${invalidHits} 处，拒绝静默跳过`);
+    }
+    localText = localText.split(invalidBefore).join(backendCheck + invalidBefore);
+    // ③-b encode 归一化一处（ATTACHMENT_WRITE_FAILED 包裹，模板字面量开头做锚）
+    const encodeBefore = '\t\tthrow new AttachmentError(`The ${detected.mediaType === "image/png" && detected.depth !== "uchar" ? `${detected.depth === "ushort" ? "16-bit" : detected.depth} PNG` : `${detected.depth} ${detected.mediaType.slice(6).toUpperCase()}`} could not be converted to the normalized 8-bit sRGB form.`';
+    const encodeHits = localText.split(encodeBefore).length - 1;
+    if (encodeHits !== 1) {
+      die(`IMAGE_BACKEND_UNAVAILABLE 补丁：attachment-local 期望 1 处 encode 归一化锚点，实到 ${encodeHits} 处，拒绝静默跳过`);
+    }
+    localText = localText.replace(encodeBefore, backendCheck + encodeBefore);
+    writeFileSync(localFile, localText, 'utf8');
+    log('[pack-core]   attachment-local：3 处 sharp catch 识别 IMAGE_BACKEND_UNAVAILABLE（dshmSharpBackendUnavailable）');
+  } else {
+    log('[pack-core]   attachment-local：dshmSharpBackendUnavailable 已存在（跳过）');
+  }
+
+  // ── ④ dsh-tool-fs：穷举 switch 补 case（不补则 default 走 assertNever 运行时抛错）──
+  const toolFsFile = join(STAGE, 'node_modules', '@deepseek-ai', 'dsh-tool-fs', 'lib', 'index.js');
+  if (!existsSync(toolFsFile)) {
+    die(`IMAGE_BACKEND_UNAVAILABLE 补丁：找不到 ${toolFsFile}`);
+  }
+  let toolFsText = readFileSync(toolFsFile, 'utf8');
+  if (toolFsText.includes('IMAGE_BACKEND_UNAVAILABLE')) {
+    log('[pack-core]   tool-fs remedy：IMAGE_BACKEND_UNAVAILABLE 已存在（跳过）');
+    return;
+  }
+  const remedyBefore = '\t\tcase "ATTACHMENT_WRITE_FAILED": return /16-bit PNG/iu.test(error.message)';
+  const remedyHits = toolFsText.split(remedyBefore).length - 1;
+  if (remedyHits !== 1) {
+    die(`IMAGE_BACKEND_UNAVAILABLE 补丁：tool-fs 期望 1 处 remedy switch 锚点，实到 ${remedyHits} 处，拒绝静默跳过`);
+  }
+  toolFsText = toolFsText.replace(
+    remedyBefore,
+    '\t\tcase "IMAGE_BACKEND_UNAVAILABLE": return "the bundled image backend (sharp/libvips) did not load in this host build, so this file cannot be read as an image here";\n' + remedyBefore,
+  );
+  writeFileSync(toolFsFile, toolFsText, 'utf8');
+  log('[pack-core]   tool-fs remedy：补 IMAGE_BACKEND_UNAVAILABLE case（穷举 switch）');
+}
+
 // ── ⑤ 鸿蒙前端兼容补丁（对齐 GitCode issue #1 / #2）───────────────────────
 /*
  * 【这一组解决什么】
@@ -4119,7 +4344,7 @@ function patchResourceAddressArmor() {
     if (text.includes('DSHM_RESOURCE_ARMOR_PROTOCOL')) {
       log('[pack-core]   资源地址补丁（client-resources.protocolOf）已存在（跳过）');
     } else {
-      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(recipe.coreVersion.split('+')[0])
         ? 'if(parsed.protocol!==`${`dsh-resource`}:`)return void 0;return parsed.hostname===``?void 0:parsed.hostname.toLowerCase()'
         : '\t\t\tif (parsed.protocol !== `dsh-resource:`) return void 0;\n'
         + '\t\t\treturn parsed.hostname === "" ? void 0 : parsed.hostname.toLowerCase();\n';
@@ -4149,7 +4374,7 @@ function patchResourceAddressArmor() {
     if (text.includes('DSHM_RESOURCE_ARMOR_PATH')) {
       log('[pack-core]   资源地址补丁（sidebar-right.pathOf）已存在（跳过）');
     } else {
-      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(recipe.coreVersion.split('+')[0])
         ? 'function pathOf(address){try{return new URL(address).pathname}catch{return}}'
         : '\t\tfunction pathOf(address) {\n'
         + '\t\t\ttry {\n'
@@ -4192,20 +4417,33 @@ function patchResourceAddressArmor() {
     if (text.includes('DSHM_RESOURCE_ARMOR_SUBAGENT')) {
       log('[pack-core]   资源地址补丁（subagent.parseSubagentChatAddress）已存在（跳过）');
     } else {
-      const before = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
-        ? 'if(url.protocol!==`dsh-resource:`||url.hostname.toLowerCase()!==`subagentchat`)return void 0;const parts=url.pathname.split(`/`).filter(Boolean);if(parts.length!==2||parts[0]!==`session`)return void 0;const parentSessionId=url.searchParams.get(`parent`);const mode=url.searchParams.get(`mode`);'
-        : '\t\t\tif (url.protocol !== "dsh-resource:" || url.hostname.toLowerCase() !== "subagentchat") return void 0;\n'
-        + '\t\t\tconst parts = url.pathname.split("/").filter(Boolean);\n'
-        + '\t\t\tif (parts.length !== 2 || parts[0] !== "session") return void 0;\n'
-        + '\t\t\tconst parentSessionId = url.searchParams.get("parent");\n'
-        + '\t\t\tconst mode = url.searchParams.get("mode");\n';
+      /*
+       * 0.2.3-alpha.2 upstream inserted decodeURIComponent + an `url.search === ""` early
+       * return between the host guard and the query reads. Under ArkWeb the query may be
+       * merged into pathname, so that early return would misfire and yield a bare sessionId.
+       * The patch below preserves upstream's decode step and only redirects the query source
+       * to the armor-extracted value.
+       */
+      const isV3 = recipe.coreVersion.split('+')[0] === '0.2.3-alpha.2';
+      const before = isV3
+        ? 'if(url.protocol!==`dsh-resource:`||url.hostname.toLowerCase()!==`subagentchat`)return void 0;const parts=url.pathname.split(`/`).filter(Boolean);if(parts.length!==2||parts[0]!==`session`)return void 0;let sessionId;try{sessionId=decodeURIComponent(parts[1])}catch(_invalidEncoding){return}if(url.search===``)return sessionId;const parentSessionId=url.searchParams.get(`parent`);const mode=url.searchParams.get(`mode`);'
+        : ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+          ? 'if(url.protocol!==`dsh-resource:`||url.hostname.toLowerCase()!==`subagentchat`)return void 0;const parts=url.pathname.split(`/`).filter(Boolean);if(parts.length!==2||parts[0]!==`session`)return void 0;const parentSessionId=url.searchParams.get(`parent`);const mode=url.searchParams.get(`mode`);'
+          : '\t\t\tif (url.protocol !== "dsh-resource:" || url.hostname.toLowerCase() !== "subagentchat") return void 0;\n'
+          + '\t\t\tconst parts = url.pathname.split("/").filter(Boolean);\n'
+          + '\t\t\tif (parts.length !== 2 || parts[0] !== "session") return void 0;\n'
+          + '\t\t\tconst parentSessionId = url.searchParams.get("parent");\n'
+          + '\t\t\tconst mode = url.searchParams.get("mode");\n';
       if (!text.includes(before)) {
         die('资源地址补丁：subagent 的 parseSubagentChatAddress() 实现已变化（未找到待替换片段），拒绝静默跳过');
       }
+      const decodeBlock = '\t\t\tlet sessionId;\n'
+        + '\t\t\ttry { sessionId = decodeURIComponent(parts[1]); } catch (_invalidEncoding) { return; }\n';
       const after = '\t\t\t/*\n'
         + '\t\t\t * 【DSHM 鸿蒙补丁 DSHM_RESOURCE_ARMOR_SUBAGENT】ArkWeb 下 `dsh-resource://subagentchat/...` 的\n'
         + '\t\t\t * hostname === ""（判定直接失败），且 query 可能被并进 path ⇒ searchParams 取不到\n'
         + '\t\t\t * parent / mode。这里用正则从原始地址取回 authority / path / query，再走原有判定与白名单。\n'
+        + (isV3 ? '\t\t\t * 0.2.3 新增的 decodeURIComponent 步骤原样保留，只把 query 来源换成 armor 提取值。\n' : '')
         + '\t\t\t */\n'
         + '\t\t\tconst armor = url.hostname === "" ? /^[a-z][a-z\\d+.-]*:\\/\\/([^/?#]*)([^?#]*)(\\?[^#]*)?/iu.exec(value) : null;\n'
         + '\t\t\tconst host = armor === null ? url.hostname : armor[1];\n'
@@ -4214,7 +4452,9 @@ function patchResourceAddressArmor() {
         + '\t\t\tif (url.protocol !== "dsh-resource:" || host.toLowerCase() !== "subagentchat") return void 0;\n'
         + '\t\t\tconst parts = pathname.split("/").filter(Boolean);\n'
         + '\t\t\tif (parts.length !== 2 || parts[0] !== "session") return void 0;\n'
+        + (isV3 ? decodeBlock : '')
         + '\t\t\tconst searchParams = new URLSearchParams(query);\n'
+        + (isV3 ? '\t\t\tif (query === "" || query === "?") return sessionId;\n' : '')
         + '\t\t\tconst parentSessionId = searchParams.get("parent");\n'
         + '\t\t\tconst mode = searchParams.get("mode");\n';
       text = text.replace(before, after);
@@ -4681,7 +4921,7 @@ function patchTerminalKeyboardResizeGuard() {
     log('[pack-core]   终端键盘 resize 守卫已存在（跳过）');
     return;
   }
-  const anchor = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'].includes(recipe.coreVersion.split('+')[0])
+  const anchor = ['0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5', '0.2.3-alpha.2'].includes(recipe.coreVersion.split('+')[0])
     ? 'const measure=()=>{if(!current.current.visible'
     : 'const measure = () => {\n\t\t\t\t\tif (!current.current.visible';
   const count = src.split(anchor).length - 1;
@@ -5232,6 +5472,7 @@ patchFsLocalLink();
 patchFsLocalPermissionHint();
 patchAttachmentLocalLink();
 patchAttachmentLocalCause();
+patchImageBackendUnavailable();
 /*
  * 【⑤ 鸿蒙前端/平台兼容补丁】对应 GitCode issue #1（侧边栏资源预览不可用、PDF 预览
  * 报错）与 #2（侧边栏终端 openharmony 被判为不支持），以及 N4（侧栏 files 页签被

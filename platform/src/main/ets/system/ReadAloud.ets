@@ -30,6 +30,56 @@ const TAG: string = 'platform/readaloud';
 /** textToSpeech.speak 的硬上限（文档：不超过 10,000 字符） */
 const TTS_MAX_CHARS: number = 9800;
 
+/**
+ * 中文兜底音色（SDK 明示：13 = 凌晓珊女声，推荐值；0 也可用）。
+ *
+ * 【为什么不是"小艺"字面量】Core Speech Kit 的 `VoiceInfo.person` 没有名为"小艺"的
+ * 枚举值（zh-CN 只有 13 女声 / 21 男声，男声需下载）。但系统朗读的默认音色就是
+ * 小艺同款中文女声，13 是 SDK 的推荐值，因此把它作为"小艺音色"的等价默认。
+ */
+const XIAOYI_FALLBACK_PERSON: number = 13;
+
+/** 音色探测结果缓存：一次启动只查一次，避免每次朗读都走一次 listVoices */
+let xiaoyiPersonPromise: Promise<number> | null = null;
+
+/**
+ * 解析本机已安装的"小艺"音色编号。
+ *
+ * 策略（按优先级）：
+ *   1. `listVoices` 返回的音色里 description 含「小艺」/「Xiaoyi」且 `status === 'INSTALLED'`
+ *      ⇒ 用它的 `person`（设备真有这个音色时尊重设备）；
+ *   2. 没有明确命名的小艺音色 ⇒ 用 13（SDK 推荐的中文女声，等价于系统默认朗读音色）。
+ *
+ * 【为什么不下载 21 男声】`downloadVoice` 会有网络与存储成本，朗读是系统能力，
+ * 不该为了一个音色让首次朗读变慢或依赖网络。
+ * 【失败安全】任何异常都回落到 13 —— 音色选择绝不能阻断朗读。
+ */
+function resolveXiaoyiPerson(): Promise<number> {
+  if (xiaoyiPersonPromise !== null) {
+    return xiaoyiPersonPromise;
+  }
+  xiaoyiPersonPromise = textToSpeech.listVoices({
+    requestId: 'dshm-voices-' + Date.now().toString(),
+    online: 1
+  }).then((voices: Array<textToSpeech.VoiceInfo>): number => {
+    for (const voice of voices) {
+      const desc: string = voice.description === undefined ? '' : voice.description;
+      const installed: boolean = voice.status === 'INSTALLED';
+      if (installed && (desc.indexOf('小艺') >= 0 || desc.toLowerCase().indexOf('xiaoyi') >= 0)) {
+        hilog.info(DOMAIN, TAG, '已选用小艺音色 person=%{public}d（%{public}s）', voice.person, desc);
+        return voice.person;
+      }
+    }
+    hilog.info(DOMAIN, TAG, '本机无显式「小艺」音色，使用 SDK 推荐中文女声 person=%{public}d',
+      XIAOYI_FALLBACK_PERSON);
+    return XIAOYI_FALLBACK_PERSON;
+  }).catch((e: BusinessError): number => {
+    hilog.warn(DOMAIN, TAG, '音色探测失败（回退推荐音色）：%{public}s', e.message);
+    return XIAOYI_FALLBACK_PERSON;
+  });
+  return xiaoyiPersonPromise;
+}
+
 /** 朗读控制器（进程内单例；由页面的桥持有） */
 export class ReadAloud {
   private textReaderReady: boolean = false;
@@ -184,28 +234,37 @@ export class ReadAloud {
       this.speakWithEngine(this.ttsEngine, clipped, requestId);
       return;
     }
-    const params: textToSpeech.CreateEngineParams = {
-      language: 'zh-CN',
-      person: 13,
-      online: 1
-    };
+    /*
+     * 【先解析音色再建引擎】listVoices 是异步的，但只读一次并缓存（见 resolveXiaoyiPerson），
+     * 首次朗读多一次本机查询（毫秒级），换来"设备有小艺音色就用小艺"；后续朗读零额外成本。
+     * 任何一步失败都按 13 号推荐音色继续，不会因为音色问题而不出声。
+     */
     try {
-      textToSpeech.createEngine(params).then((engine: textToSpeech.TextToSpeechEngine): void => {
-        this.ttsEngine = engine;
-        engine.setListener({
-          onStart: (_requestId: string, _response: textToSpeech.StartResponse): void => {
-          },
-          onComplete: (_requestId: string, _response: textToSpeech.CompleteResponse): void => {
-          },
-          onStop: (_requestId: string, _response: textToSpeech.StopResponse): void => {
-          },
-          onError: (_requestId: string, errorCode: number, errorMessage: string): void => {
-            hilog.warn(DOMAIN, TAG, 'TTS 错误 %{public}d：%{public}s', errorCode, errorMessage);
-          }
+      resolveXiaoyiPerson().then((person: number): void => {
+        const params: textToSpeech.CreateEngineParams = {
+          language: 'zh-CN',
+          person: person,
+          online: 1
+        };
+        textToSpeech.createEngine(params).then((engine: textToSpeech.TextToSpeechEngine): void => {
+          this.ttsEngine = engine;
+          engine.setListener({
+            onStart: (_requestId: string, _response: textToSpeech.StartResponse): void => {
+            },
+            onComplete: (_requestId: string, _response: textToSpeech.CompleteResponse): void => {
+            },
+            onStop: (_requestId: string, _response: textToSpeech.StopResponse): void => {
+            },
+            onError: (_requestId: string, errorCode: number, errorMessage: string): void => {
+              hilog.warn(DOMAIN, TAG, 'TTS 错误 %{public}d：%{public}s', errorCode, errorMessage);
+            }
+          });
+          this.speakWithEngine(engine, clipped, requestId);
+        }).catch((e: BusinessError): void => {
+          hilog.warn(DOMAIN, TAG, 'TTS 引擎创建失败：%{public}s', e.message);
         });
-        this.speakWithEngine(engine, clipped, requestId);
       }).catch((e: BusinessError): void => {
-        hilog.warn(DOMAIN, TAG, 'TTS 引擎创建失败：%{public}s', e.message);
+        hilog.warn(DOMAIN, TAG, '音色解析失败（不应发生）：%{public}s', e.message);
       });
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'TTS 引擎创建同步失败：%{public}s', (err as BusinessError).message);

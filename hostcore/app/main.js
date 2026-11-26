@@ -40,6 +40,8 @@ const tarGz = require('./tar-gz.cjs');
 // 进来的，boot 那一刻的补丁贴不到它 ⇒ 装完这一跳必须再贴一次。单列文件是为了让
 // tools/check-market-bridge.mjs 能直接 require（main.js 不可 require）。见该文件头注。
 const marketPatch = require('./dshm-market-patch.cjs');
+// dsh-pet 桌面宿主伴生层：静态路由 + DSH_PET_IN_PROCESS（见 dshm-pet-host.cjs 头注）。
+const petHost = require('./dshm-pet-host.cjs');
 // 主线程侧的**异步 Python 桥**（2026-10-19，LOOP-GAP 根因二）：Python 的**执行**搬到
 // ./python-worker.cjs 的 worker 线程里，主线程只负责排队与调度 —— 内测日志里
 // `pip install` 那几处 800711ms / 522814ms / 33277ms 的停顿就是"端点里同步跑 Python"造成的。
@@ -1778,6 +1780,48 @@ function stage(name, extra) {
 stage('BOOT_00_NODE_START',
   `pid=${process.pid} node=${process.version} platform=${process.platform}/${process.arch} jitless=${process.execArgv.includes('--jitless')}`);
 
+/*
+ * ── 编译缓存可见性探针（2026-11-25，B1）────────────────────────────────────
+ *
+ * `NODE_COMPILE_CACHE` 由 ArkTS 侧（`NodeRuntime` → `buildHostEnv`）传入，但
+ * **"环境变量被设置"不等于"libnode 真的启用了缓存"**：若这一版 libnode 没编译
+ * `src/compile_cache.cc`，Node 会静默忽略它 —— 于是"我们以为开了、其实没开"，
+ * 而启动耗时又没有任何变化，很难区分"缓存没命中"与"缓存根本没生效"。
+ *
+ * 这里用官方 API（`module.getCompileCacheDir()`）读回**实际状态**，把两种情况分开：
+ *   · 返回非空 ⇒ 已启用（打出目录，便于下一次对比条目数）
+ *   · 返回空 + env 有值 ⇒ 该 libnode 不支持（结论落盘，不再猜）
+ *
+ * 【为什么不做目录遍历计数、不主动 enableCompileCache()】
+ *   · `readdirSync` 是同步 IO，这条函数在 BOOT_00 之后、任何启动工作之前，
+ *     缓存目录可能有上千条目 —— 用几十毫秒换一行日志，在启动路径上是净亏；
+ *   · `enableCompileCache()` 与 `NODE_COMPILE_CACHE` 走同一套内部实现，
+ *     libnode 若没编译该特性，它同样无效；主动调用只会多一条"看起来做了事"的日志。
+ * 所以本函数只读一次状态、零 IO、零副作用；任何异常都吞掉。
+ */
+function reportCompileCache() {
+  const envDir = process.env.NODE_COMPILE_CACHE || '';
+  let activeDir = '';
+  try {
+    const mod = require('node:module');
+    if (mod && typeof mod.getCompileCacheDir === 'function') {
+      activeDir = mod.getCompileCacheDir() || '';
+    }
+  } catch (e) {
+    activeDir = '';
+  }
+  if (activeDir.length > 0) {
+    diag(`compile-cache: 已启用 dir=${activeDir}`);
+    return;
+  }
+  if (envDir.length > 0) {
+    diag(`compile-cache: 未生效 env=${envDir}（当前 libnode 可能未编译 compile_cache）`);
+    return;
+  }
+  diag('compile-cache: 未配置（NODE_COMPILE_CACHE 为空）');
+}
+reportCompileCache();
+
 /**
  * 捕获 dsh 打印的 **authenticatedUrl**，并落盘成 `host-ready.json` 供 ArkTS 侧接入。
  *
@@ -1851,6 +1895,10 @@ const PENDING_RUNTIME_PROBES = {};
  * 【缓存什么】只缓存**稳定的坏结论**（"仍被系统拦，权限未生效"）与成功结论；
  * E44 模式（闭包缺）不缓存 —— 那种情况会随依赖闭包装配而变，值得每次重探。
  * 【存在哪】`<HOME_DIR>/runtime-facts.json`（沙箱内，随应用数据走，不涉隐私）。
+ * 【核心换树即失效（2026-11-25，r51 R8）】缓存记录带 `corePath`（= CORE_DIR）；
+ * 应用内升级核心后 CORE_DIR 变了，旧记录（含没有 corePath 的老格式）一律判失效，
+ * 本 boot 重探一次并回写 —— note 恒指**当前**核心树，不再拿 0.2.2 时代的结论
+ * 指认 0.2.3 的 pty.node。
  * 【失败态】读写异常一律静默：这是一条**纯降噪**的旁路，不能因为它挡住启动。
  */
 const PTY_DLOPEN_CACHE_FILE = 'runtime-facts.json';
@@ -1859,7 +1907,7 @@ function ptyDlopenCachePath() {
   return path.join(HOME_DIR, PTY_DLOPEN_CACHE_FILE);
 }
 
-/** 读缓存；`'on'` 表示环境变量要求强制重探。返回探针记录或 null。 */
+/** 读缓存；`'on'` 表示环境变量要求强制重探。corePath 与当前核心不符即失效。返回探针记录或 null。 */
 function readPtyDlopenCache() {
   try {
     if (String(process.env.DSHM_PTY_DLOPEN_PROBE || '') === 'on') {
@@ -1869,6 +1917,9 @@ function readPtyDlopenCache() {
     const rec = raw && raw['sandbox-dlopen'];
     if (rec && typeof rec.name === 'string' && typeof rec.note === 'string'
         && typeof rec.ok === 'boolean') {
+      if (rec.corePath !== CORE_DIR) {
+        return null;
+      }
       return { name: rec.name, ok: rec.ok, note: `${rec.note}（缓存）` };
     }
     return null;
@@ -1877,7 +1928,7 @@ function readPtyDlopenCache() {
   }
 }
 
-/** 写缓存（只写这一项，保留文件里其它字段）。 */
+/** 写缓存（只写这一项，保留文件里其它字段；corePath 供换核心后判失效）。 */
 function writePtyDlopenCache(record) {
   try {
     let next = {};
@@ -1886,7 +1937,7 @@ function writePtyDlopenCache(record) {
     } catch (e) {
       next = {};
     }
-    next['sandbox-dlopen'] = { name: record.name, ok: record.ok, note: record.note };
+    next['sandbox-dlopen'] = { name: record.name, ok: record.ok, note: record.note, corePath: CORE_DIR };
     next.updatedAt = new Date().toISOString();
     fs.writeFileSync(ptyDlopenCachePath(), JSON.stringify(next, null, 2));
   } catch (e) {
@@ -1955,6 +2006,23 @@ function runtimeFacts() {
         note: (e && e.message ? String(e.message) : String(e)).slice(0, 200),
       });
     }
+  }
+  /*
+   * office wasm 资产探针（R3 回归防护，2026-11-26）：0.2.3 核心曾漏带
+   * `@deepseek-ai/libreoffice-kit-wasm`，office_render/convert 直到用户打开文档
+   * 才硬报 `Cannot find module .../package.json`（见 docs/PITFALLS.md §2.14）。
+   * boot 时解析一次：缺包只记诊断、不阻断其余能力，但排查第一眼可见。
+   */
+  try {
+    require.resolve(path.join(CORE_DIR, 'node_modules', '@deepseek-ai',
+      'libreoffice-kit-wasm', 'package.json'));
+    facts.natives.push({ name: 'office-kit-wasm', ok: true, note: 'libreoffice-kit-wasm 随核心在包' });
+  } catch (e) {
+    facts.natives.push({
+      name: 'office-kit-wasm',
+      ok: false,
+      note: '缺 @deepseek-ai/libreoffice-kit-wasm：office_render/convert 不可用（核心打包回归）',
+    });
   }
   // ── ACL 权限专项探针（ohos.permission.ALLOW_EXTERNAL_NATIVE_CODE 生效性实测）──
   // E39 之前的结论是"沙箱解包出来的 .node，dlopen 被系统拦"——整个 HAP libs
@@ -4273,6 +4341,24 @@ function toolchainWrapperScript(name) {
       '# DSHM python wrapper：能 exec 真身就 exec（行为不变），否则桥模式（进程内 CPython）',
       `P=${PYTHON_PREFIX}`,
       'export PYTHONHOME="$P"',
+      /*
+       * 【2026-11-24】随包 python 是 musl 构建，直接 exec 时需要同目录 libpython；
+       * 不设 LD_LIBRARY_PATH 会在部分设备上退化成 "No such file or directory"。
+       */
+      'export LD_LIBRARY_PATH="$P/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+      /*
+       * pip 装的包统一落到沙盒 py-site（可写、持久），PYTHONPATH 必须带上；
+       * 否则 `pip3 install` 成功但 `python3 -c "import x"` 找不到。
+       */
+      'PY_SITE="${DSHM_SANDBOX_HOME:-$HOME}/py-site"',
+      'export PYTHONPATH="$PY_SITE${PYTHONPATH:+:$PYTHONPATH}"',
+      /*
+       * wheel 自带的 `*.libs/`（Pillow 的 pillow.libs、numpy 的 numpy.libs 等）必须在
+       * 进程启动前进 LD_LIBRARY_PATH；musl 不会替我们按需搜索这些目录。
+       */
+      'for d in "$PY_SITE"/*.libs "$PY_SITE"/*/*.libs; do',
+      '  [ -d "$d" ] && export LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+      'done',
       'if [ ! -x "$P/bin/python3.12" ]; then',
       '  echo "python3：解释器尚未就位（首次启动解包中），稍后重试" >&2',
       '  exit 127',
@@ -4293,11 +4379,45 @@ function toolchainWrapperScript(name) {
       '# DSHM pip wrapper：能 exec 真身就 -m pip（行为不变），否则桥模式（-m pip 走 exec 端点）',
       `P=${PYTHON_PREFIX}`,
       'export PYTHONHOME="$P"',
+      'export LD_LIBRARY_PATH="$P/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+      'PY_SITE="${DSHM_SANDBOX_HOME:-$HOME}/py-site"',
+      'mkdir -p "$PY_SITE"',
+      'export PYTHONPATH="$PY_SITE${PYTHONPATH:+:$PYTHONPATH}"',
+      'for d in "$PY_SITE"/*.libs "$PY_SITE"/*/*.libs; do',
+      '  [ -d "$d" ] && export LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+      'done',
+      /*
+       * 【端侧 pip 口径，2026-11-24】
+       * ① 随包 CPython 的 platform tag 是 `harmonyos_hongmeng_kernel_..._aarch64`，
+       *    与 PyPI 的 `musllinux_1_2_aarch64` 对不上 ⇒ 默认只会去编 sdist（必然失败）。
+       *    所以 install 时显式给 platform/abi，并 `--only-binary` + `--target`。
+       * ② 默认源用阿里云镜像（端侧直连 pypi.org 实测超时）；可用 PIP_INDEX_URL 覆盖。
+       * ③ 装完必须给 .so/.node 补 .codesign，否则 dlopen 被拒（沙盒/用户目录都一样）。
+       */
+      'export PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"',
+      'export PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-mirrors.aliyun.com}"',
+      'export PIP_DISABLE_PIP_VERSION_CHECK=1',
       'if [ ! -x "$P/bin/python3.12" ]; then',
       '  echo "pip3：解释器尚未就位（首次启动解包中），稍后重试" >&2',
       '  exit 127',
       'fi',
       'if ( exec "$P/bin/python3.12" --version ) >/dev/null 2>&1; then',
+      '  if [ "$1" = "install" ]; then',
+      '    shift',
+      '    CONST=""',
+      '    [ -f "$P/constraints.txt" ] && CONST="--constraint $P/constraints.txt"',
+      '    "$P/bin/python3.12" -m pip install --platform musllinux_1_2_aarch64 --python-version 3.12 --implementation cp --abi cp312 --only-binary=:all: --target "$PY_SITE" $CONST "$@"',
+      '    rc=$?',
+      '    if [ -f "$P/selfsign.js" ]; then',
+      '      NB=$(command -v node 2>/dev/null)',
+      '      if [ -n "$NB" ]; then',
+      '        find "$PY_SITE" -type f \( -name "*.so" -o -name "*.so.*" -o -name "*.node" \) -print | while IFS= read -r f; do "$NB" "$P/selfsign.js" "$f" --force >/dev/null 2>&1; done',
+      '      else',
+      '        echo "pip3：未找到 node，跳过 .so 签名；带 C 扩展的包可能 import 失败" >&2',
+      '      fi',
+      '    fi',
+      '    exit $rc',
+      '  fi',
       '  exec "$P/bin/python3.12" -m pip "$@"',
       'fi',
       ...pythonBridgeShimLines('pip3', 'pip3 <pip-args...>（桥模式等价 python3 -m pip <args>）', true),
@@ -5163,6 +5283,7 @@ function registerPythonHttpBridge(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-python/status',
+      auth: 'anonymous',
       handler: async (request, response) => {
         try {
           if (request.method !== 'GET') {
@@ -5208,6 +5329,7 @@ function registerPythonHttpBridge(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-python/run-get',
+      auth: 'anonymous',
       handler: async (request, response) => {
         if (request.method !== 'GET') {
           response.writeHead(405, { allow: 'GET' });
@@ -5234,6 +5356,7 @@ function registerPythonHttpBridge(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-python/exec',
+      auth: 'anonymous',
       handler: async (request, response) => {
         if (request.method !== 'GET') {
           response.writeHead(405, { allow: 'GET' });
@@ -5586,6 +5709,7 @@ function registerBrowserBridge(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-browser/start',
+      auth: 'anonymous',
       handler: async (request, response) => {
         const html = '<!doctype html><html><head><meta charset="utf-8">'
           + '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -5605,6 +5729,7 @@ function registerBrowserBridge(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-browser/status',
+      auth: 'anonymous',
       handler: async (request, response) => {
         const list = [];
         for (const c of clients.values()) list.push({ id: c.id, info: c.info, lastSeen: c.lastSeen });
@@ -5614,6 +5739,7 @@ function registerBrowserBridge(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-browser/invoke',
+      auth: 'anonymous',
       handler: async (request, response) => {
         try {
           const url = new URL(request.url, 'http://localhost');
@@ -5695,6 +5821,7 @@ function registerOpenLinkEndpoint(ctx, onLaunched) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-open-link',
+      auth: 'anonymous',
       handler: async (request, response) => {
         try {
           const url = new URL(request.url, 'http://localhost');
@@ -6455,6 +6582,7 @@ function registerRegistryViewEndpoint(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-registry/view',
+      auth: 'anonymous',
       handler: async (request, response) => {
         const sendJson = (status, body) => {
           const payload = JSON.stringify(body);
@@ -6600,6 +6728,7 @@ function registerPackageListViewEndpoint(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-packages/list',
+      auth: 'anonymous',
       handler: async (request, response) => {
         const sendJson = (status, body) => {
           const payload = JSON.stringify(body);
@@ -6718,6 +6847,7 @@ function registerShotProxyEndpoint(ctx) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/dshm-shot',
+      auth: 'anonymous',
       handler: async (request, response) => {
         const sendText = (status, text) => {
           response.writeHead(status, {
@@ -6928,7 +7058,7 @@ function writeEnvProbe() {
       `"${path.join(binDir, 'node')}" -v 2>&1 | head -3`,
       `echo "rc=$?"`,
       `echo "=== node-cli 直连（带 el1 libs）==="`,
-      `LD_LIBRARY_PATH="${libs}" DSHM_NODE_LIBNODE="${libs}/libnode.so.137" "${path.join(binDir, 'node-cli')}" -v 2>&1 | head -3`,
+      `LD_LIBRARY_PATH="${libs}" DSHM_NODE_LIBNODE="${libs}/libnode.so.147" "${path.join(binDir, 'node-cli')}" -v 2>&1 | head -3`,
       `echo "rc=$?"`,
       `echo "=== WebAssembly（子进程带 JIT 才可用）==="`,
       `"${path.join(binDir, 'node')}" -e "console.log(typeof WebAssembly, typeof WebAssembly.Module)" 2>&1 | head -3`,
@@ -7616,6 +7746,13 @@ function scheduleToolchainExtraction(resRoot, binDir, skipExtras = false) {
     // 不依赖解包（isElf 判定幂等轻量），只挂在解包/归位路径上会被跳过
     // （真机踩过：连续两轮 boot 补齐 diag 缺失、占位未替换）。
     finalizeToolchain();
+    /*
+     * python 预设（py-site）投放不能只挂在"本轮刚解过 python"的收尾里（R4，2026-11-26）：
+     * 升级用户的 python 工具链早已就绪 ⇒ didPy=false，预设永远不会解，`$HOME/py-site`
+     * 恒空（真机诊断实测 pptx/lxml 等默认不可导入）。稳态 boot 也补一次——该函数幂等：
+     * 仅当 py-site 不存在或为空、且预设包随包时才解，用户已有包则不动。
+     */
+    ensurePythonSitePreset();
     diag(`工具链：无需解包（python=${pythonReady()}，git=${gitReady()}`
       + EXTRA_TOOLCHAINS.map((sp) => `，${sp.name}=${extraReady(sp)}`).join('') + '）');
     /* 启动期没有 python/git 要解，但 extras 被延后了 ⇒ 单独排一次（3 s 后，等 boot 环先走完）。 */
@@ -7967,6 +8104,65 @@ async function inProcessToolchainFallback(tarball, needPy, needGit, why, resRoot
  * @param {boolean} didGit 本轮是否解了 git
  * @param {boolean} [gitSkipped=false] git 是**跳过**（手持档结构性不适用）而不是失败 ⇒ 收尾记 SKIPPED
  */
+/**
+ * 手机端 Python 预设包（2026-11-24）：把 pptx/lxml/Pillow/yaml/openpyxl 等预装包
+ * 解到 `$DSHM_SANDBOX_HOME/py-site`，让不能 exec / 不想等 pip 的设备开箱可用。
+ *
+ * 规则：
+ *  - 只在 py-site **不存在或为空** 时解，避免覆盖用户 pip 装的版本；
+ *  - 解包失败只记日志，不影响 Python 本体（用户仍可 pip 安装）；
+ *  - 预设内的 .so 在构建时已自签名（端侧 dlopen 要求）。
+ */
+function ensurePythonSitePreset() {
+  const home = process.env.DSHM_SANDBOX_HOME || process.env.HOME || '';
+  if (!home) {
+    return;
+  }
+  const site = path.join(home, 'py-site');
+  const marker = path.join(site, '.dshm-preset.json');
+  const preset = path.join(RES_ROOT, 'toolchain', 'python', 'dshm-pysite.tar.gz');
+  if (!fs.existsSync(preset)) {
+    return;
+  }
+  let existing = [];
+  try {
+    existing = fs.existsSync(site) ? fs.readdirSync(site).filter((n) => n !== '.dshm-preset.json') : [];
+  } catch (e) {
+    existing = [];
+  }
+  if (existing.length > 0) {
+    return;
+  }
+  const stage = site + '.preset-' + Date.now();
+  try {
+    fs.mkdirSync(stage, { recursive: true });
+  } catch (e) {
+    diag(`python 预设：创建暂存目录失败：${String(e)}`);
+    return;
+  }
+  tarGz.extractTarGzFile(preset, stage, {
+    stripPrefixes: ['site'],
+    yieldEvery: 16,
+    maxOutputLength: 512 * 1024 * 1024,
+  }).then(() => {
+    try {
+      if (fs.existsSync(site)) {
+        fs.rmdirSync(site);
+      }
+      fs.renameSync(stage, site);
+      fs.writeFileSync(marker, JSON.stringify({ preset: 'dshm-pysite', at: new Date().toISOString() }));
+      diag('python 预设：已解包到 py-site');
+    } catch (e) {
+      diag(`python 预设：归位失败：${String(e)}`);
+    }
+  }).catch((e) => {
+    diag(`python 预设：解包失败：${String(e).slice(0, 200)}`);
+    try {
+      fs.rmSync(stage, { recursive: true, force: true });
+    } catch (_e) { /* 清理失败忽略 */ }
+  });
+}
+
 function finishToolchainExtraction(didPy, didGit, gitSkipped = false, childOk = true, extrasOk = childOk) {
   /*
    * 【P0-1 注意 2（2026-11-11）：非 0 退出不做收尾】tar 半途失败时目录"非空"但内容
@@ -7987,6 +8183,17 @@ function finishToolchainExtraction(didPy, didGit, gitSkipped = false, childOk = 
       }
       fs.renameSync(path.join(TOOLCHAIN_DIR, 'py-stage', 'python'), PYTHON_PREFIX);
       fs.rmSync(path.join(TOOLCHAIN_DIR, 'py-stage'), { recursive: true, force: true });
+      /*
+       * pip 装进来的 .so 在端侧 dlopen 需要 .codesign（用户目录/沙盒都不放行未签名 ELF）。
+       * 把自签名工具随 python 前缀投放，pip wrapper 安装完就地签名。失败只记日志：
+       * 签名缺失只会让带 C 扩展的包 import 失败，不影响纯 Python 包。
+       */
+      try {
+        fs.copyFileSync(path.join(RES_ROOT, 'toolchain', 'python', 'selfsign.js'),
+          path.join(PYTHON_PREFIX, 'selfsign.js'));
+      } catch (e) {
+        diag(`工具链：selfsign.js 投放失败：${String(e)}`);
+      }
     } catch (e) {
       if (backedUp && !fs.existsSync(PYTHON_PREFIX)) fs.renameSync(backup, PYTHON_PREFIX);
       diag(`工具链：python 收尾失败：${String(e)}`);
@@ -7994,6 +8201,19 @@ function finishToolchainExtraction(didPy, didGit, gitSkipped = false, childOk = 
     }
     /* 与 publishExtras 同口径：只清空的 .previous-<ts> 空壳。 */
     pruneEmptyPreviousSiblings(PYTHON_PREFIX);
+    ensurePythonSitePreset();
+    /*
+     * 解包延后到 READY 之后，`startupWork` 里那次 `python` 任务可能因 pythonReady=false
+     * 被跳过；解包完成后在这里补挂一次（幂等，失败只记日志）。
+     */
+    try {
+      ensurePythonBridge();
+    } catch (e) {
+      diag(`工具链：解包后补挂 Python 桥失败：${String(e)}`);
+    }
+    try {
+      startupWork.activity();
+    } catch (e) { /* 调度器未就绪不影响解包结果 */ }
   }
   /*
    * 【把签名版本标记落到解包目录（报告 4 ③）】needsReextractForSign 比对的是
@@ -8189,10 +8409,13 @@ function finishToolchainExtraction(didPy, didGit, gitSkipped = false, childOk = 
   // 【报告 3 ③】core 树解包不保留权限位 ⇒ rg/sharp 的 .node 需要补 x 位
   ensureCoreExecBits();
   /*
-   * P0-2（2026-11-11）：启动期只解 python/git，extras 延后到本轮解包结束后再排。
-   * web 监听不依赖 bash/gh/npm/pnpm/tmux，它们晚 3~5 秒不影响可用性。
+   * 【启动提速 2026-11-25：借 WorkBuddy 的顺序】它先 await whenReady + 建窗口，
+   * 重活（bootstrap/migration）放到窗口之后；我们对应地**不再在 BOOT_10 之前**
+   * 启动 26MB Python 归档 + 25MB extras 的解包（会与核心树装载抢 IO）。
+   * 改为挂到 startupWork：READY 之后静默 3s 再跑。稳态 boot 无解包，行为不变；
+   * 首启期间 python3/bash 可能短暂报「稍后重试」，解包完成后自动补挂桥。
    */
-  scheduleToolchainExtraction(resRoot, binDir, true);
+  startupWork.request('toolchain', () => scheduleToolchainExtraction(resRoot, binDir, true));
   ensureBundledSkills(resRoot);
   // hmfs"执行许可绑创建者"（见 probeExec 注释）：锚点齐备后异步真探测+修复
   startupWork.request('exec', ensureExecutables);
@@ -8845,6 +9068,9 @@ async function start() {
   globalThis.__dshmUpdateTransaction = require('./dshm-update-transaction.cjs').withUpdateTransaction;
   globalThis.__dshmProfileWriter = require('./dshm-profile-writer.cjs').withProfileWriter;
   globalThis.__dshmProfileWriterToken = require('./dshm-profile-writer.cjs').currentToken;
+  // dsh-pet 桌面宿主：必须在 runProfile（插件 apply）之前生效，否则插件会去 spawn Electron。
+  process.env.DSH_PET_IN_PROCESS = '1';
+  process.env.DSH_PET_OPEN_TARGET = process.env.DSH_PET_OPEN_TARGET || 'web';
   const result = await profileBoot.runProfile({
     environment: appBootMod.loadLayeredEnv('dsh'),
     profile: PROFILE,
@@ -8868,18 +9094,34 @@ async function start() {
   if (browserAutomationEnabled()) {
     registerOpenLinkEndpoint(ctx, browserBridge && browserBridge.armAutoClose);
   }
-  // 桌面服务卡片的状态聚合（会话进度 + 余额/token 用量）→ $DSH_HOME/card-state.json
-  registerCardState(ctx);
-  // registry 查询端点（/dshm-registry/view）：`pnpm view` 假壳的 Host 侧转发目标。
-  // 注册失败只 diag（view 是增量能力，不影响已验证的 web 服务链路）。
-  registerRegistryViewEndpoint(ctx);
-  // 包清单端点（/dshm-packages/list）：skin-market 在 pnpm add 后跑
-  // `pnpm list --json --depth=0` 定位已装包真实路径，缺它会报
-  // "installed package manifest missing"。转发给该端点即可（同 view 的增量能力）。
-  registerPackageListViewEndpoint(ctx);
-  // 预览图代理（/dshm-shot）：插件市场（dshmarket）的卡片缩略图 / 灯箱原图在本档
-  // 直连不上图床（真机实测），改由宿主代取（原因与白名单见函数头注）。
-  registerShotProxyEndpoint(ctx);
+  // dsh-pet 渲染页同源静态路由（插件未安装时静默跳过）；
+  // PetAbility 启动前会预检 /dsh-pet-native，故保留在关键路径。
+  petHost.registerPetHost(ctx, HOME_DIR, diag);
+  /*
+   * 【启动提速 2026-11-21】以下四项不属于首屏关键路径，统一延后到 DSHM_READY 之后的下一 tick：
+   *   · card-state 注册时会**同步读**最多 2 万条 card-usage.jsonl（还可能 compact 写回）；
+   *   · registry / packages / shot 各自 require 子模块后注册路由，供插件市场 / 桌面卡片使用。
+   * 端口绑定与 READY 先发，ArkTS 先加载 Web；页面真正用到这些端点之前（毫秒级）已注册。
+   * 失败只 diag，不影响已验证的 web 服务链路。
+   */
+  const deferRegister = (label, fn) => {
+    const run = () => {
+      try {
+        fn();
+      } catch (e) {
+        diag('[defer] ' + label + ' 注册失败：' + String(e && e.message ? e.message : e));
+      }
+    };
+    try {
+      setTimeout(run, 0);
+    } catch (e) {
+      run();
+    }
+  };
+  deferRegister('card-state', () => registerCardState(ctx));
+  deferRegister('registry-view', () => registerRegistryViewEndpoint(ctx));
+  deferRegister('packages-list', () => registerPackageListViewEndpoint(ctx));
+  deferRegister('shot-proxy', () => registerShotProxyEndpoint(ctx));
   // 这行是给 ArkTS 侧的机器可读信号：ArkTS 会等到端口可连为止。
   // authUrl 是**冗余通道**：主通道是 host-ready.json（ArkTS 侧按文件读，见 adoptLocalHost）。
   /*

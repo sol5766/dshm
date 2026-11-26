@@ -53,7 +53,9 @@ import { speechRecognizer, textToSpeech } from '@kit.CoreSpeechKit';
 import { audio } from '@kit.AudioKit';
 import { util } from '@kit.ArkTS';
 // 听写→剪贴板：把识别文本写进系统剪贴板，供用户长按黏贴
-import { copyText, hapticTap , dialogMaterial } from 'platform';
+import { copyText, hapticTap , dialogMaterial, ScanSaveKind, persistScanResults, scanUris } from 'platform';
+// 会话区「加号」：Vision Kit 文档扫描 / 表格提取（DocScan 能力不可用时走系统文件选择器）
+import { DocumentScanner, DocumentScannerConfig, DocType, SaveOption } from '@kit.VisionKit';
 // 【2026-10-03】"用户可见目录 + agent 可读写删"的两件设备能力（见
 // platform/src/main/ets/system/FilePicker.ets 的注释，与
 // dsh-移植研究/30-DSHM文件能力植入-侦察与设计.md §5.3）。
@@ -646,6 +648,17 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
     return url.indexOf('/dsh/authorize') >= 0 || url.indexOf('/oauth/authorize') >= 0;
   }
 
+  /* 应用自身页面（Host 走本机回环）⇒ 不是外链，必须放行给 WebView。
+     没有这条，下面的"接管所有 http(s) 锚点"会把应用自己的导航也拦成外开。 */
+  function isSameOriginAsApp(url) {
+    try {
+      var here = globalThis.location && globalThis.location.origin
+        ? String(globalThis.location.origin) : '';
+      if (here.length === 0) { return false; }
+      return url === here || url.indexOf(here + '/') === 0;
+    } catch (e) { return false; }
+  }
+
   /* 桥没就位时**不能丢掉这次外开**：桥的注册与文档开始垫片的先后关系在真机上
      有过反复（见 .javaScriptProxy 处注释），而授权页只在 waiting-browser 那一刻
      推一次，错过就得让用户手动复制链接。故对自动外开加一道 15s 有界重试。 */
@@ -700,6 +713,15 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
   function scanAccount(view) {
     try {
       if (!view || typeof view !== 'object') { return; }
+      /* 【2026-11-19 与 entry 对齐：rc.3 起的账号封套】
+         0.2.2-rc.3 起账号流帧 / 一元 RPC 结果不再是裸 AccountView，而是
+         {type:'credentials-changed'|…, state:AccountView} 这类封套。不剥封套 ⇒ 永远扫不到
+         attempt.phase === 'waiting-browser' ⇒ **手机端点登录不跳浏览器**
+         （平板 / PC 已修，手机壳漏了同一处）。 */
+      if (view.attempt === undefined && view.status === undefined
+        && typeof view.state === 'object' && view.state !== null) {
+        view = view.state;
+      }
       var attempt = view.attempt;
       if (!attempt || typeof attempt !== 'object') { return; }
       if (attempt.phase !== 'waiting-browser') { return; }
@@ -723,6 +745,12 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
                 /* 诊断：先如实记下帧形状（判据一行没改）。既能确认自动外开走的是哪条
                    路径，也能在"扫不到账号状态"时看出 item 的 value 到底长什么样。 */
                 var v = frame.value;
+                /* rc.3 封套先剥（同 scanAccount 头注）：不剥的话账号帧会一直掉进
+                   下面的 keys= 计数分支，永远看不到 attempt=/url= 诊断行。 */
+                if (v && typeof v === 'object' && v.attempt === undefined && v.status === undefined
+                  && typeof v.state === 'object' && v.state !== null) {
+                  v = v.state;
+                }
                 if (v && typeof v === 'object' && (v.attempt !== undefined || v.status !== undefined)) {
                   log('ws item attempt=' + (v.attempt && v.attempt.phase ? v.attempt.phase : '-') +
                     ' url=' + (v.attempt && typeof v.attempt.authorizeUrl === 'string' ? 'yes' : 'no'));
@@ -821,9 +849,16 @@ const OPEN_LINK_SHIM_JS: string = `(function () {
           node = node.parentNode;
         }
         if (!anchor) { return; }
-        if (anchor.getAttribute('target') !== '_blank') { return; }
         var href = anchor.href;
         if (!isHttpUrl(href)) { return; }
+        /*
+         * 【2026-11-19 与 entry 对齐（docs/275 同款缺陷）】原有判据只认 target 为 _blank
+         * 的锚点 ⇒ 官方正文里的 Markdown 链接（渲染出来不带 target）与设置面板里的普通
+         * 锚点都掉回 WebView 默认行为：既不跳浏览器，还可能把外部页（授权页按 204 空页）
+         * 加载进应用自己的 WebView，把界面替掉。
+         * 现在**所有 http(s) 锚点**都交出去；同源（应用自身）放行给 WebView。
+         */
+        if (isSameOriginAsApp(href)) { return; }
         /* 只有真正投出去了才 preventDefault：桥未就位时放行，交由 WebView 默认行为
            （仍是丢弃，与改动前一致），绝不制造新的「点了没反应」。
            不 stopPropagation —— 页面前端自己挂在 <a> 上的回调照旧该跑，我们在捕获
@@ -3634,19 +3669,111 @@ function decorTopInsetVp(decorPresent: boolean): number {
 }
 
 /**
- * 品牌启动页底色 —— **唯一一份**（启动视图、启动期状态栏/窗口底色、`color.json` 的
- * `start_window_background` 三处同值）。
+ * 启动页底色 —— **跟随系统深浅色**（2026-11-21 起）。
  *
- * 【为什么是白（2026-10-16 用户报"启动的时候 APP 区跟状态栏就不是一个色"，第二轮定稿）】
- * 真机逐点取色（手机 `62T0225B18039433`）：启动期**系统把状态栏那一条固定画成 `#FFFFFF`**，
- * 我们写进去的 `statusBarColor=#F3F7FB` 在这一阶段**不被采用**（1.5s / 4s / 7s 三个时间点都是
- * 状态栏 `#FFFFFF` vs 启动页 `#F3F6FB`，中间一条硬台阶）。也就是说"启动期状态栏只能是白的"，
- * 那要让"APP 区跟状态栏一个色"，只能反过来让**启动页也取白**：
- *   · 白也是**浅色应用界面**的窗口/状态栏底色 ⇒ 启动页 → 应用界面那一跳没有色差；
- *   · 深色外观下，等首帧就绪后由 `onPhaseChanged` 换成 `#151517`（那段本来就要换）。
- * 原先的 `#F3F7FB` 是"像素级复刻"官方桌面启动页的底色，本轮为沉浸一致性让位（docs/169 §?）。
+ * 【历史】2026-10-16 曾固定取白 `#FFFFFF`：当时真机（手机 `62T0225B18039433`）观察到启动期系统把
+ * 状态栏那一条固定画成白色，为消除「状态栏白 / 启动页浅灰」的硬台阶，反过来让启动页也取白。
+ *
+ * 【现在】启动视图改用资源 `app.color.start_window_background`（base `#FFFFFF` / dark `#151517`，
+ * 与 `module.json5` 的 `startWindowBackground` 同一份 ⇒ 系统启动窗与页面首帧零色差）；启动期
+ * 状态栏/窗口底色改用 `windowChromeFor(this.systemAppearance())`。深色系统下从首帧起就是深底
+ * 浅图标，不再「先白后深」。
  */
-const SPLASH_BG: string = '#FFFFFF';
+
+/**
+ * 会话区「加号」扫描入口垫片（2026-11-25）。
+ *
+ * 【为什么需要】加号的第一层菜单是**网页自己的 React UI**，原生层看不到 DOM 结构，
+ * `onShowFileSelector` 只在第二层「选择文件」时才触发。实测用户反馈：加号菜单里
+ * 没有扫描/表格选项 —— 所以必须在网页 DOM 里注入两个按钮。
+ *
+ * 【做法】找到加号按钮（aria-label 含「添加文件」/ `input.commands`），在它旁边插
+ * 「扫描文档」「提取表格」两个按钮。点击时先调原生桥 `startScan(mode)` 打标，
+ * 再同步 `input[type=file].click()` —— 必须在用户手势内触发，否则 ArkWeb 会拦截
+ * 程序化 click。原生侧在 `onShowFileSelector` 看到标记后直接起 DocumentScanner，
+ * 不再弹中间动作面板。
+ *
+ * 【失败策略】找不到加号或 input 时静默不注入；原生能力不可用时 startScan 会回退到
+ * 系统选择器。任何异常都不影响网页自身功能。
+ */
+const SCAN_SHIM_JS: string = `
+(function () {
+  function findPlus() {
+    var buttons = document.querySelectorAll('button,[role=button]');
+    for (var i = 0; i < buttons.length; i++) {
+      var label = (buttons[i].getAttribute('aria-label') || '') + ' ' + (buttons[i].title || '');
+      if (label.indexOf('添加文件') >= 0 || label.indexOf('input.commands') >= 0 ||
+          label.indexOf('attach') >= 0 || label.indexOf('附件') >= 0) {
+        return buttons[i];
+      }
+    }
+    return null;
+  }
+  /* 文档 / 表格的线性图标，currentColor 跟随网页主题 */
+  function iconSvg(kind) {
+    if (kind === 1) {
+      return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        + 'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+        + '<rect x="3" y="3" width="18" height="18" rx="2"/>'
+        + '<line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/>'
+        + '<line x1="9" y1="3" x2="9" y2="21"/></svg>';
+    }
+    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+      + 'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
+      + '<polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/>'
+      + '<line x1="8" y1="17" x2="16" y2="17"/></svg>';
+  }
+  function makeButton(id, title, mode) {
+    var btn = document.createElement('button');
+    btn.id = id;
+    btn.type = 'button';
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.innerHTML = iconSvg(mode);
+    /* 无边框、无背景，由 16px 图标本身决定视觉尺寸，与输入区其他工具图标统一 */
+    btn.style.cssText = 'margin:0 2px;padding:2px;border:0;background:transparent;'
+      + 'display:inline-flex;align-items:center;justify-content:center;'
+      + 'width:20px;height:20px;box-sizing:border-box;cursor:pointer;color:inherit;';
+    btn.addEventListener('click', function () {
+      try {
+        var bridges = window.__DSHM_BRIDGES__;
+        if (bridges && typeof bridges.startScan === 'function') { bridges.startScan(mode); }
+        var input = document.querySelector('input[type=file]');
+        if (!input) {
+          input = document.createElement('input');
+          input.type = 'file';
+          input.style.display = 'none';
+          document.body.appendChild(input);
+        }
+        input.value = '';
+        input.click();
+      } catch (e) { /* 垫片失败不影响网页自身交互 */ }
+    });
+    return btn;
+  }
+  /*
+   * 【持续守护】新窗口 / 切换会话会导致网页 SPA 重新渲染，之前插入的按钮被清掉。
+   * 用 MutationObserver 监听 DOM 变化，按钮不在就重新插入；再配一个低频定时轮询兜底。
+   */
+  function ensureButtons() {
+    var plus = findPlus();
+    if (!plus || !plus.parentElement) { return; }
+    var host = plus.parentElement;
+    if (host.querySelector('#dshm-scan-doc')) { return; }
+    host.insertBefore(makeButton('dshm-scan-doc', '扫描文档', 0), plus.nextSibling);
+    host.insertBefore(makeButton('dshm-scan-sheet', '提取表格', 1), plus.nextSibling);
+  }
+  function start() {
+    ensureButtons();
+    var observer = new MutationObserver(function () { ensureButtons(); });
+    observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    setInterval(ensureButtons, 1500);
+  }
+  if (document.readyState !== 'loading') { start(); }
+  else { document.addEventListener('DOMContentLoaded', start); }
+})();
+`;
 
 @Entry
 @Component
@@ -3654,6 +3781,8 @@ struct WebApp {
   @StorageProp(KEY_HOST_LAUNCH_URL) @Watch('onLaunchUrlChanged') launchUrl: string = '';
   @StorageProp(KEY_HOST_BOOT_ERROR) @Watch('onHostBootErrorChanged') hostBootError: string = '';
   @State @Watch('onPhaseChanged') phase: WebPhase = WebPhase.BOOTING;
+  /** 启动页是否用深色：按系统当前深浅色，在 aboutToAppear 里定（web 主题上报前）。 */
+  @State splashDark: boolean = false;
   /** ERROR 覆盖层展示的原因（不含任何凭据） */
   /**
    * 云同步面板是否显示（docs/320）。
@@ -3670,6 +3799,13 @@ struct WebApp {
   /** 上一次清单统计的时间戳（`CLOUD_STATS_MIN_GAP_MS` 的判据）。 */
   private cloudStatsAt: number = 0;
   @State errorText: string = '';
+  // ── 会话区加号：文档扫描 / 表格提取（2026-11-25）──────────────────────
+  /** -1 = 不显示扫描组件；0 = 文档扫描；1 = 表格提取 */
+  @State scanDocType: number = -1;
+  /** 被拦截的 ArkWeb 文件选择事件：扫描完成后用它把沙箱 URI 回传网页 */
+  private pendingFileSelector: OnShowFileSelectorEvent | undefined = undefined;
+  /** 垫片按钮点「扫描文档/提取表格」时预埋的模式；>=0 表示直接起扫描 */
+  private pendingScanMode: number = -1;
   // ── 启动加载页品牌动效 ────────────────────────────────────────────────
   // 两个属性分工与 PC / 平板壳一致（docs/320）：brandOpacity 负责淡入、
   // brandBreath 负责常驻呼吸缩放。手机壳原先只有呼吸、没有淡入 —— 换标后两端
@@ -3844,6 +3980,13 @@ struct WebApp {
   private bottomInsetArmed: boolean = false;
   /** 已应用的底部避让高度（px）：幂等闸门，避免 avoidAreaChange 重复来时重排 */
   private bottomAvoidPx: number = -1;
+  /**
+   * 顶部状态栏高度（vp）：窗口已 layout-fullscreen（见 EntryAbility.enterHandheldImmersive），
+   * 页面内容据此下移，避免被状态栏压住；根容器的底色仍铺满到状态栏下方（= 沉浸）。
+   */
+  @State topInsetVp: number = 0;
+  /** 已应用的顶部避让高度（px）：幂等闸门 */
+  private topAvoidPx: number = -1;
   /** 本页注册的底部避让回调（aboutToDisappear 用它精确 off，不动别的监听者） */
   private bottomAvoidCb: (opt: window.AvoidAreaOptions) => void =
     (opt: window.AvoidAreaOptions): void => {
@@ -3867,6 +4010,8 @@ struct WebApp {
 
   // ── 窗口外观取色 ──
   @State windowBg: string = '#FFFFFF';
+  /** 首页**实际**背景色（onPageEnd 采样）；非空时优先于 windowChromeFor 的固定色。 */
+  @State pageBg: string = '';
   /**
    * 当前生效的明暗模式（'light' | 'dark'，空串=尚未确定）。
    *
@@ -4044,6 +4189,12 @@ struct WebApp {
    */
   private bridges: Record<string, Function> = {
     'startPick': (id: string): string => this.dirPickerBridge.startPick(id),
+            // 网页垫片「扫描文档/提取表格」入口：只打标，input.click 在网页侧同步发起
+            'startScan': (mode: number): string => {
+              this.pendingScanMode = mode;
+              hilog.info(DOMAIN, TAG, '网页垫片请求扫描 mode=%{public}d', mode);
+              return 'ok';
+            },
     'onThemeMode': (mode: string): void => this.themeBridge.onThemeMode(mode)
     ,'startNativeCapture': (): string => this.startNativeCapture()
     ,'nativeCaptureState': (): string => this.nativeCaptureState()
@@ -4887,6 +5038,8 @@ struct WebApp {
     { script: PICKER_SHIM_JS, scriptRules: ['*'] },
     { script: DESKTOP_CARRIER_JS, scriptRules: ['*'] },
     { script: BRAND_SHIM_JS, scriptRules: ['*'] },
+    // 会话区「加号」扫描入口（2026-11-25）：在网页 DOM 里注入两个扫描按钮
+    { script: SCAN_SHIM_JS, scriptRules: ['*'] },
     { script: THEME_SHIM_JS, scriptRules: ['*'] },
     { script: OPEN_LINK_SHIM_JS, scriptRules: ['*'] },
     { script: SIDEBAR_SHIM_JS, scriptRules: ['*'] },
@@ -4963,6 +5116,15 @@ struct WebApp {
 
   aboutToAppear(): void {
     this.nativeCaptureDisposed = false;
+    // 启动页首帧就要定深浅：web 主题还没上报，只能读系统 colorMode（见 systemAppearance）。
+    this.splashDark = this.systemAppearance() === 'dark';
+    /*
+     * 【JD-033 修复】启动页阶段（BOOTING，宿主启动 7–9s）根容器/Stack 的底色就是状态栏那一条的
+     * 实际来源；此前 `windowBg` 默认 #FFFFFF，且 applySystemBarTheme 只在阶段/外观变化时触发，
+     * 于是深色系统下启动页 logo 可见期间状态栏仍是白条，直到 web 就绪才变深。
+     * 首帧前先按系统深浅色初始化根容器底色，与启动页 `start_window_background` 同源。
+     */
+    this.windowBg = windowChromeFor(this.systemAppearance()).bg;
     /*
      * ArkWeb 网页下载落地（2026-11-15）：官方 Web 的「下载 Session 日志」是
      * `<a download>`，没有委托时任务停在 PENDING、文件不落地。安装一次全局委托，
@@ -5390,6 +5552,7 @@ struct WebApp {
     }
     try {
       this.applyBottomInsetPx(this.readBottomAvoidPx(win));
+      this.applyTopInsetPx(this.readTopAvoidPx(win));
       win.on('avoidAreaChange', this.bottomAvoidCb);
     } catch (e) {
       const err = e as BusinessError;
@@ -5397,7 +5560,61 @@ struct WebApp {
       hilog.warn(DOMAIN, TAG, '底部避让区读数失败（底部不沉浸）：%{public}s', err.message);
       this.bottomInsetArmed = false;
       this.bottomInsetVp = 0;
+      this.topInsetVp = 0;
     }
+  }
+
+  /**
+   * 读顶部状态栏高度（px）。
+   *
+   * 【为什么用 TYPE_SYSTEM】状态栏属于系统避让区；真机上 TYPE_SYSTEM 的 topRect 就是状态栏高度
+   * （与 entry 同源读数，见 docs/391 §4）。
+   */
+  private readTopAvoidPx(win: window.Window): number {
+    let sys: number = 0;
+    try {
+      sys = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM).topRect.height;
+    } catch (e) {
+      sys = 0;
+    }
+    this.dirPickerBridge.writeDiagMarkerPublic('diag-top-inset', `sysTop=${sys}`);
+    return sys;
+  }
+
+  /**
+   * 这一次的 SYSTEM top=0 是不是「瞬态」？
+   *
+   * 全屏 / 最大化：状态栏仍在（layout-fullscreen 只是让内容铺到它下面），
+   * `avoidAreaChange` 的 0 是窗口装饰重建时的瞬态读数 → 保留上次非零。
+   * 自由窗口 / 分屏：内容本来就不在状态栏下面，0 是合法读数 → 允许清零。
+   */
+  private shouldPreserveTopZero(): boolean {
+    if (this.decorWin === undefined) {
+      return true;
+    }
+    try {
+      const status: window.WindowStatusType = this.decorWin.getWindowStatus();
+      return status !== window.WindowStatusType.FLOATING
+        && status !== window.WindowStatusType.SPLIT_SCREEN;
+    } catch (err) {
+      return true;
+    }
+  }
+
+  /** 应用顶部避让（幂等：同值不重排）。 */
+  private applyTopInsetPx(px: number): void {
+    const rounded: number = px > 0 ? Math.round(px) : 0;
+    if (rounded === 0 && this.topInsetVp > 0 && this.shouldPreserveTopZero()) {
+      this.dirPickerBridge.writeDiagMarkerPublic('diag-top-inset', 'skip topPx=0（保留上次非零）');
+      return;
+    }
+    if (rounded === this.topAvoidPx) {
+      return;
+    }
+    this.topAvoidPx = rounded;
+    this.topInsetVp = rounded > 0 ? px2vp(rounded) : 0;
+    this.dirPickerBridge.writeDiagMarkerPublic('diag-top-inset',
+      `apply topPx=${rounded} vp=${this.topInsetVp}`);
   }
 
   /**
@@ -5458,6 +5675,8 @@ struct WebApp {
       return;
     }
     this.applyBottomInsetPx(this.readBottomAvoidPx(this.decorWin));
+    /* 状态栏高度也随系统条变化（旋转 / 折叠 / 导航方式），同一拍重读。 */
+    this.applyTopInsetPx(this.readTopAvoidPx(this.decorWin));
   }
 
   /**
@@ -5962,7 +6181,7 @@ struct WebApp {
    * 页面阶段变化 ⇒ 窗口外观（状态栏 / 窗口底色）**重判一次**。
    *
    * 【为什么必须有它（2026-10-16 用户报"启动的时候 APP 区跟状态栏就不是一个色"）】
-   * 启动期那格颜色取的是**启动页色**（`SPLASH_BG`），首帧之后要切成当前外观色；
+   * 启动期那格颜色取的是**启动页色**（按系统深浅色），首帧之后要切成应用外观色；
    * 而 `applySystemBarTheme` 的幂等闸门只认"外观" ⇒ 阶段变了它自己不会重跑（闸门会挡住）。
    * 这里先把闸门清掉再重放：启动页 → 应用界面这一跳，状态栏与窗口底色跟着换色，全程同色。
    */
@@ -5992,6 +6211,84 @@ struct WebApp {
    * 【失败只记日志】窗口可能尚未创建、或设备处于全屏（无状态栏）——那属正常时序，
    * 不该影响任何其他功能。同时保留**上一次成功的值**，避免抖动式重试。
    */
+  /**
+   * 系统当前深浅色（`'light' | 'dark'`）—— 启动页在 web 主题上报前就要取色，此时 `themeMode`
+   * 还是初值，不能用；直接读 UIAbility 的 `Configuration.colorMode`。应用 `setColorMode(NOT_SET)`
+   * 时它是系统值，用户固定外观时它是应用值，两种都等于「当前实际显示」，与
+   * `startWindowBackground` 的资源解析同源。
+   */
+  private systemAppearance(): string {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      if (ctx !== undefined
+        && ctx.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK) {
+        return 'dark';
+      }
+    } catch (e) {
+      // 取不到按浅色（与官方 boot 的 color-scheme:light 一致）
+    }
+    return 'light';
+  }
+
+  /**
+   * 采样网页**实际背景色**，用它填状态栏那条（2026-11-21 移动端沉浸修复）。
+   *
+   * 状态栏透明（layout-fullscreen + SYSTEM_BAR_HANDOFF_BG）后，露出的就是窗口/根容器底色。
+   * 之前取固定的 `windowChromeFor` 色（深 `#151517` / 浅 `#FFFFFF`）⇒ 与官方 Web 自己的背景
+   * 有色差，深色下表现为状态栏一条与页面割裂的色带。改为读首页真实背景：状态栏与页面天然同色。
+   */
+  private samplePageBackground(): void {
+    if (this.decorWin === undefined) {
+      return;
+    }
+    const js: string = '(function(){try{'
+      + 'function bg(el){var c="";try{c=getComputedStyle(el).backgroundColor||"";}catch(e){return "";}'
+      + 'if(!c||c==="transparent"||c==="rgba(0, 0, 0, 0)"){return "";}return c;}'
+      + 'return bg(document.body)||bg(document.documentElement)||"";}catch(e){return "";}})()';
+    try {
+      this.controller.runJavaScript(js, (err: BusinessError, result: string) => {
+        if (err) {
+          return;
+        }
+        this.applyPageBackground(typeof result === 'string' ? result : '');
+      });
+    } catch (e) {
+      // controller 未挂载：下一轮 onPageEnd 再采
+    }
+  }
+
+  /** 把 `rgb()/rgba()` 采样结果落到窗口/根容器底色；透明色不采纳。 */
+  private applyPageBackground(css: string): void {
+    const m: RegExpExecArray | null =
+      /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)/.exec(css);
+    if (m === null) {
+      return;
+    }
+    const alpha: number = m[4] === undefined ? 1 : Number(m[4]);
+    if (!(alpha >= 0.5)) {
+      return;
+    }
+    const hex2 = (v: string): string => {
+      const h: string = Number(v).toString(16).toUpperCase();
+      return h.length < 2 ? '0' + h : h;
+    };
+    const hex: string = '#' + hex2(m[1]) + hex2(m[2]) + hex2(m[3]);
+    if (this.pageBg === hex) {
+      return;
+    }
+    this.pageBg = hex;
+    this.windowBg = hex;
+    const win: window.Window | undefined = this.decorWin;
+    if (win !== undefined) {
+      try {
+        win.setWindowBackgroundColor(hex);
+      } catch (e) {
+        // 窗口未就绪：忽略
+      }
+    }
+    hilog.info(DOMAIN, TAG, '页面背景采样：%{public}s（状态栏随之同色）', hex);
+  }
+
   private applySystemBarTheme(mode: string): void {
     // 【2026-10-10 加固：先发布外观 + 重设三键，再吃幂等闸门】
     // ① 发布：能力层在窗口状态变化时要按"当前外观"重放三键配色，而它拿不到页面的 @State
@@ -6014,20 +6311,26 @@ struct WebApp {
      *
      * 启动期原本有三处浅色各说各话：`startWindowBackground = #FFFFFF`（首帧窗口底色）、启动视图自己画的
      * `#F3F7FB`、窗口外观的浅色也是 `#FFFFFF` ⇒ 用户看到"状态栏一条纯白 + 底下 `#F3F6FB` 的启动页"。
-     * 现在三处统一取 `SPLASH_BG`（`color.json` 的 `start_window_background` 已改同值）：
+     * 现在三处统一取「启动页色」（`start_window_background` 资源 与 `windowChromeFor(系统色)` 同源）：
      * splash 还没让位（BOOTING，或首次 LOADING）时状态栏与窗口底色都用它；首帧之后按外观切换。
      * **只换"我们拥有的那格颜色"** —— 是否拥有仍由下面的 `statusBarOwnedByApp` 判（自由窗口下照样交还系统）。
      */
     const splashUp: boolean = this.phase === WebPhase.BOOTING
       || (this.phase === WebPhase.LOADING && !this.everReady);
-    const barBg: string = splashUp ? SPLASH_BG : chrome.bg;
-    const lightIcon: boolean = splashUp ? false : chrome.lightIcon;
-    const contentColor: string = splashUp ? '#0F1115' : chrome.content;
+    /*
+     * 【2026-11-21 启动背景跟随系统】启动页不再恒为白：按系统当前深浅色取同一份窗口色
+     * （`windowChromeFor`），与窗口底色/启动视图同源，深色系统下从首帧起就是深底浅图标。
+     */
+    const splashChrome = windowChromeFor(this.systemAppearance());
+    const barBg: string = splashUp ? splashChrome.bg : chrome.bg;
+    const lightIcon: boolean = splashUp ? splashChrome.lightIcon : chrome.lightIcon;
+    const contentColor: string = splashUp ? splashChrome.content : chrome.content;
     // 顶栏（自绘）也随之翻转：官方外观是浅色→白底黑字，深色→黑底白字。
     // 【注意】这与"顶栏恒定白底黑字"的旧口径不同：报告 5 要求的是**跟随外观**，
     // 故这里按 mode 同时更新自绘顶栏，保证状态栏与顶栏不会是两种观感。
     // 【顶栏不取启动页色】它只在应用界面里出现 ⇒ 始终按外观取色，否则"启动页让位"那一刻顶栏会慢一拍。
-    this.windowBg = chrome.bg;
+    // 页面已采样到真实背景时以它为准：状态栏与页面同色（深色下不再出现割裂色带）。
+    this.windowBg = this.pageBg.length > 0 ? this.pageBg : chrome.bg;
     // 【2026-10-05 回归修复】三键配色必须与顶栏底色**同一拍**设置。
     // 见 applyDecorButtonMode 的完整注释：漏了这一步 ⇒ 深色外观下"黑底黑键、三键看不见"。
     this.applyDecorButtonMode(mode);
@@ -6081,7 +6384,9 @@ struct WebApp {
     } else {
       try {
         this.decorWin.setWindowSystemBarProperties({
-          statusBarColor: barBg,
+          /* 手持档已 layout-fullscreen（EntryAbility.enterHandheldImmersive）：底色透明，
+             让根容器自己的底色/页面铺到状态栏下方；图标明暗仍按外观设。 */
+          statusBarColor: this.handheld ? SYSTEM_BAR_HANDOFF_BG : barBg,
           statusBarContentColor: contentColor,
           isStatusBarLightIcon: lightIcon
         }).catch((e: BusinessError): void => {
@@ -6102,7 +6407,7 @@ struct WebApp {
       }
     }
     try {
-      this.decorWin.setWindowBackgroundColor(barBg);
+      this.decorWin.setWindowBackgroundColor(this.windowBg);
     } catch (e) {
       // 窗口底色失败不影响状态栏本身；闪白风险由"下次成功时再设"覆盖
       hilog.debug(DOMAIN, TAG, '窗口底色设置失败（忽略）');
@@ -6440,6 +6745,45 @@ struct WebApp {
     .backgroundColor('#66000000') // token-exempt: 原生模态遮罩
   }
 
+  /** 扫描配置：文档 → JPG/PDF；表格 → EXCEL */
+  private scanConfig(): DocumentScannerConfig {
+    const config: DocumentScannerConfig = new DocumentScannerConfig();
+    if (this.scanDocType === 1) {
+      config.supportType = [DocType.SHEET];
+      config.saveOptions = [SaveOption.EXCEL];
+    } else {
+      config.supportType = [DocType.DOC];
+      config.saveOptions = [SaveOption.JPG, SaveOption.PDF];
+    }
+    config.maxShotCount = 10;
+    return config;
+  }
+
+  /**
+   * 扫描回调：临时 URI 复制进沙箱，再通过被拦截的 file selector 回传网页。
+   * 这是 14:30 那版真机生成 XLSX 的链路（handleFileList）。
+   */
+  private handleScanResult(code: number, saveType: SaveOption, uris: string[]): void {
+    this.scanDocType = -1;
+    const event: OnShowFileSelectorEvent | undefined = this.pendingFileSelector;
+    this.pendingFileSelector = undefined;
+    if (event === undefined) {
+      hilog.warn(DOMAIN, TAG, '扫描完成但无 file selector 事件，无法回传网页');
+      return;
+    }
+    if (code !== 200 || uris.length === 0) {
+      hilog.info(DOMAIN, TAG, '扫描取消 / 失败 code=%{public}d，回传空列表', code);
+      event.result.handleFileList([]);
+      return;
+    }
+    const ctx: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    const kind: ScanSaveKind = saveType === SaveOption.EXCEL ? ScanSaveKind.EXCEL
+      : (saveType === SaveOption.PDF ? ScanSaveKind.PDF : ScanSaveKind.JPG);
+    const files = persistScanResults(uris, kind, ctx.filesDir);
+    hilog.info(DOMAIN, TAG, '扫描完成：%{public}d 件，回传网页', files.length);
+    event.result.handleFileList(scanUris(files));
+  }
+
   build() {
     Column() {
       Stack() {
@@ -6484,7 +6828,7 @@ struct WebApp {
           .javaScriptProxy({
             object: this.bridges,
             name: '__DSHM_BRIDGES__',
-            methodList: ['startPick', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture', 'cancelNativeCapture', 'openExternal', 'openFilePreview', 'openFileLocation', 'platformHandheld', 'platformForm', 'platformPcMode', 'platformSingleScreen', 'requestSystemBack', 'cloudSyncState', 'cloudSyncAction', 'readAloud', 'stopReadAloud', 'shareText'],
+            methodList: ['startPick', 'startScan', 'onThemeMode', 'startNativeCapture', 'nativeCaptureState', 'takeNativeCapture', 'cancelNativeCapture', 'openExternal', 'openFilePreview', 'openFileLocation', 'platformHandheld', 'platformForm', 'platformPcMode', 'platformSingleScreen', 'requestSystemBack', 'cloudSyncState', 'cloudSyncAction', 'readAloud', 'stopReadAloud', 'shareText'],
             controller: this.controller
           })
           .editMenuOptions(this.webEditMenuOptions)
@@ -6550,6 +6894,11 @@ struct WebApp {
              * 「新建会话」按钮属于侧栏常驻 DOM，页面加载完成即可点；SPA 内部路由不影响它。
              */
             this.webReady = true;
+            // 采样真实背景色（状态栏透明后露出的就是它）；样式可能稍晚稳定，400ms 再采一次（幂等）。
+            this.samplePageBackground();
+            setTimeout((): void => {
+              this.samplePageBackground();
+            }, 400);
             this.scheduleViewportReconcile('page-end');
             this.schedulePostLoadSettle();
             if (this.pendingLaunchAction.length > 0) {
@@ -6589,13 +6938,28 @@ struct WebApp {
           // 是 ArkWeb 默认选择器（input 触发）还是我们的 DocumentViewPicker」的
           // 决定性信号——默认实现也弹系统选择器，肉眼难分辨，靠本回调留痕。
           // 返回 false 走 ArkWeb 默认行为（弹默认选择器），不改变现有交互。
-          .onShowFileSelector((event?: OnShowFileSelectorEvent) => {
+          .onShowFileSelector((event?: OnShowFileSelectorEvent): boolean => {
             if (event === undefined) {
               return false;
             }
-            hilog.info(DOMAIN, TAG, 'onShowFileSelector 触发（ArkWeb 默认文件选择，input[type=file] 路径）');
+            hilog.info(DOMAIN, TAG, 'onShowFileSelector 触发（会话区扫描 / input[type=file]）');
             this.dirPickerBridge.writeDiagMarkerPublic('diag-file-selector');
-            return false;
+            if (!canIUse('SystemCapability.AI.Component.DocScan')) {
+              hilog.info(DOMAIN, TAG, '本机无 DocScan 能力，沿用系统文件选择器');
+              this.pendingScanMode = -1;
+              return false;
+            }
+            this.pendingFileSelector = event;
+            if (this.pendingScanMode >= 0) {
+              this.scanDocType = this.pendingScanMode;
+              this.pendingScanMode = -1;
+              hilog.info(DOMAIN, TAG, '扫描请求：启动 DocumentScanner');
+            } else {
+              hilog.info(DOMAIN, TAG, '普通文件选择：沿用系统文件选择器');
+              this.pendingFileSelector = undefined;
+              return false;
+            }
+            return true;
           })
           // web 侧 console 全量转发到 hilog：官方 web UI 的启动/运行错误
           // （__ModuleLoader__ boot 失败、API 调用异常等）在 ArkTS 层不可见，
@@ -6696,8 +7060,8 @@ struct WebApp {
             Progress({ value: this.progressValue, total: 100, type: ProgressType.Linear })
               .width(200)
               .height(6)
-              .color('#1c2430')
-              .backgroundColor('#e4e7ec') // token-exempt: 启动页进度条底色（D23），与顶栏描边同值
+              .color(this.splashDark ? '#FFFFFF' : '#1c2430')
+              .backgroundColor(this.splashDark ? '#2A2A2E' : '#e4e7ec') // 启动页进度条：随启动页深浅色
               .margin({ top: 40 })
           }
           .alignItems(HorizontalAlign.Center)
@@ -6706,7 +7070,7 @@ struct WebApp {
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor(SPLASH_BG) // token-exempt: 启动页底色；与 start_window_background / 启动期状态栏同源（为什么取白见 SPLASH_BG 头注）
+        .backgroundColor($r('app.color.start_window_background')) // 启动页底色：随系统深浅色（与 module.json5 的 startWindowBackground 同源）
         /*
          * 【启动页要真正"沉浸"进状态栏那一条】（2026-10-16 用户报"启动的时候 APP 区跟状态栏就不是一个色"）
          *
@@ -6723,6 +7087,17 @@ struct WebApp {
           this.handheld ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : this.bottomSafeAreaEdges())
         .onAppear(() => {
           this.startBrandAnimation();
+        })
+      }
+
+      // ── Vision Kit 文档扫描 / 表格提取（由输入框旁按钮触发，2026-11-25）──
+      // 扫描结果经 file selector 回传网页，作为附件进入会话区。
+      if (this.scanDocType >= 0) {
+        DocumentScanner({
+          scannerConfig: this.scanConfig(),
+          onResult: (code: number, saveType: SaveOption, uris: string[]): void => {
+            this.handleScanResult(code, saveType, uris);
+          }
         })
       }
 
@@ -6747,7 +7122,9 @@ struct WebApp {
         .justifyContent(FlexAlign.Center)
         .padding(24)
         .backgroundColor($r('sys.color.background_primary'))
-        .expandSafeArea(this.bottomSafeAreaTypes(), this.bottomSafeAreaEdges())
+        .expandSafeArea(
+          this.handheld ? [SafeAreaType.SYSTEM] : this.bottomSafeAreaTypes(),
+          this.handheld ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : this.bottomSafeAreaEdges())
       }
       if (this.workspaceBrowserOpen) {
         this.WorkspaceBrowserOverlay()
@@ -6803,10 +7180,14 @@ struct WebApp {
        * 【为什么这里现算而不是读一个 @State 结论】三键可见性由能力层在 loadContent 回调里
        * 发布（页面首帧之后才有）—— 渲染期求值天然跟上，不必再往状态里存第二份结论。
        */
-      .padding({ top: this.decorTopInsetNow() })
+      /* 顶部让位 = 三键区（自由窗口）+ 状态栏（layout-fullscreen 后的沉浸让位）。
+         两者互斥：全屏时 decorTopInsetNow()=0，自由窗口时 topInsetVp=0。 */
+      .padding({ top: this.decorTopInsetNow() + this.topInsetVp })
       // 底部手势区沉浸（docs/130）：Stack 是"把扩下去的额度接力给子组件"的那一环 ——
       // expandSafeArea 不向子组件传播，父容器的框不伸，子组件就还是被它框在安全区上沿。
-      .expandSafeArea(this.bottomSafeAreaTypes(), this.bottomSafeAreaEdges())
+      .expandSafeArea(
+        this.handheld ? [SafeAreaType.SYSTEM] : this.bottomSafeAreaTypes(),
+        this.handheld ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : this.bottomSafeAreaEdges())
     }
     .width('100%')
     .height('100%')
@@ -6829,6 +7210,8 @@ struct WebApp {
      * root / Stack / 覆盖层仍扩进安全区并画满主题底色，Web 内容框止于安全区上沿。
      * 这样固定底栏整体上移，小白条只覆盖原生底色带，不再盖住使用统计。
      */
-    .expandSafeArea(this.bottomSafeAreaTypes(), this.bottomSafeAreaEdges())
+    .expandSafeArea(
+      this.handheld ? [SafeAreaType.SYSTEM] : this.bottomSafeAreaTypes(),
+      this.handheld ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : this.bottomSafeAreaEdges())
   }
 }

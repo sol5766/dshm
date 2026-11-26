@@ -213,6 +213,20 @@ export const VM_MEMORY_PERFORMANCE_MIB = 1024;
 export const VM_TCG_BUFFER_MIB = 128;
 /** 16G+ 性能档的 TCG 翻译缓存（2 vCPU 下按 2× 预留）。 */
 export const VM_TCG_BUFFER_PERFORMANCE_MIB = 512;
+
+/**
+ * guest vCPU 数（2026-11-24 用户反馈：guest 内 node 退出 20–29 s、npm/pnpm 在 15–30 s
+ * 窗口内不返回）。TCI 解释器下单核算力是主瓶颈，多核至少能把 npm 的并行子进程、
+ * 内核调度与 I/O 等待摊开。经济档 4、性能档 6；`DSHM_VM_CPUS` 可覆盖（1..8）。
+ *
+ * 【为什么不直接给满】TCG 线程数与宿主负载线性相关，本机已是 20 核 / Load 25+
+ * 且内存吃紧；4/6 是"明显加速但不把宿主拖死"的折中。低内存设备仍受 memBudget 闸门保护。
+ */
+export const VM_CPUS_DEFAULT = 4;
+/** 16G+ 性能档的 vCPU 数。 */
+export const VM_CPUS_PERFORMANCE = 6;
+export const VM_CPUS_MIN = 1;
+export const VM_CPUS_MAX = 8;
 /** 16G+ 性能档启动 VM 前的可用内存地板。 */
 export const VM_MIN_AVAILABLE_PERFORMANCE_MIB = 1792;
 /**
@@ -252,9 +266,29 @@ export function vmTierProfile(env = process.env, totalMib = defaultMemTotal()) {
     tier,
     totalMib: typeof totalMib === 'number' && Number.isFinite(totalMib) ? totalMib : null,
     defaultMemoryMib: performance ? VM_MEMORY_PERFORMANCE_MIB : VM_MEMORY_DEFAULT_MIB,
+    defaultCpus: performance ? VM_CPUS_PERFORMANCE : VM_CPUS_DEFAULT,
     tcgBufferMib: performance ? VM_TCG_BUFFER_PERFORMANCE_MIB : VM_TCG_BUFFER_MIB,
     minAvailableMib: performance ? VM_MIN_AVAILABLE_PERFORMANCE_MIB : VM_MIN_AVAILABLE_MIB,
   };
+}
+
+/**
+ * 解析 guest vCPU 数（纯函数，`env` 是注入点）。
+ * 默认按内存档位（经济 4 / 性能 6），`DSHM_VM_CPUS` 可覆盖并夹在 [1, 8]。
+ */
+export function vmCpus(env = process.env, totalMib = defaultMemTotal()) {
+  const profile = vmTierProfile(env, totalMib);
+  const raw = String(env.DSHM_VM_CPUS ?? '').trim();
+  if (raw.length === 0) {
+    return profile.defaultCpus;
+  }
+  const value = Math.round(Number(raw));
+  if (!Number.isFinite(value) || value <= 0) {
+    return profile.defaultCpus;
+  }
+  if (value < VM_CPUS_MIN) return VM_CPUS_MIN;
+  if (value > VM_CPUS_MAX) return VM_CPUS_MAX;
+  return value;
 }
 
 /**
@@ -558,6 +592,8 @@ function bootArgv(extraShare = state.extraShare) {
   // guest 内存：`mem0` 的 size 与 `-m` 是同一份内存的两种说法（`-machine` 已把
   // `memory-backend=mem0`），所以**只取一个变量**喂两处 —— 写死两份常量迟早会漂。
   const memMib = vmMemoryMib();
+  // vCPU：2026-11-24 起按内存档位给 4 / 6，`DSHM_VM_CPUS` 可覆盖（见 vmCpus）。
+  const cpus = vmCpus();
   // 【为什么要有 earlycon】`console=ttyAMA0` 要等 PL011 驱动 probe 完才生效，
   // 而真机 P1 的症状（`query-status=running` 却永远等不到 QGA、串口恒 0 B）恰恰可能是
   // **更早**就停了（解压/MMU/PSCI/设备树）。earlycon 直写 PL011，把这之前的输出也捞出来。
@@ -608,7 +644,7 @@ function bootArgv(extraShare = state.extraShare) {
       const index = k + 1;
       return ['-chardev', `socket,id=term${index},path=${termSocket(index)},server=on,wait=off`];
     }).flat(),
-    '-smp', 'cpus=2,sockets=1,cores=2,threads=1',
+    '-smp', `cpus=${cpus},sockets=1,cores=${cpus},threads=1`,
     // 【两处同源】见上面 `memMib` 的注释；`DSHM_VM_MEMORY_MIB` 一改，两处一起变。
     '-object', `memory-backend-ram,id=mem0,size=${memMib}M,merge=off,prealloc=off`,
     '-m', `${memMib}M`,

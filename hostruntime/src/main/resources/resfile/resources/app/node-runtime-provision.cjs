@@ -244,7 +244,7 @@ function writeIfChanged(file, data, mode) {
  * 布置随包 `nodecli` 与 `node` wrapper。
  *
  * `nodecli` 只有约几十 KB，真正的 Node/V8/ICU 复用 HAP 里已有的
- * `libnode.so.137`。wrapper 在每次执行时注入 libnode 的绝对路径与动态库目录。
+ * `libnode.so.147`。wrapper 在每次执行时注入 libnode 的绝对路径与动态库目录。
  */
 function ensureBundledNodeCli(options = {}) {
   const binDir = String(options.binDir || '').trim();
@@ -253,7 +253,7 @@ function ensureBundledNodeCli(options = {}) {
   /*
    * 已验证的完整 Node（ArkTS 认领的 `Download/<包名>/node-brew`）。
    *
-   * 【P0-2 修复（docs/267 §2）】旧包装器只走「随包 nodecli + libnode.so.137」，
+   * 【P0-2 修复（docs/267 §2）】旧包装器只走「随包 nodecli + libnode.so.147」，
    * 而那条路在真机进程域里**必然失败**：node-cli 需要 libc++_shared.so，它落在
    * el1 bundle libs 与随包路径上，两者在当前域都不能被动态加载器映射
    * （dlopen 返回 EACCES，实测 2026-10-26/28 两次复现，包装器恒 rc=127）。
@@ -294,11 +294,11 @@ function ensureBundledNodeCli(options = {}) {
       '  echo "node：随包 nodecli 尚未就位" >&2',
       '  exit 127',
       'fi',
-      'if [ ! -f "$LIBS/libnode.so.137" ]; then',
-      '  echo "node：找不到 $LIBS/libnode.so.137" >&2',
+      'if [ ! -f "$LIBS/libnode.so.147" ]; then',
+      '  echo "node：找不到 $LIBS/libnode.so.147" >&2',
       '  exit 127',
       'fi',
-      'export DSHM_NODE_LIBNODE="$LIBS/libnode.so.137"',
+      'export DSHM_NODE_LIBNODE="$LIBS/libnode.so.147"',
       'case ":${LD_LIBRARY_PATH:-}:" in',
       '  *":$LIBS:"*) ;;',
       '  *) export LD_LIBRARY_PATH="$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;',

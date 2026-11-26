@@ -1,6 +1,6 @@
 {
   "$comment": "DSHM 端侧 dsh 核心树的配方（唯一事实来源）。tools/pack-core.mjs 读它来物化、裁剪、校验、打包。改版本/换移植件都只改这里。",
-  "coreVersion": "0.2.2-rc.5+dshm.1",
+  "coreVersion": "0.2.3-alpha.2+dshm.1",
   "platform": {
     "os": "openharmony",
     "cpu": "arm64"
@@ -79,9 +79,15 @@
         "**/tests/**",
         "**/__tests__/**"
       ]
+    },
+    {
+      "why": "@ohos-ports/img-sharp-wasm32 是 sharp 的 wasm32 回退平台包（zip 内 3.4 MB）：sharp.impl/lib/sharp.js 的 paths 候选列表逐项 try/catch（wasm32 档排在末位，删除只是少一个必然失败的回退），utility.js 的 versions require 也在条件分支内。启用下方 $comment_pruneCandidate_wasm32 记录的候选（2026-11-25 审核按其前置条件实核加载器后启用）。",
+      "dir": "@ohos-ports/img-sharp-wasm32",
+      "remove": true
     }
   ],
-  "$comment_pruneCandidate_wasm32": "候选裁剪项（**尚未启用**）：@ohos-ports/img-sharp-wasm32 是 sharp 的 wasm32 平台回退包，在鸿蒙/arm64 上用不到；而且它是全树唯一的 .wasm（D6 E20），在 --jitless 下 WASM 为 undefined，这个回退**即使被选中也必然失败**。删掉它能少一份体积、并把 sharp 的失败语义从'走到 WASM 然后 undefined'变成'明确说没有可用原生二进制'。之所以先不启用：需要先确认 sharp 的加载器是不是**无条件** require 这个包——若是条件 require，删掉安全；若无条件，删掉会直接抛错。这一步要能跑一次 Node 才能验，别凭猜删。",
+  "$comment_keep_libreofficeKitWasm": "@deepseek-ai/libreoffice-kit-wasm **不得裁剪**（2026-11-25 两端实测后回滚）：审核轮曾按『jitless 下 wasm 后端永不可用 + dsh-office-kit lookupEntry 对 MODULE_NOT_FOUND 优雅降级』整包裁掉，但真机上 office_render/office_convert/office_recalculate 全部硬错 `Cannot find module '@deepseek-ai/libreoffice-kit-wasm/package.json'`——设备侧实际加载路径会直接 require 该包的 package.json，不走审核所核的 lookupEntry 降级分支。证据：dist/acceptance/20261125-core023-audit-report.md §10 ⑦、PC 诊断 v3 R3、手机诊断 r51 P1-2。",
+  "$comment_pruneCandidate_wasm32": "候选裁剪项（**已于 2026-11-25 启用**，见上方 prune 规则）：@ohos-ports/img-sharp-wasm32 是 sharp 的 wasm32 平台回退包，在鸿蒙/arm64 上用不到；而且它是全树唯一的 .wasm（D6 E20），在 --jitless 下 WASM 为 undefined，这个回退**即使被选中也必然失败**。删掉它能少一份体积、并把 sharp 的失败语义从'走到 WASM 然后 undefined'变成'明确说没有可用原生二进制'。启用前核实：sharp.impl/lib/sharp.js 的加载是 paths 候选列表逐项 try/catch（条件式，非无条件 require）⇒ 删除安全。",
   "$comment_requiredNative": "打包后必须存在的原生产物；缺任何一个即失败（否则会在设备上以 boot 失败的形式暴露）",
   "requiredNative": [
     "koffi/build/koffi/openharmony_arm64/koffi.node",

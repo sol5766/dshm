@@ -38,6 +38,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { commonEventManager } from '@kit.BasicServicesKit';
 import { appRecovery } from '@kit.AbilityKit';
 import { process } from '@kit.ArkTS';
+import { http } from '@kit.NetworkKit';
 import fs from '@ohos.file.fs';
 
 import { DshHost, NodeRuntime, probeNativeBindings, resolveHostDataDir, resolveHostModulePaths } from 'hostruntime';
@@ -84,6 +85,8 @@ import {
   windowChromeFor,
   statusBarOwnedByApp,
   SYSTEM_BAR_HANDOFF_BG,
+  StartupPhase,
+  startupMarks,
 } from 'platform';
 import type { NotificationDraft, RememberedHost, RememberedToken } from 'platform';
 import { assertNoSensitiveContent, notificationFor, SessionHub } from 'appstate';
@@ -531,6 +534,11 @@ export default class EntryAbility extends UIAbility {
   private knockWindowId: number = -1;
   /** 本实例的主窗口对象；几何读写与监听释放都要用它 */
   private mainWindow: window.Window | undefined = undefined;
+  /** dsh-pet 桌面宿主只启动一次；插件未装时 PetAbility 会因页面 404 自行退出。 */
+  private petStarted: boolean = false;
+  private petWatchTimer: number = -1;
+  private petQueryBusy: boolean = false;
+  private petHttp: http.HttpRequest = http.createHttp();
   private pendingAuthReturnWant: Want | undefined = undefined;
   /** 窗口记忆（preferences 句柄），onWindowStageCreate 时 attach */
   private memory: WindowMemory = new WindowMemory();
@@ -744,6 +752,14 @@ export default class EntryAbility extends UIAbility {
   };
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    /*
+     * 启动分段标记 S0（docs/201 §3-P2 / §6-A1）。
+     * 【为什么是第一行】这里是"能力入口"，之后的每一段都要相对它计时；
+     * 埋点自身只做一次 mkdir + 一次拼路径，失败静默，不会影响启动。
+     */
+    startupMarks.init(this.context.filesDir);
+    startupMarks.mark('S0', StartupPhase.PROCESS, 'onCreate_enter',
+      `kind=${launchParam.launchReason}`);
     if (typeof want.uri === 'string' && want.uri.trim().toLowerCase() === AUTH_RETURN_URI) {
       this.pendingAuthReturnWant = want;
     }
@@ -771,20 +787,28 @@ export default class EntryAbility extends UIAbility {
      * 原生绑定与 Node 版本由共享 hostruntime HSP 统一探测。两条读数都来自同一个
      * 原生库域；HAP 不再各自 import libdshhost.so，避免产品壳与 HSP 出现两套句柄。
      */
-    const nativeProbe = probeNativeBindings();
-    if (nativeProbe.probeOk) {
-      hilog.info(DOMAIN, TAG, 'DSHM-PROBE cmake 构建的原生模块可绑定，返回值=%{public}s',
-        nativeProbe.probeValue);
-    } else {
-      hilog.error(DOMAIN, TAG, 'DSHM-PROBE cmake 模块绑定失败：%{public}s',
-        nativeProbe.probeError.length > 0 ? nativeProbe.probeError : '(空错误)');
-    }
-    if (nativeProbe.runtimeVersion.length > 0) {
-      hilog.info(DOMAIN, TAG, 'DSHM-RUNTIME libnode 版本 = %{public}s', nativeProbe.runtimeVersion);
-    } else {
-      hilog.error(DOMAIN, TAG, 'DSHM-RUNTIME 调用原生模块失败：%{public}s',
-        nativeProbe.runtimeError.length > 0 ? nativeProbe.runtimeError : '(空错误)');
-    }
+    /*
+     * 【2026-11-25 启动优化（docs/201 §6-B3）】原生绑定探测**只用于日志**（DSHM-PROBE /
+     * DSHM-RUNTIME），不参与任何首帧或启动决策 ⇒ 从 onCreate 同步段挪到下一个宏任务，
+     * 避免 `dlopen` + 原生方法调用与首帧抢同一个 ArkTS 线程。
+     * 与 `warmWebEngineOnce()` 同一手法：诊断类工作一律让位于「先出首帧」。
+     */
+    setTimeout((): void => {
+      const nativeProbe = probeNativeBindings();
+      if (nativeProbe.probeOk) {
+        hilog.info(DOMAIN, TAG, 'DSHM-PROBE cmake 构建的原生模块可绑定，返回值=%{public}s',
+          nativeProbe.probeValue);
+      } else {
+        hilog.error(DOMAIN, TAG, 'DSHM-PROBE cmake 模块绑定失败：%{public}s',
+          nativeProbe.probeError.length > 0 ? nativeProbe.probeError : '(空错误)');
+      }
+      if (nativeProbe.runtimeVersion.length > 0) {
+        hilog.info(DOMAIN, TAG, 'DSHM-RUNTIME libnode 版本 = %{public}s', nativeProbe.runtimeVersion);
+      } else {
+        hilog.error(DOMAIN, TAG, 'DSHM-RUNTIME 调用原生模块失败：%{public}s',
+          nativeProbe.runtimeError.length > 0 ? nativeProbe.runtimeError : '(空错误)');
+      }
+    }, 0);
     /*
      * 【2026-10-06 落成；2026-10-14 更正为**三端**】目录授权**跨启动恢复**
      * （"侧边栏工作区文件"重启后还能不能读的关键）。
@@ -860,6 +884,9 @@ export default class EntryAbility extends UIAbility {
       // 保证 host 延迟启动时 vm.js 一定能读到同 pid 的前台状态。
       writeAppLifecycle(this.context.filesDir, true, 'onCreate');
     }
+    // S1：静态配置（ArkWeb 内存档位 / 主题模式）、启动参数、前台态均已就绪。
+    // 之后的一切（prefs 读取、宿主启动）都不再阻塞首帧。
+    startupMarks.mark('S1', StartupPhase.ABILITY, 'launch_params_published');
     this.prefs.attach(this.context).then(async () => {
       const mode: ThemeMode = await this.prefs.loadThemeMode();
       // 应用**并如实记录是否成功**：失败时页面会把这个事实说出来（见 Index 的主题写回路径），
@@ -1188,6 +1215,9 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
     AppStorage.setOrCreate<boolean>(KEY_HOST_AUTOCONNECT, true);
     // Web 壳页只认这个键：handleUrl 是本次进程拿到的完整启动 URL，token 必然有效
     AppStorage.setOrCreate<string>(KEY_HOST_LAUNCH_URL, handleUrl);
+    // S5：宿主就绪且启动 URL 已发布 —— 从这里开始才是 Web 的加载成本
+    startupMarks.mark('S5', StartupPhase.HOST, 'host_ready_url_published',
+      `tokenLen=${token.length}`);
     this.persistConnectedHost(baseUrl, token);
     hilog.info(DOMAIN, TAG, 'DSHM-AUTO 已接入本端 Host：base=%{public}s tokenLen=%{public}d',
       baseUrl, token.length);
@@ -1401,6 +1431,8 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
+    // S2：窗口阶段建立（此后 loadContent → 首帧 → 宿主链，三段可分别计时）
+    startupMarks.mark('S2', StartupPhase.WINDOW, 'window_stage_create');
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
@@ -1521,6 +1553,9 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
       /* 【启动链埋点 2026-11-01】W 级：info 在端侧导出的日志里看不到（实证：本应用 0 条 I 级）。
        * 这一行是「页面树建好、准备调度宿主链」的证据点；没有它 ⇒ 连 loadContent 回调都没到。 */
       hilog.warn(DOMAIN, TAG, 'DSHM-TRACE loadContent 回调到达，准备调度宿主链');
+      // S3：页面树已建好（首帧提交紧随其后）。这是"感知启动"的真实起点。
+      startupMarks.mark('S3', StartupPhase.FIRST_FRAME, 'load_content_callback',
+        err.code ? 'load-failed' : 'ok');
       // 首帧之后再拉宿主（见 HOST_START_DELAY_AFTER_FIRST_FRAME_MS 与 onCreate 里的注释）
       this.scheduleHostStartAfterFirstFrame(err.code ? 0 : HOST_START_DELAY_AFTER_FIRST_FRAME_MS);
     });
@@ -1642,6 +1677,8 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
     this.hostStartScheduled = true;
     setTimeout(async (): Promise<void> => {
       hilog.warn(DOMAIN, TAG, '首帧后启动宿主链（延迟 %{public}d ms）', delayMs);
+      // S4：宿主链开始（S4→S5 就是"起核心 + 起 Node"的真实成本）
+      startupMarks.mark('S4', StartupPhase.HOST, 'host_chain_scheduled', `delay=${delayMs}ms`);
       /*
        * 【启动链埋点 2026-11-01】3 秒心跳：区分"卡住"与"只是慢"。
        * 下面这个 await（目录授权）在启动页盖着的时候跑；不 resolve 就到不了 startHost。
@@ -1661,15 +1698,19 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
       }
       this.autoStartHostForDiagnosis();
       /*
-       * 【2026-11-15 冷启动优化】宿主线程已经在跑自己的插件图，UI 线程此时是空的 ⇒
-       * 趁着这段等待把 ArkWeb 引擎预热掉，而不是等就绪后再串行装载。
+       * 【2026-11-25 启动优化（docs/201 §6-B3）】预热从"紧邻宿主启动"改为"下一个宏任务"。
        *
-       * 位置刻意在 `autoStartHostForDiagnosis()` **之后**：`initializeWebEngine()` 是同步调用，
-       * 放在它之前会把宿主线程的创建整体推后同样长的时间，等于白忙。
-       * 前提（SDK 明文）：UI 线程同步调用、全局一次、早于任何 Web 组件初始化 —— 本处三点都满足
-       * （Web 组件在 `phase !== BOOTING` 才挂载，此刻仍未创建）。失败只降级。
+       * `initializeWebEngine()` 是 UI 线程**同步**调用。它紧跟在 `autoStartHostForDiagnosis()`
+       * 之后时，宿主链已经排队的 Promise 回调（probe / installBundled / start 的 `.then`）
+       * 会被这一次同步调用整体压后 —— 那段时间直接计入「S4 → S5 宿主就绪」。
+       * 让出一个宏任务后，宿主链先跑自己的回调，预热在同一个空闲窗口内完成。
+       *
+       * 前提不变（SDK 明文）：UI 线程同步调用、全局一次、早于任何 Web 组件初始化 ——
+       * 此刻 `Web` 仍未创建（`phase === BOOTING`），三点都满足。失败只降级。
        */
-      this.warmWebEngineOnce();
+      setTimeout((): void => {
+        this.warmWebEngineOnce();
+      }, 0);
       /*
        * ── superagent 的**手动**起停（2026-11-02，docs/346 §4 方案 A）────────────
        * 官方要求它跑在独立 profile / 独立端口 / 能独立重启；端侧只有"第二进程"能做到，
@@ -2315,6 +2356,75 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
    *
    * 两者都失败时只记日志：此时窗口仍是用户自己的状态，不会比"唤不回来"更糟。
    */
+  /** 轮询 dsh-pet 配置：只有存在 desktop/both 宠物才启动桌面宿主，避免无宠时多出黑框。 */
+  private startPetWatcher(): void {
+    if (isHandheldForm() || this.petWatchTimer >= 0) {
+      return;
+    }
+    this.pollPetConfig();
+    this.petWatchTimer = setInterval((): void => {
+      this.pollPetConfig();
+    }, 2000);
+  }
+
+  private pollPetConfig(): void {
+    if (this.petQueryBusy) {
+      return;
+    }
+    const base: string = AppStorage.get<string>('dshLastHostUrl') ?? '';
+    const token: string = AppStorage.get<string>('dshLastHostToken') ?? '';
+    if (base.length === 0) {
+      return;
+    }
+    this.petQueryBusy = true;
+    const origin: string = base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+    const url: string = origin + '/dsh-pet-7340/config'
+      + (token.length > 0 ? '?token=' + encodeURIComponent(token) : '');
+    this.petHttp.request(url, {
+      method: http.RequestMethod.GET,
+      connectTimeout: 3000,
+      readTimeout: 3000,
+      expectDataType: http.HttpDataType.STRING
+    }).then((resp: http.HttpResponse): void => {
+      this.petQueryBusy = false;
+      const body: string = String(resp.result ?? '');
+      const hasDesktop: boolean = resp.responseCode === 200
+        && /"display"\s*:\s*"(desktop|both)"/.test(body);
+      if (hasDesktop && !this.petStarted) {
+        // 注意：不要在这里先置 petStarted——startPetAbility 自带同一守卫，
+        // 先置 true 会让它直接 return，PetAbility 永远起不来。
+        this.startPetAbility();
+      } else if (!hasDesktop && this.petStarted) {
+        // PetAbility 自己也会轮询并在无桌面宠物时退出；这里复位，便于用户再次开启。
+        this.petStarted = false;
+      }
+    }).catch((_e: BusinessError): void => {
+      this.petQueryBusy = false;
+    });
+  }
+
+  /** 启动 dsh-pet 桌面宿主 Ability（仅 PC/2in1）。 */
+  private startPetAbility(): void {
+    if (this.petStarted || isHandheldForm()) {
+      return;
+    }
+    this.petStarted = true;
+    try {
+      const want: Want = {
+        bundleName: this.context.abilityInfo.bundleName,
+        abilityName: 'PetAbility',
+        moduleName: 'entry'
+      };
+      this.context.startAbility(want).then((): void => {
+        hilog.info(DOMAIN, TAG, 'dsh-pet 桌面宿主已启动');
+      }).catch((e: BusinessError): void => {
+        hilog.warn(DOMAIN, TAG, 'dsh-pet 桌面宿主启动失败：%{public}d %{public}s', e.code, e.message);
+      });
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'dsh-pet 桌面宿主启动异常');
+    }
+  }
+
   private ensureWindowShown(): void {
     const win: window.Window | undefined = this.mainWindow;
     if (win === undefined) {
@@ -2322,13 +2432,33 @@ const dataDir: string = resolveHostDataDir(ctx.filesDir, !isHandheldForm());
     }
     // 取一个非空别名给异步回调用：ArkTS 不做跨回调的非空收窄
     const target: window.Window = win;
+    /*
+     * 【2026-11-23 亮屏顶窗修复】原实现无条件 `restore()`，失败后兜底 `showWindow()`。
+     * 亮屏时系统会把任务回一次前台（onForeground），平板/未最小化的窗口 `restore()` 往往失败，
+     * 于是每次都走 `showWindow()` 把窗口顶到最前 —— 用户看到的就是「一亮屏 DSHM 自己跳到前台」。
+     *
+     * 现在先读窗口真实状态：**只有 MINIMIZE 才恢复**，未最小化时什么都不做；
+     * 不再兜底 `showWindow()`（它会把未最小化的窗口也顶到最前，正是故障来源）。
+     *
+     * `getWindowStatus()` 是**同步** API（@since 12，直接返回 `WindowStatusType`，
+     * 读不到抛 801/1300002）—— 不是 Promise，不能 `.then`；用 try/catch 包住，
+     * 读失败按「不动作」处理（与本文件 `readWindowStatusOf` 的用法同口径）。
+     */
+    let status: window.WindowStatusType;
+    try {
+      status = target.getWindowStatus();
+    } catch (e) {
+      const err: BusinessError = e as BusinessError;
+      hilog.debug(DOMAIN, TAG, 'getWindowStatus 失败（不恢复窗口）：%{public}s', err.message);
+      return;
+    }
+    if (status !== window.WindowStatusType.MINIMIZE) {
+      return;
+    }
     target.restore().then(() => {
-      hilog.info(DOMAIN, TAG, '主窗已恢复到前台');
+      hilog.info(DOMAIN, TAG, '主窗已从最小化恢复');
     }).catch((restoreErr: BusinessError) => {
-      hilog.debug(DOMAIN, TAG, 'restore 未生效（可能本就未最小化）：%{public}s', restoreErr.message);
-      target.showWindow().catch((showErr: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, '唤回主窗失败：%{public}s', showErr.message);
-      });
+      hilog.debug(DOMAIN, TAG, 'restore 未生效：%{public}s', restoreErr.message);
     });
   }
 
@@ -2561,6 +2691,8 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
     if (this.launchParams.kind !== WindowKind.MAIN) {
       return;
     }
+    /* dsh-pet 桌面宿主：仅 PC/2in1；按 /dsh-pet-7340/config 的 display 决定是否启动。 */
+    this.startPetWatcher();
     /* 【2026-11-07】主窗已就绪：平板沉浸式状态栏在这之后才真正能设（见 onWindowStageCreate 的时序注）。 */
     this.enterTabletImmersive();
     // ── 自由窗口标题栏沉浸（2026-09-21 品牌对齐）──────────────────────────
@@ -2603,12 +2735,17 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
      * 现在的取舍（用户 2026-11-12 裁决「A」）：**自由窗口 / 分屏里保留系统标题栏与三键**，
      * 换来分屏与拖拽；全屏（含手机全屏）仍然隐藏装饰、保持沉浸。手机与 PC/2in1 的
      * 装饰策略不变（PC 档 isHandheldForm() 为假，本来就不走这一段）。 */
-    if (isHandheldForm()) {
-      const statusPre: number | undefined = readWindowStatusOf(win);
-      this.pcMode = statusPre === window.WindowStatusType.FLOATING;
-      AppStorage.setOrCreate<boolean>(KEY_PC_MODE, this.pcMode);
-      this.publishDecorKeysVisible(false);
-    } else {
+    /* 【2026-11-19 修复 A：撤销 11-12 留下的"手持档早分支"】
+     *
+     * 11-12 落地 docs/416 时，这里多出一个 `if (isHandheldForm()) { …只设 pcMode… } else { …原链… }`
+     * 的包裹：手持档（平板）只写 `pcMode` 与 `publishDecorKeysVisible(false)` 就结束，
+     * `setWindowDecorVisible(true)`（FLOATING 恢复装饰）、`setWindowTitleButtonVisible`、
+     * `decorPresentOf`、`writeDecorCapsDiag`、`reassertWindowChrome` **一次都执行不到**。
+     * 真机读数因此恒为 `decor=skip buttons=skip show=false`（与用户 2026-11-19 的探针一致）。
+     *
+     * 现在统一走下面这条完整链：`pcMode = 手持 && FLOATING`（PC 档 isHandheldForm() 为假
+     * ⇒ 恒 false，行为逐字不变）。全屏仍隐藏装饰保持沉浸；自由窗口/分屏才把系统标题栏与
+     * 三键拉回来，分屏与拖拽入口随之恢复。 */
     let statusPre: window.WindowStatusType | undefined = undefined;
     try {
       statusPre = win.getWindowStatus();
@@ -2729,7 +2866,6 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
       '窗口装饰探测：visible=%{public}s height=%{public}d status=%{public}s ⇒ 三键在=%{public}s',
       decorVisibleRaw.length > 0 ? decorVisibleRaw : 'ok', decorHeightVp, statusRaw,
       decorPresent ? 'yes' : 'no');
-    }
     this.memoryReady.then((): Promise<boolean> => {
       return this.memory.restoreMainGeometry(win);
     }).then((restored: boolean) => {
@@ -2900,11 +3036,17 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
       return;
     }
     const target: window.Window = win;
+    /*
+     * 【图标明暗跟随当前外观】原先写死 `isStatusBarLightIcon: false`（深色图标）——
+     * 深色系统/深色启动页上就是「深图标压深底」，看起来像状态栏没跟过来。
+     * 启动期页面还没上报，`appearanceMode()` 会回落到系统 colorMode（与启动页同源）。
+     */
+    const chrome = windowChromeFor(this.appearanceMode());
     target.setWindowLayoutFullScreen(true).then(() => {
       hilog.info(DOMAIN, TAG, '平板沉浸：layout-fullscreen 已开启');
       const props: window.SystemBarProperties = {
         statusBarColor: '#00000000',
-        isStatusBarLightIcon: false
+        isStatusBarLightIcon: chrome.lightIcon
       };
       return target.setWindowSystemBarProperties(props);
     }).then(() => {
@@ -3308,7 +3450,22 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
    */
   private appearanceMode(): string {
     const v: string | undefined = AppStorage.get<string>(KEY_APPEARANCE_MODE);
-    return v === 'dark' ? 'dark' : 'light';
+    if (v === 'dark' || v === 'light') {
+      return v;
+    }
+    /*
+     * 【2026-11-21 启动白底修复】页面还没上报（冷启动首帧）时不再默认浅色，改按
+     * **系统当前深浅色**取 —— 否则深色系统下建窗就是白底，首帧后才变深，用户看到白闪。
+     * 应用 `setColorMode(NOT_SET)` 时这里读到的就是系统值；用户固定外观时读到的是应用值，
+     * 两种都等于「当前实际显示」，与 `startWindowBackground` 的资源解析同源。
+     */
+    try {
+      return this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+        ? 'dark'
+        : 'light';
+    } catch (e) {
+      return 'light';
+    }
   }
 
   /**

@@ -1371,6 +1371,38 @@ export default class EntryAbility extends UIAbility {
     this.revokeDecorStyle();
     this.decorStage = windowStage;
     this.decorContentReady = false;
+    /*
+     * 【2026-11-21 启动期沉浸】深色系统下启动页显示期间状态栏仍是白的：
+     * `enterHandheldImmersive()` 在 loadContent 回调**之后**才执行，且原先只设透明状态栏、
+     * 没设窗口底色 ⇒ 透明后露出默认白底（APP 区深色、状态栏白）。
+     * 这里在 loadContent **之前**先把 layout-fullscreen + 窗口底色 + 图标明暗设好，
+     * 启动页首帧即与页面同色；失败由 afterWindowStageReady 的那次兜底。
+     */
+    if (isHandheldForm()) {
+      try {
+        const early: window.Window = windowStage.getMainWindowSync();
+        const earlyChrome = windowChromeFor(this.appearanceMode());
+        try {
+          early.setWindowBackgroundColor(earlyChrome.bg);
+        } catch (e) {
+          // 窗口未就绪：忽略
+        }
+        early.setWindowLayoutFullScreen(true).then((): Promise<void> => {
+          return early.setWindowSystemBarProperties({
+            statusBarColor: SYSTEM_BAR_HANDOFF_BG,
+            statusBarContentColor: earlyChrome.content,
+            isStatusBarLightIcon: earlyChrome.lightIcon
+          });
+        }).then((): void => {
+          hilog.info(DOMAIN, TAG, '启动期沉浸：基础色=%{public}s 图标=%{public}s',
+            earlyChrome.bg, earlyChrome.lightIcon ? '浅色' : '深色');
+        }).catch((e: BusinessError): void => {
+          hilog.warn(DOMAIN, TAG, '启动期沉浸设置失败（afterWindowStageReady 兜底）：%{public}s', e.message);
+        });
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, '启动期沉浸取窗失败（afterWindowStageReady 兜底）');
+      }
+    }
     windowStage.loadContent('pages/WebApp', (err) => {
       if (this.decorStage !== windowStage) {
         return;
@@ -2076,6 +2108,10 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
     if (this.launchParams.kind !== WindowKind.MAIN) {
       return;
     }
+    /* 【2026-11-19 手机沉浸（用户报「多任务界面不沉浸」）】
+       主窗已就绪（mainWindow 已赋值）才设，时序与 entry 的 enterTabletImmersive 同源：
+       早于这一步调用时 mainWindow 还是 undefined，会直接 early-return。 */
+    this.enterHandheldImmersive();
     // ── 自由窗口标题栏沉浸（2026-09-21 品牌对齐）──────────────────────────
     // 官方文档（窗口沉浸式·自由窗口标题栏沉浸案例）：setWindowDecorVisible(false)
     // 隐藏系统标题栏的应用图标+应用名（也就消除了与新应用图标不同步的旧图），
@@ -2706,7 +2742,22 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
    */
   private appearanceMode(): string {
     const v: string | undefined = AppStorage.get<string>(KEY_APPEARANCE_MODE);
-    return v === 'dark' ? 'dark' : 'light';
+    if (v === 'dark' || v === 'light') {
+      return v;
+    }
+    /*
+     * 【2026-11-21 启动白底修复】页面还没上报（冷启动首帧）时不再默认浅色，改按
+     * **系统当前深浅色**取 —— 否则深色系统下建窗就是白底，首帧后才变深，用户看到白闪。
+     * 应用 `setColorMode(NOT_SET)` 时这里读到的就是系统值；用户固定外观时读到的是应用值，
+     * 两种都等于「当前实际显示」，与 `startWindowBackground` 的资源解析同源。
+     */
+    try {
+      return this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+        ? 'dark'
+        : 'light';
+    } catch (e) {
+      return 'light';
+    }
   }
 
   /**
@@ -2771,6 +2822,53 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
   }
 
   /**
+   * 手机沉浸式状态栏（2026-11-19，用户报「多任务界面不沉浸」）。
+   *
+   * 【做什么】把主窗切到 **layout-fullscreen**（内容铺到状态栏下方），状态栏底色置透明。
+   * 页面侧按 `topInsetVp`（TYPE_SYSTEM.topRect）把内容下移同样的量 ⇒ 状态栏那一条由
+   * 应用自己的底色画，文字不会被压住；最近任务里的窗口快照也就跟着铺满整卡，不再有
+   * 一条与页面割裂的色带（与平板 `enterTabletImmersive()` 同一结构）。
+   *
+   * 【为什么手机现在才做】此前手机只做「切后台时把状态栏交还系统」（docs/170），
+   * 前台仍由系统画一条独立底色；用户 1010018 复报最近任务界面不沉浸 ⇒ 需要窗口级沉浸。
+   *
+   * 【失败只降级】任何一步失败都只记日志：最坏情况就是回到改动前的普通布局。
+   */
+  private enterHandheldImmersive(): void {
+    if (!isHandheldForm()) {
+      return;
+    }
+    const win: window.Window | undefined = this.mainWindow;
+    if (win === undefined) {
+      return;
+    }
+    const target: window.Window = win;
+    /*
+     * 【2026-11-21 启动白条】只设透明、不设窗口底色 ⇒ 透明后露出默认白底（APP 区深色、状态栏白）。
+     * 这里按当前外观同时设窗口底色与图标明暗；启动更早处（onWindowStageCreate）还有一次同样设置。
+     */
+    const chrome = windowChromeFor(this.appearanceMode());
+    try {
+      target.setWindowBackgroundColor(chrome.bg);
+    } catch (e) {
+      // 窗口未就绪：忽略
+    }
+    target.setWindowLayoutFullScreen(true).then(() => {
+      hilog.info(DOMAIN, TAG, '手机沉浸：layout-fullscreen 已开启');
+      return target.setWindowSystemBarProperties({
+        statusBarColor: SYSTEM_BAR_HANDOFF_BG,
+        statusBarContentColor: chrome.content,
+        isStatusBarLightIcon: chrome.lightIcon
+      });
+    }).then(() => {
+      hilog.info(DOMAIN, TAG, '手机沉浸：状态栏透明 + 图标%{public}s + 窗口底色 %{public}s',
+        chrome.lightIcon ? '浅色' : '深色', chrome.bg);
+    }).catch((e: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, '手机沉浸设置失败（降级为普通布局）：%{public}s', e.message);
+    });
+  }
+
+  /**
    * 按**当前生效外观**把窗口外观三件（状态栏配色 / 窗口底色 / 三键配色）再收敛一次。
    *
    * 【为什么要在前后台边界上做】任务卡片用的是**窗口快照**：用户"切浅色 → 立刻切后台"时，
@@ -2832,7 +2930,8 @@ return host.stop('EntryAbility.stopHostThenExit：应用退出流程').then((res
     } else {
       try {
         win.setWindowSystemBarProperties({
-          statusBarColor: chrome.bg,
+          /* 手持档已 layout-fullscreen：底色透明，让页面/窗口自己的底色透上来（与平板同口径）。 */
+          statusBarColor: handheld ? SYSTEM_BAR_HANDOFF_BG : chrome.bg,
           statusBarContentColor: chrome.content,
           isStatusBarLightIcon: chrome.lightIcon
         }).catch((e: BusinessError): void => {

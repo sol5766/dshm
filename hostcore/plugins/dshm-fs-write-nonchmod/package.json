@@ -18,7 +18,7 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@deepseek-ai/dsh-fs": "0.2.2-rc.5",
-    "@deepseek-ai/dsh-fs-sandbox": "0.2.2-rc.5"
+    "@deepseek-ai/dsh-fs": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-fs-sandbox": "0.2.3-alpha.2"
   }
 }

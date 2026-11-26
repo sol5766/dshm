@@ -49,14 +49,23 @@
  * 退出码：0 = 干净/成功；1 = 体检判红（有槽不是中性态 / 存在活着的 io_uring 系统调用）；
  *         2 = 拒绝操作（二进制不是预期的那份，或槽里不是预期的原字节）；3 = 用法错误。
  */
-import { readFileSync, writeFileSync, copyFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, copyFileSync, existsSync, unlinkSync, renameSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_SO = join(ROOT, 'hostruntime/libs/arm64-v8a/libnode.so.137');
-const DEFAULT_ORIG = join(ROOT, 'dist/node/libnode.so.137.orig');
+
+/** 当前随包件：优先 147（Node 26），其次 137（Node 24 回滚基线）。 */
+function defaultSo() {
+  const p147 = join(ROOT, 'hostruntime/libs/arm64-v8a/libnode.so.147');
+  return existsSync(p147) ? p147 : join(ROOT, 'hostruntime/libs/arm64-v8a/libnode.so.137');
+}
+function defaultOrig(ver) {
+  return join(ROOT, `dist/node/libnode.so.${ver}.orig`);
+}
+const DEFAULT_SO = defaultSo();
+const DEFAULT_ORIG = defaultOrig(DEFAULT_SO.endsWith('.147') ? '147' : '137');
 
 // ---------------------------------------------------------------- 已知基线（本仓随包件）
 /** 随包 `libnode.so.137` 的字节指纹（= 已中性化状态）。 */
@@ -119,6 +128,81 @@ export const NEUTRALISED_WORD = 0x12800000;
 /** `movz w0,#425/426/427` 的指令字。 */
 export const MOVZ_WORD = { 425: 0x52803520, 426: 0x52803540, 427: 0x52803560 };
 
+// ---------------------------------------------------------------- 版本布局表
+/**
+ * Node **v26.13.0 预编译件**（`libnode.so.147`，119,875,640 B，2026-11-23 换入）的布局。
+ * - `syscall@plt` 桩 vaddr `0x7049dc0` 由 `.rela.plt` 符号 `syscall` 解析确认；
+ * - 17 个 io_uring 槽逐个反汇编确认（425×2 / 426×14 / 427×1）；
+ * - 兄弟包装器 nr=90 / nr=57 的 `bl` 用于反推并交叉验证桩地址；
+ * - `pristine` = 换入时的原样（**仍是活的 io_uring**，2026-11-24 手机 SIGSYS 实测的根因）。
+ */
+export const LAYOUT_147 = {
+  soname: 'libnode.so.147',
+  size: 119879736,
+  pristine: {
+    sha256: '9cd15d25724df6604e67c3c0d7cf253fc9cd2d2d79195e7467435e859c058180',
+    size: 119875640,
+  },
+  /** 打完全部槽并重新签名后的目标态（2026-11-24 手机修复轮实填）。 */
+  shipped: { sha256: 'c58785c96e224644dd6ba8bb4a7e22aa23257d494f92c59c6878d2581862bcd1', size: 119879736, reSigned: true },
+  syscallStub: 0x7049dc0,
+  siblings: [
+    { slot: 0x3e6ece0, nr: 90 },
+    { slot: 0x4550930, nr: 57 },
+  ],
+  anchors: [
+    { vaddr: 0x3f5a29, bytes: Buffer.from('libnode.so.147', 'ascii'), what: 'SONAME 字符串' },
+    { vaddr: 0x753f22, bytes: Buffer.from('v26.13.0', 'ascii'), what: 'Node 版本字符串 v26.13.0' },
+    { vaddr: 0x7049dc0, word: 0x90000d10, what: 'syscall@plt 桩首条 adrp x16' },
+    { vaddr: 0x3e6ece0, word: 0x94c76c38, what: '兄弟包装器 nr=90 的 bl syscall@plt' },
+    { vaddr: 0x4550930, word: 0x94abe524, what: '兄弟包装器 nr=57 的 bl syscall@plt' },
+    { vaddr: 0x4560204, word: 0x52803520, what: 'SITES[0] 的 movz w0,#425' },
+  ],
+  sites: [
+    { nr: 425, movz: 0x4560204, slot: 0x4560208, where: 'uv__io_uring_setup 独立包装器' },
+    { nr: 426, movz: 0x456022c, slot: 0x4560238, where: 'uv__io_uring_enter 独立包装器' },
+    { nr: 427, movz: 0x456025c, slot: 0x4560260, where: 'uv__io_uring_register 独立包装器' },
+    { nr: 425, movz: 0x45603a4, slot: 0x45603ac, where: 'uv__use_io_uring 门控路径的 setup' },
+    { nr: 426, movz: 0x4560a88, slot: 0x4560aa0, where: 'io_poll 内联的 enter #1' },
+    { nr: 426, movz: 0x4560cd0, slot: 0x4560ce8, where: 'io_poll 内联的 enter #2' },
+    { nr: 426, movz: 0x4560d9c, slot: 0x4560db4, where: 'io_poll 内联的 enter #3' },
+    { nr: 426, movz: 0x4560e88, slot: 0x4560ea0, where: 'io_poll 内联的 enter #4' },
+    { nr: 426, movz: 0x4560f80, slot: 0x4560f98, where: 'io_poll 内联的 enter #5' },
+    { nr: 426, movz: 0x456105c, slot: 0x4561074, where: 'io_poll 内联的 enter #6' },
+    { nr: 426, movz: 0x456111c, slot: 0x4561134, where: 'io_poll 内联的 enter #7' },
+    { nr: 426, movz: 0x4561200, slot: 0x4561218, where: 'io_poll 内联的 enter #8' },
+    { nr: 426, movz: 0x45612c8, slot: 0x45612e0, where: 'io_poll 内联的 enter #9' },
+    { nr: 426, movz: 0x45613bc, slot: 0x45613d4, where: 'io_poll 内联的 enter #10' },
+    { nr: 426, movz: 0x45614e8, slot: 0x4561500, where: 'io_poll 内联的 enter #11' },
+    { nr: 426, movz: 0x4561b90, slot: 0x4561ba8, where: 'io_poll 内联的 enter #12' },
+    { nr: 426, movz: 0x4561d98, slot: 0x4561db0, where: 'io_poll 内联的 enter #13' },
+  ],
+};
+
+export const LAYOUTS = {
+  '137': {
+    soname: 'libnode.so.137',
+    size: SHIPPED.size,
+    shipped: SHIPPED,
+    pristine: { sha256: null, size: 155413312 },
+    syscallStub: SYSCALL_STUB,
+    siblings: [
+      { slot: SIBLING_SLOT, nr: 90 },
+      { slot: 0x4b38e5c, nr: 215 },
+    ],
+    anchors: ANCHORS,
+    sites: SITES,
+  },
+  '147': LAYOUT_147,
+};
+
+/** 依据 SONAME 字符串识别布局；认不出就拒绝（绝不盲改）。 */
+export function detectLayout(buf) {
+  if (buf.includes(Buffer.from('libnode.so.147\0', 'ascii'))) return { ver: '147', layout: LAYOUTS['147'] };
+  if (buf.includes(Buffer.from('libnode.so.137\0', 'ascii'))) return { ver: '137', layout: LAYOUTS['137'] };
+  throw new Error('认不出 libnode 版本（找不到 SONAME 字符串 libnode.so.137/147）');
+}
+
 // ---------------------------------------------------------------- ELF 小工具
 const u32 = (x) => x >>> 0;
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
@@ -159,6 +243,11 @@ function mapper(elf, label) {
 
 const readWord = (buf, off) => u32(buf.readUInt32LE(off));
 
+/** 某个槽"未中性化"时应有的指令字（`bl syscall@plt`）；布局里显式给了 orig 就用它。 */
+export function originalWordOf(site, syscallStub) {
+  return site.orig !== undefined ? u32(site.orig) : encodeBl(site.slot, syscallStub);
+}
+
 function decodeBlTarget(word, pc) {
   const imm26 = u32(word) & 0x3ffffff;
   const signed = imm26 & 0x2000000 ? imm26 - 0x4000000 : imm26;
@@ -185,13 +274,15 @@ export function inspect(file = DEFAULT_SO) {
   const exec = elf.exec;
   if (!exec.length) throw new Error('没有可执行 PT_LOAD 段');
 
+  const { ver, layout } = detectLayout(buf);
   const sha = sha256(buf);
   const failures = [];
   const notes = [];
   const sites = [];
+  notes.push(`布局 = libnode.so.${ver}（${layout.sites.length} 个 io_uring 槽）`);
 
   // 1) 锚点
-  for (const a of ANCHORS) {
+  for (const a of layout.anchors) {
     if (a.bytes) {
       const off = at(a.vaddr, a.bytes.length);
       const got = buf.subarray(off, off + a.bytes.length);
@@ -214,30 +305,34 @@ export function inspect(file = DEFAULT_SO) {
   //    ⚠️ 这一条是"假绿"的分水岭：旧版把桩地址从写死的锚点反推，换版后反推出一个
   //    不存在的地址 ⇒ 广扫里所有 bl 都不匹配 ⇒ 明明 23 处 movz+bl 却报"无活体"。
   //    现在桩地址有常量兜底 + 编码往返 + 布局锚点三重校验，漂移必然判红。
-  const siblingBl = readWord(buf, at(SIBLING_SLOT, 4));
-  const syscallStub = decodeBlTarget(siblingBl, SIBLING_SLOT);
-  if (syscallStub !== SYSCALL_STUB) {
-    failures.push(
-      `syscall@plt 桩漂移：反推 0x${syscallStub.toString(16)} ≠ 记录 0x${SYSCALL_STUB.toString(16)}`
-    );
-  }
-  if (encodeBl(SIBLING_SLOT, syscallStub) !== u32(siblingBl)) {
-    failures.push(`bl 编码往返自检失败（0x${SIBLING_SLOT.toString(16)}）`);
+  let syscallStub = layout.syscallStub;
+  for (const sib of layout.siblings) {
+    const siblingBl = readWord(buf, at(sib.slot, 4));
+    const stub = decodeBlTarget(siblingBl, sib.slot);
+    if (stub !== layout.syscallStub) {
+      failures.push(
+        `syscall@plt 桩漂移：兄弟(nr=${sib.nr}) 0x${sib.slot.toString(16)} 反推 0x${stub.toString(16)} ≠ 记录 0x${layout.syscallStub.toString(16)}`
+      );
+    }
+    if (encodeBl(sib.slot, stub) !== u32(siblingBl)) {
+      failures.push(`bl 编码往返自检失败（0x${sib.slot.toString(16)}）`);
+    }
   }
   notes.push(`syscall@plt 桩 = 0x${syscallStub.toString(16)}`);
 
-  // 3) 17 个槽
-  for (const s of SITES) {
+  // 3) 全部槽
+  for (const s of layout.sites) {
     const movzWord = readWord(buf, at(s.movz, 4));
     if (!isMovzW0(movzWord, s.nr)) {
       failures.push(
         `0x${s.movz.toString(16)} 不是 movz w0,#${s.nr}（实到 0x${movzWord.toString(16)}；${s.where}）`
       );
     }
+    const origWord = s.orig !== undefined ? u32(s.orig) : encodeBl(s.slot, syscallStub);
     const word = readWord(buf, at(s.slot, 4));
     let state;
     if (u32(word) === NEUTRALISED_WORD) state = 'neutralised';
-    else if (u32(word) === u32(s.orig)) state = 'UNPATCHED';
+    else if (u32(word) === origWord) state = 'UNPATCHED';
     else if (isBl(word) && decodeBlTarget(word, s.slot) === syscallStub) state = 'UNPATCHED';
     else state = 'UNEXPECTED';
     sites.push({ nr: s.nr, slot: s.slot, movz: s.movz, state, word: u32(word), where: s.where });
@@ -288,7 +383,7 @@ export function inspect(file = DEFAULT_SO) {
     notes.push('全文件广扫：没有活着的 io_uring_setup/enter/register 路径');
   }
 
-  return { ok: failures.length === 0, failures, notes, sha256: sha, size: buf.length, sites, liveCalls, syscallStub };
+  return { ok: failures.length === 0, failures, notes, sha256: sha, size: buf.length, sites, liveCalls, syscallStub, ver };
 }
 const wallUncondBranch = (w) => u32(w) >>> 26 === 0x05; // B
 
@@ -327,17 +422,20 @@ function doApply(file, origPath, { json = false } = {}) {
   const buf = readFileSync(file);
   const elf = readElf(buf);
   const at = mapper(elf, 'file');
+  const { ver, layout } = detectLayout(buf);
   const touched = [];
-  for (const s of SITES) {
+  for (const s of layout.sites) {
     const off = at(s.slot, 4);
     const cur = readWord(buf, off);
-    if (u32(cur) !== u32(s.orig)) {
-      console.error(`⛔ 拒绝写入：0x${s.slot.toString(16)} 当前 0x${cur.toString(16)} ≠ 记录原值 0x${s.orig.toString(16)}`);
+    const origWord = s.orig !== undefined ? u32(s.orig) : encodeBl(s.slot, layout.syscallStub);
+    if (u32(cur) !== origWord) {
+      console.error(`⛔ 拒绝写入：0x${s.slot.toString(16)} 当前 0x${cur.toString(16)} ≠ 记录原值 0x${origWord.toString(16)}（${s.where}）`);
       return 2;
     }
     buf.writeUInt32LE(NEUTRALISED_WORD, off);
     touched.push({ slot: s.slot, nr: s.nr, from: u32(cur), to: NEUTRALISED_WORD });
   }
+  console.log(`   布局 libnode.so.${ver}`);
 
   if (origPath) {
     if (!existsSync(origPath)) {
@@ -350,11 +448,21 @@ function doApply(file, origPath, { json = false } = {}) {
 
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, buf);
-  copyFileSync(tmp, file);
   try {
+    copyFileSync(tmp, file);
     unlinkSync(tmp);
-  } catch {
-    /* 临时文件清不掉不影响结果 */
+  } catch (e) {
+    /*
+     * 【OHOS 文件系统实测】随包件由 file_manager 组持有、目标文件本身不可写时，
+     * copyfile(2) 会 EPERM（哪怕目录可写、tmp 能建）。rename(2) 只需要目录权限，
+     * 是同语义的原子替换 —— 这里降级用它，别再让 --apply 半途而废。
+     */
+    if (e && (e.code === 'EPERM' || e.code === 'EACCES')) {
+      renameSync(tmp, file);
+    } else {
+      try { unlinkSync(tmp); } catch { /* ignore */ }
+      throw e;
+    }
   }
 
   const after = inspect(file);
